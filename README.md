@@ -1,4 +1,8 @@
 <p align="center"><img src="docs/assets/localrouter-hero.png" alt="LocalRouter" width="100%"></p>
+<p align="center"><a href="https://x.com/jayleaton"><img src="https://img.shields.io/badge/Follow-%40jayleaton-000000?logo=x&logoColor=white" alt="Follow @jayleaton"></a> <a href="https://buymeacoffee.com/jayleaton"><img src="https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee: Support"></a></p>
+
+> [!WARNING]
+> **Early preview.** LocalRouter is new and under active development: expect bugs and breaking changes. Please [open an issue](https://github.com/jayleaton/localrouter/issues) if something doesn't work.
 
 **LocalRouter runs generative models on your own GPU box and hands them to your agents.** One small daemon owns the
 machine: an agent asks for an image or a video over MCP (or an OpenAI-style HTTP API), LocalRouter loads the model
