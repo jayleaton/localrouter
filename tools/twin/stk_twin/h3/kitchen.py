@@ -20,6 +20,7 @@ _DIR = Path(os.environ.get("STK_KROOT", Path(__file__).resolve().parents[4] / "k
 
 _DECLS = """
 at::Tensor k_int8_attention(at::Tensor q, at::Tensor k, at::Tensor v, double scale);
+at::Tensor k_int8_attention_rows(at::Tensor q, at::Tensor k, at::Tensor v, double scale);
 void k_rms_rope_split_half_(at::Tensor q, at::Tensor k, at::Tensor freqs, at::Tensor qw, at::Tensor kw, double eps, int64_t rot_dim);
 """
 
@@ -48,6 +49,25 @@ at::Tensor k_int8_attention(at::Tensor q, at::Tensor k, at::Tensor v, double sca
     ok(kitchen_int8_attention(q.data_ptr(), k.data_ptr(), v.data_ptr(), o.data_ptr(), ws.data_ptr(), B, H, HK, Sq, Sk, D,
                               q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
                               v.stride(0), v.stride(1), v.stride(2), (float)scale, STREAM), "int8_attention");
+    return o;
+}
+
+// kitchen_int8_attention_rows: the same kernels with the output written as rows [Sq, H * D] (batch 1), where the Zig engine's
+// out projection reads it (no [H, S, D] -> rows pass). Bit-identical to k_int8_attention's output transposed to rows.
+at::Tensor k_int8_attention_rows(at::Tensor q, at::Tensor k, at::Tensor v, double scale) {
+    bf16_cuda(q, 4, "q"); bf16_cuda(k, 4, "k"); bf16_cuda(v, 4, "v");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(), "q, k, v: one device");
+    TORCH_CHECK(q.stride(3) == 1 && k.stride(3) == 1 && v.stride(3) == 1, "the last dimension of q, k and v must be contiguous");
+    TORCH_CHECK(v.sizes() == k.sizes() && q.size(0) == 1 && k.size(0) == 1 && q.size(3) == k.size(3), "q, k, v: shapes (batch 1)");
+    c10::cuda::CUDAGuard guard(q.device());
+    const int B = 1, H = q.size(1), Sq = q.size(2), D = q.size(3), HK = k.size(1), Sk = k.size(2);
+    const size_t bytes = kitchen_int8_attention_workspace_bytes(B, H, HK, Sq, Sk, D);
+    TORCH_CHECK(bytes > 0, "int8_attention_rows: unsupported shape (head dim 64 or 128, H divisible by HK)");
+    auto o = at::empty({Sq, (int64_t)H * D}, q.options());
+    auto ws = at::empty({(int64_t)bytes}, q.options().dtype(at::kByte));
+    ok(kitchen_int8_attention_rows(q.data_ptr(), k.data_ptr(), v.data_ptr(), o.data_ptr(), ws.data_ptr(), B, H, HK, Sq, Sk, D,
+                                   q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
+                                   v.stride(0), v.stride(1), v.stride(2), (float)scale, STREAM), "int8_attention_rows");
     return o;
 }
 
@@ -90,13 +110,19 @@ def _mod():
     digest = h.hexdigest()
     src = f"// kitchen sha256 {digest}\n" + _LAUNCH
     return load_inline(f"stk_h3_kitchen_{digest[:12]}", cpp_sources=_DECLS, cuda_sources=src,
-                       functions=["k_int8_attention", "k_rms_rope_split_half_"], extra_cuda_cflags=flags,
+                       functions=["k_int8_attention", "k_int8_attention_rows", "k_rms_rope_split_half_"], extra_cuda_cflags=flags,
                        extra_include_paths=[str(_DIR)], with_cuda=True)
 
 
 def int8_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float | None = None) -> torch.Tensor:
     """softmax(q k^T * scale) v with INT8 Q, K, V and U8 probabilities; q [B,H,Sq,D], k, v [B,HK,Sk,D] bf16, D 64 or 128, no mask."""
     return _mod().k_int8_attention(q, k, v, float(q.shape[-1] ** -0.5 if scale is None else scale))
+
+
+def int8_attention_rows(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float | None = None) -> torch.Tensor:
+    """int8_attention (batch 1) with the result as bf16 rows [Sq, H * D]: equal, bit for bit, to
+    int8_attention(q, k, v)[0].transpose(0, 1).reshape(Sq, H * D), without that transpose (the kernel stores the rows)."""
+    return _mod().k_int8_attention_rows(q, k, v, float(q.shape[-1] ** -0.5 if scale is None else scale))
 
 
 def rms_rope_split_half_(q: torch.Tensor, k: torch.Tensor, freqs: torch.Tensor, q_norm_weight: torch.Tensor,

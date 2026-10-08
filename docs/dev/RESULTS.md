@@ -300,3 +300,42 @@ copies waited 2 ms in all and `pread` took 15.3 of 17.3 s. On GB10 reading throu
 the drive gives 12 GB/s to direct reads (one stream, 64 MB). With direct I/O the 18.5 GB read in 1.6 s; the rest of
 the 3.6 s is the context (0.25 s), NVFP4 repacking, and the VAE's scratch (0.6 s). A cold image is now the load plus
 the generation (12.4 s).
+
+## M7 speed round: MiniMax H3 on GB10 (2026-10-08, a Spark, one window)
+
+Everything below is bit-identical: the old and new paths agree byte for byte, and Zig agrees with the twin.
+
+**Video VAE decode.** GEMM tiles of 256 x 128 with a 3-stage pipeline (the m tile fastest), attention two heads at a
+time. Every GEMM shape, and the frames old against new and Zig against twin, are equal. The GEMM sum is 1.94x faster.
+
+| | 56 frames | 124 frames |
+| --- | ---: | ---: |
+| decode before | 13.85 s | 32.2 s |
+| decode now | **7.14 s** | **16.7 s** |
+
+**DiT step** (`localrouter check h3-step-bench`, 768x448, GPU events, median). The replay of a fresh capture is 639/639
+equal, alone and chained, and every fast configuration's velocities equal the reference's.
+
+| | 56 frames (5,967 tokens) | 124 frames (12,915 tokens) |
+| --- | ---: | ---: |
+| reference schedule | 1,739 ms | 4,621 ms |
+| fused gate_add + norm_mod, attention as rows | **1,674 ms** (1.04x) | **4,472 ms** (1.03x) |
+| fused + CUDA graph | 1,680 ms | 4,476 ms |
+
+The step is GPU-bound: under 1 ms between ops, so the graph saves nothing. Of the fused step at 56 frames, the GEMMs
+are 776 ms, the attention kernel 349 ms, and the memory-bound elementwise ops about 550 ms (attention prep 132, gate +
+norm 125, quantize 105, SwiGLU 104, RMSNorm + RoPE 83). At 124 frames attention is 1,580 of 4,472 ms. Next: fold
+quantize into its producers, and rope into attention prep; then the attention kernel for long clips.
+
+**Full clips** (`localrouter check h3-bench`, engine only, text encoder resident, two runs equal):
+
+| | 56 frames (2.3 s) | 124 frames (5.2 s) |
+| --- | ---: | ---: |
+| encode / sample / audio / video | 0.91 / 13.4 / 0.10 / 7.2 s | 0.92 / 35.8 / 0.20 / 17.0 s |
+| warm total | **21.7 s** (was 29 s) | **53.9 s** |
+| load (cold) | 10.5 s | 20.2 s |
+| peak memory (MemAvailable drop) | 36.7 GiB | 38.8 GiB |
+
+Unloading the text encoder between requests lowers the peak only to 36.0 / 37.9 GiB (the peak is the decode) and costs
+13-14 s a request, so it stays resident; the tool's estimate (40,000 MiB plus the frames) covers the measured peak.
+Over MCP from another machine, a 5 s clip took 71 s from cold.

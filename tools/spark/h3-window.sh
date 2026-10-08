@@ -51,7 +51,8 @@ others=$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader | grep -
 [[ -z ${WINDOW_OPEN:-} ]] || { step "open: $WINDOW_OPEN"; opened=1; bash -c "$WINDOW_OPEN" >> "$R/window.log" 2>&1; }
 
 envs=(-e "H3_RUN=$RUN")
-for v in SKIP_SETUP SKIP_TWIN_TESTS SKIP_PACK SKIP_CAPTURE ONLY KEEP_CAPTURES KITCHEN_SRC_BUILD HF_TOKEN; do
+for v in SKIP_SETUP SKIP_TWIN_TESTS SKIP_PACK SKIP_CAPTURE ONLY KEEP_CAPTURES KITCHEN_SRC_BUILD HF_TOKEN \
+         H3_SPEED_VAE H3_SPEED_DIT H3_SPEED_MEM STOP_ON_BUILD_FAIL WITH_COMFY; do
     [[ -z ${!v:-} ]] || envs+=(-e "$v")
 done
 step "container ($NGC)"

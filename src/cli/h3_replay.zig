@@ -109,7 +109,44 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         try out.writer.writeAll("]}");
     }
     dit.probe = null;
-    { // a step's time, warm
+    { // the fast schedules, probe-free: each must give the captured velocities byte for byte (the probed passes above ran the
+        // reference schedule, op by op). Three steps a configuration: the first and second warm it (a graph's first use is
+        // eager, its second captures), the third is a replay; the velocities are cleared before each and checked after.
+        const default_fuse = dit.fuse;
+        const default_graphs = dit.graphs;
+        const zeros = try a.alloc(u8, @max(nvx, nax));
+        @memset(zeros, 0);
+        try out.writer.writeAll(", \"fast\": {");
+        for ([_]struct { []const u8, bool, bool }{ .{ "ref", false, false }, .{ "fuse", true, false }, .{ "graph", false, true }, .{ "fuse_graph", true, true } }, 0..) |cfg, ci| {
+            dit.fuse = cfg[1];
+            dit.graphs = cfg[2];
+            var equal = true;
+            var ms: i64 = 0;
+            for (0..3) |rep| {
+                try bufs[3].upload(0, zeros[0..nvx]);
+                try bufs[4].upload(0, zeros[0..nax]);
+                const t1 = std.Io.Clock.awake.now(io);
+                try dit.step(try bufs[1].at(0), try bufs[2].at(0), sigma, t, lh, lw, audio_t, try bufs[3].at(0), try bufs[4].at(0));
+                try s.synchronize();
+                if (rep == 2) ms = t1.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+                for ([_]struct { []const u8, usize }{ .{ "video", 3 }, .{ "audio", 4 } }) |e| {
+                    const ref = outputs.out(e[0]).?;
+                    const want = try a.alloc(u8, ref.bytes());
+                    try cap.blob(io, ref, want);
+                    const got = try a.alloc(u8, ref.bytes());
+                    try d.check(d.api.cuMemcpyDtoH_v2(got.ptr, try bufs[e[1]].at(0), got.len), "cuMemcpyDtoH");
+                    equal = equal and std.mem.eql(u8, got, want);
+                }
+            }
+            pass = pass and equal;
+            try out.writer.print("{s}\"{s}\": {{\"velocities_equal\": {}, \"step_ms\": {d}}}", .{ if (ci > 0) ", " else "", cfg[0], equal, ms });
+        }
+        try out.writer.writeAll("}, \"graph_error\": ");
+        if (dit.graph_error) |e| try out.writer.print("\"{s}\"", .{@errorName(e)}) else try out.writer.writeAll("null");
+        dit.fuse = default_fuse;
+        dit.graphs = default_graphs and dit.graph_error == null;
+    }
+    { // a step's time, warm, as the engine runs it (the graph of the last configuration above is reused: a replay)
         const t1 = std.Io.Clock.awake.now(io);
         try dit.step(try bufs[1].at(0), try bufs[2].at(0), sigma, t, lh, lw, audio_t, try bufs[3].at(0), try bufs[4].at(0));
         try s.synchronize();

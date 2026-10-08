@@ -222,6 +222,8 @@ pub const Decoder = struct {
         const t = &v.tile;
         t.rec.probe = v.probe;
         t.rec.keep = v.layers;
+        t.prof.on = v.k.prof and v.probe == null; // STK_VVAE_PROF: not while a probe's copies and compares would be billed to ops
+        t.prof.ms = @splat(0);
         const hh: u32 = hz * ratio;
         const ww: u32 = wz * ratio;
         const frames = outputFrames(tz);
@@ -297,6 +299,7 @@ pub const Decoder = struct {
             }
         }
         if (run.pos != frames) return error.FrameCountMismatch;
+        if (t.prof.on) t.prof.report();
     }
 };
 
@@ -366,7 +369,10 @@ const Run = struct {
                     n += 1;
                 }
                 try t.rec.pre("place", ins[0..n]);
+                try t.prof.begin(v.s);
                 try v.k.place(v.s, p);
+                try t.prof.mark(v.s, .place);
+                try t.prof.end();
                 if (t.rec.on and v.probe != null) {
                     try r.copyRegion(cv, fr, out_y, out_x, p.oh, p.ow);
                     try t.rec.post("place", &.{.{ .role = "y", .ptr = r.region, .bytes = 3 * @as(u64, fr) * p.oh * p.ow * 2 }});
@@ -460,6 +466,8 @@ test "clip plan and frame counts" {
 }
 
 test "the decode path type-checks (lazy analysis)" {
+    _ = tile_mod; // the tile's and the launches' own tests (vae_video_tile.zig, vae_video_ops.zig) run with this file's
+    _ = @import("vae_video_ops.zig");
     _ = Decoder.init;
     _ = Decoder.decode;
     _ = Decoder.deinit;

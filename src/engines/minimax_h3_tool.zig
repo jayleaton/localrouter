@@ -19,7 +19,7 @@ pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{.tex
 const P = h3.pipeline;
 const fps = 24; // the model's frame rate: requests at another rate are refused
 const default_steps = 8;
-// The engine's own estimate (docs/dev/M7.md): weights 32.8 GB plus scratch for 5 s clips; to be replaced by the measured peak.
+// Covers the measured engine peak (GB10, 2026-10-08): 36.7 GiB at 56 frames, 38.8 GiB for a 5 s clip, text encoder resident.
 const default_resident_mb = 40_000;
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {

@@ -14,6 +14,14 @@ What it does, as ComfyUI does it (tools/twin/VVAE-PORT.md has the arithmetic, th
                                    attention as S = q k^T / softmax / P v, to_out GEMM + residual addcmul, RMSNorm, w1,
                                    SwiGLU, w2 + addcmul) -> LayerNorm -> proj_out -> unshuffle 16 x 16 x 4 patches.
 Every GPU op runs inside `REC.op` under a stable name (the scheme is in VVAE-PORT.md, "Recorder names").
+
+Speed knobs (none changes a bit of the output; test_vae_video.py proves each against the plain path):
+  STK_VVAE_REF=1     every GEMM on the reference kernel (stk_gemm_f16_ref, the first version) and the whole attention in one
+                     piece: the old path, for the comparison and the proofs
+  STK_VVAE_HEADS=n   heads an attention group runs (default 2; 32 or 0: all heads at once). A tile that is not recorded
+                     runs q k^T, softmax and P v group by group, so the scores of a group (6.5 MB a head) stay in the L2
+                     instead of making four trips (write, read, write, read) of 207 MB through the LPDDR5X
+  STK_VVAE_PROF=1    CUDA events around every op: the GPU milliseconds of a decode by class go to stderr
 """
 
 from __future__ import annotations
@@ -21,7 +29,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from contextlib import contextmanager
+import sys
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 
@@ -52,6 +61,10 @@ void k_gemm(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tens
             c10::optional<at::Tensor> rscale, int64_t M, int64_t N, int64_t K, int64_t lda, int64_t ldb, int64_t ldc,
             int64_t a_off, int64_t b_off, int64_t c_off, int64_t sA, int64_t sB, int64_t sC, int64_t batch, int64_t ldr,
             int64_t sR);
+void k_gemm_v(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tensor c, c10::optional<at::Tensor> res,
+              c10::optional<at::Tensor> rscale, int64_t M, int64_t N, int64_t K, int64_t lda, int64_t ldb, int64_t ldc,
+              int64_t a_off, int64_t b_off, int64_t c_off, int64_t sA, int64_t sB, int64_t sC, int64_t batch, int64_t ldr,
+              int64_t sR, int64_t variant);
 at::Tensor k_denorm(at::Tensor z, at::Tensor stdv, at::Tensor mean);
 at::Tensor k_gather_rows(at::Tensor z, int64_t t0, int64_t Tn, int64_t y0, int64_t h, int64_t x0, int64_t w);
 at::Tensor k_rope_table(at::Tensor inv_freq, int64_t T, int64_t H, int64_t W, int64_t nsuf);
@@ -74,6 +87,7 @@ _LAUNCH = r"""
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdlib>
 #include "gemm_f16.cu"
 #include "vae_video.cu"
 #define HP(t) reinterpret_cast<__half*>((t).data_ptr())
@@ -89,10 +103,26 @@ static void chk_launch(const char* what) {
     TORCH_CHECK(e == cudaSuccess, what, ": ", cudaGetErrorString(e));
 }
 
-void k_gemm(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tensor c, c10::optional<at::Tensor> res,
-            c10::optional<at::Tensor> rscale, int64_t M, int64_t N, int64_t K, int64_t lda, int64_t ldb, int64_t ldc,
-            int64_t a_off, int64_t b_off, int64_t c_off, int64_t sA, int64_t sB, int64_t sC, int64_t batch, int64_t ldr,
-            int64_t sR) {
+// The GEMM's kernels (gemm_f16.cu): 0 = stk_gemm_f16_ref (the first version: grid (n, m) of 128 x 128), 1 = stk_gemm_f16
+// (256 x 128, the linears), 2 = _s (128 x 128, K <= 64), 3 = _n (64 x 64, N <= 64); grid (m, n, batch) for 1 .. 3. All four
+// are bit-equal (test_vae_video.py); the default is by shape, the reference when STK_VVAE_REF is set. The Zig engine's
+// Ops.gemm picks the same way.
+static int gemm_pick(int64_t M, int64_t N, int64_t K) {
+    static const char* e = std::getenv("STK_VVAE_REF");
+    if (e && e[0] && !(e[0] == '0' && !e[1])) return 0;
+    return K <= 64 ? 2 : (N <= 64 ? 3 : 1);
+}
+// One of the template tiles: dynamic shared memory opt-in (above 48 KiB), grid (m, n, batch) of Cf::THREADS threads.
+#define GEMM_TILE(KERN, CF)                                                                                                     \
+    do {                                                                                                                        \
+        cudaFuncSetAttribute(KERN, cudaFuncAttributeMaxDynamicSharedMemorySize, stk_gemm16::CF::SMEM);                          \
+        KERN<<<dim3(cdiv(M, stk_gemm16::CF::BM), cdiv(N, stk_gemm16::CF::BN), (unsigned)batch), stk_gemm16::CF::THREADS,       \
+               stk_gemm16::CF::SMEM, STREAM>>>(ap, bq, bp, cp, (int)M, (int)N, (int)K, lda, ldb, ldc, sA, sB, sC, rp, sp, ldr, sR); \
+    } while (0)
+void k_gemm_v(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tensor c, c10::optional<at::Tensor> res,
+              c10::optional<at::Tensor> rscale, int64_t M, int64_t N, int64_t K, int64_t lda, int64_t ldb, int64_t ldc,
+              int64_t a_off, int64_t b_off, int64_t c_off, int64_t sA, int64_t sB, int64_t sC, int64_t batch, int64_t ldr,
+              int64_t sR, int64_t variant) {
     chkh(a, "a"); chkh(b, "b"); chkh(c, "c");
     TORCH_CHECK(K % 8 == 0 && lda % 8 == 0 && ldb % 8 == 0 && a_off % 8 == 0 && b_off % 8 == 0 && ldc % 2 == 0 &&
                 sA % 8 == 0 && sB % 8 == 0, "gemm_f16 alignment: K, lda, ldb, offsets, strides % 8, ldc even");
@@ -100,9 +130,22 @@ void k_gemm(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tens
     if (bias.has_value()) { chkh(*bias, "bias"); bp = CHP(*bias); }
     if (res.has_value()) { chkh(*res, "res"); chkh(*rscale, "rscale"); rp = CHP(*res); sp = CHP(*rscale); }
     c10::cuda::CUDAGuard g(a.device());
-    stk_gemm_f16<<<dim3(cdiv(N, 128), cdiv(M, 128), (unsigned)batch), 256, 0, STREAM>>>(
-        CHP(a) + a_off, CHP(b) + b_off, bp, HP(c) + c_off, (int)M, (int)N, (int)K, lda, ldb, ldc, sA, sB, sC, rp, sp, ldr, sR);
+    const __half* ap = CHP(a) + a_off; const __half* bq = CHP(b) + b_off; __half* cp = HP(c) + c_off;
+    if (variant < 0) variant = gemm_pick(M, N, K);
+    if (variant == 0)
+        stk_gemm_f16_ref<<<dim3(cdiv(N, 128), cdiv(M, 128), (unsigned)batch), 256, 0, STREAM>>>(
+            ap, bq, bp, cp, (int)M, (int)N, (int)K, lda, ldb, ldc, sA, sB, sC, rp, sp, ldr, sR);
+    else if (variant == 1) GEMM_TILE(stk_gemm_f16, CfgWide);
+    else if (variant == 2) GEMM_TILE(stk_gemm_f16_s, CfgStd);
+    else if (variant == 3) GEMM_TILE(stk_gemm_f16_n, CfgNarrow);
+    else TORCH_CHECK(false, "gemm variant: 0 .. 3");
     chk_launch("stk_gemm_f16");
+}
+void k_gemm(at::Tensor a, at::Tensor b, c10::optional<at::Tensor> bias, at::Tensor c, c10::optional<at::Tensor> res,
+            c10::optional<at::Tensor> rscale, int64_t M, int64_t N, int64_t K, int64_t lda, int64_t ldb, int64_t ldc,
+            int64_t a_off, int64_t b_off, int64_t c_off, int64_t sA, int64_t sB, int64_t sC, int64_t batch, int64_t ldr,
+            int64_t sR) {
+    k_gemm_v(a, b, bias, c, res, rscale, M, N, K, lda, ldb, ldc, a_off, b_off, c_off, sA, sB, sC, batch, ldr, sR, -1);
 }
 at::Tensor k_denorm(at::Tensor z, at::Tensor stdv, at::Tensor mean) {
     chkh(z, "z"); chkh(stdv, "std"); chkh(mean, "mean");
@@ -216,7 +259,7 @@ void k_finalize(c10::optional<at::Tensor> a, int64_t a0, at::Tensor b, int64_t b
 }
 """
 
-NAMES = ["k_gemm", "k_denorm", "k_gather_rows", "k_rope_table", "k_suffix_", "k_rms_norm", "k_layer_norm", "k_rms_rope_",
+NAMES = ["k_gemm", "k_gemm_v", "k_denorm", "k_gather_rows", "k_rope_table", "k_suffix_", "k_rms_norm", "k_layer_norm", "k_rms_rope_",
          "k_vt", "k_softmax_", "k_nan_to_num_", "k_swiglu", "k_unshuffle", "k_place_tile", "k_finalize"]
 
 
@@ -340,6 +383,39 @@ class VideoVAE:
         self.pix_std = f16_const(IMAGENET_STD)
         self.pix_mean = f16_const(IMAGENET_MEAN)
         self._scores: torch.Tensor | None = None
+        ref = os.environ.get("STK_VVAE_REF", "")
+        self.ref_path = bool(ref) and ref != "0"
+        g = int(os.environ.get("STK_VVAE_HEADS", "2"))
+        self.groups = HEADS if self.ref_path or g <= 0 or g >= HEADS else g  # heads an attention group runs
+        self.prof = os.environ.get("STK_VVAE_PROF", "") not in ("", "0")
+        self._ev: list = []                                                  # (class, start, end) of the decode so far
+
+    # ------------------------------------------------------------------------------------------------ phase timing
+    def _ph(self, cls: str):
+        """STK_VVAE_PROF: CUDA events around an op, summed by class (gemm, attn_gemm, softmax, norm, rope, swiglu, other,
+        place) when the decode ends. A no-op otherwise."""
+        if not self.prof:
+            return nullcontext()
+        return self._timed(cls)
+
+    @contextmanager
+    def _timed(self, cls: str):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record()
+        try:
+            yield
+        finally:
+            b.record()
+            self._ev.append((cls, a, b))
+
+    def _report(self) -> None:
+        torch.cuda.synchronize()
+        tot: dict[str, float] = {}
+        for cls, a, b in self._ev:
+            tot[cls] = tot.get(cls, 0.0) + a.elapsed_time(b)
+        self._ev = []
+        tot["sum"] = sum(tot.values())
+        print("vvae_phase_ms " + " ".join(f"{k}={v:.1f}" for k, v in sorted(tot.items())), file=sys.stderr, flush=True)
 
     # ------------------------------------------------------------------------------------------------ loading
     @classmethod
@@ -398,7 +474,7 @@ class VideoVAE:
             out = torch.empty(M, N, dtype=torch.float16, device=x.device)
         ins = {"x": x} if res is None else {"x": x, "res": res}
         attrs = {"M": M, "N": N, "K": K, "epilogue": "bias" if res is None else "bias+addcmul"}
-        with REC.op(name, "gemm_f16", attrs, **ins) as o:
+        with self._ph("gemm"), REC.op(name, "gemm_f16", attrs, **ins) as o:
             mod().k_gemm(x, wt, bias, out, res, rscale, M, N, K, K, K, out.stride(0), 0, 0, 0, 0, 0, 0, 1,
                          0 if res is None else res.stride(0), 0)
             o.out(y=out[:M])
@@ -406,30 +482,55 @@ class VideoVAE:
 
     def _attention(self, p: str, qkv: torch.Tensor, S: int) -> torch.Tensor:
         """softmax(q k^T / 8) v per head, non-causal, from the rotated qkv buffer [S, 6144] -> rows [S, 2048]:
-        S = q k^T (our fp16 GEMM, fp16 out), a fp32 row softmax (fp16 out), O = P v (our GEMM), all 32 heads batched."""
+        S = q k^T (our fp16 GEMM, fp16 out), a fp32 row softmax (fp16 out), O = P v (our GEMM), all 32 heads batched.
+        A tile that is not recorded runs the three steps `self.groups` heads at a time (`_attention_grouped`): a head's
+        bits depend on that head alone, so the output is the same, and the group's scores never leave the L2."""
         m = mod()
         SP = (S + 7) // 8 * 8
         if self._scores is None or self._scores.numel() != HEADS * S * SP:
             # zeros once: the pad columns [S, SP) are written 0 by every softmax and never by the GEMM
             self._scores = torch.zeros(HEADS, S, SP, dtype=torch.float16, device=qkv.device)
         sc = self._scores
-        with REC.op(f"{p}.vt", "vt", {"S": S, "SP": SP}, qkv=qkv) as o:
+        with self._ph("other"), REC.op(f"{p}.vt", "vt", {"S": S, "SP": SP}, qkv=qkv) as o:
             vt = m.k_vt(qkv, S, SP, HEADS)
             o.out(y=vt)
-        with REC.op(f"{p}.sc", "gemm_f16", {"M": S, "N": S, "K": HD, "batch": HEADS, "epilogue": "none"}, qkv=qkv) as o:
-            m.k_gemm(qkv, qkv, None, sc, None, None, S, S, HD, qkv.stride(0), qkv.stride(0), SP, 0, HD, 0, 3 * HD, 3 * HD,
-                     S * SP, HEADS, 0, 0)
-            o.out(y=sc)
-        with REC.op(f"{p}.sm", "softmax_rows", {"S": S, "SP": SP, "scale": 0.125}, s=sc) as o:
-            m.k_softmax_(sc, S, SP, 0.125)
-            o.out(y=sc)
-        att = torch.empty(S, DIM, dtype=torch.float16, device=qkv.device)
-        with REC.op(f"{p}.pv", "gemm_f16", {"M": S, "N": HD, "K": SP, "batch": HEADS, "epilogue": "none"}, p=sc, vt=vt) as o:
-            m.k_gemm(sc, vt, None, att, None, None, S, HD, SP, SP, SP, DIM, 0, 0, 0, S * SP, HD * SP, HD, HEADS, 0, 0)
-            o.out(y=att)
-        with REC.op(f"{p}.nan", "nan_to_num", {}, x=att) as o:
+        if self.groups < HEADS and not REC.on:
+            att = self._attention_grouped(qkv, vt, sc, S, SP)
+        else:
+            with self._ph("attn_gemm"), REC.op(f"{p}.sc", "gemm_f16", {"M": S, "N": S, "K": HD, "batch": HEADS, "epilogue": "none"}, qkv=qkv) as o:
+                m.k_gemm(qkv, qkv, None, sc, None, None, S, S, HD, qkv.stride(0), qkv.stride(0), SP, 0, HD, 0, 3 * HD, 3 * HD,
+                         S * SP, HEADS, 0, 0)
+                o.out(y=sc)
+            with self._ph("softmax"), REC.op(f"{p}.sm", "softmax_rows", {"S": S, "SP": SP, "scale": 0.125}, s=sc) as o:
+                m.k_softmax_(sc, S, SP, 0.125)
+                o.out(y=sc)
+            att = torch.empty(S, DIM, dtype=torch.float16, device=qkv.device)
+            with self._ph("attn_gemm"), REC.op(f"{p}.pv", "gemm_f16", {"M": S, "N": HD, "K": SP, "batch": HEADS, "epilogue": "none"}, p=sc, vt=vt) as o:
+                m.k_gemm(sc, vt, None, att, None, None, S, HD, SP, SP, SP, DIM, 0, 0, 0, S * SP, HD * SP, HD, HEADS, 0, 0)
+                o.out(y=att)
+        with self._ph("other"), REC.op(f"{p}.nan", "nan_to_num", {}, x=att) as o:
             m.k_nan_to_num_(att)
             o.out(y=att)
+        return att
+
+    def _attention_grouped(self, qkv: torch.Tensor, vt: torch.Tensor, sc: torch.Tensor, S: int, SP: int,
+                           groups: int | None = None) -> torch.Tensor:
+        """The attention's three steps for `groups` heads at a time on the first `groups` heads' worth of the score buffer
+        (6.5 MB a head at 1797 tokens: two heads fit the GB10's L2, where all 32 are 207 MB through memory four times).
+        Head h0 + i of a group is the same GEMM, softmax and GEMM on the same halves as in the all-heads launches: q, k as
+        windows into qkv (a_off, b_off by h0 * 192), v^T by h0 * 64 * SP, the output columns by h0 * 64."""
+        m = mod()
+        G = groups or self.groups
+        att = torch.empty(S, DIM, dtype=torch.float16, device=qkv.device)
+        for h0 in range(0, HEADS, G):
+            g = min(G, HEADS - h0)
+            with self._ph("attn_gemm"):
+                m.k_gemm(qkv, qkv, None, sc, None, None, S, S, HD, qkv.stride(0), qkv.stride(0), SP, h0 * 3 * HD, HD + h0 * 3 * HD, 0,
+                         3 * HD, 3 * HD, S * SP, g, 0, 0)
+            with self._ph("softmax"):
+                m.k_softmax_(sc[:g], S, SP, 0.125)
+            with self._ph("attn_gemm"):
+                m.k_gemm(sc, vt, None, att, None, None, S, HD, SP, SP, SP, DIM, 0, h0 * HD * SP, h0 * HD, S * SP, HD * SP, HD, g, 0, 0)
         return att
 
     def decode_tile(self, z: torch.Tensor, t0: int, Tn: int, y0: int, h: int, w: int, x0: int, name: str) -> torch.Tensor:
@@ -453,27 +554,27 @@ class VideoVAE:
             o.out(y=table)
         for i, b in enumerate(W["layers"]):
             p = f"{name}.L{i}"
-            with REC.op(f"{p}.norm1", "rms_norm_f16", {"eps": EPS}, x=hs) as o:
+            with self._ph("norm"), REC.op(f"{p}.norm1", "rms_norm_f16", {"eps": EPS}, x=hs) as o:
                 n = m.k_rms_norm(hs, b["norm1"], EPS)
                 o.out(y=n)
             qkv = self._lin(f"{p}.qkv", n, b["qkv.w"], b["qkv.b"])
-            with REC.op(f"{p}.rr", "rms_rope_f16", {"eps": EPS, "rot_dim": 48}, qkv=qkv, table=table) as o:
+            with self._ph("rope"), REC.op(f"{p}.rr", "rms_rope_f16", {"eps": EPS, "rot_dim": 48}, qkv=qkv, table=table) as o:
                 m.k_rms_rope_(qkv, table, S, HEADS, EPS, 0)
                 o.out(qkv=qkv)
             att = self._attention(p, qkv, S)
             self._lin(f"{p}.out", att, b["out.w"], b["out.b"], out=hs, res=hs, rscale=b["scale1"])
-            with REC.op(f"{p}.norm2", "rms_norm_f16", {"eps": EPS}, x=hs) as o:
+            with self._ph("norm"), REC.op(f"{p}.norm2", "rms_norm_f16", {"eps": EPS}, x=hs) as o:
                 n = m.k_rms_norm(hs, b["norm2"], EPS)
                 o.out(y=n)
             gu = self._lin(f"{p}.w1", n, b["w1.w"], b["w1.b"])
-            with REC.op(f"{p}.swi", "swiglu_f16", {}, x=gu) as o:
+            with self._ph("swiglu"), REC.op(f"{p}.swi", "swiglu_f16", {}, x=gu) as o:
                 a = m.k_swiglu(gu)
                 o.out(y=a)
             self._lin(f"{p}.w2", a, b["w2.w"], b["w2.b"], out=hs, res=hs, rscale=b["scale2"])
         # the head runs on the patch rows only: ComfyUI normalises and projects all S rows and drops the 5 suffix rows;
         # a row's bits depend on that row alone, so the kept rows are the same
         xs = hs[:nP]
-        with REC.op(f"{name}.norm_out", "layer_norm_f16", {"eps": EPS}, x=xs) as o:
+        with self._ph("norm"), REC.op(f"{name}.norm_out", "layer_norm_f16", {"eps": EPS}, x=xs) as o:
             n = m.k_layer_norm(xs, W["norm_out.w"], W["norm_out.b"], EPS)
             o.out(y=n)
         rows = self._lin(f"{name}.proj", n, W["proj.w"], W["proj.b"])
@@ -514,7 +615,7 @@ class VideoVAE:
                     if ltail is not None:
                         ins["ltail"] = ltail
                     attrs = {"ey": ey, "ex": ex, "oy": out_y, "ox": out_x, "oh": oh, "ow": ow}
-                    with REC.op(f"{name}.place", "place_tile", attrs, **ins) as o:
+                    with self._ph("place"), REC.op(f"{name}.place", "place_tile", attrs, **ins) as o:
                         m.k_place_tile(tile, ytail, ey, ltail, ex, canvas, out_y, out_x, oh, ow)
                         o.out(y=canvas[:, :, out_y:out_y + oh, out_x:out_x + ow])
                 cur.append(tile)
@@ -601,4 +702,6 @@ class VideoVAE:
                         write_part(f"vvae.c{ci}.part1", overlap[0], overlap[1], overlap[2])
                         overlap = None
         assert pos == F, f"wrote {pos} frames of {F}"
+        if self.prof:
+            self._report()
         return (out, outf) if return_float else out

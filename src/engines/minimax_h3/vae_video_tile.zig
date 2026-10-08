@@ -73,6 +73,73 @@ pub const Rec = struct {
     }
 };
 
+/// The classes of `STK_VVAE_PROF`'s report: the GPU time between the events around an op goes to the class of the op.
+pub const Phase = enum(u8) { gemm, attn_gemm, softmax, norm, rope, swiglu, other, place };
+const n_phase = 8;
+const phase_names = [n_phase][]const u8{ "gemm", "attn_gemm", "softmax", "norm", "rope", "swiglu", "other", "place" };
+
+/// CUDA events recorded after every op of a tile (and its placement into the canvas): `begin` stamps the start, `mark(class)`
+/// the end of an op, `end` waits for the last stamp and credits each interval to its class. Only when `STK_VVAE_PROF` is set
+/// and no probe is attached (a probe's copies and compares would be billed to the ops). Every call is a no-op when off.
+pub const Prof = struct {
+    on: bool = false,
+    evs: []cuda.Event = &.{},
+    cls: []Phase = &.{},
+    n: usize = 0,
+    ms: [n_phase]f64 = @splat(0),
+
+    const capacity = 8192; // a tile: 36 x (13 + 3 x 16 groups of 2 heads), at one head a group about 4,000
+
+    fn init(p: *Prof, gpa: std.mem.Allocator, d: *const cuda.Driver) !void {
+        p.evs = try gpa.alloc(cuda.Event, capacity);
+        errdefer gpa.free(p.evs);
+        p.cls = try gpa.alloc(Phase, capacity);
+        errdefer gpa.free(p.cls);
+        var made: usize = 0;
+        errdefer for (p.evs[0..made]) |*e| e.deinit();
+        while (made < capacity) : (made += 1) p.evs[made] = try cuda.Event.init(d, true);
+    }
+
+    fn deinit(p: *Prof, gpa: std.mem.Allocator) void {
+        for (p.evs) |*e| e.deinit();
+        gpa.free(p.evs);
+        gpa.free(p.cls);
+        p.* = .{};
+    }
+
+    pub fn begin(p: *Prof, s: cuda.Stream) !void {
+        if (!p.on) return;
+        try p.evs[0].record(s);
+        p.n = 1;
+    }
+
+    pub fn mark(p: *Prof, s: cuda.Stream, ph: Phase) !void {
+        if (!p.on or p.n == 0 or p.n >= p.evs.len) return;
+        try p.evs[p.n].record(s);
+        p.cls[p.n] = ph;
+        p.n += 1;
+    }
+
+    pub fn end(p: *Prof) !void {
+        if (!p.on or p.n < 2) {
+            p.n = 0;
+            return;
+        }
+        try p.evs[p.n - 1].synchronize();
+        for (1..p.n) |i| p.ms[@intFromEnum(p.cls[i])] += try cuda.Event.elapsedMs(p.evs[i - 1], p.evs[i]);
+        p.n = 0;
+    }
+
+    /// One line on stderr: the milliseconds of the decode by class (summed over its tiles and placements) and their sum.
+    pub fn report(p: *const Prof) void {
+        var sum: f64 = 0;
+        for (p.ms) |m| sum += m;
+        std.debug.print("vvae_phase_ms", .{});
+        for (phase_names, p.ms) |nm, m| std.debug.print(" {s}={d:.1}", .{ nm, m });
+        std.debug.print(" sum={d:.1}\n", .{sum});
+    }
+};
+
 pub const Layer = struct { norm1: u64, qkv_w: u64, qkv_b: u64, out_w: u64, out_b: u64, scale1: u64, norm2: u64, w1_w: u64, w1_b: u64, w2_w: u64, w2_b: u64, scale2: u64 };
 
 pub const Weights = struct {
@@ -160,10 +227,12 @@ pub fn loadWeights(st: *Store, up: *Uploader, p: *const Pack) !Weights {
 pub const Lat = struct { ptr: u64, tz: u32, hz: u32, wz: u32 };
 
 pub const Tile = struct {
+    gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     k: *const Ops,
     s: cuda.Stream,
     rec: Rec = .{},
+    prof: Prof = .{},
     store: Store,
     w: Weights = undefined,
     sc_numel: u64 = 0, // the score buffer's last layout (zeroed whenever it changes, as the twin reallocates it)
@@ -182,8 +251,10 @@ pub const Tile = struct {
     proj: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, p: *const Pack, up: *Uploader) !Tile {
-        var t: Tile = .{ .d = d, .k = k, .s = s, .store = .init(d, gpa) };
+        var t: Tile = .{ .gpa = gpa, .d = d, .k = k, .s = s, .store = .init(d, gpa) };
         errdefer t.store.deinit();
+        if (k.prof) try t.prof.init(gpa, d);
+        errdefer t.prof.deinit(gpa);
         t.w = try loadWeights(&t.store, up, p);
         try t.store.done(up); // the weights have landed
         const sizes = .{
@@ -196,6 +267,7 @@ pub const Tile = struct {
     }
 
     pub fn deinit(t: *Tile) void {
+        t.prof.deinit(t.gpa);
         t.store.deinit();
     }
 
@@ -214,10 +286,12 @@ pub const Tile = struct {
         }
         try t.k.gemm(t.s, .{ .a = x, .b = wt, .bias = bias, .c = out, .m = m, .n = n, .k = kk, .lda = kk, .ldb = kk, .ldc = n, .res = res, .rscale = rscale, .ldr = if (res == 0) 0 else n });
         try rec.post(op, &.{io("y", out, m * n * 2)});
+        try t.prof.mark(t.s, .gemm);
     }
 
     /// softmax(q k^T / 8) v per head from the rotated qkv [S, 6144] -> rows [S, 2048] (t.att): q k^T (fp16 out), fp32 row
-    /// softmax, P v, all 32 heads batched; nan_to_num in place.
+    /// softmax, P v; nan_to_num in place. A tile that is not recorded runs the three steps `Ops.heads` heads at a time
+    /// (`attentionGrouped`), a recorded one all 32 batched as the capture names them.
     fn attention(t: *Tile, ss: u64, sp: u64) !void {
         const rec = &t.rec;
         const k = t.k;
@@ -230,18 +304,45 @@ pub const Tile = struct {
         try rec.pre("vt", &.{io("qkv", t.qkv, ss * 3 * dim * 2)});
         try k.vt(t.s, t.qkv, t.vt, ss, sp, heads, 3 * dim);
         try rec.post("vt", &.{io("y", t.vt, vt_bytes)});
-        try rec.pre("sc", &.{io("qkv", t.qkv, ss * 3 * dim * 2)});
-        try k.gemm(t.s, .{ .a = t.qkv, .b = t.qkv, .c = t.sc, .m = ss, .n = ss, .k = hd, .lda = 3 * dim, .ldb = 3 * dim, .ldc = sp, .b_off = hd, .sa = 3 * hd, .sb = 3 * hd, .sc = ss * sp, .batch = heads });
-        try rec.post("sc", &.{io("y", t.sc, sc_bytes)});
-        try rec.pre("sm", &.{io("s", t.sc, sc_bytes)});
-        try k.softmax(t.s, t.sc, heads * ss, ss, sp, 0.125);
-        try rec.post("sm", &.{io("y", t.sc, sc_bytes)});
-        try rec.pre("pv", &.{ io("p", t.sc, sc_bytes), io("vt", t.vt, vt_bytes) });
-        try k.gemm(t.s, .{ .a = t.sc, .b = t.vt, .c = t.att, .m = ss, .n = hd, .k = sp, .lda = sp, .ldb = sp, .ldc = dim, .sa = ss * sp, .sb = hd * sp, .sc = hd, .batch = heads });
-        try rec.post("pv", &.{io("y", t.att, ss * dim * 2)});
+        try t.prof.mark(t.s, .other);
+        if (k.heads < heads and !rec.active()) {
+            try t.attentionGrouped(ss, sp);
+        } else {
+            try rec.pre("sc", &.{io("qkv", t.qkv, ss * 3 * dim * 2)});
+            try k.gemm(t.s, .{ .a = t.qkv, .b = t.qkv, .c = t.sc, .m = ss, .n = ss, .k = hd, .lda = 3 * dim, .ldb = 3 * dim, .ldc = sp, .b_off = hd, .sa = 3 * hd, .sb = 3 * hd, .sc = ss * sp, .batch = heads });
+            try rec.post("sc", &.{io("y", t.sc, sc_bytes)});
+            try t.prof.mark(t.s, .attn_gemm);
+            try rec.pre("sm", &.{io("s", t.sc, sc_bytes)});
+            try k.softmax(t.s, t.sc, heads * ss, ss, sp, 0.125);
+            try rec.post("sm", &.{io("y", t.sc, sc_bytes)});
+            try t.prof.mark(t.s, .softmax);
+            try rec.pre("pv", &.{ io("p", t.sc, sc_bytes), io("vt", t.vt, vt_bytes) });
+            try k.gemm(t.s, .{ .a = t.sc, .b = t.vt, .c = t.att, .m = ss, .n = hd, .k = sp, .lda = sp, .ldb = sp, .ldc = dim, .sa = ss * sp, .sb = hd * sp, .sc = hd, .batch = heads });
+            try rec.post("pv", &.{io("y", t.att, ss * dim * 2)});
+            try t.prof.mark(t.s, .attn_gemm);
+        }
         try rec.pre("nan", &.{io("x", t.att, ss * dim * 2)});
         try k.nanToNum(t.s, t.att, ss * dim);
         try rec.post("nan", &.{io("y", t.att, ss * dim * 2)});
+        try t.prof.mark(t.s, .other);
+    }
+
+    /// q k^T, softmax and P v for `Ops.heads` heads at a time on the first heads of the score buffer. A head's bits depend on
+    /// that head's q, k, v alone, so the output equals the all-heads launches' (test_vae_video "attention_groups", the frames'
+    /// hash); the scores of a group (6.5 MB a head at 1797 tokens) stay in the L2 instead of four trips of 207 MB through the
+    /// LPDDR5X. Head h0 + i: q and k windows into qkv (offsets h0 * 192), v^T by h0 * 64 * sp, the output columns by h0 * 64.
+    fn attentionGrouped(t: *Tile, ss: u64, sp: u64) !void {
+        const k = t.k;
+        var h0: u32 = 0;
+        while (h0 < heads) : (h0 += k.heads) {
+            const g: u32 = @min(k.heads, heads - h0);
+            try k.gemm(t.s, .{ .a = t.qkv, .b = t.qkv, .c = t.sc, .m = ss, .n = ss, .k = hd, .lda = 3 * dim, .ldb = 3 * dim, .ldc = sp, .a_off = h0 * 3 * hd, .b_off = hd + h0 * 3 * hd, .sa = 3 * hd, .sb = 3 * hd, .sc = ss * sp, .batch = g });
+            try t.prof.mark(t.s, .attn_gemm);
+            try k.softmax(t.s, t.sc, @as(u64, g) * ss, ss, sp, 0.125);
+            try t.prof.mark(t.s, .softmax);
+            try k.gemm(t.s, .{ .a = t.sc, .b = t.vt, .c = t.att, .m = ss, .n = hd, .k = sp, .lda = sp, .ldb = sp, .ldc = dim, .b_off = @as(u64, h0) * hd * sp, .c_off = h0 * hd, .sa = ss * sp, .sb = hd * sp, .sc = hd, .batch = g });
+            try t.prof.mark(t.s, .attn_gemm);
+        }
     }
 
     /// ViT3DDecoder on post_quant_conv of the crop [t0, t0 + tn) x [y0, y0 + h) x [x0, x0 + w) of `z` (latent frames past
@@ -253,36 +354,44 @@ pub const Tile = struct {
         const ss = np + nsuf;
         const sp = (ss + 7) / 8 * 8;
         rec.layer = null;
+        try t.prof.begin(t.s);
         try rec.pre("gather", &.{io("z", z.ptr, @as(u64, zc) * z.tz * z.hz * z.wz * 2)});
         try k.gather(t.s, z.ptr, t.rows, zc, z.tz, z.hz, z.wz, t0, tn, y0, h, x0, w);
         try rec.post("gather", &.{io("y", t.rows, np * zc * 2)});
+        try t.prof.mark(t.s, .other);
         try t.lin("pqc", t.rows, t.w.pqc_w, t.w.pqc_b, t.pq, np, zc, zc, 0, 0);
         try t.lin("embed", t.pq, t.w.embed_w, t.w.embed_b, t.hs, np, dim, zc, 0, 0);
         try rec.pre("suffix", &.{ io("h", t.hs, np * dim * 2), io("reg", t.w.reg, 4 * dim * 2) });
         try k.suffix(t.s, t.hs, t.w.reg, np, dim);
         try rec.post("suffix", &.{io("y", t.hs + np * dim * 2, nsuf * dim * 2)});
+        try t.prof.mark(t.s, .other);
         try rec.pre("rope", &.{io("inv_freq", t.w.inv_freq, 16)});
         try k.ropeTable(t.s, t.w.inv_freq, t.table, tn, h, w, nsuf);
         try rec.post("rope", &.{io("y", t.table, ss * 24 * 4 * 2)});
+        try t.prof.mark(t.s, .other);
         const hb = ss * dim * 2;
         for (&t.w.l, 0..) |*l, i| {
             rec.layer = @as(u32, @intCast(i));
             try rec.pre("norm1", &.{io("x", t.hs, hb)});
             try k.rmsNorm(t.s, t.hs, l.norm1, t.n, ss, dim, eps);
             try rec.post("norm1", &.{io("y", t.n, hb)});
+            try t.prof.mark(t.s, .norm);
             try t.lin("qkv", t.n, l.qkv_w, l.qkv_b, t.qkv, ss, 3 * dim, dim, 0, 0);
             try rec.pre("rr", &.{ io("qkv", t.qkv, ss * 3 * dim * 2), io("table", t.table, ss * 24 * 4 * 2) });
             try k.rmsRope(t.s, t.qkv, t.table, ss, heads, 3 * dim, eps);
             try rec.post("rr", &.{io("qkv", t.qkv, ss * 3 * dim * 2)});
+            try t.prof.mark(t.s, .rope);
             try t.attention(ss, sp);
             try t.lin("out", t.att, l.out_w, l.out_b, t.hs, ss, dim, dim, t.hs, l.scale1);
             try rec.pre("norm2", &.{io("x", t.hs, hb)});
             try k.rmsNorm(t.s, t.hs, l.norm2, t.n, ss, dim, eps);
             try rec.post("norm2", &.{io("y", t.n, hb)});
+            try t.prof.mark(t.s, .norm);
             try t.lin("w1", t.n, l.w1_w, l.w1_b, t.gu, ss, 2 * ffn, dim, 0, 0);
             try rec.pre("swi", &.{io("x", t.gu, ss * 2 * ffn * 2)});
             try k.swiglu(t.s, t.gu, t.act, ss, ffn);
             try rec.post("swi", &.{io("y", t.act, ss * ffn * 2)});
+            try t.prof.mark(t.s, .swiglu);
             try t.lin("w2", t.act, l.w2_w, l.w2_b, t.hs, ss, dim, ffn, t.hs, l.scale2);
         }
         rec.layer = null;
@@ -290,10 +399,13 @@ pub const Tile = struct {
         try rec.pre("norm_out", &.{io("x", t.hs, np * dim * 2)});
         try k.layerNorm(t.s, t.hs, t.w.norm_out_w, t.w.norm_out_b, t.n, np, dim, eps);
         try rec.post("norm_out", &.{io("y", t.n, np * dim * 2)});
+        try t.prof.mark(t.s, .norm);
         try t.lin("proj", t.n, t.w.proj_w, t.w.proj_b, t.proj, np, 3 * 4 * 16 * 16, dim, 0, 0);
         try rec.pre("unshuf", &.{io("x", t.proj, np * 3 * 4 * 16 * 16 * 2)});
         try k.unshuffle(t.s, t.proj, out, tn, h, w);
         try rec.post("unshuf", &.{io("y", out, @as(u64, 3) * 4 * tn * 16 * h * 16 * w * 2)});
+        try t.prof.mark(t.s, .other);
+        try t.prof.end();
     }
 };
 

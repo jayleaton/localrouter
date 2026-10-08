@@ -19,7 +19,8 @@ fn i64of(v: anytype) i64 {
 }
 
 /// `stk_gemm_f16`: C[m, n] = A[m, k] . B[n, k]^T (+ bias[n]), then with `res`: half(res + C * rscale[col]). Pointers are
-/// bytes (device addresses; 0 = absent), offsets and strides in half elements, like the twin's `k_gemm`.
+/// bytes (device addresses; 0 = absent), offsets and strides in half elements, like the twin's `k_gemm`. Which of the four
+/// bit-equal kernels runs is `Ops.pick`'s call (the twin's `gemm_pick`), the reference when `STK_VVAE_REF` is set.
 pub const Gemm = struct {
     a: Ptr,
     b: Ptr,
@@ -44,10 +45,39 @@ pub const Gemm = struct {
     sr: u64 = 0,
 };
 
+/// The GEMM kernels of gemm_f16.cu, indexed as the twin's `k_gemm_v` variants: the reference (grid (n, m) of 128 x 128, the
+/// first version) and the three template tiles (grid (m, n), dynamic shared memory = stages * (BM + BN) * (BK + 8) * 2 bytes).
+const GemmKernel = struct { name: [:0]const u8, bm: u32, bn: u32, threads: u32, smem: u32 };
+const gemm_kernels = [_]GemmKernel{
+    .{ .name = "stk_gemm_f16_ref", .bm = 128, .bn = 128, .threads = 256, .smem = 0 },
+    .{ .name = "stk_gemm_f16", .bm = 256, .bn = 128, .threads = 256, .smem = 3 * (256 + 128) * 40 * 2 },
+    .{ .name = "stk_gemm_f16_s", .bm = 128, .bn = 128, .threads = 256, .smem = 2 * (128 + 128) * 40 * 2 },
+    .{ .name = "stk_gemm_f16_n", .bm = 64, .bn = 64, .threads = 128, .smem = 3 * (64 + 64) * 40 * 2 },
+};
+
+/// Environment variable `name` set to something other than "" or "0".
+fn envOn(name: [*:0]const u8) bool {
+    const v = std.c.getenv(name) orelse return false;
+    const t = std.mem.span(v);
+    return t.len > 0 and !std.mem.eql(u8, t, "0");
+}
+
+/// Environment variable `name` as an unsigned number (`default` when unset or not a number).
+fn envInt(name: [*:0]const u8, default: u32) u32 {
+    const v = std.c.getenv(name) orelse return default;
+    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch default;
+}
+
 pub const Ops = struct {
     gemm_module: cuda.Module,
     module: cuda.Module,
-    gemm_fn: cuda.Function,
+    gemm_fns: [gemm_kernels.len]cuda.Function,
+    /// `STK_VVAE_REF=1`: every GEMM on the reference kernel and the attention in one piece (the old path, for comparisons).
+    ref_only: bool,
+    /// `STK_VVAE_HEADS=n`: heads an attention group runs (default 2; 0 or >= 32: all at once). See Tile.attention.
+    heads: u32,
+    /// `STK_VVAE_PROF=1`: CUDA events around every op; the decode's GPU milliseconds by class go to stderr.
+    prof: bool,
     denorm_fn: cuda.Function,
     gather_fn: cuda.Function,
     suffix_fn: cuda.Function,
@@ -69,10 +99,20 @@ pub const Ops = struct {
         errdefer g.unload();
         var m = try cuda.Module.load(d, image);
         errdefer m.unload();
+        var fns: [gemm_kernels.len]cuda.Function = undefined;
+        for (gemm_kernels, &fns) |k, *f| {
+            f.* = try g.function(k.name);
+            if (k.smem > 48 * 1024) try f.allowDynamicShared(k.smem); // 92,160 bytes of the wide tile: opt in
+        }
+        const ref_only = envOn("STK_VVAE_REF");
+        const heads = envInt("STK_VVAE_HEADS", 2);
         return .{
             .gemm_module = g,
             .module = m,
-            .gemm_fn = try g.function("stk_gemm_f16"),
+            .gemm_fns = fns,
+            .ref_only = ref_only,
+            .heads = if (ref_only or heads == 0 or heads >= 32) 32 else heads,
+            .prof = envOn("STK_VVAE_PROF"),
             .denorm_fn = try m.function("vv_denorm"),
             .gather_fn = try m.function("vv_gather_rows"),
             .suffix_fn = try m.function("vv_suffix"),
@@ -99,7 +139,16 @@ pub const Ops = struct {
         try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = blk } }, s, args);
     }
 
-    /// grid (ceil(n / 128), ceil(m / 128), batch) x 256; A and B advance by `a_off` / `b_off` half elements first.
+    /// The kernel for an m x n x k GEMM (an index of `gemm_kernels`, the twin's `gemm_pick`): K <= 64 (scores, the embeddings:
+    /// the epilogue dominates) the 128 x 128 tile, N <= 64 (P . V) the 64 x 64, the linears the 256 x 128. All bit-equal.
+    pub fn pick(m: u64, n: u64, k: u64) usize {
+        _ = m;
+        return if (k <= 64) 2 else if (n <= 64) 3 else 1;
+    }
+
+    /// Reference: grid (ceil(n / 128), ceil(m / 128), batch) x 256. The others: grid (ceil(m / BM), ceil(n / BN), batch), the m
+    /// tile fastest (the blocks resident together read one weight tile once). A and B advance by `a_off` / `b_off` half
+    /// elements first.
     pub fn gemm(o: *const Ops, s: cuda.Stream, g: Gemm) !void {
         var a: cuda.launch.Args = .{};
         a.add(g.a + 2 * g.a_off);
@@ -112,7 +161,13 @@ pub const Ops = struct {
         a.add(g.rscale);
         a.add(i64of(g.ldr));
         a.add(i64of(g.sr));
-        try go(o.gemm_fn, s, .{ .x = blocks2(g.n, 128), .y = blocks2(g.m, 128), .z = g.batch }, 256, &a);
+        const v: usize = if (o.ref_only) 0 else pick(g.m, g.n, g.k);
+        const k = gemm_kernels[v];
+        const grid: cuda.launch.Dim3 = if (v == 0)
+            .{ .x = blocks2(g.n, k.bn), .y = blocks2(g.m, k.bm), .z = g.batch }
+        else
+            .{ .x = blocks2(g.m, k.bm), .y = blocks2(g.n, k.bn), .z = g.batch };
+        try cuda.launch.launch(o.gemm_fns[v], .{ .grid = grid, .block = .{ .x = k.threads }, .shared = k.smem }, s, &a);
     }
 
     fn blocks2(n: u64, by: u64) u32 {
@@ -300,3 +355,18 @@ pub const Ops = struct {
         try go(o.finalize_fn, s, .{ .x = blocks(@as(u64, f.copy) * f.h * f.w * 3) }, block, &a);
     }
 };
+
+test "gemm kernels: the shape pick and the shared memory the tiles need" {
+    // the linears (K, N large) the wide tile; scores (K = 64) and the embeddings (K = 24) the 128 x 128; P . V (N = 64) the narrow
+    try std.testing.expectEqual(@as(usize, 1), Ops.pick(1797, 6144, 2048));
+    try std.testing.expectEqual(@as(usize, 1), Ops.pick(1797, 2048, 8192));
+    try std.testing.expectEqual(@as(usize, 2), Ops.pick(1797, 1797, 64));
+    try std.testing.expectEqual(@as(usize, 2), Ops.pick(1792, 2048, 24));
+    try std.testing.expectEqual(@as(usize, 2), Ops.pick(1792, 24, 24));
+    try std.testing.expectEqual(@as(usize, 3), Ops.pick(1797, 64, 1800));
+    // stages * (BM + BN) * (BK + 8) * 2 as gemm_f16.cu's Cfg::SMEM
+    try std.testing.expectEqual(@as(u32, 92160), gemm_kernels[1].smem);
+    try std.testing.expectEqual(@as(u32, 40960), gemm_kernels[2].smem);
+    try std.testing.expectEqual(@as(u32, 30720), gemm_kernels[3].smem);
+    try std.testing.expect(gemm_kernels[1].smem <= 99 * 1024); // the opt-in limit of an sm_120 / sm_121 block
+}
