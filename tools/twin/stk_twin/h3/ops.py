@@ -15,6 +15,7 @@ KDIR = Path(os.environ.get("STK_KROOT", Path(__file__).resolve().parents[4] / "k
 _DECLS = """
 void k_norm_mod(at::Tensor x, at::Tensor w, at::Tensor mod, at::Tensor idx, at::Tensor y, int64_t part, double eps);
 void k_gate_add_(at::Tensor x, at::Tensor y, at::Tensor mod, at::Tensor idx, int64_t part);
+void k_gate_add_norm_mod_(at::Tensor x, at::Tensor y, at::Tensor gmod, at::Tensor nmod, at::Tensor idx, at::Tensor w, at::Tensor out, int64_t gpart, int64_t npart, double eps);
 at::Tensor k_swiglu(at::Tensor gu);
 at::Tensor k_silu_mul_split(at::Tensor gu);
 at::Tensor k_rms_norm(at::Tensor x, at::Tensor w, double eps);
@@ -57,6 +58,14 @@ void k_gate_add_(at::Tensor x, at::Tensor y, at::Tensor mod, at::Tensor idx, int
     long long D = x.size(-1), S = x.numel() / D;
     h3_gate_add<<<dim3(cdiv(D, 256), (unsigned)S), 256, 0, STREAM>>>(BF(x), CBF(y), F32(mod), idx.data_ptr<int>(), D,
                                                                     (int)part);
+}
+void k_gate_add_norm_mod_(at::Tensor x, at::Tensor y, at::Tensor gmod, at::Tensor nmod, at::Tensor idx, at::Tensor w, at::Tensor out,
+                          int64_t gpart, int64_t npart, double eps) {
+    chk(x, at::kBFloat16, "x"); chk(y, at::kBFloat16, "y"); chk(gmod, at::kFloat, "gmod"); chk(nmod, at::kFloat, "nmod");
+    chk(idx, at::kInt, "idx"); chk(w, at::kFloat, "w"); chk(out, at::kBFloat16, "out");
+    long long D = w.numel();
+    h3_gate_add_norm_mod<<<(unsigned)(x.numel() / D), 256, 0, STREAM>>>(BF(x), CBF(y), F32(gmod), F32(nmod), idx.data_ptr<int>(),
+                                                                         F32(w), BF(out), D, (int)gpart, (int)npart, (float)eps);
 }
 at::Tensor k_swiglu(at::Tensor gu) {
     chk(gu, at::kBFloat16, "gu");
@@ -161,7 +170,7 @@ void k_scale32_(at::Tensor x, double c) {
 }
 """
 
-NAMES = ["k_norm_mod", "k_gate_add_", "k_swiglu", "k_silu_mul_split", "k_rms_norm", "k_final_mod", "k_scale",
+NAMES = ["k_norm_mod", "k_gate_add_", "k_gate_add_norm_mod_", "k_swiglu", "k_silu_mul_split", "k_rms_norm", "k_final_mod", "k_scale",
          "k_uncarry_", "k_patchify", "k_unpatchify_neg", "k_pack_audio", "k_unpack_audio_neg", "k_add", "k_gemm_f32",
          "k_denoise", "k_euler32_", "k_res2_", "k_scale32_"]
 

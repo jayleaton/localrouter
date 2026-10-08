@@ -17,6 +17,8 @@ pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-avae")) return @import("h3_avae.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-vvae")) return @import("h3_vvae.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-e2e")) return @import("h3_e2e.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-step-bench")) return @import("h3_stepbench.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-bench")) return @import("h3_bench.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-vae")) return @import("qwen_vae.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-e2e")) return @import("qwen_e2e.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-te")) return @import("qwen_te.zig").run(io, gpa, args[1..]);
@@ -125,4 +127,12 @@ fn fetch(c: *std.http.Client, a: std.mem.Allocator, method: std.http.Method, bas
 fn report(what: []const u8, detail: []const u8) u8 {
     std.debug.print("selftest FAILED at {s}: {s}\n", .{ what, detail });
     return 1;
+}
+
+test "h3 bench: its argument and shape tests run with the unit tests" {
+    _ = @import("h3_bench.zig");
+}
+
+test "h3 step bench: its argument tests and the step code's type check run with the unit tests" {
+    _ = @import("h3_stepbench.zig");
 }

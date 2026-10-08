@@ -105,6 +105,13 @@ Temporal blend: `ext = min(carried frames, part frames, 5)`, position = frame in
 `C[M, N] = A[M, K] . B[N, K]^T`, block tile 128 x 128 x 32, 256 threads, two-stage `cp.async`, `ldmatrix`, `mma.sync.m16n8k16.f16.f16.f32` with an fp32 accumulator over K tiles ascending,
 no split-K. Epilogue per element: `v = acc; if bias: v = v + float(bias)` (fp32 add); `o = half(v)`; with `res`: `o = half(float(res) + float(o) * float(rscale))`. An output's bits depend only on its two input rows.
 Batched by `blockIdx.z` (`sA, sB, sC` element strides) for the 32 heads. Requirements: `K % 8 == 0`, `lda, ldb % 8 == 0`, 16-byte aligned A and B, `ldc` even.
+
+Four kernels, one arithmetic (`gemm_f16.cu` header has the argument): `stk_gemm_f16_ref` is the version above; `stk_gemm_f16` (256 x 128 x 32 tile, three stages, 8 warps of 64 x 64, 92,160 bytes of dynamic shared memory, one block a
+multiprocessor), `_s` (128 x 128, two stages) and `_n` (64 x 64, three stages, 4 warps) are one template that changes only the tile, the stages, the grid order (the m tile fastest) and the C store (a half2 where aligned); every output element
+still sees `acc = 0`, then the same k16 chunks in ascending order into the same `mma.sync m16n8k16`, then the same epilogue. The launch picks by shape (`Ops.pick` / `gemm_pick`): K <= 64 `_s`, N <= 64 `_n`, else the wide one;
+`STK_VVAE_REF=1` runs the reference everywhere. `test_vae_video.py` ("gemm_variants_*") proves every kernel equal to the reference with `torch.equal` on int16 views over every shape the decoder launches.
+The attention of a tile that is not recorded runs `STK_VVAE_HEADS` (default 2) heads at a time (qk^T, softmax, P.V on the first heads' worth of the score buffer, window offsets `h0 * 192`, `h0 * 64 * SP`, `h0 * 64`): the same
+per-head launches, so the same bits ("attention_groups_*"), with the scores (6.5 MB a head) in the L2 instead of 207 MB through memory four times. `STK_VVAE_PROF=1` prints the GPU milliseconds of a decode by class.
 This replaces cuBLAS (ComfyUI's `F.linear`); the order of the fp32 accumulation inside a K tile is the tensor core's, so cuBLAS and we agree to fp32 rounding only (not bitwise).
 
 ### 4.2 The rotation table (`vv_rope_table`)
@@ -147,7 +154,7 @@ Kinds: `gemm_f16` (attrs M, N, K, batch, epilogue `none | bias | bias+addcmul`),
 Names are unique per decode. A full capture of a 1344 x 768 video is about 196 tiles x 36 layers x 14 ops (scores alone are 207 MB a blob), so record selectively: `decode(latents, rec=lambda chunk, row, col: ...)` toggles the recorder per tile
 (`row = col = -1` for the clip-level ops and the denorm). The scratch score buffer is zero-initialised once so recorded outputs are deterministic.
 
-Kernel launches (grids are in the `launch:` comment of each kernel): GEMM grid `(ceil(N/128), ceil(M/128), batch)` x 256; the `.sc` call uses `lda = ldb = 6144`, `sA = sB = 192`, `b_off = 64`, `ldc = SP`, `sC = S * SP`;
+Kernel launches (grids are in the `launch:` comment of each kernel): GEMM grid `(ceil(N/128), ceil(M/128), batch)` x 256 for the reference, `(ceil(M/BM), ceil(N/BN), batch)` for the others; the `.sc` call uses `lda = ldb = 6144`, `sA = sB = 192`, `b_off = 64`, `ldc = SP`, `sC = S * SP`;
 the `.pv` call `A = P (lda = SP, sA = S * SP)`, `B = V^T (ldb = SP, sB = 64 * SP)`, `ldc = 2048`, `sC = 64`, `K = SP`.
 
 ## 6. Finalise and uint8 (`vv_finalize`)
@@ -181,7 +188,7 @@ The temporal blend and finalise are one kernel (the same per-element arithmetic,
 3. **`F.rms_norm` on fp16**: torch's fused kernel (one rounding of `(x * rstd) * w`) is assumed, as for the DiT's bf16 `h3_rms_norm`; a composite path (round `x * rstd`, then multiply by `w` as a second fp16 op) differs by up to 1 ulp. Which one the pod's torch takes is not determined from the sources here.
 4. **torch scalar division by reciprocal**: the blend weights and `create_token_ids` assume `tensor / python_scalar` is `x * (1.0f / s)` on CUDA (`div_true_kernel_cuda`'s CPU-scalar branch). The structure check (blend arithmetic over several overlaps) and the rope-table check test this.
 5. **`addcmul` contraction** is argued bit-neutral (the product of two fp16 values is exact in fp32); `gemm_addcmul_epilogue` compares with `torch.addcmul`.
-6. **`silu` / `exp` / `cos` / `sin` / `rsqrt`**: the same CUDA math functions as torch's kernels only if the toolkit versions agree and torch's silu uses the accurate `expf` (not `__expf`); checked by `swiglu` and `rope_table_vs_comfy`.
+6. **`silu` / `exp` / `cos` / `sin` / `rsqrt`**: the same CUDA math functions as torch's kernels only if LocalRouter's versions agree and torch's silu uses the accurate `expf` (not `__expf`); checked by `swiglu` and `rope_table_vs_comfy`.
 7. **`post_quant_conv` accumulation**: if cuDNN picks an fp16-accumulating algorithm for the 1x1x1 conv the GEMM (fp32 accumulation) differs at the 1e-3 relative level on a 24-term dot product; affects the first op only.
 8. **Attention score precision** (4.4) is the largest numerical deviation; if the PSNR check is short of the mark, the first remedy is fp32 scores in a larger buffer (a GEMM variant with fp32 output), which would change `vv_softmax`'s input type.
 9. **Memory**: the weights are 4.85 GB, the score scratch 207 MB, a 1344 x 768 clip canvas 173 MB plus the previous row's raw tiles (about 11 MB each); the twin holds the whole uint8 video (124 x 768 x 1344 x 3 = 384 MB) on the GPU.

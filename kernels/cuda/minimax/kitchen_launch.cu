@@ -121,10 +121,13 @@ AttnPlan attn_plan(int B, int H, int HK, int Sq, int Sk, int D) {
     return p;
 }
 
-// launch_impl of sage_attn_launcher.cu at mask kNone, bf16 out.
+// launch_impl of sage_attn_launcher.cu at mask kNone, bf16 out. o_rows (ours): the output's strides (seq, head) are (H * D, D),
+// o as [B, Sq, H, D] rows, instead of the wheel's (D, Sq * D), o as [B, H, Sq, D]. The kernel stores through
+// stride_seq_o / stride_h_o only (qk_int_sv_i8_cuda.cuh, the 128-bit stores at O + b * stride_bz_o + h * stride_h_o +
+// row * stride_seq_o), so every output value is the same and only its address differs; B must be 1 for the rows form.
 template <int HD, int CTA_K, bool FUSE>
 int attn_launch(int8_t* q8, int8_t* k8, int8_t* v8, bf16* o, float* qs, float* ks, float* vs, int Sq, int Sk, int H,
-                int groups, int B, int D, int padded_k, float scale, cudaStream_t stream) {
+                int groups, int B, int D, int padded_k, float scale, bool o_rows, cudaStream_t stream) {
     constexpr int CTA_Q = 128;
     constexpr int WARP_Q = HD >= 128 ? 16 : 32;
     constexpr int WARP_K = CTA_K;
@@ -140,21 +143,22 @@ int attn_launch(int8_t* q8, int8_t* k8, int8_t* v8, bf16* o, float* qs, float* k
     const dim3 block(32, (CTA_Q / WARP_Q) * (CTA_K / WARP_K));
     kernel<<<grid, block, smem, stream>>>(
         q8, k8, v8, o, nullptr, qs, ks, vs, nullptr, nullptr, 0, 0, 0, 0, -1, Sq, Sk, groups,
-        H * Sq * D, D, Sq * D, Hk * Sk * D, D, Sk * D, Hk * D * padded_k, D * padded_k, padded_k, H * Sq * D, D, Sq * D, scale);
+        H * Sq * D, D, Sq * D, Hk * Sk * D, D, Sk * D, Hk * D * padded_k, D * padded_k, padded_k, H * Sq * D,
+        o_rows ? H * D : D, o_rows ? D : Sq * D, scale);
     return (int)cudaGetLastError();
 }
 
 // DISPATCH_DTYPE of the launcher for kNone and bf16.
 template <int HD>
 int attn_dispatch(int cta_k, int Sk, int8_t* q8, int8_t* k8, int8_t* v8, bf16* o, float* qs, float* ks, float* vs, int Sq,
-                  int H, int groups, int B, int D, int padded_k, float scale, cudaStream_t stream) {
+                  int H, int groups, int B, int D, int padded_k, float scale, bool o_rows, cudaStream_t stream) {
     if (Sk <= 512 && cta_k == 64)
-        return attn_launch<HD, 64, false>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, stream);
+        return attn_launch<HD, 64, false>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, o_rows, stream);
     if constexpr (HD == 128) {
         if (cta_k == 128)
-            return attn_launch<128, 128, true>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, stream);
+            return attn_launch<128, 128, true>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, o_rows, stream);
     }
-    return attn_launch<HD, 64, true>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, stream);
+    return attn_launch<HD, 64, true>(q8, k8, v8, o, qs, ks, vs, Sq, Sk, H, groups, B, D, padded_k, scale, o_rows, stream);
 }
 
 // LAUNCH_FUSED of quant_qk_int8.cu: the configurations the op reaches (D 64 and D 128 at cta 64, D 128 at cta 128).
@@ -197,9 +201,11 @@ size_t kitchen_int8_attention_workspace_bytes(int B, int H, int HK, int Sq, int 
 // int8_attention(q, k, v, scale) for bf16 q [B,H,Sq,D], k, v [B,HK,Sk,D] (strides in elements, last stride 1) into o [B,H,Sq,D]
 // bf16 contiguous. workspace: kitchen_int8_attention_workspace_bytes bytes, 256-byte aligned. Returns a cudaError_t (0 = launched;
 // cudaErrorInvalidValue for an argument the wheel rejects: head dim, divisibility, alignment, int32 strides).
-int kitchen_int8_attention(const void* q, const void* k, const void* v, void* o, void* workspace, int B, int H, int HK, int Sq,
-                           int Sk, int D, int64_t q_sb, int64_t q_sh, int64_t q_sn, int64_t k_sb, int64_t k_sh, int64_t k_sn,
-                           int64_t v_sb, int64_t v_sh, int64_t v_sn, float scale, cudaStream_t stream) {
+static int kitchen_int8_attention_impl(const void* q, const void* k, const void* v, void* o, void* workspace, int B, int H, int HK,
+                                       int Sq, int Sk, int D, int64_t q_sb, int64_t q_sh, int64_t q_sn, int64_t k_sb, int64_t k_sh,
+                                       int64_t k_sn, int64_t v_sb, int64_t v_sh, int64_t v_sn, float scale, bool o_rows,
+                                       cudaStream_t stream) {
+    if (o_rows && B != 1) return ERR_ARGS;
     const size_t need = kitchen_int8_attention_workspace_bytes(B, H, HK, Sq, Sk, D);
     if (need == 0 || !workspace || !q || !k || !v || !o || (reinterpret_cast<uintptr_t>(workspace) & 255)) return ERR_ARGS;
     if (!qk_aligned(q, q_sb, q_sh, q_sn, B, H, Sq) || !qk_aligned(k, k_sb, k_sh, k_sn, B, HK, Sk) ||
@@ -251,8 +257,25 @@ int kitchen_int8_attention(const void* q, const void* k, const void* v, void* o,
 
     // 4. attention
     bf16* ob = static_cast<bf16*>(o);
-    return D == 64 ? attn_dispatch<64>(P.cta_k, Sk, q8, k8, v8, ob, qs, ks, vs, Sq, H, H / HK, B, D, P.padded_k, scale, stream)
-                   : attn_dispatch<128>(P.cta_k, Sk, q8, k8, v8, ob, qs, ks, vs, Sq, H, H / HK, B, D, P.padded_k, scale, stream);
+    return D == 64 ? attn_dispatch<64>(P.cta_k, Sk, q8, k8, v8, ob, qs, ks, vs, Sq, H, H / HK, B, D, P.padded_k, scale, o_rows, stream)
+                   : attn_dispatch<128>(P.cta_k, Sk, q8, k8, v8, ob, qs, ks, vs, Sq, H, H / HK, B, D, P.padded_k, scale, o_rows, stream);
+}
+
+int kitchen_int8_attention(const void* q, const void* k, const void* v, void* o, void* workspace, int B, int H, int HK, int Sq,
+                           int Sk, int D, int64_t q_sb, int64_t q_sh, int64_t q_sn, int64_t k_sb, int64_t k_sh, int64_t k_sn,
+                           int64_t v_sb, int64_t v_sh, int64_t v_sn, float scale, cudaStream_t stream) {
+    return kitchen_int8_attention_impl(q, k, v, o, workspace, B, H, HK, Sq, Sk, D, q_sb, q_sh, q_sn, k_sb, k_sh, k_sn, v_sb, v_sh,
+                                       v_sn, scale, false, stream);
+}
+
+// Ours, not the wheel's: kitchen_int8_attention with o as bf16 rows [Sq, H * D] (B 1) instead of [B, H, Sq, D]: the same
+// kernels, the same values, written where the transpose to rows would have put them (see attn_launch). The engine's
+// attention output feeds the out projection as rows, so this drops the separate [H, S, D] -> [S, H * D] pass.
+int kitchen_int8_attention_rows(const void* q, const void* k, const void* v, void* o, void* workspace, int B, int H, int HK, int Sq,
+                                int Sk, int D, int64_t q_sb, int64_t q_sh, int64_t q_sn, int64_t k_sb, int64_t k_sh, int64_t k_sn,
+                                int64_t v_sb, int64_t v_sh, int64_t v_sn, float scale, cudaStream_t stream) {
+    return kitchen_int8_attention_impl(q, k, v, o, workspace, B, H, HK, Sq, Sk, D, q_sb, q_sh, q_sn, k_sb, k_sh, k_sn, v_sb, v_sh,
+                                       v_sn, scale, true, stream);
 }
 
 // rms_rope_split_half_(q, k, freqs, q_norm, k_norm, eps, rot_dim) in place, bf16 q, k [batch, dim1, dim2, head_dim] (strides in

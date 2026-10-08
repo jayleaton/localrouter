@@ -4,13 +4,16 @@
 //! Four inputs: the H3 pack (DiT + `tokenizer.json`), the text encoder checkpoint and the two VAE checkpoints as published.
 //! Heap-allocated: its parts point at each other.
 //!
-//! Memory (a 128 GB GB10 holds all of it; weights are uploaded once and never paged): the text encoder's NVFP4 AWQ
-//! checkpoint is about 20 GB on the device (int8 embedding, NVFP4 linears, fp32 norms), the DiT's NVFP4 pack about 20 GB,
-//! the VAEs about 5 GB (fp16 video 4.85 GB, fp32 audio the rest). Scratch: the DiT's activations for the longest
-//! sequence (768x448, 56 frames: 38 k tokens) are about 10 GB, the VAEs' a few GB, the sampler state 7 buffers of
-//! [video | audio] (about 14 MB each at that size). So all resident peaks near 60 GB; with `Options.unload_te` the
-//! encoder is freed after each encode and loaded again by the next `generate` (about 20 GB less while sampling and
-//! decoding, at the cost of re-reading the checkpoint), for a smaller machine or a shared one.
+//! Memory (a 128 GB GB10 holds all of it; weights are uploaded once and never paged): 32.8 GB of weights measured on
+//! GB10 (the 32B text encoder's NVFP4 AWQ checkpoint and the DiT's pack, the larger part; the VAEs about 5 GB: fp16 video
+//! 4.85 GB, fp32 audio the rest; `stk check h3-bench` prints the split). Scratch, all allocated at `create` for `Limits`:
+//! the DiT's about 271 KB a token (S = text limit + 2 audio + video tokens: 1.7 GiB at 768x448, 56 frames, 3.4 GiB at 124
+//! frames), the encoder's 0.2 GiB (512 tokens), the video VAE's tiles 0.33 GiB (fixed: one 256 px tile at a time) plus
+//! 0.14 GiB of canvases per decode, the audio VAE's 0.3 GiB, the sampler state and frames 0.15 GiB. So all resident is
+//! about 38 GB at 124 frames (docs/M7.md, "Full clips (5 s) and memory"). With `Options.unload_te` the encoder is freed
+//! after each encode and loaded again by the next `generate`: its weights and scratch are gone while sampling and
+//! decoding and between requests, but the PEAK is unchanged (the encode runs with everything else resident), and every
+//! request pays the checkpoint's reload.
 
 const std = @import("std");
 const cuda = @import("cuda");

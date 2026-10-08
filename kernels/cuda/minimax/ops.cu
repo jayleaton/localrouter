@@ -12,13 +12,8 @@ __device__ __forceinline__ float h3_ld(const bf16* p, long long i) { return __bf
 __device__ __forceinline__ bf16 h3_st(float v) { return __float2bfloat16_rn(v); }
 __device__ __forceinline__ float h3_bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
 
-// The row's sum of squares in a fixed order: thread-strided partials, then a shared-memory tree.
-__device__ __forceinline__ float h3_sumsq(const bf16* xr, long long D, float* s) {
-    float acc = 0.0f;
-    for (long long j = threadIdx.x; j < D; j += H3_BLOCK) {
-        const float v = h3_ld(xr, j);
-        acc = __fadd_rn(acc, __fmul_rn(v, v));
-    }
+// The shared-memory tree over the block's 256 partials, a fixed order: s[t] += s[t + st] for st = 128 .. 1.
+__device__ __forceinline__ float h3_tree(float acc, float* s) {
     s[threadIdx.x] = acc;
     __syncthreads();
     for (int st = H3_BLOCK / 2; st > 0; st >>= 1) {
@@ -26,6 +21,16 @@ __device__ __forceinline__ float h3_sumsq(const bf16* xr, long long D, float* s)
         __syncthreads();
     }
     return s[0];
+}
+
+// The row's sum of squares in a fixed order: thread-strided partials (thread t: j = t, t + 256, ... ascending), then the tree.
+__device__ __forceinline__ float h3_sumsq(const bf16* xr, long long D, float* s) {
+    float acc = 0.0f;
+    for (long long j = threadIdx.x; j < D; j += H3_BLOCK) {
+        const float v = h3_ld(xr, j);
+        acc = __fadd_rn(acc, __fmul_rn(v, v));
+    }
+    return h3_tree(acc, s);
 }
 
 // tfvideo's norm_mod: y = (x * rsqrt(mean(x^2) + eps) * w) * (1 + scale) + shift, fp32, one rounding. x [S, D] bf16,
@@ -54,6 +59,45 @@ extern "C" __global__ void h3_gate_add(bf16* x, const bf16* y, const float* mod,
     const long long o = (long long)blockIdx.y * D + j;
     const float g = mod[(long long)idx[blockIdx.y] * 6 * D + (3 * part + 2) * D + j];
     x[o] = h3_st(__fadd_rn(h3_ld(x, o), __fmul_rn(h3_ld(y, o), g)));
+}
+
+// h3_gate_add then h3_norm_mod in one pass over the row: x = bf16(x + y * gate) in place (gate from chunk 2 / 5 of the
+// row's `gmod` row, part gpart 0 / 1), then y_out = norm_mod of that x under `nmod` (part npart: chunks 0, 1 / 3, 4), with
+// the norm weight w fp32 [D]. `gmod` and `nmod` may be one buffer (the same block's two halves) or two (the last
+// gate_add of a block and the next block's first norm_mod, each under its own block's modulation). launch: block 256,
+// grid S (as h3_norm_mod). Bit-identical to the two kernels one after the other, per element:
+//   * x_new[j] = h3_st(__fadd_rn(x[j], __fmul_rn(y[j], g[j]))): the very expression of h3_gate_add, stored to x (bf16).
+//   * h3_norm_mod read x_new from memory as bf16, so its value is exactly the rounded x_new[j]; here the thread stores
+//     x_new[j] and, after the tree, reads it back: the same bf16, by the same thread (so ordered by program order).
+//   * the sum of squares: thread t adds x_new[t]^2, x_new[t + 256]^2, ... in ascending j with __fadd_rn(acc,
+//     __fmul_rn(v, v)), then h3_tree: the loop and the tree of h3_sumsq, over the same values in the same order.
+//   * r, the second loop and its stores are h3_norm_mod's statements, unchanged (all rounding intrinsics: no
+//     contraction, no reassociation).
+// Nothing else changes: the grid of h3_gate_add (one thread an element) is replaced by one block a row, which only
+// moves which thread computes an element; every element's arithmetic is independent of its thread.
+extern "C" __global__ void h3_gate_add_norm_mod(bf16* x, const bf16* y, const float* gmod, const float* nmod, const int* idx,
+                                                const float* w, bf16* out, long long D, int gpart, int npart, float eps) {
+    __shared__ float s[H3_BLOCK];
+    bf16* xr = x + (long long)blockIdx.x * D;
+    const bf16* yr = y + (long long)blockIdx.x * D;
+    bf16* orow = out + (long long)blockIdx.x * D;
+    const int row_mod = idx[blockIdx.x];
+    const float* g = gmod + (long long)row_mod * 6 * D + (3 * gpart + 2) * D;
+    float acc = 0.0f;
+    for (long long j = threadIdx.x; j < D; j += H3_BLOCK) {
+        const bf16 xv = h3_st(__fadd_rn(h3_ld(xr, j), __fmul_rn(h3_ld(yr, j), g[j])));
+        xr[j] = xv;
+        const float v = __bfloat162float(xv);
+        acc = __fadd_rn(acc, __fmul_rn(v, v));
+    }
+    const float r = rsqrtf(__fadd_rn(__fdiv_rn(h3_tree(acc, s), (float)D), eps));
+    const float* m = nmod + (long long)row_mod * 6 * D;
+    const float* shift = m + (3 * npart) * D;
+    const float* scale = m + (3 * npart + 1) * D;
+    for (long long j = threadIdx.x; j < D; j += H3_BLOCK) {
+        const float n = __fmul_rn(__fmul_rn(h3_ld(xr, j), r), w[j]);
+        orow[j] = h3_st(__fadd_rn(__fmul_rn(n, __fadd_rn(1.0f, scale[j])), shift[j]));
+    }
 }
 
 // tfvideo's swiglu: [M, 2F] = [gate | up] -> bf16(gate / (1 + exp(-gate)) * up), fp32. launch: block 256,

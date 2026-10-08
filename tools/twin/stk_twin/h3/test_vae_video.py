@@ -1,6 +1,11 @@
 """python -m stk_twin.h3.test_vae_video: the video VAE twin (stk_twin.h3.vae_video; kernels/cuda/minimax/gemm_f16.cu and
 vae_video.cu) on a GPU. One JSON line {"pass": ...} at the end.
 
+  0. new == old: every GEMM kernel (stk_gemm_f16, _s, _n, and the shape-picked default the decoder launches) against
+     stk_gemm_f16_ref, the first version, bit for bit (int16 views, so -0 / NaN payloads count) over every shape the decoder
+     launches (qkv, scores, P . V, to_out and w2 with the residual in place, w1, x_embedder, post_quant_conv, proj_out) and
+     odd edges; each timed, with the speedup printed. The attention run group by group (STK_VVAE_HEADS) against all heads at
+     once, bit for bit. `python -m stk_twin.h3.test_vae_video --gemm` runs only these (and prints the one JSON line).
   1. kernel checks: the fp16 GEMM (fp64 bound, row independence, batching, epilogues, determinism), denorm / swiglu /
      blend arithmetic against torch (bit-exact where torch's op order is known), RMSNorm / LayerNorm / softmax against torch
      within 1 half ulp, the RoPE rotation against the comfy-kitchen wheel (bit-exact; which contraction variant matches is
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import sys
 import types
 
@@ -62,6 +68,173 @@ def lin(a, w, bias=None, res=None, scale=None):
 
 def rnd(*shape, scale=1.0, seed=None):
     return (torch.randn(*shape, device=DEV) * scale).half()
+
+
+# ------------------------------------------------------------------------------------------------ 0. new == old, and speed
+VARIANTS = {"ref": 0, "wide": 1, "std": 2, "narrow": 3}   # stk_gemm_f16_ref, stk_gemm_f16, _s, _n (vae_video.py k_gemm_v)
+
+
+def bits(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(torch.int16)
+
+
+def time_ms(fn, reps: int) -> float:
+    for _ in range(2):
+        fn()
+    torch.cuda.synchronize()
+    ts = []
+    for _ in range(reps):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record()
+        fn()
+        b.record()
+        torch.cuda.synchronize()
+        ts.append(a.elapsed_time(b))
+    return statistics.median(ts)
+
+
+def gemm_cases():
+    """(name, flops, kind, setup() -> tensors, mk(tensors) -> a fresh output tensor, run(tensors, variant, out): the launch).
+    `kind`: "linear" (the weights' GEMMs: the sum the speedup is reported for), "linear_small", "attn" or "edge"."""
+    S, SP = 1797, 1800
+    cases = []
+
+    def lin(name, M, N, K, *, bias=True, res=False, kind="linear", ldc=None, out_rows=None, wscale=0.05, ascale=1.0, special=False):
+        ldc = ldc or N
+        out_rows = out_rows or M
+
+        def setup():
+            a = rnd(M, K, scale=ascale)
+            if special:  # an inf and a NaN in the activations: whole rows of NaN / inf, identical bits wanted
+                a[3, 5] = float("inf")
+                a[M // 2, 7] = float("nan")
+            return dict(a=a, w=rnd(N, K, scale=wscale), b=rnd(N, scale=0.5) if bias else None,
+                        r=rnd(out_rows, ldc, scale=2.0) if res else None, sc=rnd(N, scale=0.3) if res else None)
+
+        def mk(t):
+            return t["r"].clone() if res else torch.full((out_rows, ldc), 7.0, device=DEV).half()  # 7: a write outside C shows
+
+        def run(t, v, out):
+            V.mod().k_gemm_v(t["a"], t["w"], t["b"], out, out if res else None, t["sc"], M, N, K, K, K, ldc, 0, 0, 0, 0, 0, 0, 1,
+                             ldc if res else 0, 0, v)
+
+        cases.append((name, 2.0 * M * N * K, kind, setup, mk, run))
+
+    lin("qkv", S, 6144, 2048)
+    lin("out", S, 2048, 2048, res=True)
+    lin("w1", S, 16384, 2048)
+    lin("w2", S, 2048, 8192, res=True)
+    lin("embed", 1792, 2048, 24, out_rows=S, kind="linear_small")
+    lin("pqc", 1792, 24, 24, kind="linear_small")
+    lin("proj", 1792, 3072, 2048)
+
+    def sc_setup():
+        return dict(qkv=rnd(S, 32 * 192, scale=2.0))
+
+    def sc_mk(t):
+        return torch.zeros(32, S, SP, dtype=torch.float16, device=DEV)  # the pad columns stay 0, as in the decoder
+
+    def sc_run(t, v, sc):
+        qkv = t["qkv"]
+        V.mod().k_gemm_v(qkv, qkv, None, sc, None, None, S, S, 64, qkv.stride(0), qkv.stride(0), SP, 0, 64, 0, 192, 192, S * SP, 32, 0, 0, v)
+
+    cases.append(("scores", 2.0 * S * S * 64 * 32, "attn", sc_setup, sc_mk, sc_run))
+
+    def pv_setup():
+        qkv = rnd(S, 32 * 192, scale=2.0)
+        p = torch.rand(32, S, SP, device=DEV).half()
+        p[:, :, S:] = 0
+        return dict(p=p, vt=V.mod().k_vt(qkv, S, SP, 32))
+
+    def pv_mk(t):
+        return torch.full((S, 2048), 7.0, device=DEV).half()
+
+    def pv_run(t, v, att):
+        V.mod().k_gemm_v(t["p"], t["vt"], None, att, None, None, S, 64, SP, SP, SP, 2048, 0, 0, 0, S * SP, 64 * SP, 64, 32, 0, 0, v)
+
+    cases.append(("pv", 2.0 * S * 64 * SP * 32, "attn", pv_setup, pv_mk, pv_run))
+
+    # the grouped attention's launches: a window of heads (offsets into qkv / vt / the output columns), batch 2 and 5
+    def grp(h0, g):
+        def mk(t):
+            return torch.zeros(g, S, SP, dtype=torch.float16, device=DEV)
+
+        def run(t, v, sc):
+            qkv = t["qkv"]
+            V.mod().k_gemm_v(qkv, qkv, None, sc, None, None, S, S, 64, qkv.stride(0), qkv.stride(0), SP, h0 * 192, 64 + h0 * 192, 0, 192, 192, S * SP, g, 0, 0, v)
+        return mk, run
+
+    cases.append(("scores_heads_5_9", 2.0 * S * S * 64 * 4, "edge", sc_setup, *grp(5, 4)))
+
+    # odd edges: M, N, K not multiples of any tile, N odd (ldc even), one row, K = 8, tall and wide, alias in place, saturation
+    lin("edge_1x8x8", 1, 8, 8, kind="edge")
+    lin("edge_5x24x24", 5, 24, 24, kind="edge")
+    lin("edge_17x101x40", 17, 101, 40, ldc=102, kind="edge")
+    lin("edge_127x129x72_res", 127, 129, 72, res=True, ldc=130, kind="edge")
+    lin("edge_300x2056x1800", 300, 2056, 1800, kind="edge")
+    lin("edge_1800x65x136", 1800, 65, 136, bias=False, ldc=66, kind="edge")
+    lin("edge_257x9x8_res", 257, 9, 8, bias=False, res=True, ldc=10, kind="edge")
+    lin("edge_saturate", 200, 300, 2048, ascale=40.0, wscale=1.0, res=True, kind="edge")
+    lin("edge_inf_nan", 200, 300, 64, special=True, kind="edge")
+    return cases
+
+
+def test_gemm_variants() -> None:
+    """New == old: every variant and the picked default against stk_gemm_f16_ref, bit for bit, plus the timings."""
+    torch.manual_seed(11)
+    rows = []
+    tot = {"ref": 0.0, "auto": 0.0}
+    def once(t, mk, run, v):
+        out = mk(t)
+        run(t, v, out)
+        return out
+
+    for name, flops, kind, setup, mk, run in gemm_cases():
+        t = setup()
+        ref = once(t, mk, run, 0)
+        got = {"auto": once(t, mk, run, -1)}
+        for vn, v in VARIANTS.items():
+            if vn != "ref":
+                got[vn] = once(t, mk, run, v)
+        ok = {k: bool(torch.equal(bits(o), bits(ref))) for k, o in got.items()}
+        reps = 4 if flops > 2e10 else 8
+        out = mk(t)  # timing reuses one output (the in-place residual cases drift, the time does not)
+        ms = {"ref": time_ms(lambda: run(t, 0, out), reps)}
+        if kind != "edge":
+            for k, v in (("auto", -1),) + tuple((k, v) for k, v in VARIANTS.items() if k != "ref"):
+                ms[k] = time_ms(lambda v=v: run(t, v, out), reps)
+            if kind == "linear":
+                tot["ref"] += ms["ref"]
+                tot["auto"] += ms["auto"]
+        info = {"equal": ok}
+        if kind != "edge":
+            info.update(ms={k: round(m, 3) for k, m in ms.items()}, tflops={k: round(flops / m / 1e9, 1) for k, m in ms.items()},
+                        speedup_auto=round(ms["ref"] / ms["auto"], 2), best=min(ms, key=ms.get))
+        record(f"gemm_variants_{name}", all(ok.values()), **info)
+        rows.append((name, ms))
+        del t, ref, got, out
+    print("\nGEMM ms (median) by kernel: ref = stk_gemm_f16_ref, wide / std / narrow = stk_gemm_f16 / _s / _n, auto = picked by shape")
+    print(f"{'case':<22}" + "".join(f"{k:>9}" for k in ("ref", "auto", "wide", "std", "narrow")) + "   speedup(auto)")
+    for name, ms in rows:
+        if "auto" in ms:
+            print(f"{name:<22}" + "".join(f"{ms.get(k, float('nan')):9.3f}" for k in ("ref", "auto", "wide", "std", "narrow")) + f"   {ms['ref'] / ms['auto']:.2f}x")
+    record("gemm_variants_linear_sum", True, ref_ms=round(tot["ref"], 2), auto_ms=round(tot["auto"], 2),
+           speedup=round(tot["ref"] / tot["auto"], 2) if tot["auto"] else None)
+
+
+def test_attention_groups() -> None:
+    """The attention group by group (heads per group 1, 2, 5, 7: the last group short) against all heads at once, bit for bit."""
+    torch.manual_seed(12)
+    mean, std = rnd(24), (torch.rand(24, device=DEV) + 0.5).half()
+    vv = V.VideoVAE.bare(mean, std, DEV)
+    for S in (204, 1797):
+        qkv = rnd(S, 32 * 192, scale=2.0)
+        vv.groups = V.HEADS
+        ref = vv._attention("t", qkv, S)
+        for g in (1, 2, 5, 7):
+            vv.groups = g
+            got = vv._attention("t", qkv, S)
+            record(f"attention_groups_S{S}_g{g}", torch.equal(bits(got), bits(ref)))
 
 
 # ------------------------------------------------------------------------------------------------ 1. kernels
@@ -324,7 +497,15 @@ def test_end_to_end(cvae) -> None:
 
 
 def main() -> int:
+    if "--gemm" in sys.argv[1:]:
+        test_gemm_variants()
+        test_attention_groups()
+        ok = all(r["ok"] for r in RES.values())
+        print(json.dumps({"pass": ok, "checks": RES, "skipped": SKIPPED}))
+        return 0 if ok else 1
     cvae = import_comfy()
+    test_gemm_variants()
+    test_attention_groups()
     test_gemm()
     test_elementwise()
     test_rope(cvae)

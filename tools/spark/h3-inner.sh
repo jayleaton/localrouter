@@ -29,7 +29,8 @@ export STK=/workspace/localrouter
 export WITH_COMFY=${WITH_COMFY:-1}
 ONLY=${ONLY:-}
 R=$STK/results/${H3_RUN:-h3-$(date -u +%Y%m%d-%H%M%S)}; mkdir -p $R
-sel() { [[ -z $ONLY || " $ONLY " == *" $1 "* ]]; }
+sel() { [[ -z $ONLY ]] && return 0; local p ps; read -ra ps <<< "$ONLY"   # entries may be globs ("vvae-*"); read does not expand them
+    for p in "${ps[@]}"; do [[ $1 == $p ]] && return 0; done; return 1; }
 run() { local name=$1; shift; sel $name || return 0; echo "[h3 $(date +%T)] $name"; local t0=$(date +%s)
     "$@" > $R/$name.log 2>&1; local rc=$?
     tail -n 1 $R/$name.log | grep '^{' >> $R/summary.jsonl
@@ -111,7 +112,8 @@ ZIG=$STK/zig/zig
 export ZIG_GLOBAL_CACHE_DIR=$STK/zig-cache
 if sel zig-build; then
     SRC=/tmp/localrouter/stk-src; rm -rf $SRC; mkdir -p $SRC; cp -r $STK/repo/. $SRC/; cd $SRC
-    run zig-build $ZIG build -Doptimize=ReleaseSafe -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120 --prefix $STK/h3-out fatbins install
+    run zig-build $ZIG build -Doptimize=ReleaseSafe -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120 --prefix $STK/h3-out fatbins install \
+        || { [[ ${STOP_ON_BUILD_FAIL:-0} == 1 ]] && { echo "[h3 $(date +%T)] zig-build failed: stopping (STOP_ON_BUILD_FAIL)"; exit 1; }; }
 fi
 S=$STK/h3-out/bin/localrouter
 run h3-te $S check h3-te $TE $C
@@ -124,4 +126,14 @@ drop $CV
 cap generate $CG python -m stk_twin.h3.generate --models $VMODELS --pack $P --out $CG
 run h3-e2e $S check h3-e2e $P $TE $VA $VV $CG
 drop $CG
+
+# The speed round (each fragment's steps are named vvae-*, h3sd-*, h3sm-*; select them with ONLY globs or the H3_SPEED_* flags)
+[[ ${H3_SPEED_VAE:-0} != 1 ]] || source $STK/repo/tools/spark/h3-speed-vae.sh
+[[ ${H3_SPEED_DIT:-0} != 1 ]] || source $STK/repo/tools/spark/h3-speed-dit.sh
+# bit-exactness at a full 5 s clip (768x448, 124 frames: about 12.9k tokens, past the sizes the attention was proven at)
+CG5=$CAP/h3-gen-124
+cap e2e124-generate $CG5 python -m stk_twin.h3.generate --models $VMODELS --pack $P --out $CG5 --size 768x448 --frames 124
+run e2e124-check $S check h3-e2e $P $TE $VA $VV $CG5
+drop $CG5
+[[ ${H3_SPEED_MEM:-0} != 1 ]] || source $STK/repo/tools/spark/h3-speed-mem.sh   # last: it wants the GPU idle
 echo "[h3 $(date +%T)] done: $R"

@@ -12,7 +12,11 @@ fn blocks(n: u64) u32 {
     return @intCast((n + block - 1) / block);
 }
 
+/// Kernel launches made through this file (the H3 ops and comfy-kitchen's): a counter for the step benchmark.
+pub var count: u64 = 0;
+
 fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: cuda.launch.Dim3, shared: u32, args: *cuda.launch.Args) !void {
+    _ = @atomicRmw(u64, &count, .Add, 1, .monotonic);
     try cuda.launch.launch(f, .{ .grid = grid, .block = blk, .shared = shared }, s, args);
 }
 
@@ -24,6 +28,7 @@ pub const Ops = struct {
     module: cuda.Module,
     norm_mod_fn: cuda.Function,
     gate_add_fn: cuda.Function,
+    gate_add_norm_mod_fn: cuda.Function,
     swiglu_fn: cuda.Function,
     silu_mul_fn: cuda.Function,
     rms_fn: cuda.Function,
@@ -50,7 +55,7 @@ pub const Ops = struct {
         o.module = m;
         inline for (.{
             .{ "norm_mod_fn", "h3_norm_mod" },             .{ "gate_add_fn", "h3_gate_add" },     .{ "swiglu_fn", "h3_swiglu" },
-            .{ "silu_mul_fn", "h3_silu_mul_split" },       .{ "rms_fn", "h3_rms_norm" },          .{ "final_mod_fn", "h3_final_mod" },
+            .{ "gate_add_norm_mod_fn", "h3_gate_add_norm_mod" }, .{ "silu_mul_fn", "h3_silu_mul_split" },       .{ "rms_fn", "h3_rms_norm" },          .{ "final_mod_fn", "h3_final_mod" },
             .{ "scale_fn", "h3_scale" },                   .{ "uncarry_fn", "h3_uncarry" },       .{ "patchify_fn", "h3_patchify" },
             .{ "unpatchify_fn", "h3_unpatchify_neg" },     .{ "pack_audio_fn", "h3_pack_audio" }, .{ "unpack_audio_fn", "h3_unpack_audio_neg" },
             .{ "add_fn", "h3_add" },                       .{ "gemm_fn", "h3_gemm_f32" },         .{ "to_bf16_fn", "h3_f32_to_bf16" },
@@ -81,6 +86,19 @@ pub const Ops = struct {
         a.add(i64of(dim));
         a.add(part);
         try go(o.gate_add_fn, s, .{ .x = blocks(dim), .y = @intCast(rows) }, .{ .x = block }, 0, &a);
+    }
+
+    /// `gateAdd` (x = bf16(x + y * gate), the gate from `gmod` part `gpart`) then `normMod` of that x (`nmod` part `npart`, weight w) into
+    /// `out`, in one launch: ops.cu's h3_gate_add_norm_mod, bit-identical to the two kernels in sequence (its comment gives the
+    /// per-element argument). `gmod` / `nmod`: the modulation rows [R, 6, D] of the gate's block and of the norm's block.
+    pub fn gateAddNormMod(o: *const Ops, s: cuda.Stream, x: Ptr, y: Ptr, gmod: Ptr, nmod: Ptr, idx: Ptr, w: Ptr, out: Ptr, rows: u64, dim: u64, gpart: i32, npart: i32, eps: f32) !void {
+        var a: cuda.launch.Args = .{};
+        inline for (.{ x, y, gmod, nmod, idx, w, out }) |p| a.add(p);
+        a.add(i64of(dim));
+        a.add(gpart);
+        a.add(npart);
+        a.add(eps);
+        try go(o.gate_add_norm_mod_fn, s, .{ .x = @intCast(rows) }, .{ .x = block }, 0, &a);
     }
 
     /// [M, 2F] -> [M, F]: tfvideo's swiglu (`silu_split` false) or ComfyUI's (true: SiLU rounded to bf16 first).
@@ -322,6 +340,12 @@ pub const Kitchen = struct {
     /// softmax(q k^T / sqrt(128)) v over S tokens: q, k, v views into one qkv buffer [S, 3 * heads * 128] (row stride
     /// 3 * heads * 128), out [heads, S, 128] bf16 contiguous; `ws` at least `Plan.of(heads, S).total` bytes.
     pub fn attention(k: *const Kitchen, s: cuda.Stream, qkv: Ptr, out: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
+        try k.attentionPrep(s, qkv, ws, heads, seq);
+        try k.attentionKernel(s, out, ws, heads, seq, false);
+    }
+
+    /// The wheel's launches 1 to 3 (the K anchor, Q and K to INT8 with the rotation, V to INT8) into the workspace.
+    pub fn attentionPrep(k: *const Kitchen, s: cuda.Stream, qkv: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
         const d: u32 = 128;
         const p = Plan.of(heads, seq);
         const row: i64 = 3 * @as(i64, heads) * d; // the qkv buffer's row stride (elements)
@@ -359,19 +383,27 @@ pub const Kitchen = struct {
             const big = seq > 256;
             try go(if (big) k.v512 else k.v128, s, .{ .x = heads * (d / 8) }, .{ .x = if (big) 512 else 128 }, 0, &a);
         }
-        { // 4. the attention kernel
-            var a: cuda.launch.Args = .{};
-            inline for (.{ ws + p.q8, ws + p.k8, ws + p.v8, out, @as(u64, 0), ws + p.qs, ws + p.ks, ws + p.vs, @as(u64, 0), @as(u64, 0) }) |x| a.add(x);
-            inline for (.{ @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 0) }) |x| a.add(x);
-            a.add(@as(i32, -1));
-            const hsd: u32 = heads * seq * d;
-            inline for (.{ seq, seq, @as(u32, 1), hsd, d, seq * d, hsd, d, seq * d, heads * d * p.padded_k, d * p.padded_k, p.padded_k, hsd, d, seq * d }) |x| a.add(@as(u32, x));
-            a.add(@as(f32, @bitCast(@as(u32, 0x3db504f3)))); // 128 ** -0.5 rounded to f32
-            const fuse = !(seq <= 512 and p.cta_k == 64);
-            const f = if (p.cta_k == 128) k.attn_c128_fuse else if (fuse) k.attn_c64_fuse else k.attn_c64;
-            const smem: u32 = if (p.cta_k == 128) 49152 else 32768;
-            try go(f, s, .{ .x = (seq + 127) / 128, .y = heads, .z = 1 }, .{ .x = 32, .y = 8 }, smem, &a);
-        }
+    }
+
+    /// The wheel's launch 4, the attention kernel, from the workspace `attentionPrep` filled. `rows` false: out [heads, S,
+    /// 128] as the wheel writes it; true: out as rows [S, heads * 128] (the kernel's output strides (seq, head) =
+    /// (heads * 128, 128) instead of (128, S * 128): the same values at the addresses a [H, S, D] -> rows pass would give them).
+    pub fn attentionKernel(k: *const Kitchen, s: cuda.Stream, out: Ptr, ws: Ptr, heads: u32, seq: u32, rows: bool) !void {
+        const d: u32 = 128;
+        const p = Plan.of(heads, seq);
+        var a: cuda.launch.Args = .{};
+        inline for (.{ ws + p.q8, ws + p.k8, ws + p.v8, out, @as(u64, 0), ws + p.qs, ws + p.ks, ws + p.vs, @as(u64, 0), @as(u64, 0) }) |x| a.add(x);
+        inline for (.{ @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 0) }) |x| a.add(x);
+        a.add(@as(i32, -1));
+        const hsd: u32 = heads * seq * d;
+        inline for (.{ seq, seq, @as(u32, 1), hsd, d, seq * d, hsd, d, seq * d, heads * d * p.padded_k, d * p.padded_k, p.padded_k, hsd }) |x| a.add(@as(u32, x));
+        a.add(@as(u32, if (rows) heads * d else d)); // stride_seq_o
+        a.add(@as(u32, if (rows) d else seq * d)); // stride_h_o
+        a.add(@as(f32, @bitCast(@as(u32, 0x3db504f3)))); // 128 ** -0.5 rounded to f32
+        const fuse = !(seq <= 512 and p.cta_k == 64);
+        const f = if (p.cta_k == 128) k.attn_c128_fuse else if (fuse) k.attn_c64_fuse else k.attn_c64;
+        const smem: u32 = if (p.cta_k == 128) 49152 else 32768;
+        try go(f, s, .{ .x = (seq + 127) / 128, .y = heads, .z = 1 }, .{ .x = 32, .y = 8 }, smem, &a);
     }
 
     /// In place on q, k (views into the qkv buffer [S, 3 * heads * 128]): per-head RMSNorm (bf16 weights) then

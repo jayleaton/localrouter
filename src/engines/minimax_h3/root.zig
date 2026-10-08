@@ -4,6 +4,7 @@
 
 pub const launch = @import("launch.zig");
 pub const layout = @import("layout.zig");
+pub const profile = @import("profile.zig");
 pub const dit = @import("dit.zig");
 pub const sampler = @import("sampler.zig");
 pub const te32 = @import("te32.zig");
@@ -14,6 +15,8 @@ pub const pipeline = @import("pipeline.zig");
 pub const kernels = @import("minimax_kernels");
 
 test {
+    _ = profile;
+    _ = dit;
     _ = layout;
     _ = sampler;
     _ = te32;

@@ -15,7 +15,7 @@ bit for bit against reference implementations of the same models:
 | Model | Can do | On a DGX Spark (GB10) |
 | --- | --- | --- |
 | **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
-| **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448, 56 frames with stereo audio in about 29 s warm |
+| **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
 
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
 their input-image ports land. Check each model's advertised capabilities before submitting a job.
@@ -52,6 +52,10 @@ faster NVFP4 pack and serves it as `qwen-image-2.1-nvfp4`. LocalRouter listens o
 otherwise: on a terminal the installer asks "Make LocalRouter reachable from your tailnet? [y/N]" once, and remembers the
 answer in `.env` under `LOCALROUTER_HOME`. Re-running it updates the service using the existing packs. The complete two-model installer still needs an
 end-to-end check on a DGX Spark; the video installation path has only been exercised with stubs.
+
+Prebuilt Qwen-Image 2.1 packs are available as an optional download from
+[Hugging Face](https://huggingface.co/jayleaton/localrouter-qwen-image-2.1), for non-commercial research or evaluation
+only under the Qwen Research License. The installer still converts the official checkpoint locally by default.
 
 ## Expose it to your tailnet
 

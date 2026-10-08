@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,14 @@ FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 FRAME_RESCALE = 5.0 / 3.0
 LINEARS = ("qkv", "out", "fc1", "fc2")
 SOURCE = {"qkv": "attn.qkv_proj", "out": "attn.out_proj", "fc1": "mlp.fc1", "fc2": "mlp.fc2"}
+
+
+def fused() -> bool:
+    """Whether a step runs the fused schedule (the Zig engine's non-probe path): `k_gate_add_norm_mod_` for a gate_add and the
+    norm_mod after it, and the INT8 attention stored as rows. Bit-identical to the reference schedule (test_fuse.py,
+    `stk check h3-replay`'s fast pass), so the capture, which records every intermediate, runs the reference one, as does
+    STK_H3_REF=1; everything else (generate, the e2e gate) runs the fused one, as the engine does."""
+    return not REC.on and os.environ.get("STK_H3_REF", "") != "1"
 
 
 # ------------------------------------------------------------------------------------------------ host-side scalars
@@ -119,7 +128,7 @@ class Layout:
 
     def rope_table(self, inv_freq: np.ndarray) -> torch.Tensor:
         """[1, S, 1, 48, 2, 2] bf16: ComfyUI's rope_rotation_table of the fp32 angles pos * inv_freq, cos / sin by the
-        toolkit's portable sincos (in f64 of the fp32 angle, rounded to fp32), then bf16."""
+        LocalRouter's portable sincos (in f64 of the fp32 angle, rounded to fp32), then bf16."""
         ang = (self.pos.astype(F32)[:, :, None] * inv_freq.astype(F32)[None, None, :]).reshape(self.S, 48)
         c = np.empty_like(ang)
         s = np.empty_like(ang)
@@ -304,8 +313,11 @@ class H3Dit:
         ae = self._gemm32("audio_patch_proj", ar, self.side["audio_patch_proj.weight"], self.side["audio_patch_proj.bias"])
         h = torch.cat([self.context, ae.to(torch.bfloat16), ve.to(torch.bfloat16)]).contiguous()  # exact rounds + moves
 
-        for i, b in enumerate(self.blocks):
-            h = self.block(i, b, h, t_emb, idx, lay.S)
+        if fused():
+            h = self.blocks_fused(h, t_emb, idx, lay.S)
+        else:
+            for i, b in enumerate(self.blocks):
+                h = self.block(i, b, h, t_emb, idx, lay.S)
 
         # final layer: fp32 curve modulation of each target segment, fp32 heads, negated, back to the latents
         ada = self._gemm32("final.adaln", t_emb, self.side["final_layer.adaln_proj.linear.weight"],
@@ -378,6 +390,40 @@ class H3Dit:
         with REC.op(f"{p}.gate_add2", "gate_add", {"part": 1}, x=x, y=y) as o:
             m.k_gate_add_(x, y, mod, idx, 1)
             o.out(x=x)
+        return x
+
+
+    def blocks_fused(self, x: torch.Tensor, t_emb: torch.Tensor, idx: torch.Tensor, S: int) -> torch.Tensor:
+        """The 50 blocks as `block` runs them, with two bit-preserving fusions (the Zig engine's non-probe schedule):
+        a gate_add and the norm_mod right after it (the same block's gate_add1 + norm_mod2, or a block's gate_add2 + the
+        next block's norm_mod1, each under its own block's modulation) are one kernel, and the INT8 attention stores
+        rows. The next block's adaln runs before that fused kernel (it reads no activation). Nothing is recorded."""
+        from .kitchen import int8_attention_rows, rms_rope_split_half_
+
+        m, bl = H.mod(), self.blocks
+        adaln = lambda i: self._gemm32(f"L{i}.adaln", t_emb, bl[i]["ada_w"], bl[i]["ada_b"]).view(-1, 6, D).contiguous()
+        mod = adaln(0)
+        h = torch.empty_like(x)
+        m.k_norm_mod(x, bl[0]["norm1"], mod, idx, h, 0, EPS)
+        for i, b in enumerate(bl):
+            qkv = self.lin(f"L{i}.qkv", b["qkv"], h)
+            q = qkv[:, : HEADS * HD].view(1, S, HEADS, HD)
+            k = qkv[:, HEADS * HD: 2 * HEADS * HD].view(1, S, HEADS, HD)
+            v = qkv[:, 2 * HEADS * HD:].view(S, HEADS, HD)
+            rms_rope_split_half_(q, k, self._rope, b["q_norm"], b["k_norm"], EPS, 96)
+            if self.attn == "int8":
+                att = int8_attention_rows(*(t.transpose(0, 1).unsqueeze(0) for t in (q[0], k[0], v)))
+            else:
+                att = bf16_attention(q[0].contiguous(), k[0].contiguous(), v.contiguous()).view(S, HEADS * HD).contiguous()
+            out = self.lin(f"L{i}.out", b["out"], att)
+            m.k_gate_add_norm_mod_(x, out, mod, mod, idx, b["norm2"], h, 0, 1, EPS)
+            y = self.lin(f"L{i}.fc2", b["fc2"], m.k_swiglu(self.lin(f"L{i}.fc1", b["fc1"], h)))
+            if i + 1 < len(bl):
+                nxt = adaln(i + 1)
+                m.k_gate_add_norm_mod_(x, y, mod, nxt, idx, bl[i + 1]["norm1"], h, 1, 0, EPS)
+                mod = nxt
+            else:
+                m.k_gate_add_(x, y, mod, idx, 1)
         return x
 
 
