@@ -1,0 +1,10 @@
+.agents/
+.zig-cache/
+zig-out/
+/data/
+*.png
+*.mp4
+!docs/assets/*.png
+zig-pkg/
+results/
+__pycache__/

@@ -1,0 +1,17 @@
+# The tailnet-only variant of compose.yaml (tools/spark/install.sh uses it for LOCALROUTER_BIND=tailscale):
+#   docker compose -f docker/compose.yaml -f docker/compose.tailscale.yaml up -d
+# The container shares the host's network and the daemon looks for the tailnet address itself (--host tailscale, the
+# interface with an address in 100.64.0.0/10), so it listens on that address only. Nothing is published on any other
+# interface, and no tailnet IP is baked into the container's configuration. If Docker starts before tailscale is up, the
+# daemon exits with "no tailnet address found" and `restart: unless-stopped` starts it again until tailscale has its
+# address. Needs Docker Compose 2.24 or later (for !reset).
+services:
+  localrouter:
+    network_mode: host
+    ports: !reset []
+    command: ["serve", "--host", "tailscale", "--port", "${LOCALROUTER_PORT:-8190}", "--config", "/etc/localrouter/tools.json", "--data", "/data"]
+    healthcheck:
+      # the daemon is not on 127.0.0.1 here; LOCALROUTER_BIND is the address install.sh resolved (from .env)
+      test: ["CMD", "localrouter", "check", "health", "http://${LOCALROUTER_BIND:-127.0.0.1}:${LOCALROUTER_PORT:-8190}"]
+      interval: 30s
+      timeout: 5s

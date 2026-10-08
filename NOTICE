@@ -1,0 +1,31 @@
+LocalRouter
+Copyright 2026 Jay Leaton
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by others:
+
+TensorFold (https://github.com/ashhart/TensorFold), by Ash Hart, Apache License 2.0.
+  LocalRouter's engines are built on TensorFold's CUDA runtime (a build dependency) and its NVFP4 kernels
+  (kernels/cuda/nvfp4/, copied with their provenance noted in each file); the image engine's attention is derived
+  from TensorFold's prefill attention (kernels/cuda/qwen_image/attention.cu). TensorFold's Python implementations
+  were the baselines the Zig engines were ported from and are checked against.
+
+SageAttention (https://github.com/thu-ml/SageAttention), Copyright 2024 by the SageAttention team, with
+  modifications by NVIDIA CORPORATION & AFFILIATES, as distributed in comfy-kitchen 0.2.35
+  (https://github.com/Comfy-Org/comfy-kitchen), Apache License 2.0.
+  The INT8 attention and RoPE kernels in kernels/cuda/minimax/kitchen/ are verbatim copies, headers intact.
+
+Qwen2.5 tokenizer files (tools/twin/stk_twin/h3/tokenizer/), from the Qwen team, Apache License 2.0.
+
+Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
+by the installer from their publishers and remain under their own licenses.
+
+ComfyUI (https://github.com/comfyanonymous/ComfyUI) is used, optionally and only at development time, as the reference
+implementation for MiniMax H3 in the comparison tests; it is not part of LocalRouter.
+
+Qwen-Image 2.1 weights: Qwen Research License (research/evaluation only).
+  https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE
+MiniMax H3 weights: MiniMax H3 Community License Agreement (territorial and downstream use restrictions).
+  https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+These weight licences are separate from LocalRouter's software licence; installing locally does not waive them.

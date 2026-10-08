@@ -1,0 +1,20 @@
+# docker compose -f docker/compose.yaml up -d   (tools/spark/install.sh does this with the packs it made)
+# Tools come from /etc/localrouter/tools.json (mount your own); without it only the self-test tools are served.
+# LOCALROUTER_BIND / LOCALROUTER_PORT pick the host address and port it is published on; the default is this machine only
+# (127.0.0.1). Inside the container the daemon listens on all of the container's interfaces (--host all): the published
+# port is the only way in. For the tailnet only, add compose.tailscale.yaml (see there), or LOCALROUTER_BIND=<an IP>.
+services:
+  localrouter:
+    image: localrouter:dev
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["serve", "--host", "all", "--config", "/etc/localrouter/tools.json", "--data", "/data"]
+    ports: ["${LOCALROUTER_BIND:-127.0.0.1}:${LOCALROUTER_PORT:-8190}:8190"]
+    volumes:
+      - ${LOCALROUTER_MODELS:-~/models}:/models:ro
+      - ${LOCALROUTER_DATA:-~/localrouter-data}:/data
+      - ${LOCALROUTER_CONFIG:-./tools.json}:/etc/localrouter/tools.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+    restart: unless-stopped
