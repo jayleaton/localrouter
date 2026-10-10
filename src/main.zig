@@ -2,6 +2,7 @@
 //!   localrouter serve [--config FILE] [--host H] [--port N] [--data DIR]   the daemon (API + scheduler); H: an IP, localhost (default 127.0.0.1), all, tailscale
 //!   localrouter worker                                                     one tool's worker (LOCALROUTER_TOOL holds its config)
 //!   localrouter gen image|video ...                                        the client (see cli/gen.zig)
+//!   localrouter models [--url URL]                                         the server's models: kind, capabilities, defaults
 //!   localrouter mcp-stdio [--url URL]                                      /mcp over stdio, for clients without HTTP MCP
 //!   localrouter check gpu                                                  driver and memory probe
 
@@ -33,6 +34,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (std.mem.eql(u8, cmd, "serve")) return serve.run(gpa, io, arena, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "gen")) return gen.run(gpa, io, arena, args[2..], init.environ_map);
+    if (std.mem.eql(u8, cmd, "models")) return gen.models(gpa, io, arena, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "mcp-stdio")) return mcp_stdio.run(gpa, io, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "check")) return check.run(io, gpa, args[2..]);
     return usage();
@@ -44,6 +46,7 @@ fn usage() u8 {
         \\  localrouter serve [--config FILE] [--host H] [--port N] [--data DIR]
         \\  localrouter gen image PROMPT [-o FILE] [--size WxH] [--seed N] [--steps N] [--model ID] [--url URL]
         \\  localrouter gen video PROMPT [-o FILE] [--size WxH] [--seconds N] [--seed N] [--model ID] [--url URL]
+        \\  localrouter models [--url URL]
         \\  localrouter mcp-stdio [--url URL]
         \\  localrouter check gpu | selftest | health [URL]
         \\
@@ -63,7 +66,9 @@ test {
     _ = @import("api/routes.zig");
     _ = @import("media/png.zig");
     _ = @import("media/mp4.zig");
+    _ = @import("engine/engine.zig");
     _ = @import("engines/testpattern.zig");
+    _ = @import("engines/qwen_image_tool.zig");
     _ = @import("serve.zig");
     _ = @import("cli/gen.zig");
     _ = @import("cli/check.zig");

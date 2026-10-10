@@ -57,12 +57,12 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
-    for (list, app.scheduler.slots) |*e, slot| {
+    for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c) };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i) };
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
 }
@@ -97,18 +97,64 @@ fn toolIndex(app: *App, id: []const u8) ?usize {
     return null;
 }
 
-/// The named model; when the request names none, the first tool that can do `cap`, else the first of its kind (so
-/// the refusal names a model). Null when unknown or of the wrong kind.
-pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability) ?usize {
+/// The model for a request that needs `cap`: the one named, else the configured default for `cap` (`Config.defaults`),
+/// else the first tool that can do it, else the first of its kind (so `enqueue`'s refusal names a model). Null with
+/// `why` set when the named model is unknown (404) or of another kind (400), or no model of the kind exists (404).
+pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Refusal) ?usize {
+    const kind = @tagName(cap.kind());
+    if (model orelse app.cfg.defaults.get(cap)) |m| {
+        const i = toolIndex(app, m) orelse {
+            why.* = .{ .status = 404 };
+            why.message = std.fmt.bufPrint(why.buf[0..384], "unknown model '{s}'; models that can do {s}: {s}", .{ m, @tagName(cap), able(app, cap, &why.buf) }) catch "unknown model";
+            return null;
+        };
+        const c = app.scheduler.slots[i].tool.config();
+        if (c.kind != cap.kind()) {
+            why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' is {s} model, not {s}; models that can do {s}: {s}", .{ m, article(c.kind), kind, @tagName(cap), able(app, cap, &why.buf) }) catch "the model is of another kind";
+            return null;
+        }
+        return i;
+    }
     var first: ?usize = null;
     for (app.scheduler.slots, 0..) |slot, i| {
         const c = slot.tool.config();
         if (c.kind != cap.kind()) continue;
-        if (model) |m| {
-            if (eql(c.id, m)) return i;
-        } else if (engine.supports(c, cap)) return i else if (first == null) first = i;
+        if (engine.supports(c, cap)) return i;
+        if (first == null) first = i;
+    }
+    if (first == null) {
+        why.* = .{ .status = 404 };
+        why.message = std.fmt.bufPrint(why.buf[0..384], "no {s} model is configured", .{kind}) catch "no model of this kind";
     }
     return first;
+}
+
+fn article(k: request.Kind) []const u8 {
+    return switch (k) {
+        .image => "an image",
+        .video => "a video",
+    };
+}
+
+/// "a, b": the models that can do `cap`, in the tail of `buf` (the message takes the head).
+fn able(app: *App, cap: request.Capability, buf: *[512]u8) []const u8 {
+    var w: Io.Writer = .fixed(buf[384..]);
+    for (app.scheduler.slots) |slot| {
+        const c = slot.tool.config();
+        if (engine.supports(c, cap)) w.print("{s}{s}", .{ if (w.end > 0) ", " else "", c.id }) catch break;
+    }
+    return if (w.end > 0) w.buffered() else "none";
+}
+
+/// The capabilities for which tool `i` serves requests that name no model.
+pub fn defaultFor(app: *App, a: std.mem.Allocator, i: usize) ![]const request.Capability {
+    var list: std.ArrayList(request.Capability) = .empty;
+    for (std.enums.values(request.Capability)) |cap| {
+        var why: Refusal = .{};
+        const t = resolve(app, null, cap, &why) orelse continue;
+        if (t == i and engine.supports(app.scheduler.slots[i].tool.config(), cap)) try list.append(a, cap);
+    }
+    return list.items;
 }
 
 // ---------------------------------------------------------------- images
@@ -164,7 +210,8 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     const wh = request.parseSize(if (eql(b.size, "auto")) "1024x1024" else b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const refs = try a.alloc([]const u8, files.len);
     for (refs, files) |*d, f| d.* = f.name;
-    const tool = resolve(app, b.model, if (edit) .image_edit else .text_to_image) orelse return h.fail(req, a, 404, "invalid_request_error", "unknown image model");
+    var why_model: Refusal = .{};
+    const tool = resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
     const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs } };
     const j = (try submit(app, req, a, tool, r, files)) orelse return;
     j.done.wait(app.io) catch return;
@@ -197,6 +244,11 @@ pub fn enqueue(app: *App, tool: usize, r: request.Request, files: []const inputs
         return null;
     }
     request.validate(r, .{}, &why.message) catch return null;
+    var w: Io.Writer = .fixed(why.buf[0..384]);
+    if (!engine.check(cfg, &r, &w)) {
+        why.message = if (w.end > 0) w.buffered() else "the model cannot serve this request";
+        return null;
+    }
     const j = app.table.create(app.io, app.jobs_dir, tool, r, sched.nowUnix(app.io)) catch |err| {
         why.* = .{ .status = 500, .typ = "server_error", .message = @errorName(err) };
         return null;
@@ -267,7 +319,8 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const wh = request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
-    const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video) orelse return h.fail(req, a, 404, "invalid_request_error", "unknown video model");
+    var why_model: Refusal = .{};
+    const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files)) orelse return;
     try videoObject(app, req, a, j);

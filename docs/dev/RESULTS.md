@@ -339,3 +339,44 @@ quantize into its producers, and rope into attention prep; then the attention ke
 Unloading the text encoder between requests lowers the peak only to 36.0 / 37.9 GiB (the peak is the decode) and costs
 13-14 s a request, so it stays resident; the tool's estimate (40,000 MiB plus the frames) covers the measured peak.
 Over MCP from another machine, a 5 s clip took 71 s from cold.
+
+## Qwen-Image 2.1 Turbo on GB10 (2026-10-10, a Spark, one window, `tools/spark/turbo-window.sh`)
+
+Checkpoints `Qwen/Qwen-Image-2.1` d26bb61 and `Qwen/Qwen-Image-2.1-Turbo` d65dbc9, NGC PyTorch 26.07, driver
+580.178.04. Turbo's transformer has base's architecture with its own weights; its text encoder and VAE are base's. Its
+FP8 pack uses its own calibration (`tools/twin/packs/acts-fp8-turbo.json`, digests in `digests-turbo-fp8s.json`) and
+carries the checkpoint's 8 `sample_sigmas` (shift 1, no dynamic shifting).
+
+**Zig against the twin** (`localrouter check qwen-e2e`, FP8): sigmas, text context, final latents and decoded pixels
+equal, warm and without step graphs, in all 5 cases.
+
+| | steps | size | prompts | warm sampling (twin) |
+| --- | ---: | --- | --- | ---: |
+| Qwen-Image 2.1 (regression) | 25 | 1024x1024 | 0 | 15.34 s (19.05 s) |
+| Turbo | 8 | 512x512 | 0, 1 | 1.07 / 1.06 s (1.42 s) |
+| Turbo | 8 | 1024x1024 | 0, 1 | 4.91 / 4.91 s (6.18 s) |
+
+**bf16 twin against diffusers** (1024x1024, same inputs; floor: diffusers cuDNN against memory-efficient attention, on
+this GB10). `stk_twin gate` requires cos >= 0.9999 at every step: it **fails** at sigma 0.2 for Turbo, and for
+Qwen-Image 2.1 on this GB10 too (the M2 pass above was on a PRO 6000). Against the floor (the M2 criterion, 1.5x):
+
+| sigma | Turbo: cos, rel L2 | Turbo floor | ratio | 2.1: cos, rel L2 | 2.1 floor | ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.0 | 0.99997, 0.0074 | 0.0062 | 1.18 | 0.99997, 0.0077 | 0.0074 | 1.04 |
+| 0.6 | 0.99998, 0.0056 | 0.0053 | 1.07 | 0.99998, 0.0071 | 0.0058 | 1.23 |
+| 0.2 | 0.99980, 0.0201 | 0.0149 (cos 0.99989) | 1.36 | 0.99988, 0.0155 | 0.0115 | 1.34 |
+
+Whole image against the diffusers pipeline: Turbo 24.9 dB (8 steps), 2.1 26.8 dB (25 steps).
+
+**Through the daemon** (`tools/spark/compare_models.py`, `tools/twin/prompts/compare.json`, 1024x1024, FP8, each model
+with its own defaults, 3 warm repeats, every repeat byte-identical):
+
+| | first request (cold, prompt 0) | warm median, prompts 0 / 1 / 2 | load |
+| --- | ---: | ---: | ---: |
+| Turbo, 8 steps | 11.3 s | 6.33 / 6.35 / 6.37 s | 4.9 s, 21.3 GiB |
+| Qwen-Image 2.1, 25 steps | 21.7 s | 16.84 / 16.87 / 16.88 s | 4.9 s, 21.3 GiB |
+
+The same seed gives both the same starting noise, not the same trajectory. Turbo set the poster's text exactly
+("MIDNIGHT BLUE JAZZ", "LISBON 2027") where 2.1 broke "JAZZ"; both placed the still life's objects as asked (apple left,
+mug with spoon centre, three lemons stacked right, plant behind), with no visible artifacts. In the portrait, 2.1 has
+the sea spray and a deeper scene; Turbo's keeper looks younger than seventy, the spray is faint and the light flatter.

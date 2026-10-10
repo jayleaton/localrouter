@@ -20,7 +20,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 
 | Tool | Does |
 | --- | --- |
-| `list_models` | the models: kind, capabilities, priority, `keep_loaded`, and whether each is loaded |
+| `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, and whether each is loaded |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `generate_video` | `prompt`, `size`, `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
@@ -39,8 +39,19 @@ curl -s $BASE/models | jq '.data[] | {id, kind, running}'
 ```
 
 `kind` is `image` or `video`. `running: true` means it is loaded now. `capabilities` lists what the model can do:
-`text_to_image`, `image_edit`, `text_to_video`, `image_to_video`. A request that needs a capability the model lacks is
-refused with a 400 naming the model and the capability; without `model`, the first model that has it is used.
+`text_to_image`, `image_edit`, `text_to_video`, `image_to_video`. `default_for` lists the capabilities the model serves
+when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
+Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
+refused with a 400 naming the model and the capability; a model of the other kind is a 400 and an unknown one a 404,
+both listing the models that can do it. A model's own limits (a larger size than it was set up for, a step count its
+schedule lacks) are refused before it loads. `localrouter models` prints the same table on the command line.
+
+| Image model | Steps | Notes |
+| --- | --- | --- |
+| `qwen-image-2.1` | 25 (any 1 to 200) | the base model; FP8 (`-nvfp4`: the faster NVFP4) |
+| `qwen-image-2.1-turbo` | 8 (only 8) | the Turbo checkpoint and its own schedule: about 3x fewer steps. Omit `steps` |
+
+Both run without classifier-free guidance (CFG 1, the models' default): `guidance` and `negative_prompt` are not used.
 
 ## Images (OpenAI Images API)
 
@@ -110,6 +121,8 @@ private image server); redirects stay off.
 ```bash
 localrouter gen image "a red fox in fresh snow" -o fox.png --size 1360x768 --seed 42
 localrouter gen video "waves at dusk" -o waves.mp4 --seconds 5
+localrouter gen image "a red fox in fresh snow" -o fox.png --model qwen-image-2.1   # a model of your choice
+localrouter models                                                                  # ids, capabilities, defaults
 ```
 
 The server address comes from `$LOCALROUTER_URL` (default `http://127.0.0.1:8190`) or `--url`.
@@ -138,8 +151,8 @@ Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
 
 | Status | Meaning | Do |
 | --- | --- | --- |
-| 400 | Invalid request (size, n, prompt, input images, a capability the model lacks) | Fix the request |
-| 404 | Unknown model or route | Re-check `GET /models` |
+| 400 | Invalid request (size, n, prompt, input images, a capability the model lacks, a model of the other kind, a size or step count the model does not take) | Fix the request |
+| 404 | Unknown model (the message lists the models that can do it) or route | Re-check `GET /models` |
 | 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority) | Retry later; don't loop |
 | 503 `server_error` | The tool failed to load or its worker died; the message has the log tail | Report it |
 | 504 | A deadline passed | Retry once, then report |

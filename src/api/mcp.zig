@@ -121,12 +121,12 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, priority: i32, keep_loaded: bool };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
-    for (list, app.scheduler.slots) |*e, slot| {
+    for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
     }
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{}) });
     return true;
@@ -137,7 +137,8 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     const b = try parseArgs(Args, a, args, out);
     const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "ref", b.images, out);
-    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_edit else .text_to_image) orelse return fail(a, out, "unknown image model (see list_models)", .{});
+    var why: routes.Refusal = .{};
+    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
     const refs = try a.alloc([]const u8, files.len);
     for (refs, files) |*d, f| d.* = f.name;
     const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs } };
@@ -159,7 +160,8 @@ fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     const b = try parseArgs(Args, a, args, out);
     const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
-    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video) orelse return fail(a, out, "unknown video model (see list_models)", .{});
+    var why: routes.Refusal = .{};
+    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
@@ -284,13 +286,13 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image or video), capabilities (text_to_image, image_edit, text_to_video, image_to_video), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image or video), capabilities (text_to_image, image_edit, text_to_video, image_to_video), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{}}
     } },
     .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits for the result (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"What to draw."},
-    \\"model":{"type":"string","description":"An image model id from list_models; default: the first image model."},
+    \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_image, or image_edit with images)."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360).","default":"1024x1024"},
     \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
     \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
@@ -302,7 +304,7 @@ const tool_list = [_]Tool{
     .{ .name = "generate_video", .title = "Generate video", .description = "Text to video with audio (MP4), or image to video when `image` is given. Waits up to wait_s seconds; returns the MP4's URL when done, otherwise the job id for get_job.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
-    \\"model":{"type":"string","description":"A video model id from list_models; default: the first video model."},
+    \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits.","default":"768x448"},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
     \\"fps":{"type":"integer","default":24},
