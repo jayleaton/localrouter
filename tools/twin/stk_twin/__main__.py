@@ -75,7 +75,8 @@ def cmd_gate(a):
     q.pipe.transformer = ref
     lat = x.flatten(2).transpose(1, 2).contiguous()
     with torch.inference_mode():
-        ref_img = q.pipe(prompt=prompt, height=H, width=W, num_inference_steps=a.steps, latents=lat).images[0]
+        # the checkpoint's own sigmas given explicitly, as a diffusers with huggingface/diffusers#14950 takes them itself
+        ref_img = q.pipe(prompt=prompt, height=H, width=W, num_inference_steps=a.steps, sigmas=q.sample_sigmas, latents=lat).images[0]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     ours_img.save(out / "twin-bf16.png")
@@ -187,15 +188,16 @@ def cmd_pack(a):
     from . import pack
 
     if a.precision == "te":  # the text encoder's bf16 pack and tokenizer
-        man = pack.write_te(twin(a, "none").pipe, a.out, {"repo": "Qwen/Qwen-Image-2.1", "dir": a.model})
+        man = pack.write_te(twin(a, "none").pipe, a.out, {"repo": a.repo, "dir": a.model})
         print(json.dumps({"pack": a.out, "precision": "te", "tensors": len(man["tensors"])}))
         return
     if a.precision == "vae":  # the VAE decoder's bf16 pack
-        man = pack.write_vae(twin(a, "none").pipe.vae, a.out, {"repo": "Qwen/Qwen-Image-2.1", "dir": a.model})
+        man = pack.write_vae(twin(a, "none").pipe.vae, a.out, {"repo": a.repo, "dir": a.model})
         print(json.dumps({"pack": a.out, "precision": "vae", "tensors": len(man["tensors"])}))
         return
     acts = json.load(open(a.acts)) if a.acts else {}
-    man = pack.write(load_transformer(a.model), a.precision, acts, a.out, {"repo": "Qwen/Qwen-Image-2.1", "dir": a.model})
+    man = pack.write(load_transformer(a.model), a.precision, acts, a.out, {"repo": a.repo, "dir": a.model},
+                     model=a.repo.split("/")[-1].lower())
     print(json.dumps({"pack": a.out, "precision": a.precision, "tensors": len(man["tensors"])}))
 
 
@@ -363,17 +365,22 @@ def cmd_capture(a):
 def main():
     ap = argparse.ArgumentParser(prog="stk_twin")
     ap.add_argument("command", choices=["gate", "floor", "attncheck", "calibrate", "pack", "render", "bench", "tegate", "triton", "capture"])
-    ap.add_argument("--model", required=True, help="the Qwen/Qwen-Image-2.1 snapshot directory")
+    ap.add_argument("--model", required=True, help="the Qwen/Qwen-Image-2.1 (or -Turbo) snapshot directory")
+    ap.add_argument("--repo", default="Qwen/Qwen-Image-2.1", help="pack: the checkpoint's repository, for the manifest")
     ap.add_argument("--pack", help="a pack directory (render, bench, capture)")
     ap.add_argument("--precision", default="nvfp4")
     ap.add_argument("--acts")
     ap.add_argument("--size", default="1024x1024")
-    ap.add_argument("--steps", type=int, default=25)
+    ap.add_argument("--steps", type=int, default=0, help="0: the checkpoint's own (Turbo: its 8 sample_sigmas), else 25")
     ap.add_argument("--step", type=int, default=0, help="capture: the denoising step to record")
     ap.add_argument("--prompt", type=int, default=0, help="capture: the gate prompt (index into prompts/gate.json)")
     ap.add_argument("--light", action="store_true", help="capture: request, sigmas, context, latents, pixels only")
     ap.add_argument("--out", default="out")
     a = ap.parse_args()
+    if a.steps == 0:
+        from .qwen_image import sample_sigmas
+        own = sample_sigmas(a.model)
+        a.steps = len(own) if own else 25
     globals()["cmd_" + a.command](a)
 
 

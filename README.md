@@ -15,6 +15,7 @@ bit for bit against reference implementations of the same models:
 | Model | Can do | On a DGX Spark (GB10) |
 | --- | --- | --- |
 | **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
+| **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
 | **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
 
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
@@ -48,7 +49,10 @@ image DiT weights are verified against committed reference digests), builds and 
 one image and a one-second clip through MCP as a check (printing the clip's wall time), and prints how to connect
 agents. `MODELS=image` or `MODELS=video` installs just one (about 110 GB free for images only; the default, both,
 needs about 200 GB). The image model is FP8 (`qwen-image-2.1`, kept warm); `PRECISIONS="fp8s nvfp4"` also builds the
-faster NVFP4 pack and serves it as `qwen-image-2.1-nvfp4`. LocalRouter listens on `127.0.0.1` only unless you say
+faster NVFP4 pack and serves it as `qwen-image-2.1-nvfp4`. Qwen-Image 2.1 Turbo is installed beside it as
+`qwen-image-2.1-turbo` (about 25 GB more: only its DiT differs, the text encoder and VAE are shared) and becomes the
+image model a request gets when it names none, kept warm; `IMAGE_MODELS=qwen-image-2.1` installs the base model only,
+`IMAGE_DEFAULT=qwen-image-2.1` keeps it the default. LocalRouter listens on `127.0.0.1` only unless you say
 otherwise: on a terminal the installer asks "Make LocalRouter reachable from your tailnet? [y/N]" once, and remembers the
 answer in `.env` under `LOCALROUTER_HOME`. Re-running it updates the service using the existing packs. The complete two-model installer still needs an
 end-to-end check on a DGX Spark; the video installation path has only been exercised with stubs.
@@ -75,7 +79,7 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 
 | MCP tool | Does |
 | --- | --- |
-| `list_models` | the models, what each can do, and whether it is loaded |
+| `list_models` | the models, what each can do, which capabilities each serves by default (`default_for`), and whether it is loaded |
 | `generate_image` | text to image. Waits, returns the PNGs inline and as links; edit inputs are accepted by the API but refused by the current engines |
 | `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
 | `get_job`, `cancel_job` | follow or stop a video job |
@@ -91,9 +95,12 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 ```json
 {
   "reserve_bytes": 8589934592,
+  "defaults": {"text_to_image": "qwen-image-2.1-turbo"},
   "tools": [
-    {"id": "qwen-image-2.1", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
+    {"id": "qwen-image-2.1-turbo", "kind": "image", "engine": "qwen_image_turbo", "weights": "/models/qwen-image-2.1",
      "priority": 10, "keep_loaded": true, "options": {"precision": "fp8s"}},
+    {"id": "qwen-image-2.1", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
+     "priority": 5, "options": {"precision": "fp8s"}},
     {"id": "qwen-image-2.1-nvfp4", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
      "priority": 10, "options": {"precision": "nvfp4"}},
     {"id": "minimax-h3", "kind": "video", "engine": "minimax_h3", "weights": "/models/minimax-h3",
@@ -109,13 +116,15 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `reserve_bytes` | 8 GiB | memory always left free for the OS and other services |
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
 | `keep_outputs_s` | 86400 | how long outputs stay |
+| `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
 | `tools[].priority` | 0 | higher is unloaded later when memory is needed |
 | `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; size limits; default steps) |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `testpattern` |
+| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
 (see "Expose it to your tailnet") and never `all` on an untrusted network.

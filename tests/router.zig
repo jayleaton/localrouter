@@ -160,6 +160,60 @@ test "image inputs: edits over multipart, JSON and MCP; image to video; capabili
     try testing.expectEqual(@as(i64, 0), models[1].object.get("priority").?.integer);
 }
 
+test "model choice: per-capability defaults, explicit models, clear refusals over HTTP, MCP and the CLI" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // `first` would serve text to image unasked; the config makes `second` the default for it, `first` for edits.
+    var d = try Daemon.start(testing.allocator, io, "choice", "{" ++ reserve ++ ", \"defaults\": {\"text_to_image\": \"second\", \"image_edit\": \"first\"}, \"tools\": [" ++
+        "{\"id\": \"first\", \"kind\": \"image\", \"engine\": \"testpattern\"}," ++
+        "{\"id\": \"second\", \"kind\": \"image\", \"engine\": \"testpattern\", \"capabilities\": [\"text_to_image\"], \"options\": {\"max_side\": 512}}," ++
+        "{\"id\": \"vid\", \"kind\": \"video\", \"engine\": \"testpattern\"}]}");
+    defer d.stop();
+
+    const Gen = struct { model: []const u8 };
+    const unasked = try d.call(a, .POST, "/v1/images/generations", "{\"prompt\":\"bars\",\"size\":\"256x256\",\"seed\":1}");
+    try testing.expectEqual(std.http.Status.ok, unasked.status);
+    try testing.expectEqualStrings("second", (try std.json.parseFromSliceLeaky(Gen, a, unasked.body, .{ .ignore_unknown_fields = true })).model);
+    const named = try harness.image(&d, a, "first", ",\"seed\":1");
+    try testing.expectEqualStrings("first", (try std.json.parseFromSliceLeaky(Gen, a, named.body, .{ .ignore_unknown_fields = true })).model);
+    const edited = try d.call(a, .POST, "/v1/images/edits", try std.fmt.allocPrint(a, "{{\"prompt\":\"bars\",\"size\":\"256x256\",\"image\":\"{s}\"}}", .{try b64(a, png_a)}));
+    try testing.expectEqualStrings("first", (try std.json.parseFromSliceLeaky(Gen, a, edited.body, .{ .ignore_unknown_fields = true })).model);
+
+    // /v1/models and list_models say which model each capability goes to
+    const M = struct { data: []const struct { id: []const u8, default_for: []const []const u8 } };
+    const listed = try std.json.parseFromSliceLeaky(M, a, (try d.call(a, .GET, "/v1/models", null)).body, .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("image_edit", listed.data[0].default_for[0]);
+    try testing.expectEqualStrings("text_to_image", listed.data[1].default_for[0]);
+    try testing.expectEqual(@as(usize, 2), listed.data[2].default_for.len); // vid: both video capabilities, unconfigured
+    const mm = (try mcpText(a, try mcpCall(&d, a, "list_models", "{}"))).object.get("models").?.array.items;
+    try testing.expectEqualStrings("text_to_image", mm[1].object.get("default_for").?.array.items[0].string);
+
+    // refusals: an unknown model lists the ones that can, another kind says so, a model's own limit before loading
+    const unknown = try harness.image(&d, a, "nope", "");
+    try testing.expectEqual(std.http.Status.not_found, unknown.status);
+    for ([_][]const u8{ "unknown model 'nope'", "first, second" }) |n| try testing.expect(std.mem.indexOf(u8, unknown.body, n) != null);
+    try expectRefusal(try harness.image(&d, a, "vid", ""), &.{ "'vid' is a video model", "text_to_image: first, second" });
+    try testing.expectEqual(std.http.Status.ok, (try d.call(a, .POST, "/v1/tools/release", "{}")).status);
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "second"));
+    try expectRefusal(try harness.image(&d, a, "second", ",\"size\":\"768x768\""), &.{"'second' takes sizes up to 512 pixels a side"});
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "second")); // refused before any load
+    const wrong = try mcpCall(&d, a, "generate_video", "{\"prompt\":\"w\",\"model\":\"first\"}");
+    try testing.expect(wrong.object.get("isError").?.bool);
+    try testing.expect(std.mem.indexOf(u8, wrong.object.get("content").?.array.items[0].object.get("text").?.string, "'first' is an image model, not video") != null);
+
+    // the CLI: `models` shows the defaults; `gen image` without --model goes to the default
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{d.port});
+    const table = try std.process.run(a, io, .{ .argv = &.{ opts.localrouter_exe, "models", "--url", url } });
+    try testing.expect(std.mem.indexOf(u8, table.stdout, "DEFAULT FOR") != null);
+    try testing.expect(std.mem.indexOf(u8, table.stdout, "text_to_image") != null);
+    const out_png = try std.fmt.allocPrint(a, "{s}/cli.png", .{d.dir});
+    const gen = try std.process.run(a, io, .{ .argv = &.{ opts.localrouter_exe, "gen", "image", "bars", "-o", out_png, "--size", "256x256", "--seed", "1", "--url", url } });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, gen.term);
+    try testing.expectEqualSlices(u8, try firstPng(a, unasked.body), try Io.Dir.cwd().readFileAlloc(io, out_png, a, .limited(1 << 20)));
+}
+
 const private_reason = [_][]const u8{ "loopback, private or link-local", "allow_private_urls" };
 
 /// The URL of a fresh image from MCP, as the daemon names it (the Host header the client sent).

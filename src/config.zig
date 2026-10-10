@@ -37,11 +37,27 @@ pub const Config = struct {
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
+    defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     tools: []const ToolConfig = &default_tools,
 
     pub fn tool(c: *const Config, id: []const u8) ?*const ToolConfig {
         for (c.tools) |*t| if (std.mem.eql(u8, t.id, id)) return t;
         return null;
+    }
+};
+
+/// A tool id per capability, `{"text_to_image": "qwen-image-2.1-turbo"}`: requests that name no model use it. Unset:
+/// the first tool (in config order) that has the capability. `serve` checks each names a tool that can do it.
+pub const Defaults = struct {
+    text_to_image: ?[]const u8 = null,
+    image_edit: ?[]const u8 = null,
+    text_to_video: ?[]const u8 = null,
+    image_to_video: ?[]const u8 = null,
+
+    pub fn get(d: Defaults, cap: Capability) ?[]const u8 {
+        return switch (cap) {
+            inline else => |c| @field(d, @tagName(c)),
+        };
     }
 };
 
@@ -69,6 +85,19 @@ test "parse a config with an external tool" {
     try std.testing.expectEqualStrings("nvfp4", c.tool("qwen-image-2.1").?.options.?.object.get("precision").?.string);
     try std.testing.expectEqual(@as(usize, 3), c.tool("py-tts").?.cmd.len);
     try std.testing.expect(c.tool("nope") == null);
+    try std.testing.expect(c.defaults.get(.text_to_image) == null);
+}
+
+test "defaults name a model per capability; unknown capabilities are rejected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try parse(arena.allocator(),
+        \\{"defaults": {"text_to_image": "turbo", "image_to_video": "v"}}
+    );
+    try std.testing.expectEqualStrings("turbo", c.defaults.get(.text_to_image).?);
+    try std.testing.expectEqualStrings("v", c.defaults.get(.image_to_video).?);
+    try std.testing.expect(c.defaults.get(.image_edit) == null);
+    try std.testing.expectError(error.UnknownField, parse(arena.allocator(), "{\"defaults\": {\"text_to_speech\": \"x\"}}"));
 }
 
 test "the default host is loopback; host accepts the keywords" {

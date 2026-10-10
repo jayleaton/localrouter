@@ -20,7 +20,10 @@ stdio-only clients `npx -y mcp-remote http://<host>:8190/mcp --allow-http`.
 
 ## Use
 
-1. `list_models`: the ids, their kind (`image` / `video`) and whether each is loaded (`running`).
+1. `list_models`: the ids, their kind (`image` / `video`), what each can do (`capabilities`), which one a request
+   without `model` gets (`default_for`) and whether each is loaded (`running`). Name `model` to pick one: where it is
+   installed, `qwen-image-2.1-turbo` (8 steps, the faster) is usually the default and `qwen-image-2.1` (25 steps) the
+   base model. Leave `steps` out: each model uses its own (Turbo takes only 8).
 2. `generate_image` with `prompt` (and `size`, `seed`, `n`, `model`): returns the PNG inline plus its URL, and the
    seed. About 1 megapixel is best: `1024x1024`, `1360x768`, `768x1360`. A warm 1024x1024 image takes about 17 s
    (FP8, the default; the NVFP4 model, `qwen-image-2.1-nvfp4` where installed, takes about 13 s); the first call also
