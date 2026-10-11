@@ -18,16 +18,22 @@
 #           CLEANUP = DEADLINE - 10 min (a step's timeout is also capped at CLEANUP). At CLEANUP the guard terminates our
 #           step's process group (KILL 10 s later); at DEADLINE it KILLs the group and stops this script.
 #   memory  bounded and measured for the whole job, <= 100 GiB total. The job must run in its own cgroup v2 with
-#           memory.max <= 96 GiB (`docker run --memory 96g`, or `systemd-run --scope -p MemoryMax=96G` on the host);
+#           memory.max <= 96 GiB, on the host: `systemd-run --scope -p MemoryMax=96G` (or `--user --scope`);
 #           preflight refuses a shared or unlimited cgroup. Every process this job starts (guard, tar, python, page
 #           cache) is charged there, so memory.current is the job's host-side total and memory.peak its high-water
 #           mark. Device allocations made through the driver are not cgroup-charged, so the guard adds GPU memory
 #           as nvidia-smi's device-wide memory.used (conservative: every app on the device counts against us),
 #           sampled every second. FAIL CLOSED: the query must exit 0 within 10 s with every row numeric; [N/A],
 #           "Not Supported", an empty or partly numeric answer, a timeout or an error fails preflight, refuses a step
-#           and kills a running step. No estimate stands in for it. Outside the cgroup, HELPER_RESERVE_GIB (2: the
-#           `docker run` / `systemd-run` client and the login shell) is counted as a fixed reserve. The total is
-#           cgroup + GPU + reserve <= TOTAL_GIB (100): the guard kills the step above it, and a step starts only if
+#           and kills a running step. No estimate stands in for it. Launcher and login helpers are measured, not
+#           assumed: at start the job records its ancestor processes (the shell and session that launched it, up to
+#           but excluding pid 1 and the systemd manager) that lie outside its cgroup, and the guard adds their summed
+#           VmRSS from /proc every second. Discovery fails closed: an unreadable or malformed stat or cgroup of a live
+#           ancestor (or of this job) refuses every step, never a partial list; an ancestor that exits mid-scan
+#           restarts it, and a live helper that becomes unreadable fails closed. `systemd-run --scope` execs the job
+#           inside the scope, so no launcher client stays outside. A job inside a container is refused: its launcher
+#           (the docker client) is outside the container's pid namespace and cannot be measured from here. The total
+#           cgroup + GPU + helpers <= TOTAL_GIB (100): the guard kills the step above it, and a step starts only if
 #           the total + its declared peak fits. MemAvailable >= MIN_GIB (8) stays as a supplemental headroom guard.
 #           Logged: memavail.log (every sample), guard.log (actions).
 #   disk    a step does not start if du($WORK) + its output budget exceeds 200 GB, or the filesystem lacks the budget
@@ -80,8 +86,7 @@ for m in $MODES; do [[ " tf32_rna tf32_truncate fp32 " == *" $m "* ]] || die "MO
 [[ -n ${MODES// /} ]] || die "MODES is empty"
 
 # contract constants (not overridable)
-TOTAL_GIB=100   # cgroup (memory.current) + GPU memory + helper reserve: the contract's node total for this job
-HELPER_RESERVE_GIB=2   # processes outside the job's cgroup: the docker / systemd-run client and the login shell
+TOTAL_GIB=100   # cgroup (memory.current) + GPU memory + measured helpers: the contract's node total for this job
 CG_MAX_GIB=96   # the job's cgroup memory.max must be at most this (leaves room for the GPU term's own accounting)
 DISK_GB=200
 STOP_NEW_S=1200
@@ -117,8 +122,8 @@ export STK_K6_SRC=$KD/kandinsky6-upstream STK_K6_DIT_FATBINS=$KD/fatbins KIT_SHA
 unset STK_K6_CONFIG   # the twin's built-in Pro-distill config, never a file from elsewhere
 
 avail_kib() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
-JOB_BASE=$(avail_kib)   # MemAvailable before this job does anything (supplemental and fallback accounting)
-# this job's cgroup v2 directory (the container's own, or the systemd scope it was started in)
+JOB_BASE=$(avail_kib)   # MemAvailable before this job does anything (supplemental headroom only)
+# this job's cgroup v2 directory (the systemd scope it was started in)
 CG=/sys/fs/cgroup$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup 2> /dev/null)
 cg_kib() { local v; v=$(cat "$CG/$1" 2> /dev/null) || { echo -1; return; }; [[ $v =~ ^[0-9]+$ ]] && echo $(( v / 1024 )) || echo -1; }
 cg_max_kib() { local v; v=$(cat "$CG/memory.max" 2> /dev/null) || { echo -1; return; }; [[ $v == max ]] && echo -2 || echo $(( v / 1024 )); }
@@ -132,6 +137,84 @@ gpu_kib() {
     awk 'BEGIN {n = 0; bad = 0} {gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 ~ /^[0-9]+$/) {s += $0; n++} else bad = 1}
          END {if (n > 0 && !bad) print s * 1024; else print -1}' <<< "${out%$'\n'}"
 }
+# ---- launcher / login helper discovery (begin)
+# This job's ancestors outside its cgroup, up to (excluding) pid 1 and the systemd manager, recorded once as
+# "pid:starttime". Fail closed: unless every live ancestor's /proc stat and cgroup read and parse, HELPER_ERR is set
+# and helper_kib reports -1, so a partial chain is never accepted. An ancestor that exits mid-scan (its child is
+# re-parented) restarts the scan; a chain still changing after 5 scans fails too.
+proc_read() { cat "/proc/$1/$2" 2> /dev/null; }
+proc_alive() { [[ -d /proc/$1 ]]; }
+# the unified (v2) cgroup path of pid $1: exactly one "0::/..." line
+cg_of() {
+    local t
+    t=$(proc_read "$1" cgroup) || return 1
+    t=$(awk -F: '$1 == "0" && $2 == "" {print $3; n++} END {exit n != 1}' <<< "$t") || return 1
+    [[ $t == /* ]] || return 1
+    echo "$t"
+}
+# "ppid starttime comm" of pid $1, from a /proc/$1/stat whose pid field and shape check out
+stat_of() {
+    local st pid comm f
+    st=$(proc_read "$1" stat) || return 1
+    [[ $st == *" ("*") "* ]] || return 1
+    pid=${st%% (*}; [[ $pid == "$1" ]] || return 1
+    comm=${st#* (}; comm=${comm%) *}
+    read -r -a f <<< "${st##*) }"
+    (( ${#f[@]} >= 20 )) && [[ ${f[1]} =~ ^[0-9]+$ && ${f[19]} =~ ^[0-9]+$ ]] || return 1
+    echo "${f[1]} ${f[19]} $comm"
+}
+HELPERS=""; HELPER_ERR=""
+helper_scan_once() {   # 0 complete, 1 unreadable or malformed (HELPER_ERR set), 2 the chain changed: scan again
+    local c=$$ p pp s s2 cg start comm mine depth=0
+    mine=$(cg_of $$) || { HELPER_ERR="this job's own /proc cgroup is unreadable or malformed"; return 1; }
+    s=$(stat_of $$) || { HELPER_ERR="this job's own /proc stat is unreadable or malformed"; return 1; }
+    read -r p _ <<< "$s"
+    while (( p != 1 )); do
+        (( p > 0 )) || { HELPER_ERR="the parent of $c is outside this pid namespace"; return 1; }
+        (( ++depth <= 256 )) || { HELPER_ERR="ancestor chain deeper than 256"; return 1; }
+        if s=$(stat_of "$p") && cg=$(cg_of "$p") && s2=$(stat_of "$p"); then
+            [[ $s == "$s2" ]] || return 2
+        else
+            # p exited if its child c has been re-parented; if c still names p as parent, a live ancestor is unreadable
+            s2=$(stat_of "$c") || return 2
+            read -r pp _ <<< "$s2"
+            (( pp == p )) && { HELPER_ERR="live ancestor $p: /proc stat or cgroup unreadable or malformed"; return 1; }
+            return 2
+        fi
+        read -r pp start comm <<< "$s"
+        [[ $comm == systemd ]] && return 0
+        [[ $cg == "$mine" ]] || HELPERS+="$p:$start "
+        c=$p; p=$pp
+    done
+}
+helper_scan() {
+    local i r
+    for i in 1 2 3 4 5; do
+        HELPERS=""; HELPER_ERR=""
+        helper_scan_once; r=$?
+        (( r == 0 )) && return 0
+        (( r == 1 )) && { HELPERS=""; return 0; }
+    done
+    HELPERS=""; HELPER_ERR="the ancestor chain kept changing during 5 scans"
+}
+# summed VmRSS (KiB) of the recorded helpers still alive, or -1 if discovery failed or a live one is unreadable
+helper_kib() {
+    [[ -z $HELPER_ERR ]] || { echo -1; return; }
+    local h p s st v k=0
+    for h in $HELPERS; do
+        p=${h%%:*}
+        s=$(stat_of "$p") || { proc_alive "$p" && { echo -1; return; }; continue; }
+        read -r _ st _ <<< "$s"; [[ $st == "${h#*:}" ]] || continue   # exited; the pid now names another process
+        s=$(proc_read "$p" status) || { proc_alive "$p" && { echo -1; return; }; continue; }
+        v=$(awk '/^VmRSS:/ {r = $2; n++} /^State:[ \t]+[ZX]/ {z = 1} END {print n == 1 ? r : (n == 0 && z ? 0 : "x")}' <<< "$s")
+        [[ $v =~ ^[0-9]+$ ]] || { echo -1; return; }
+        k=$(( k + v ))
+    done
+    echo "$k"
+}
+# ---- launcher / login helper discovery (end)
+in_container() { [[ -f /.dockerenv || -f /run/.containerenv ]] || grep -qE '(docker|containerd|kubepods|libpod)' /proc/1/cgroup 2> /dev/null; }
+helper_scan   # once, at start: the ancestors that launched this job
 gib() { awk -v k="$1" 'BEGIN {printf "%.1f", k / 1048576}'; }
 du_bytes() { du -sxb "$WORK" 2> /dev/null | cut -f1; }
 df_bytes() { df -B1 --output=avail "$WORK" | tail -1 | tr -dc 0-9; }
@@ -356,9 +439,20 @@ preflight() {
     else
         echo "ok   cgroup $CG: memory.max $(gib "$cgmax") GiB, memory.current $(gib "$cgcur") GiB, memory.peak $( p=$(cg_kib memory.peak); (( p < 0 )) && echo n/a || echo "$(gib "$p") GiB")"
     fi
+    if in_container; then
+        echo "FAIL running inside a container: its launcher is outside this pid namespace and cannot be measured; run on the host under systemd-run --scope"; bad=1
+    fi
+    local hk; hk=$(helper_kib)
+    if [[ -n $HELPER_ERR ]]; then
+        echo "FAIL launcher / login helper discovery: $HELPER_ERR"; bad=1
+    elif (( hk >= 0 )); then
+        echo "ok   launcher / login helpers outside the cgroup: pid:starttime ${HELPERS:-none}, $(gib "$hk") GiB RSS (measured every second)"
+    else
+        echo "FAIL a launcher / login helper is alive but its memory is unreadable"; bad=1
+    fi
     gk=$(gpu_kib)
     if (( gk >= 0 )); then
-        echo "ok   GPU memory accounting: nvidia-smi memory.used, $(gib "$gk") GiB used now (+ helper reserve $HELPER_RESERVE_GIB GiB)"
+        echo "ok   GPU memory accounting: nvidia-smi memory.used, $(gib "$gk") GiB used now"
     else
         echo "FAIL GPU memory: nvidia-smi gave no complete numeric memory.used ([N/A], unsupported, timeout or error): the job total cannot be bounded"; bad=1
     fi
@@ -440,7 +534,7 @@ finalize() {
         echo "kit: $KIT_SHA"
         echo "started: $(date -u -d "@$START" +%FT%TZ)  ended: $(date -u +%FT%TZ)  deadline: $(date -u -d "@$DEADLINE" +%FT%TZ)"
         echo "result: $RESULT"
-        echo "memory: cgroup $CG memory.peak $( p=$(cg_kib memory.peak); (( p < 0 )) && echo n/a || echo "$(gib "$p") GiB"), memory.max $(gib "$(cg_max_kib)") GiB; GPU nvidia-smi memory.used; helper reserve $HELPER_RESERVE_GIB GiB"
+        echo "memory: cgroup $CG memory.peak $( p=$(cg_kib memory.peak); (( p < 0 )) && echo n/a || echo "$(gib "$p") GiB"), memory.max $(gib "$(cg_max_kib)") GiB; GPU nvidia-smi memory.used; helpers ${HELPERS:-none} measured"
         echo
         column -t -s $'\t' "$R/steps.tsv" 2> /dev/null || cat "$R/steps.tsv"
         echo
@@ -463,22 +557,23 @@ finalize() {
 # the guard: one sample a second; kills only our current step's process group
 
 guard() {
-    local now avail pid name base cur="" peak=0 cgk gpu=0 drop use reason tick=0 term_at=0
+    local now avail pid name base cur="" peak=0 cgk gpu=0 hk=0 drop use reason tick=0 term_at=0
     while :; do
         now=$(date +%s); avail=$(avail_kib); pid=""; name=""; base=0
         [[ -f $R/.step ]] && read -r pid name base < "$R/.step"
         drop=0; use=0
         cgk=$(cg_kib memory.current)
-        gpu=$(gpu_kib)
+        gpu=$(gpu_kib); hk=$(helper_kib)
         drop=$(( JOB_BASE - avail )); (( drop < 0 )) && drop=0
-        use=$(( (cgk < 0 ? 0 : cgk) + (gpu < 0 ? 0 : gpu) + HELPER_RESERVE_GIB * GIB_KIB ))
+        use=$(( (cgk < 0 ? 0 : cgk) + (gpu < 0 ? 0 : gpu) + (hk < 0 ? 0 : hk) ))
         if [[ -n $pid ]]; then
             [[ $name == "$cur" ]] || { cur=$name; peak=0; term_at=0; }
             if (( use > peak )); then peak=$use; echo "$peak" > "$R/.peak.$name"; fi
             reason=""
-            (( use > MAX_KIB )) && reason="job total $(gib "$use") GiB (cgroup $(gib "$cgk") + GPU $(gib "$gpu") + reserve $HELPER_RESERVE_GIB) over TOTAL_GIB $TOTAL_GIB"
+            (( use > MAX_KIB )) && reason="job total $(gib "$use") GiB (cgroup $(gib "$cgk") + GPU $(gib "$gpu") + helpers $(gib "$hk")) over TOTAL_GIB $TOTAL_GIB"
             (( gpu < 0 )) && reason="GPU memory query failed (no complete numeric memory.used): job total unbounded"
             (( cgk < 0 )) && reason="cgroup memory.current unreadable: job total unbounded"
+            (( hk < 0 )) && reason="launcher / login helper memory unreadable: job total unbounded"
             (( avail < MIN_KIB )) && reason="MemAvailable $(gib "$avail") GiB under MIN_GIB $MIN_GIB"
             (( now >= CLEANUP_AT )) && reason="cleanup point (DEADLINE - 10 min)"
             if [[ -n $reason ]]; then
@@ -497,7 +592,7 @@ guard() {
             [[ -n $pid ]] && kill -KILL -- "-$pid" 2> /dev/null
             kill -TERM "$MAIN" 2> /dev/null
         fi
-        echo "$now $avail ${name:--} $cgk $gpu $drop $use"
+        echo "$now $avail ${name:--} $cgk $gpu $hk $drop $use"
         tick=$(( tick + 1 ))
         sleep 1
     done
@@ -520,14 +615,14 @@ run_step() {
         log "$name: not started: WORK $dub GB + budget $outgb GB over $DISK_GB GB, or $(( free / 1000000000 )) GB free"
         record "$name" "not-run: disk" - - - "$max" "$dub" -; return 1
     fi
-    local cgk g
-    cgk=$(cg_kib memory.current); g=$(gpu_kib)
-    if (( cgk < 0 || g < 0 )); then
-        log "$name: not started: cgroup memory.current or GPU memory.used unreadable (fail closed)"
+    local cgk g h
+    cgk=$(cg_kib memory.current); g=$(gpu_kib); h=$(helper_kib)
+    if (( cgk < 0 || g < 0 || h < 0 )); then
+        log "$name: not started: cgroup memory.current, GPU memory.used or helper memory unreadable (fail closed)"
         record "$name" "not-run: memory unaccounted" - - - "$max" "$dub" -; return 1
     fi
-    if (( avail < (peak + MIN_GIB) * GIB_KIB || cgk + g + (HELPER_RESERVE_GIB + peak) * GIB_KIB > MAX_KIB )); then
-        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB, or cgroup $(gib "$cgk") + GPU $(gib "$g") + reserve $HELPER_RESERVE_GIB + peak $peak GiB over TOTAL_GIB $TOTAL_GIB"
+    if (( avail < (peak + MIN_GIB) * GIB_KIB || cgk + g + h + peak * GIB_KIB > MAX_KIB )); then
+        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB, or cgroup $(gib "$cgk") + GPU $(gib "$g") + helpers $(gib "$h") + peak $peak GiB over TOTAL_GIB $TOTAL_GIB"
         record "$name" "not-run: memory" - - - "$max" "$dub" -; return 1
     fi
     if ! verify_kit "$KD" >> "$R/job.log" 2>&1; then
@@ -597,7 +692,7 @@ timeout 30 nvidia-smi -q > "$R/nvidia-smi-q.txt" 2>&1
 
 guard > "$R/memavail.log" 2> "$R/guard.log" &
 GUARD=$!
-log "guard: pid $GUARD; memavail.log columns: epoch MemAvailable_kib step cgroup_current_kib gpu_used_kib(-1 = query failed) memavail_drop_kib total_kib"
+log "guard: pid $GUARD; memavail.log columns: epoch MemAvailable_kib step cgroup_current_kib gpu_used_kib(-1 = query failed) helpers_rss_kib(-1 = unreadable) memavail_drop_kib total_kib"
 
 RESULT=ok
 mapfile -t STEPS < <(steps)

@@ -45,36 +45,41 @@ Basis for the estimates:
 Owner deadlines, with T0 the window start: no new work at T0+100 (N-20), everything cleaned by T0+110 (N-10), expiry
 T0+120 (N). `node-job.sh` enforces them with `DEADLINE=T0+120`: a step starts only if its max minutes end by T0+110.
 Node A is dgx01 (`WORK=/home/dgx01/k6-d1-qual`), node B is dgx02 (`WORK=/root/k6-d1-qual`, reached through dgx01);
-each node writes only its own `WORK`. Every job is a separate container run (discrete, resumable): `MODES` splits a job
+each node writes only its own `WORK`. Every job is a separate host run in its own memory scope (discrete, resumable): `MODES` splits a job
 by Fp32Linear form, so a job that no longer fits is resumed in a later window instead of truncated.
 
 Per job, estimate / worst case (worst = every step at its timeout), in minutes:
 
 | # | node A (dgx01) | est | max | node B (dgx02) | est | max |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 | setup: sha256 of image tar + kit, `docker load`, check image ID, preflight | 6 | 10 | the same | 6 | 10 |
+| 0 | setup: kit sha256, take `node-job.sh` out of it, preflight (first one checks every prefix file) | 6 | 10 | the same | 6 | 10 |
 | 1 | `smoke` | 5 | 21 | `smoke` | 5 | 21 |
 | 2 | `twin` (all 3 forms) | 24 | 60 | `ops` (every site under tf32_rna, then `fp32/*` under the other two) | 35 | 60 |
 | 3 | `blocks` MODES="tf32_rna tf32_truncate" | 20 | 40 | `blocks` MODES=fp32 | 10 | 20 |
 | 4 | export: results tarballs + sha256 | 2 | 5 | the same | 2 | 5 |
-| 5 | cleanup: `docker rmi`, remove the extracted kit (results stay in WORK) | 2 | 5 | the same | 2 | 5 |
+| 5 | cleanup: remove the extracted kit (results stay in WORK) | 2 | 5 | the same | 2 | 5 |
 | | **end (est)** | **T0+59** | | | **T0+60** | |
 
 Jobs 0-2 (the required set) fit even at their worst case: they end by T0+91 on both nodes, inside T0+100. Job 3 fits
 the estimate with 40 min to spare; if earlier steps run long, `node-job.sh` records its steps `not-run: time` and that
 job is resumed in a later window with the same kit and MODES. Export and cleanup always run before T0+110.
 
-Memory is bounded and measured for the whole job, at most 100 GiB in total. Each job runs in its own cgroup v2 with
-`memory.max` <= 96 GiB (the container with `--memory 96g`, or a host `systemd-run --scope -p MemoryMax=96G`);
-preflight refuses a shared or unlimited cgroup. All of the job's processes (guard, tar, python, page cache) are
-charged to it. Driver allocations are not cgroup-charged, so the guard adds nvidia-smi's device-wide `memory.used`
-every second, plus a fixed 2 GiB reserve for the processes outside the cgroup (the docker / systemd-run client and
-the login shell). The GPU accounting fails closed: `[N/A]`, "Not Supported", an empty or partly numeric answer, a
-timeout or an error fails preflight, refuses a step and kills a running one; no estimate replaces it. The guard kills
-a step at cgroup + GPU + reserve > 100 GiB, and a step starts only if that total plus its declared peak fits.
-MemAvailable >= 8 GiB stays as supplemental headroom. If GB10's driver does not report `memory.used`, these jobs do
-not run until a hard-bounded alternative for device allocations is agreed. The largest declared step peaks are 32 GiB
-(`blocks`), 24 GiB (`twin`, `ops`) and 8 GiB (`smoke`); gate.py's largest site estimates are 20.3 and 9.3 GiB.
+Memory is bounded and measured for the whole job, at most 100 GiB in total. Each job runs on the host in its own
+cgroup v2 scope with `memory.max` <= 96 GiB (`systemd-run --scope -p MemoryMax=96G`, which execs the job inside the
+scope, so no launcher client stays outside); preflight refuses a shared or unlimited cgroup, and refuses to run inside
+a container, whose launcher would sit outside its pid namespace, unmeasurable. All of the job's processes (guard, tar,
+python, page cache) are charged to the scope. Two terms are added, both measured every second: nvidia-smi's
+device-wide `memory.used` (driver allocations are not cgroup-charged; other apps on the device count against us), and
+the summed RSS of the job's launcher / login ancestors outside the scope (the shell and session that started it, up
+to but excluding pid 1 and the systemd manager). Both fail closed: `[N/A]`, "Not Supported", an empty or partly
+numeric answer, a timeout or an error fails preflight, refuses a step and kills a running one; so does helper
+discovery unless every live ancestor's `/proc` stat and cgroup read and parse (no partial list: an ancestor that exits
+mid-scan restarts the scan, a chain still changing after 5 scans fails), and so does a live helper that turns
+unreadable. No estimate replaces them. The guard kills a step at cgroup + GPU + helpers > 100 GiB, and a step starts
+only if that total plus its declared peak fits. MemAvailable >= 8 GiB stays as supplemental headroom. If GB10's driver
+does not report `memory.used`, these jobs do not run until a hard-bounded alternative for device allocations is
+agreed. The largest declared step peaks are 32 GiB (`blocks`), 24 GiB (`twin`, `ops`) and 8 GiB (`smoke`); gate.py's
+largest site estimates are 20.3 and 9.3 GiB.
 
 ## What the stager places on each node
 
@@ -83,24 +88,25 @@ All of it is files-only before T0; loading, extraction and setup happen after T0
 1. **The kit tarball** (`k6-dit-kit-<commit12>.tar.gz`) and its sha256 (`KIT_SHA`, printed by `kit.sh` and stored
    in its `.sha256` file). Nothing else from the repository is needed.
 2. **The oracle environment**, one of:
-   - **the image** (preferred): the `docker save` tar of `k6-dit-oracle:<lock12>`, built on the dev host from
+   - **the image** (dev-host only: lists the pinned closure and runs offline import / `gate --list` checks; jobs are
+     refused inside a container, see Memory): the `docker save` tar of `k6-dit-oracle:<lock12>`, built on the dev host from
      `oracle.Dockerfile` (pinned `python:3.13-slim-bookworm` digest, offline `--require-hashes` install of the
      `lock.txt` wheel set: `torch==2.14.1+cu130` cp313 aarch64 and its declared dependencies, nothing else). The tar
      sha256 and the loaded image ID are both checked. Inside it, `VENV=/usr/local`.
-   - **the shared oracle prefix** (staging-owned): sealed `k6-oracle-prefix.tar.gz` sha256 `74118af7…`, PBS
+   - **the shared oracle prefix** (staging-owned, the route the jobs use): sealed `k6-oracle-prefix.tar.gz` sha256 `74118af7…`, PBS
      3.13.16 + the same torch pins (+ numpy 2.5.4, safetensors 0.8.0; freeze sha256 `d793ad20…`), `MANIFEST.sha256`
      sha256 `a1af1b3b…`; one shared read-only extraction per node (staging-owned, after T0), and preflight verifies
      every file.
-   - **the offline venv fallback**: the same wheel set with `lock.txt` and `SHA256SUMS`, plus python-build-standalone
+   - **the offline venv fallback** (if the prefix is unavailable): the same wheel set with `lock.txt` and `SHA256SUMS`, plus python-build-standalone
      `cpython-3.13.16+20261009-aarch64-unknown-linux-gnu-install_only.tar.gz`; `setup-venv.sh` builds `$WORK/venv`
      with no network and checks the pins.
 
    `flash_attn`, `flash_attn_interface` and `sageattention` are absent on purpose: the native reference uses SDPA.
-3. **The NVIDIA driver**: `libcuda.so.1` with CUDA 13.0 support, and `nvidia-smi`, on a GB10 (capability 12.1); with
-   the image, the NVIDIA container runtime (`--gpus all`).
+3. **The NVIDIA driver**: `libcuda.so.1` with CUDA 13.0 support, and `nvidia-smi`, on a GB10 (capability 12.1), and
+   systemd (`systemd-run --scope`, or `--user --scope` without root) for the job's memory scope.
 4. **`WORK`**: a directory this job alone writes, on a filesystem with at least the job's budget plus 5 GB free.
    `WORK` (the extracted kit, results, caches and TMPDIR) stays under 200 GB.
-5. **Tools** (present in the image): bash, util-linux `flock` and `setsid`, coreutils (`timeout`, `sha256sum`, `du`,
+5. **Host tools**: bash, util-linux `flock` and `setsid`, coreutils (`timeout`, `sha256sum`, `du`,
    `df`), GNU tar, gzip, awk and cmp. The memory guard reads `/proc` directly (no procps). Preflight checks for each.
 
 The third-party Python imports of the DiT path, listed in full. Each entry is `file:line` in the kit; upstream paths
@@ -136,21 +142,8 @@ FATBINS=/path/to/fatbins K6_SRC=/tmp/kandinsky6-upstream \
 # prints KIT_SHA=<sha256> and CREATED_UTC=...; the same inputs + CREATED_UTC reproduce the same sha256
 ```
 
-Each job is one container run from the loaded oracle image (`IMAGE` is the checked image ID). The container
-verifies the kit sha256 before taking `node-job.sh` out of it, and writes only the bind-mounted `WORK`:
-
-```sh
-# node A: WORK=/home/dgx01/k6-d1-qual   node B: WORK=/root/k6-d1-qual   (the kit tarball inside WORK)
-docker run --rm --name k6-d1-$JOB --user "$(id -u):$(id -g)" --gpus all --network none \
-    --memory 96g --memory-swap 96g \
-    -e DEADLINE -e KIT_SHA -e MODES -e WORK=/work -e KIT=/work/k6-dit-kit-<commit12>.tar.gz -e VENV=/usr/local \
-    -v "$WORK":/work "$IMAGE" bash -c 'echo "$KIT_SHA  $KIT" | sha256sum -c --quiet - &&
-    tar -xzOf "$KIT" ./repo/tools/twin/stk_twin/kandinsky6_dit/spark/node-job.sh > /tmp/node-job.sh &&
-    exec bash /tmp/node-job.sh "$@"' _ $JOB        # append --preflight for the preflight
-```
-
-Node A runs `JOB=smoke`, `twin`, then `blocks` with `-e MODES="tf32_rna tf32_truncate"`; node B runs `smoke`, `ops`,
-then `blocks` with `-e MODES=fp32`. Each job's preflight goes first.
+Each job runs on the node's host. Node A runs `JOB=smoke`, `twin`, then `blocks` with `MODES="tf32_rna tf32_truncate"`;
+node B runs `smoke`, `ops`, then `blocks` with `MODES=fp32`. Each job's preflight (`--preflight`) goes first.
 With the shared oracle prefix: staging keeps one sealed copy per node in `k6-staging-1018d582/oracle`
 (`k6-oracle-prefix.tar.gz`, 3,344,315,223 bytes, sha256 `74118af7c8381f74ed810c6ddb3b009edc9f280d13844f2ace70f6f65ba0c474`)
 and, after T0, provides one shared read-only extraction per node (`PREFIX`, staging's path); no job copies the prefix
