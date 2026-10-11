@@ -50,6 +50,23 @@ WORKSPACE; OUT must be new or empty. It verifies the kit's `SHA256SUMS` (when pr
 --site-packages PREFIX/lib/python3.13/site-packages --time-limit-min 25` under `timeout 28m` and logs to `OUT/job-JOB.log`.
 Exit 0 means the job ran (mismatches included); 2 / 3 infrastructure failure; 124 timeout; 65 precondition.
 
+**Probe stage (job A, `--probe`).** Appended to job A's own argument list (`run_job.sh A ... OUT --probe`), it runs
+after job A's cases in the same process and changes none of them. For the native ops whose order is not yet reproduced
+it records which kernels the native libraries chose and dumps what an offline reading needs: decoder
+`mid.block_1.conv1` (gain 1) and `conv_out` (gain 1 and the loaded `learnable_gain + 1`) with `conv_in` as a passing
+control; scaled SiLU with torch's `exp(-x)`, `sigmoid` and `silu` of the same input and both k6a variants; the native
+strided SDPA [1,1,218,2048] plus the math backend's steps composed from public ops (scaled q / k^T, scores, softmax and
+`_safe_softmax`, output), each compared with the native output; and, from `MODELS/vocoder` (key set asserted as in
+job B), vocoder `conv_pre` and the dilation-1 convs `resblocks.9/10/11.convs1.0` with `resblocks.9.convs1.1` (dilation
+3) as a passing control, with stored weight and bias. Each op's input uses the same seed tag as its job A / job B case,
+so its native sha256 must equal that case's (`native_sha_equals_case_*` in job A; vocoder against the job B record).
+Each op runs once under `torch.profiler` (CPU + CUDA): kernel names, counts and device time in the JSON, the Chrome trace
+(grid, block, registers, shared memory) in `OUT/probe/traces/`. cuDNN (`CUDNN_LOGLEVEL_DBG=3`), cuBLAS
+(`CUBLAS_LOGINFO_DBG=1`) and cuBLASLt (`CUBLASLT_LOG_LEVEL=5`) API logs for the whole process go to
+`OUT/probe/logs/{cudnn,cublas,cublaslt}.log`; jobs.py sets them before importing torch, and refuses `--probe` when torch
+was already imported (a same-process wrapper) unless the wrapper exported exactly those six values beforehand.
+`probe/summary` fails the job (exit 2) above 1 GiB of probe output. The probe is diagnostic only, never qualification.
+
 Local CPU smoke (tiny shapes, native paths only, no kernel launches):
 `python -I -B jobs.py A --dry-run-cpu --weights synthetic --native-src UPSTREAM --out /tmp/k6a-dry/A`.
 
@@ -60,7 +77,7 @@ Local CPU smoke (tiny shapes, native paths only, no kernel launches):
 | Wall clock | < 30 min (28 min hard timeout, 25 min self-limit checked between cases; later cases are recorded as skipped) | A 5-10 min (checkpoint hashing, CPU load + prepare, 29 re-preparations, 572 normalization launches, 4 decoder passes); B 5-10 min (4 BigVGAN passes of ~1 TFLOP through the direct kernels). Plus ~1 min prefix verification before the timeout starts. |
 | GPU memory | < 40 GiB (self-checked) | A < 4 GiB; B < 3 GiB |
 | Host RSS | < 100 GiB (self-checked) | A < 10 GiB (1.7 GB checkpoint + encoder/decoder on CPU); B < 4 GiB |
-| Disk | < 20 GB (`ulimit -f` caps each file) | A ~0.8 GB (CPU-prepared decoder weights); B ~10 MB |
+| Disk | < 20 GB (`ulimit -f` caps each file) | A ~0.8 GB (CPU-prepared decoder weights); B ~10 MB; probe < 1 GiB (checked), ~0.1 GB expected |
 
 ## Outputs (in OUT)
 
