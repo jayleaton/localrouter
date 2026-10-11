@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Kandinsky-6 Pro distilled (`kandinsky6`): text to 864x480, 121-frame video at 24 fps with its coupled mono 44.1 kHz
+  audio, native Zig and CUDA end to end: Qwen2.5-VL and CLIP text conditioning, torch-compatible seeded noise, the
+  10-step PiFlow sampler over the fused video and audio DiT, the video VAE decode, one MP4. Built in but not yet
+  usable: it refuses to load until every admission contract is qualified on the GPU (none is yet, and the audio
+  decoder's whole-pass entry points are still to come). Its arithmetic options have no defaults.
 - Qwen-Image 2.1 Turbo (`qwen_image_turbo`, installed as `qwen-image-2.1-turbo`): the official Turbo checkpoint on
   the same native Zig engine, with its own 8-step schedule (the checkpoint's `sample_sigmas`, shift 1, CFG 1). On GB10
   its sigmas, context, latents and pixels equal the twin's; the bf16 twin's cosine gate against diffusers fails at

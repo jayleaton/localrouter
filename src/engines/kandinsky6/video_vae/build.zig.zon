@@ -1,0 +1,14 @@
+.{
+    .name = .k6v_qual,
+    .version = "0.1.0",
+    .fingerprint = 0xfd735ffd89b605b0, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // the same pin as the root build.zig.zon
+        .tensorfold = .{
+            .url = "git+https://github.com/ashhart/TensorFold.git#e7c523ebfa16b8094cf9e35e3773a7d25befcc5b",
+            .hash = "tensorfold-1.0.7-CphTLULywQAUe2LxgT29-AserW8gMmK9C-ltOxIaw1pG",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "launch.zig", "tiles.zig", "encode.zig", "decode.zig", "weights.zig", "qual.zig", "testdata" },
+}

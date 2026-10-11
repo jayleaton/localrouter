@@ -34,9 +34,10 @@ pub const Decoder = struct {
 pub const up_factors = [3][2]u32{ .{ 1, 2 }, .{ 2, 2 }, .{ 2, 2 } };
 pub const scaling_factor: f64 = 0.476986;
 
-/// 1 / float(0.476986) in fp32, as torch computes the reciprocal of a CPU scalar divisor.
+/// float(1.0 / 0.476986): torch 2.14.1's reciprocal of a CPU scalar divisor, taken in double and cast to the opmath
+/// type (BinaryDivTrueKernel.cu:46). For this factor it equals 1.0f / float(0.476986) bit for bit (0x40062d04).
 pub fn invScale() f32 {
-    return @as(f32, 1.0) / @as(f32, @floatCast(scaling_factor));
+    return @floatCast(1.0 / scaling_factor);
 }
 
 /// Largest fp16 activation (elements) of one decoder pass over a latent tile of t x h x w: the up blocks' channel
@@ -94,8 +95,11 @@ pub fn scratchBytes(plan: tiles.DecodePlan) u64 {
     return arena.peak;
 }
 
+pub const LatentDtype = launch.LatentDtype;
+
 pub const Io = struct {
     latent: u64,
+    latent_dtype: LatentDtype,
     rgb: u64,
     scratch: u64,
     scratch_bytes: u64,
@@ -109,13 +113,16 @@ pub fn decodeTile(l: launch.Launcher, w: *const Decoder, lay: Layout, z: View, o
     const zq = View.dense(spare, z.t, z.h, z.w, z.c);
     if (zq.elems() > work.act_elems) return error.BufferTooSmall;
     try l.run(try launch.conv(z, w.post_quant, .{ .causal_pad = false }, zq.ptr));
+    try l.mark("post_quant_conv", .{}, zq, false);
     try l.run(try launch.conv(zq, w.conv_in, .{}, cur));
     var x = View.dense(cur, z.t, z.h, z.w, w.conv_in.co);
-    x = try launch.midBlock(l, work, x, w.mid, spare);
+    try l.mark("decoder.conv_in", .{}, x, false);
+    x = try launch.midBlock(l, work, x, w.mid, spare, "decoder");
     if (x.ptr == spare) std.mem.swap(u64, &cur, &spare);
+    var name: [64]u8 = undefined;
     for (w.up, 0..) |ub, i| {
-        for (ub.resnets) |r| {
-            x = try launch.resnet(l, work, x, r, spare);
+        for (ub.resnets, 0..) |r, j| {
+            x = try launch.resnet(l, work, x, r, spare, try std.fmt.bufPrint(&name, "decoder.up_blocks.{d}.resnets.{d}", .{ i, j }));
             std.mem.swap(u64, &cur, &spare);
         }
         if (ub.upsampler) |u| {
@@ -124,22 +131,28 @@ pub fn decodeTile(l: launch.Launcher, w: *const Decoder, lay: Layout, z: View, o
             if (@as(u64, o[0]) * o[1] * o[2] * u.co > work.act_elems) return error.BufferTooSmall;
             try l.run(try launch.conv(x, u, .{ .up_t = f[0], .up_hw = f[1] }, spare));
             x = View.dense(spare, o[0], o[1], o[2], u.co);
+            try l.mark("decoder.up_blocks.{d}.upsamplers.0", .{i}, x, false);
             std.mem.swap(u64, &cur, &spare);
         }
     }
     try launch.groupNorm(l, work, x, w.norm_out, true, work.a);
-    try l.run(try launch.conv(View.dense(work.a, x.t, x.h, x.w, x.c), w.conv_out, .{}, out));
+    const act = View.dense(work.a, x.t, x.h, x.w, x.c);
+    try l.mark("decoder.conv_act", .{}, act, false);
+    try l.run(try launch.conv(act, w.conv_out, .{}, out));
+    try l.mark("decoder.conv_out", .{}, View.dense(out, x.t, x.h, x.w, w.conv_out.co), false);
 }
 
-/// postprocess_video for one batch item: io.latent (bf16) -> io.rgb (uint8), under `plan` (tiles.decodePlan of the
-/// decoded latent frames). Launches only; the caller synchronises its stream.
+/// postprocess_video for one batch item: io.latent (fp32 or bf16, `io.latent_dtype`) -> io.rgb (uint8), under `plan`
+/// (tiles.decodePlan of the decoded latent frames, built by the caller from its own free-memory figure: this component
+/// never probes memory). Launches only; the caller synchronises its stream.
 pub fn decode(l: launch.Launcher, w: *const Decoder, plan: tiles.DecodePlan, io: Io) !void {
     var arena: launch.Arena = .{ .base = io.scratch, .cap = io.scratch_bytes };
     const lay = try Layout.init(&arena, plan);
     const g = plan.grid;
     const lat_n: u64 = @as(u64, plan.latent_frames) * plan.lh * plan.lw * tiles.latent_channels;
-    try l.run(.{ .call = .{ .latent_in = .{ .z = io.latent, .y = lay.latent16, .count = @intCast(lat_n), .inv_sf = invScale() } }, .grid = .{ @intCast((lat_n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
+    try l.run(.{ .call = .{ .latent_in = .{ .z = io.latent, .y = lay.latent16, .count = @intCast(lat_n), .inv_sf = invScale(), .z_f32 = @intFromBool(io.latent_dtype == .f32) } }, .grid = .{ @intCast((lat_n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
     const z_all = View.dense(lay.latent16, plan.latent_frames, plan.lh, plan.lw, tiles.latent_channels);
+    try l.mark("decode.input", .{}, z_all, false);
     const sh = g.sample_h;
     const sw = g.sample_w;
     const frame_elems: u64 = @as(u64, sh) * sw * 3;
@@ -274,7 +287,7 @@ fn simDecode(plan: tiles.DecodePlan, execute: bool, latent: []const u16, rgb: []
     const rgb_bytes = @as(u64, plan.sampleFramesTotal()) * plan.grid.sample_h * plan.grid.sample_w * 3;
     sim.region(lat_addr, lat_bytes, "latent");
     sim.region(rgb_addr, rgb_bytes, "rgb");
-    try decode(sim.launcher(), &wb.dec, plan, .{ .latent = lat_addr, .rgb = rgb_addr, .scratch = sbase, .scratch_bytes = sbytes });
+    try decode(sim.launcher(), &wb.dec, plan, .{ .latent = lat_addr, .latent_dtype = .bf16, .rgb = rgb_addr, .scratch = sbase, .scratch_bytes = sbytes });
     return sim;
 }
 

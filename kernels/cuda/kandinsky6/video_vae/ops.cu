@@ -194,21 +194,29 @@ extern "C" __global__ void __launch_bounds__(256) k6v_transpose(const K6vTranspo
 }
 
 // ---- Boundaries -----------------------------------------------------------------------------------------------------
-// Decode input (postprocess_video): bf16 DiT latent / scaling_factor on the GPU is a * (1 / b) in float (torch's
-// div_true_kernel_cuda for a CPU scalar divisor), rounded to bf16; then .to(float16): half(float(bf16)).
-// inv_sf = 1.0f / float(0.476986) computed on the host in fp32, as torch does.
+// Decode input (postprocess_video): latent / scaling_factor on the GPU, then .to(float16). torch 2.14.1's
+// div_true_kernel_cuda (BinaryDivTrueKernel.cu:35-52) takes a CPU scalar divisor as a * inv_b in opmath float, with
+// inv_b = float(1.0 / double(b)) from the host; the quotient keeps the latent's dtype.
+//   fp32 latent (z_f32 = 1, the PiFlow sampler's output): y = half(z * inv_sf), no intermediate rounding
+//   bf16 latent (z_f32 = 0):                              y = half(float(bf16(float(z) * inv_sf)))
 struct K6vLatentInArgs {
-    const __nv_bfloat16* z;
+    const void* z;  // float [count] or __nv_bfloat16 [count]
     __half* y;
     long long count;
     float inv_sf;
+    int z_f32;
 };
 
 extern "C" __global__ void __launch_bounds__(256) k6v_latent_in(const K6vLatentInArgs a) {
     const long long i = (long long)blockIdx.x * 256 + threadIdx.x;
     if (i >= a.count) return;
-    const __nv_bfloat16 b = __float2bfloat16_rn(__fmul_rn(__bfloat162float(a.z[i]), a.inv_sf));
-    a.y[i] = __float2half_rn(__bfloat162float(b));
+    if (a.z_f32) {
+        a.y[i] = __float2half_rn(__fmul_rn(static_cast<const float*>(a.z)[i], a.inv_sf));
+    } else {
+        const __nv_bfloat16 b =
+            __float2bfloat16_rn(__fmul_rn(__bfloat162float(static_cast<const __nv_bfloat16*>(a.z)[i]), a.inv_sf));
+        a.y[i] = __float2half_rn(__bfloat162float(b));
+    }
 }
 
 // I2V encode input (encode_i2va_first_frame): the uint8 image is normalised on the CPU in fp32, tensor / 127.5 - 1.0

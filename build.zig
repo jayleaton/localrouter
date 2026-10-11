@@ -15,13 +15,14 @@ pub fn build(b: *std.Build) void {
     const tokenizer = b.createModule(.{ .root_source_file = b.dependency("tensorfold", .{}).path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const qwen = @import("build/qwen.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, nvfp4.module, tokenizer, nvfp4.fatbins);
     const h3 = @import("build/minimax.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, nvfp4.fatbins);
+    const k6 = @import("build/kandinsky6.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, tokenizer, nvfp4.fatbins);
 
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 }, .{ .name = "kandinsky6", .module = k6 } },
     });
     const exe = b.addExecutable(.{ .name = "localrouter", .root_module = root });
     b.installArtifact(exe);
@@ -59,8 +60,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&qwen_tests.step);
     const h3_tests = b.addRunArtifact(b.addTest(.{ .root_module = h3 }));
     test_step.dependOn(&h3_tests.step);
+    const k6_tests = b.addRunArtifact(b.addTest(.{ .root_module = k6 }));
+    test_step.dependOn(&k6_tests.step);
     const unit_step = b.step("test-unit", "Unit tests only");
     unit_step.dependOn(&qwen_tests.step);
+    unit_step.dependOn(&k6_tests.step);
     unit_step.dependOn(&unit.step);
     unit_step.dependOn(nvfp4.tests);
     b.step("test-integration", "Integration tests only").dependOn(&integration.step);

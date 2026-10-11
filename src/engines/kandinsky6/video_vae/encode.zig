@@ -109,11 +109,15 @@ pub fn encode(l: launch.Launcher, e: *const Encoder, io: Io) !void {
     try l.run(.{ .call = .{ .rgb8_in = .{ .x = io.rgb, .y = lay.input, .count = @intCast(n) } }, .grid = .{ @intCast((n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
     var cur = lay.big[0];
     var spare = lay.big[1];
-    try l.run(try launch.conv(View.dense(lay.input, io.frames, io.h, io.w, 3), e.conv_in, .{}, cur));
+    const input = View.dense(lay.input, io.frames, io.h, io.w, 3);
+    try l.mark("encode.input", .{}, input, false);
+    try l.run(try launch.conv(input, e.conv_in, .{}, cur));
     var x = View.dense(cur, io.frames, io.h, io.w, e.conv_in.co);
+    try l.mark("encoder.conv_in", .{}, x, false);
+    var name: [64]u8 = undefined;
     for (e.down, 0..) |db, i| {
-        for (db.resnets) |r| {
-            x = try launch.resnet(l, work, x, r, spare);
+        for (db.resnets, 0..) |r, j| {
+            x = try launch.resnet(l, work, x, r, spare, try std.fmt.bufPrint(&name, "encoder.down_blocks.{d}.resnets.{d}", .{ i, j }));
             std.mem.swap(u64, &cur, &spare);
         }
         if (db.downsampler) |d| {
@@ -122,14 +126,20 @@ pub fn encode(l: launch.Launcher, e: *const Encoder, io: Io) !void {
             const o = launch.convOut(x, d, spec);
             try l.run(try launch.conv(x, d, spec, spare));
             x = View.dense(spare, o[0], o[1], o[2], d.co);
+            try l.mark("encoder.down_blocks.{d}.downsamplers.0", .{i}, x, false);
             std.mem.swap(u64, &cur, &spare);
         }
     }
-    x = try launch.midBlock(l, work, x, e.mid, spare);
+    x = try launch.midBlock(l, work, x, e.mid, spare, "encoder");
     if (x.ptr == spare) std.mem.swap(u64, &cur, &spare);
     try launch.groupNorm(l, work, x, e.norm_out, true, work.a);
-    try l.run(try launch.conv(View.dense(work.a, x.t, x.h, x.w, x.c), e.conv_out, .{}, spare));
-    try l.run(try launch.conv(View.dense(spare, x.t, x.h, x.w, e.conv_out.co), e.quant, .{ .causal_pad = false }, lay.moments));
+    const act = View.dense(work.a, x.t, x.h, x.w, x.c);
+    try l.mark("encoder.conv_act", .{}, act, false);
+    try l.run(try launch.conv(act, e.conv_out, .{}, spare));
+    const co = View.dense(spare, x.t, x.h, x.w, e.conv_out.co);
+    try l.mark("encoder.conv_out", .{}, co, false);
+    try l.run(try launch.conv(co, e.quant, .{ .causal_pad = false }, lay.moments));
+    try l.mark("quant_conv", .{}, View.dense(lay.moments, x.t, x.h, x.w, e.quant.co), false);
     const lp = x.positions();
     try l.run(.{ .call = .{ .posterior = .{ .moments = lay.moments, .eps = io.eps, .mean = io.mean, .stdv = io.stdv, .latent = io.latent, .positions = @intCast(lp), .lc = @intCast(tiles.latent_channels), .sf = @floatCast(@as(f64, 0.476986)) } }, .grid = .{ @intCast((lp * tiles.latent_channels + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
 }

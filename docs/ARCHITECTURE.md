@@ -79,8 +79,8 @@ pub const entry: engine.Entry = .{
 The `Engine` vtable has three calls: `load` (weights and kernels; returns resident bytes), `generate(job, sink, arena)`
 (writes output files into `job.dir`, reports progress through `sink`, returns the file names) and `unload`. Return
 `engine.Refused.Refused` for a request the model cannot serve (wrong size, missing input): the API turns it into a 400.
-`src/engines/testpattern.zig` is a complete, GPU-free example; `qwen_image_tool.zig` and `minimax_h3_tool.zig` are the
-real ones.
+`src/engines/testpattern.zig` is a complete, GPU-free example; `qwen_image_tool.zig`, `minimax_h3_tool.zig` and
+`kandinsky6_tool.zig` are the real ones.
 
 ### Any program (the `cmd` adapter)
 
@@ -117,3 +117,9 @@ The first engines (Qwen-Image 2.1, its Turbo checkpoint, and MiniMax H3) are wri
 of the same model (`tools/twin`) bit for bit: every operation alone and chained, then prompt to pixels and audio
 samples, on the GPU it ships for. Speed changes keep those bits, or they do not ship. `docs/dev/` has the measured
 results and the development history.
+
+Kandinsky-6 Pro distilled (`src/engines/kandinsky6/`) joins components that each own their directory, gates and
+receipts: the DiT (`dit/`), the video VAE (`video_vae/`) and the audio VAE and vocoder (`audio/`). `pipeline.zig` adds
+the text encoders, the seeded noise, the PiFlow sampler, the position tables and the weights from the published
+snapshot. Before anything loads, `admission.zig` lists every contract the path rests on with its status: production
+loads only when all are qualified on the target, and a diagnostic run (the check gates) refuses anything unresolved.

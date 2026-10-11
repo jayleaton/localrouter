@@ -62,6 +62,7 @@ pub const entries = [_]Entry{
     @import("../engines/qwen_image_tool.zig").entry,
     @import("../engines/qwen_image_tool.zig").turbo_entry,
     @import("../engines/minimax_h3_tool.zig").entry,
+    @import("../engines/kandinsky6_tool.zig").entry,
 };
 
 /// Whether the tool can serve `cap`: its configured capabilities, else its engine's, else plain text to image / video;

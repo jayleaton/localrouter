@@ -17,6 +17,7 @@ bit for bit against reference implementations of the same models:
 | **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
 | **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
 | **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
+| **Kandinsky-6 Pro distilled** (video with coupled audio, 10 PiFlow steps) | not yet available: the engine is built in but refuses to load until its GPU qualification passes | 864x480, 121 frames at 24 fps with mono 44.1 kHz audio; not yet measured |
 
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
 their input-image ports land. Check each model's advertised capabilities before submitting a job.
@@ -123,7 +124,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `testpattern` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq` and `qwen_inv_freq` are required), `testpattern` |
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
@@ -156,7 +157,7 @@ NVFP4 kernels and its Python model implementations were the baselines these engi
 against. Thank you, Ash. We expect to contribute parts of the Zig work back upstream.
 
 The INT8 attention kernels are SageAttention's, as shipped in NVIDIA's comfy-kitchen. Qwen-Image is by the Qwen team
-and MiniMax H3 by MiniMax; their weights are downloaded from their publishers under their own licenses.
+MiniMax H3 by MiniMax and Kandinsky-6 by Kandinsky Lab; their weights are downloaded from their publishers under their own licenses.
 Qwen-Image 2.1 is restricted to non-commercial research or evaluation under its
 [Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
 MiniMax H3's [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU,
