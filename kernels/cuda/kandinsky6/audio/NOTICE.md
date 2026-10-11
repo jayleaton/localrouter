@@ -61,7 +61,7 @@ Native bits reproduced offline (diagnostic only; the kernels below are not yet r
 
 Recorded, not reproduced (gates stay open):
 - the decoder's K 3 convs (Cin 512 / 1024 / 2048) and the vocoder's dilation-1 convs with K >= 3 run cuDNN 9.24's FFT
-  engine (engine id 4: `fft1d_r2c` / complex `gemvx` / `fft1d_c2r`), which no direct accumulation order reproduces;
+  engine (engine id 4: `fft1d_r2c` / complex `gemvx` / `fft1d_c2r`), which is not reproduced by any order tried offline;
   conv_in, the 1x1 convs, qkv and the dilated convs run implicit-GEMM engines, which `.fma` reproduces.
 - the middle attention's SDPA (fp32, head dimension 2048) dispatches MATH. Its steps composed from public ops (q and
   k^T scaled by sqrt(1 / sqrt(D)), matmul, softmax, matmul) reproduce the native output; `probs @ v` (cuBLASLt algo 16)

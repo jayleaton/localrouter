@@ -474,7 +474,7 @@ pub const NormPolicy = struct { eps: f32, reduce: DeviceReduce, den: Acc };
 pub const DecodePolicy = struct {
     /// Convolution accumulation (every decoder conv). D3 window: `.fma` (c, k ascending) equals native cuDNN on conv_in,
     /// the 1x1 convs and qkv (implicit-GEMM engines 28 / 1); every K 3 conv with Cin >= 512 runs cuDNN's FFT engine 4
-    /// (D3 probe API log and trace), which no direct accumulation order reproduces: unresolved.
+    /// (D3 probe API log and trace), which is not reproduced by any order tried offline: unresolved.
     acc: Acc,
     /// latent_unscale's division by scaling_factor (native, D3 window: `.reciprocal`).
     unscale: Div,
