@@ -12,8 +12,8 @@
 #                         its own sha256 is the kit's identity
 #   $KIT.operator-spec.json (beside the kit) the D2 jobs for the shared staging sealer (tools/kandinsky6/staging/seal.py): per-node
 #                         immutable image IDs (NODE_IMAGES, the nodes' `docker image inspect` receipt), artifacts with
-#                         sha256, the vae assets, budgets. The oracle jobs need the sealed shared oracle stack
-#                         (ORACLE_MANIFEST_SHA256); without it they are listed under pending_jobs, not jobs.
+#                         sha256, the vae assets, budgets; the oracle jobs name the original pybundle/ (pinned there,
+#                         checked against this kit's) as the runner's read-only D2 oracle root.
 # TOOLS_ONLY=1 restages tools/ and the spec over an existing kit without rebuilding bin/ or fatbin/, which must still
 # match MANIFEST.sha256 (the checked binary and kernels stay byte-identical).
 set -euo pipefail
@@ -63,6 +63,5 @@ cd $KIT
 find bin fatbin tools inputs upstream build.json pybundle.json pybundle/MANIFEST.sha256 -type f -not -path '*/.git/*' \
     -not -name '*.pyc' | LC_ALL=C sort | xargs -d '\n' sha256sum > MANIFEST.sha256
 python3 -I $REPO/tools/spark/k6-video-vae/operator_spec.py --kit $KIT --node-images $NODE_IMAGES \
-    --assets /home/sireggy/Documents/.t3/k6-staging/assets-1018d582/progress.json \
-    ${ORACLE_MANIFEST_SHA256:+--oracle-manifest $ORACLE_MANIFEST_SHA256} > $KIT.operator-spec.json
+    --assets /home/sireggy/Documents/.t3/k6-staging/assets-1018d582/progress.json > $KIT.operator-spec.json
 echo "{\"kit\": \"$KIT\", \"manifest_sha256\": \"$(sha256sum MANIFEST.sha256 | cut -d' ' -f1)\", \"files\": $(wc -l < MANIFEST.sha256), \"operator_spec\": \"$KIT.operator-spec.json\", \"operator_spec_sha256\": \"$(sha256sum $KIT.operator-spec.json | cut -d' ' -f1)\"}"

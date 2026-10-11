@@ -3,12 +3,13 @@
 jobs.json, and runs them under run-node.py (immutable image ID, --memory/--memory-swap, read-only root and kit, models at
 /models, K6_OUTPUT, window deadlines, memory / GPU / disk watch).
 
-  python -I operator_spec.py --kit DIR --node-images FILE --assets progress.json [--oracle-manifest SHA256] > spec.json
+  python -I operator_spec.py --kit DIR --node-images FILE --assets progress.json > spec.json
 
 Per job: the node's own image ID from FILE (`docker image inspect` on each node: the same repo digest has a different
 local ID per node), the command inside the container (the kit is mounted at /ws/kit), budgets that the runner enforces.
-The oracle jobs run the pinned native stack from the sealed shared oracle prefix (/opt/k6-oracle); until its manifest
-sha256 is given they are emitted under pending_jobs and seal nothing.
+The oracle jobs run the pinned native stack from this component's own checked bundle (pybundle.sh), copied unchanged to
+each node and mounted read-only at /opt/k6-oracle-d2: its identity (manifest, requirements, versions) is pinned below,
+must match the kit's pybundle/, and is what the runner admits (layout python/bin/python3.13 + site-packages).
 """
 
 from __future__ import annotations
@@ -20,7 +21,14 @@ from pathlib import Path
 
 GIB = 1024**3
 WORKSPACE = "~/k6-d2-qual"
-ORACLE_ROOT = "~/k6-staging-1018d582/oracle/prefix"
+# the original D2 bundle, as the runner admits it (kind d2-pybundle): node path, identity, layout, container mount
+ORACLE = {"kind": "d2-pybundle", "root": "~/k6-d2-oracle-ead020cbc102/pybundle",
+          "manifest_sha256": "ead020cbc102a5cb10fdbef43f85dfa63aa14585d1835ce0b7f3bc686eac6d1d",
+          "requirements_sha256": "6bb09d766dcb16babbf6bae448b0998cf0afaa053b6fa656d1520f0a37ccef0f",
+          "interpreter_relative_path": "python/bin/python3.13", "site_packages_relative_path": "site-packages",
+          "container_root": "/opt/k6-oracle-d2", "readonly": True,
+          "versions": {"python": "3.13.16", "torch": "2.14.1+cu130", "torchvision": "0.29.1+cu130",
+                       "diffusers": "0.40.0", "numpy": "2.5.3", "accelerate": "1.15.0", "safetensors": "0.8.0"}}
 ASSETS = ["vae/config.json", "vae/diffusion_pytorch_model.safetensors"]
 ARTIFACT_DIRS = ["bin", "fatbin", "tools", "inputs", "upstream"]
 ARTIFACT_FILES = ["build.json", "MANIFEST.sha256"]
@@ -46,9 +54,11 @@ def main() -> None:
     ap.add_argument("--kit", required=True, type=Path)
     ap.add_argument("--node-images", required=True, type=Path)
     ap.add_argument("--assets", required=True, type=Path)
-    ap.add_argument("--oracle-manifest")
     a = ap.parse_args()
     kit = a.kit.resolve()
+    for name, key in (("MANIFEST.sha256", "manifest_sha256"), ("requirements.txt", "requirements_sha256")):
+        got = sha256(kit / "pybundle" / name)
+        assert got == ORACLE[key], f"kit pybundle/{name} is {got}, not the pinned original bundle {ORACLE[key]}"
     inspect = json.loads(a.node_images.read_text())
     images = {node: line.split()[0] for node, line in inspect.items()}
     for node, image in images.items():
@@ -61,12 +71,12 @@ def main() -> None:
               "node_image_receipt": {"source": str(a.node_images), "sha256": sha256(a.node_images)}}
 
     def oracle(job_id, node, timeout, n_dec, other):
-        env = {"VAE": "/models/vae", "ORACLE_ROOT": "/opt/k6-oracle", "ORACLE_MANIFEST": "/opt/k6-oracle/MANIFEST.sha256",
-               "ORACLE_MANIFEST_SHA256": a.oracle_manifest or "", "JOB_BUDGET_S": str(timeout - 120),
+        env = {"VAE": "/models/vae", "ORACLE_ROOT": ORACLE["container_root"],
+               "ORACLE_MANIFEST_SHA256": ORACLE["manifest_sha256"], "JOB_BUDGET_S": str(timeout - 120),
                "TIMEOUT_N_DEC": str(n_dec), **{f"TIMEOUT_{c}": str(other) for c in ("S_DEC", "F_DEC", "S_ENC", "N_ENC")}}
         return {"id": job_id, "node": node, "image_id": images[node], **common,
                 "command": ["/bin/bash", "/ws/kit/tools/run-oracle.sh"], "environment": env,
-                "shared_oracle": {"root": ORACLE_ROOT, "manifest_sha256": a.oracle_manifest or ""},
+                "shared_oracle": ORACLE,
                 "timeout_seconds": timeout,
                 # runner accounting on unified memory: max(cgroup + GPU, MemAvailable drop + GPU) + 4 GiB helpers,
                 # so the GPU share is counted twice: ~2 x 30 GiB device + 10 GiB host + 4 GiB, not measured
@@ -79,10 +89,7 @@ def main() -> None:
               "max_resident_bytes": 48 * GIB, "max_disk_bytes": 8_000_000_000, "output_budget_bytes": 4 * GIB}
     oracles = [oracle("d2-oracle", "dgx01", 2700, 1200, 300),         # windows of 70+ minutes
                oracle("d2-oracle-short", "dgx01", 2100, 900, 240)]   # a 60-minute window
-    spec = {"schema": 1, "component": "d2-video-vae", "jobs": [engine] + (oracles if a.oracle_manifest else [])}
-    if not a.oracle_manifest:
-        spec["pending_jobs"] = {"reason": "needs the sealed shared oracle prefix with the D2 closure (pybundle "
-                                          "requirements.txt) and its MANIFEST.sha256", "jobs": oracles}
+    spec = {"schema": 1, "component": "d2-video-vae", "jobs": [engine] + oracles}
     print(json.dumps(spec, indent=1))
 
 
