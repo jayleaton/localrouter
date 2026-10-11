@@ -1,6 +1,7 @@
 """python -m stk_twin <command> --model DIR ...   (one GPU; prints one JSON summary line per command)
 
   gate       bf16 twin vs the diffusers transformer (per-step cosine) and the whole image vs the diffusers pipeline
+  fp32ref    the bf16 twin and bf16 diffusers (two attention backends) against diffusers in fp32, same inputs as gate
   calibrate  NVFP4 static input scales over the calibration prompts -> --out acts.json
   pack       converted weights for --precision nvfp4|fp8 (+ --acts), te (the text encoder) or vae -> --out DIR
   render     the gate prompts with a pack (or --precision bf16) -> --out DIR (PNGs + timings.json)
@@ -112,6 +113,76 @@ def cmd_floor(a):
                                     img_shapes=[[(1, h, w)]], img_mask=img_mask, return_dict=False)[0][:, -h * w:])
             res[str(s)] = {"efficient": cos_rel(outs[1], outs[0]), "math": cos_rel(outs[2], outs[0])}
     print(json.dumps({"floor": "diffusers: cuDNN attention vs memory-efficient and math backends", "size": a.size, "steps_cos": res}))
+
+
+def cmd_fp32ref(a):
+    """The gate's inputs through the bf16 twin and the bf16 diffusers transformer (cuDNN and memory-efficient
+    attention), each compared with the diffusers transformer run in fp32 on the same inputs. The fp32 run is a
+    comparison reference (it shares diffusers' code and the bf16 weights, upcast), not ground truth, and the distances
+    do not change the gate's verdict. Two processes so the fp32 model (twice the bf16 weights) is alone in memory:
+    --phase bf16 writes --out/bf16.pt, --phase fp32 reads it, upcasts the very same tensors (bf16 to fp32 is exact)
+    and checks their digests before comparing. Timesteps: the bf16-rounded t diffusers' pipeline passes, which the
+    twin's time embedding rounds to as well."""
+    from diffusers import QwenImage21Transformer2DModel
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    H, W = size(a.size)
+    h, w = H // 16, W // 16
+    sig = (1.0, 0.6, 0.2)
+
+    def digest(d) -> str:
+        import hashlib
+        m = hashlib.sha256()
+        for k in ("x", "emb", "mask", "img_mask"):
+            m.update(k.encode() + str(d[k].dtype).encode() + d[k].contiguous().view(torch.uint8).numpy().tobytes())
+        return m.hexdigest()
+
+    def ref_out(ref, d, s, dtype):
+        t = (torch.tensor([s * 1000], dtype=torch.float32).to(torch.bfloat16) / 1000).to(dtype).cuda()
+        return ref(hidden_states=d["x"].cuda().to(dtype), timestep=t, encoder_hidden_states=d["emb"].cuda().to(dtype),
+                   encoder_hidden_states_mask=d["mask"].cuda(), img_shapes=[[(1, h, w)]], img_mask=d["img_mask"].cuda(),
+                   return_dict=False)[0][:, -h * w:].float().cpu()
+
+    if a.phase == "bf16":
+        q = twin(a, "bf16")
+        prompt, seed = json.load(open(HERE / "prompts/gate.json"))[0]
+        emb, mask, pad = q.pipe._get_qwen_prompt_embeds(prompt, device=q.dev)
+        x = torch.from_numpy(noise(seed, 64 * h * w)).view(1, 64, h, w).cuda().to(torch.bfloat16)
+        d = {"emb": emb.cpu(), "mask": mask.cpu(), "img_mask": torch.cat([pad, pad.new_ones(1, h * w // 4)], dim=1).cpu(),
+             "x": x.flatten(2).transpose(1, 2).contiguous().cpu(), "out": {}}
+        with torch.inference_mode():
+            for s in sig:
+                d["out"][f"twin@{s}"] = q.dit(x, torch.tensor([s], device="cuda"), emb[:, : int(mask.sum())]).flatten(2).transpose(1, 2).float().cpu()
+        del q
+        torch.cuda.empty_cache()
+        ref = QwenImage21Transformer2DModel.from_pretrained(a.model, subfolder="transformer", torch_dtype=torch.bfloat16).cuda()
+        with torch.inference_mode():
+            for s in sig:
+                for name, be in (("cudnn", SDPBackend.CUDNN_ATTENTION), ("efficient", SDPBackend.EFFICIENT_ATTENTION)):
+                    with sdpa_kernel([be]):
+                        d["out"][f"{name}@{s}"] = ref_out(ref, d, s, torch.bfloat16)
+        d["inputs_sha256"] = digest(d)
+        torch.save(d, out / "bf16.pt")
+        print(json.dumps({"fp32ref": "bf16 phase", "saved": sorted(d["out"]), "inputs_sha256": d["inputs_sha256"]}))
+        return
+    d = torch.load(out / "bf16.pt")
+    if digest(d) != d["inputs_sha256"]:
+        raise SystemExit("fp32ref: the bf16 phase's inputs do not match their digest")
+    # straight onto the GPU: on unified memory (GB10) a host copy then .cuda() would hold the fp32 weights twice
+    ref = QwenImage21Transformer2DModel.from_pretrained(a.model, subfolder="transformer", torch_dtype=torch.float32, device_map="cuda")
+    res = {}
+    with torch.inference_mode():
+        for s in sig:
+            fp32 = ref_out(ref, d, s, torch.float32)
+            res[str(s)] = {k.split("@")[0]: cos_rel(v, fp32) for k, v in d["out"].items() if k.endswith(f"@{s}")}
+            res[str(s)]["cudnn_vs_efficient"] = cos_rel(d["out"][f"efficient@{s}"], d["out"][f"cudnn@{s}"])
+    r = {"fp32ref": "bf16 outputs compared with the diffusers transformer in fp32 (a reference, not ground truth)",
+         "model": a.model, "size": a.size, "inputs_sha256": d["inputs_sha256"], "inputs_identical": True,
+         "timesteps": "bf16-rounded, as diffusers' pipeline passes them", "steps": res}
+    (out / "fp32ref.json").write_text(json.dumps(r, indent=1))
+    print(json.dumps(r))
 
 
 def cmd_attncheck(a):
@@ -364,7 +435,7 @@ def cmd_capture(a):
 
 def main():
     ap = argparse.ArgumentParser(prog="stk_twin")
-    ap.add_argument("command", choices=["gate", "floor", "attncheck", "calibrate", "pack", "render", "bench", "tegate", "triton", "capture"])
+    ap.add_argument("command", choices=["gate", "floor", "fp32ref", "attncheck", "calibrate", "pack", "render", "bench", "tegate", "triton", "capture"])
     ap.add_argument("--model", required=True, help="the Qwen/Qwen-Image-2.1 (or -Turbo) snapshot directory")
     ap.add_argument("--repo", default="Qwen/Qwen-Image-2.1", help="pack: the checkpoint's repository, for the manifest")
     ap.add_argument("--pack", help="a pack directory (render, bench, capture)")
@@ -374,6 +445,7 @@ def main():
     ap.add_argument("--steps", type=int, default=0, help="0: the checkpoint's own (Turbo: its 8 sample_sigmas), else 25")
     ap.add_argument("--step", type=int, default=0, help="capture: the denoising step to record")
     ap.add_argument("--prompt", type=int, default=0, help="capture: the gate prompt (index into prompts/gate.json)")
+    ap.add_argument("--phase", choices=["bf16", "fp32"], default="bf16", help="fp32ref: which process")
     ap.add_argument("--light", action="store_true", help="capture: request, sigmas, context, latents, pixels only")
     ap.add_argument("--out", default="out")
     a = ap.parse_args()
