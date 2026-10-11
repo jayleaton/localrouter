@@ -168,7 +168,11 @@ entry points, all with 0-byte stack frames and no spills; the most is 118 regist
 
 Repository (same run, Zig 0.17.0): `zig build` exit 0; `zig build test` exit 0; the component tests ran 17 and 14 tests
 and all passed; `zig fmt --check build.zig build src tests` reports the same 21 findings as base, none new. These files
-are not yet reachable from `build.zig`, so `zig build` and `zig build test` cover the unchanged base graph.
+are not yet reachable from `build.zig`, so `zig build` and `zig build test` cover the unchanged base graph. The
+`zig build test` log contains a test runner `failed command:` diagnostic despite exit 0. This line is inherited: the
+D0 baseline `zig build test` log for the same base graph (`~/.cache/k6-d0/base-test.log`, sha256
+`4c582e561fee753a1e51ed8a61a13b60db457b9813455b721c7ecc552cd776b9`) has the same diagnostic on line 8, followed by
+`Build Summary: 22/22 steps succeeded; 77/77 tests passed`.
 
 Pending approved SM121 hardware (not claimed): every operator alone, chained blocks, encoder and decoder end to end and
 raw RGB / latent / distribution bytes equal to SM121 fixtures of the pinned native pipeline (captured as described under
