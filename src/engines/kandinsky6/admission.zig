@@ -9,6 +9,7 @@ const rope = @import("rope.zig");
 const vae_launch = @import("video_vae/launch.zig");
 const audio = @import("audio/vae.zig");
 const vocoder = @import("audio/vocoder.zig");
+const audio_launch = @import("audio/launch.zig");
 const shapes = @import("shapes.zig");
 
 pub const Use = enum { diagnostic, production };
@@ -58,7 +59,7 @@ pub fn contracts(out: *[9]Contract) []const Contract {
     out[n] = .{
         .name = "audio: PR #6 end-to-end decode and vocode entry points",
         .status = if (audioEntryPoints()) .gpu_qualification_pending else .unresolved,
-        .why = if (audioEntryPoints()) "D3's end-to-end audio gate" else "not written yet (requested from D3 as A2)",
+        .why = if (audioEntryPoints()) "D3's end-to-end audio gate with the chosen decode / vocode policies" else "PR #6's audio/launch.zig declares no decode / vocode",
     };
     n += 1;
     return out[0..n];
@@ -70,9 +71,9 @@ fn latentInF32() bool {
     return std.mem.eql(u8, @tagName(vae_launch.latent_in_dtype), "f32");
 }
 
-/// PR #6's whole-pass API (the names requested as A2; central adapts when D3 names them).
+/// PR #6's whole-pass API (A2): `audio/launch.zig` `decode` and `vocode`.
 fn audioEntryPoints() bool {
-    return @hasDecl(audio, "decode") and @hasDecl(vocoder, "vocode");
+    return @hasDecl(audio_launch, "decode") and @hasDecl(audio_launch, "vocode");
 }
 
 fn audioContract(name: []const u8, part: anytype, state: audio.WeightState) Contract {

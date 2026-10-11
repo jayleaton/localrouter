@@ -15,6 +15,14 @@
 //!   qwen_rope_freq   required: the same choice for Qwen2.5-VL's RoPE frequency matmul (`inv_freq @ position_ids`).
 //!   qwen_inv_freq    required: a file of 64 little-endian f32, Qwen2.5-VL's `rotary_emb.inv_freq` as captured from
 //!                    the native reference on the target (torch computes it at init; it is not re-derived here).
+//!   audio            required: the audio decoder's and vocoder's numeric choices (PR #6), every field named:
+//!                    {"prepare": {"eps": 1e-4, "reduce": "serial", "den": "fma"},
+//!                     "decode": {"acc": "fma", "unscale": "true_div", "silu": "true_div", "residual": "true_div",
+//!                                "norm_residual": {"eps": 1e-4, "reduce": {"strided_tree": 256}, "den": "fma"},
+//!                                "norm_qkv": {"eps": 1e-4, "reduce": {"serial_fma": {}}, "den": "fma"},
+//!                                "attention": "math_candidate"},
+//!                     "vocode": {"conv_acc": "fma", "aa_acc": "fma", "avg": "true_div"}}
+//!                    (the shape only: the values native uses are what the audio gates determine).
 //!   vae_free_mb      the free-memory figure the video VAE's tile plan uses (upstream derives its tiling from the free
 //!                    memory it sees; the plan decides the bits, so it is configuration, never a probe). Default 8192.
 //!   resident_mb      the scheduler's estimate of the loaded footprint.
@@ -78,21 +86,10 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     return true;
 }
 
-/// The options that select arithmetic, parsed strictly: a missing or unknown value is a load failure, never a default.
+/// The options that select arithmetic, parsed strictly (`kandinsky6.pipeline.parseOptions`): a missing or unknown
+/// value is a load failure, never a default.
 fn options(cfg: *const ToolConfig) !P.Options {
-    const fp = std.meta.stringToEnum(P.Fp32Linear, engine.optionString(cfg, "fp32_linear", "")) orelse return error.Fp32LinearNotSet;
-    const clip = std.meta.stringToEnum(P.Fp32Linear, engine.optionString(cfg, "clip_linear", "")) orelse return error.ClipLinearNotSet;
-    const rope = std.meta.stringToEnum(P.Fp32Linear, engine.optionString(cfg, "qwen_rope_freq", "")) orelse return error.QwenRopeFreqNotSet;
-    const inv = engine.optionString(cfg, "qwen_inv_freq", "");
-    if (inv.len == 0) return error.QwenInvFreqNotSet;
-    return .{
-        .use = .production,
-        .fp32_linear = fp,
-        .clip_linear = clip,
-        .qwen_rope_freq = rope,
-        .qwen_inv_freq = inv,
-        .vae_free_bytes = engine.optionInt(cfg, "vae_free_mb", 8192) << 20,
-    };
+    return P.parseOptions(cfg.options, .production);
 }
 
 const Kandinsky6 = struct {
@@ -103,7 +100,7 @@ const Kandinsky6 = struct {
     fn load(ptr: *anyopaque) anyerror!u64 {
         const t: *Kandinsky6 = @ptrCast(@alignCast(ptr));
         const o = options(t.cfg) catch |err| {
-            std.log.err("kandinsky6: options.fp32_linear, clip_linear and qwen_rope_freq must name the FP32 arithmetic (tf32_rna, tf32_truncate or fp32), and qwen_inv_freq the captured inv_freq file", .{});
+            std.log.err("kandinsky6: options.fp32_linear, clip_linear and qwen_rope_freq must name the FP32 arithmetic (tf32_rna, tf32_truncate or fp32), qwen_inv_freq the captured inv_freq file, and audio every audio policy field", .{});
             return err;
         };
         t.p = try P.Pipeline.create(t.env.gpa, t.env.io, t.cfg.weights, o);
@@ -194,4 +191,29 @@ test "only the native request passes the check" {
 test "arithmetic options have no default" {
     const none: ToolConfig = .{ .id = "k", .kind = .video, .engine = "kandinsky6", .weights = "/w" };
     try std.testing.expectError(error.Fp32LinearNotSet, options(&none));
+}
+
+test "every arithmetic and audio policy option is parsed whole or refused" {
+    const json =
+        \\{"fp32_linear": "fp32", "clip_linear": "fp32", "qwen_rope_freq": "fp32", "qwen_inv_freq": "/f",
+        \\ "audio": {"prepare": {"eps": 1e-4, "reduce": "serial", "den": "fma"},
+        \\  "decode": {"acc": "fma", "unscale": "true_div", "silu": "true_div", "residual": "true_div",
+        \\    "norm_residual": {"eps": 1e-4, "reduce": {"strided_tree": 256}, "den": "fma"},
+        \\    "norm_qkv": {"eps": 1e-4, "reduce": {"serial_fma": {}}, "den": "mul_add"}, "attention": "math_candidate"},
+        \\  "vocode": {"conv_acc": "fma", "aa_acc": "mul_add", "avg": "reciprocal"}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const cfg: ToolConfig = .{ .id = "k", .kind = .video, .engine = "kandinsky6", .weights = "/w", .options = parsed.value };
+    const a = (try P.parseOptions(cfg.options, .production)).audio;
+    try std.testing.expectEqual(@as(u32, 256), a.decode.norm_residual.reduce.strided_tree);
+    try std.testing.expectEqual(.mul_add, a.vocode.aa_acc);
+    // a missing field is refused, not defaulted
+    const partial = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"fp32_linear": "fp32", "clip_linear": "fp32", "qwen_rope_freq": "fp32", "qwen_inv_freq": "/f",
+        \\ "audio": {"prepare": {"eps": 1e-4, "reduce": "serial", "den": "fma"}, "vocode": {"conv_acc": "fma", "aa_acc": "fma", "avg": "true_div"}}}
+    , .{});
+    defer partial.deinit();
+    const bad: ToolConfig = .{ .id = "k", .kind = .video, .engine = "kandinsky6", .weights = "/w", .options = partial.value };
+    try std.testing.expectError(error.AudioPolicyInvalid, P.parseOptions(bad.options, .production));
 }

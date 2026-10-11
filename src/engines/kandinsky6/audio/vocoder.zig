@@ -106,20 +106,40 @@ pub const Vocoder = struct {
         return .{ v.batch, 1, @as(u64, v.frames) * hop };
     }
 
-    /// Resident: prepared fp32 weights, biases, SnakeBeta parameters and filters. Working (per request), at the largest
-    /// stage C*T: the stage input, three AMP-block outputs, two work buffers and the Activation1d's 2x intermediate.
-    pub fn memory(v: Vocoder) Memory {
-        const p = params();
+    fn maxCt(v: Vocoder) u64 {
         var max_ct: u64 = @as(u64, upsample_initial_channel) * v.frames;
         var t: u64 = v.frames;
         for (upsample_rates, 0..) |r, i| {
             t *= r;
             max_ct = @max(max_ct, @as(u64, stageChannels(i)) * t);
         }
+        return max_ct;
+    }
+
+    /// Resident: the checkpoint's fp32 weights, biases, SnakeBeta parameters and filters. Working (per request), at the
+    /// largest stage C*T: the stage input, three AMP-block outputs, two work buffers and the Activation1d's 2x
+    /// intermediate.
+    pub fn memory(v: Vocoder) Memory {
+        const p = params();
         return .{
             .resident_bytes = (p.weights + p.biases + p.snake + p.filters) * 4,
-            .working_bytes = (6 * max_ct + 2 * max_ct) * @as(u64, v.batch) * 4,
+            .working_bytes = (6 * v.maxCt() + 2 * v.maxCt()) * @as(u64, v.batch) * 4,
         };
+    }
+
+    /// `memory().working_bytes` partitioned (offsets in floats into one contiguous scratch allocation): `stage` is the
+    /// stage input (the upsampler's output), `amp` the three AMP-block outputs, `work` two buffers (conv_pre's output,
+    /// each Activation1d's output, each conv's output, the stage average), `up2` the Activation1d's 2x intermediate.
+    pub const Scratch = struct { slot: u64, stage: u64, amp: [3]u64, work: [2]u64, up2: u64, floats: u64 };
+
+    pub fn scratch(v: Vocoder) Scratch {
+        const slot = v.maxCt() * v.batch;
+        return .{ .slot = slot, .stage = 0, .amp = .{ slot, 2 * slot, 3 * slot }, .work = .{ 4 * slot, 5 * slot }, .up2 = 6 * slot, .floats = 8 * slot };
+    }
+
+    /// Bytes of the one scratch allocation `vocode` (launch.zig) carves its working tensors from.
+    pub fn scratchBytes(v: Vocoder) u64 {
+        return v.scratch().floats * 4;
     }
 
     /// Every operator under `use` with weights in `state`, before any allocation. Checkpoint weights are used as stored;
@@ -132,6 +152,78 @@ pub const Vocoder = struct {
         for (forward_ops) |op| try vae.admitOp(op, use);
     }
 };
+
+// ------------------------------------------------------------------------------------------------ weight binding
+
+/// A convolution's checkpoint weight (used as stored) and its bias (none for conv_post).
+pub const ConvWeights = struct { w: vae.Weight, bias: ?vae.View };
+/// One Activation1d: SnakeBeta's log-scale alpha / beta [C] and the up / down 12-tap filters [12].
+pub const ActWeights = struct { alpha: vae.View, beta: vae.View, up: vae.View, down: vae.View };
+/// AMPBlock1: convs1 (dilations 1, 3, 5), convs2 (dilation 1), activations a1 = activations[2n], a2 = [2n + 1].
+pub const AmpWeights = struct { convs1: [3]ConvWeights, convs2: [3]ConvWeights, acts: [6]ActWeights };
+
+pub const num_blocks = upsample_rates.len * resblock_kernel_sizes.len;
+
+/// Every vocoder tensor, named as the selected vocoder/ checkpoint stores them (no prefix): 667 tensors.
+pub const VocoderWeights = struct {
+    conv_pre: ConvWeights,
+    ups: [upsample_rates.len]ConvWeights,
+    /// resblocks[3 * stage + j], kernel size resblock_kernel_sizes[j].
+    blocks: [num_blocks]AmpWeights,
+    post: ActWeights,
+    conv_post: ConvWeights,
+};
+
+/// `bias`: the bias length (Cout: shape[0] for a conv, shape[1] for a transposed conv), or null for none.
+fn bindConv(src: vae.Source, sink: vae.Sink, comptime prefix: []const u8, shape: [3]u64, bias: ?u64) !ConvWeights {
+    var sha: [32]u8 = undefined;
+    const t = try src.read(prefix ++ ".weight", &shape, &sha);
+    const v = try sink.place(prefix ++ ".weight", t.data, &shape);
+    var out: ConvWeights = .{ .w = .checkpointEffective(v, prefix ++ ".weight", sha), .bias = null };
+    if (bias) |n| {
+        const b = try src.read(prefix ++ ".bias", &.{n}, &sha);
+        out.bias = try sink.place(prefix ++ ".bias", b.data, &.{n});
+    }
+    return out;
+}
+
+fn bindAct(src: vae.Source, sink: vae.Sink, comptime prefix: []const u8, c: u64) !ActWeights {
+    var out: ActWeights = undefined;
+    var sha: [32]u8 = undefined;
+    inline for (.{ .{ "alpha", ".act.alpha", false }, .{ "beta", ".act.beta", false }, .{ "up", ".upsample.filter", true }, .{ "down", ".downsample.lowpass.filter", true } }) |e| {
+        const filter = e[2];
+        const t = try src.read(prefix ++ e[1], if (filter) &.{ 1, 1, filter_taps } else &.{c}, &sha);
+        @field(out, e[0]) = try sink.place(prefix ++ e[1], t.data, if (filter) &.{filter_taps} else &.{c});
+    }
+    return out;
+}
+
+/// Reads and places every vocoder tensor as stored (`WeightState.checkpoint_effective`: the native loader removes
+/// weight norm before loading plain weights, so nothing is folded or prepared).
+pub fn bindVocoder(src: vae.Source, sink: vae.Sink) !VocoderWeights {
+    @setEvalBranchQuota(200000); // the 667 comptime names
+    var out: VocoderWeights = undefined;
+    out.conv_pre = try bindConv(src, sink, "conv_pre", .{ upsample_initial_channel, num_mels, 7 }, upsample_initial_channel);
+    var cin: u64 = upsample_initial_channel;
+    inline for (0..upsample_rates.len) |i| {
+        const ch: u64 = stageChannels(i);
+        out.ups[i] = try bindConv(src, sink, std.fmt.comptimePrint("ups.{d}.0", .{i}), .{ cin, ch, upsample_kernel_sizes[i] }, ch);
+        inline for (0..resblock_kernel_sizes.len) |j| {
+            const blk = std.fmt.comptimePrint("resblocks.{d}", .{3 * i + j});
+            const b = &out.blocks[3 * i + j];
+            inline for (0..3) |n| {
+                const shape = [3]u64{ ch, ch, resblock_kernel_sizes[j] };
+                b.convs1[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs1.{d}", .{ blk, n }), shape, ch);
+                b.convs2[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs2.{d}", .{ blk, n }), shape, ch);
+            }
+            inline for (0..6) |m| b.acts[m] = try bindAct(src, sink, std.fmt.comptimePrint("{s}.activations.{d}", .{ blk, m }), ch);
+        }
+        cin = ch;
+    }
+    out.post = try bindAct(src, sink, "activation_post", cin);
+    out.conv_post = try bindConv(src, sink, "conv_post", .{ 1, cin, 7 }, null);
+    return out;
+}
 
 // -------------------------------------------------------------------------------------- host references (fp32)
 
@@ -306,4 +398,36 @@ test "snake and avg3 references" {
     var o: [3]f32 = undefined;
     avg3(&r, &r, &r, &o, .of(3, .true_div));
     try testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, &o);
+}
+
+test "vocoder scratch partitions exactly its working memory" {
+    for ([_][2]u32{ .{ 1, 436 }, .{ 2, 3 } }) |bf| {
+        const v = try Vocoder.init(bf[0], bf[1]);
+        const s = v.scratch();
+        try testing.expectEqual(v.memory().working_bytes, v.scratchBytes());
+        try testing.expectEqual(s.up2 + 2 * s.slot, s.floats);
+        try testing.expectEqual(@as(u64, 24) * bf[1] * hop * bf[0], s.slot); // the last stage: 24 x 512F
+    }
+}
+
+test "vocoder binder: binds the checkpoint's 667 tensors as stored, by name and shape" {
+    const data = try testing.allocator.alloc(f32, upsample_initial_channel * 768 * 16);
+    defer testing.allocator.free(data);
+    @memset(data, 0.5);
+    var f: vae.KeyFixtureSource = .{ .file = "vocoder", .data = data };
+    var sk: vae.RecordingSink = .{};
+    const w = try bindVocoder(f.source(), sk.sink());
+    // every fixture line read exactly once (a repeat is refused), so the bound set is the checkpoint's key set
+    try testing.expectEqual(667, vae.KeyFixtureSource.count("vocoder"));
+    try testing.expectEqual(667, f.reads);
+    try testing.expectEqual(667, sk.placed);
+    try testing.expectEqual(vae.WeightState.checkpoint_effective, w.conv_pre.w.state);
+    try testing.expectEqual(null, w.conv_post.bias);
+    try w.conv_post.w.view.expectShape(&.{ 1, 24, 7 });
+    try w.ups[0].w.view.expectShape(&.{ 1536, 768, 16 });
+    try w.ups[0].bias.?.expectShape(&.{768});
+    try w.blocks[17].convs1[2].w.view.expectShape(&.{ 24, 24, 11 });
+    try w.blocks[17].acts[5].down.expectShape(&.{filter_taps});
+    try w.post.alpha.expectShape(&.{24});
+    for (w.blocks) |b| for (b.convs1 ++ b.convs2) |c| try c.w.requirePrepared(.diagnostic);
 }

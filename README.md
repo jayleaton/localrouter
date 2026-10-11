@@ -124,7 +124,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq` and `qwen_inv_freq` are required), `testpattern` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq`, `qwen_inv_freq` and `audio` are required), `testpattern` |
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet

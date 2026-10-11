@@ -123,3 +123,6 @@ receipts: the DiT (`dit/`), the video VAE (`video_vae/`) and the audio VAE and v
 the text encoders, the seeded noise, the PiFlow sampler, the position tables and the weights from the published
 snapshot. Before anything loads, `admission.zig` lists every contract the path rests on with its status: production
 loads only when all are qualified on the target, and a diagnostic run (the check gates) refuses anything unresolved.
+`localrouter check k6-components` (one stage, from the reference's own inputs where it has them) and `k6-e2e` (the
+whole pipeline) record the pipeline's ops in the reference capture's format (`kandinsky6/rec.zig`), for
+`stk_twin.kandinsky6.compare`.

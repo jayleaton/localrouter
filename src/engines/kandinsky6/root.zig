@@ -12,6 +12,7 @@ pub const central = @import("central.zig");
 pub const vae_gpu = @import("vae_gpu.zig");
 pub const admission = @import("admission.zig");
 pub const pipeline = @import("pipeline.zig");
+pub const rec = @import("rec.zig");
 pub const text = struct {
     pub const prompt = @import("text/prompt.zig");
     pub const qwen25 = @import("text/qwen25.zig");
@@ -42,6 +43,7 @@ test {
     _ = vae_gpu;
     _ = admission;
     _ = pipeline;
+    _ = rec;
     _ = text.prompt;
     _ = text.qwen25;
     _ = text.clip;

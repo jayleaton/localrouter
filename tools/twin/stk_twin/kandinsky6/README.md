@@ -88,7 +88,8 @@ ref                  {"sha": hex, "dtype": "bfloat16|float16|float32|uint8|bool|
 DIR/cublaslt.log, DIR/cublas.log, DIR/e2e/output.mp4 (+ output.txt)   when produced
 ```
 
-The native side writes the same format:
+The native side writes the same format (`localrouter check k6-components --stages ...` and `localrouter check k6-e2e`,
+src/cli/k6.zig):
 
 - The same op names and the same role names.
 - Its own `stage` notes, if it has stages.
