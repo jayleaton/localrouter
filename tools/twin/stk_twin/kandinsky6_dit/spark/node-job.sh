@@ -17,13 +17,19 @@
 #   time    STOP_NEW = DEADLINE - 20 min: no step starts at or after it, and none starts unless its max minutes end by
 #           CLEANUP = DEADLINE - 10 min (a step's timeout is also capped at CLEANUP). At CLEANUP the guard terminates our
 #           step's process group (KILL 10 s later); at DEADLINE it KILLs the group and stops this script.
-#   memory  the node total of everything this job starts: a guard samples MemAvailable every second and takes our use
-#           as max(RSS of every process in the step's session + their nvidia-smi used memory, MemAvailable when this
-#           job started - MemAvailable now), so the guard, the kit, caches and any helper count too (GB10 memory is
-#           unified: device allocations show up there). It kills the step if that exceeds MAX_GIB (96: the 100 GiB
-#           contract minus 4 GiB for the container runtime started before this script) or MemAvailable falls under
-#           MIN_GIB (default 8). A step does not start unless MemAvailable >= its declared peak + MIN_GIB and the job
-#           total + that peak stays within MAX_GIB. Logged: memavail.log (every sample), guard.log (actions).
+#   memory  bounded and measured for the whole job, <= 100 GiB total. The job must run in its own cgroup v2 with
+#           memory.max <= 96 GiB (`docker run --memory 96g`, or `systemd-run --scope -p MemoryMax=96G` on the host);
+#           preflight refuses a shared or unlimited cgroup. Every process this job starts (guard, tar, python, page
+#           cache) is charged there, so memory.current is the job's host-side total and memory.peak its high-water
+#           mark. Device allocations made through the driver are not cgroup-charged, so the guard adds GPU memory
+#           as nvidia-smi's device-wide memory.used (conservative: every app on the device counts against us),
+#           sampled every second. FAIL CLOSED: the query must exit 0 within 10 s with every row numeric; [N/A],
+#           "Not Supported", an empty or partly numeric answer, a timeout or an error fails preflight, refuses a step
+#           and kills a running step. No estimate stands in for it. Outside the cgroup, HELPER_RESERVE_GIB (2: the
+#           `docker run` / `systemd-run` client and the login shell) is counted as a fixed reserve. The total is
+#           cgroup + GPU + reserve <= TOTAL_GIB (100): the guard kills the step above it, and a step starts only if
+#           the total + its declared peak fits. MemAvailable >= MIN_GIB (8) stays as a supplemental headroom guard.
+#           Logged: memavail.log (every sample), guard.log (actions).
 #   disk    a step does not start if du($WORK) + its output budget exceeds 200 GB, or the filesystem lacks the budget
 #           + 5 GB; du before and after every step is recorded.
 #   GPU     one heavy job per node: an exclusive flock on $WORK/.gpu.lock, held for the whole run (refused if another
@@ -74,17 +80,21 @@ for m in $MODES; do [[ " tf32_rna tf32_truncate fp32 " == *" $m "* ]] || die "MO
 [[ -n ${MODES// /} ]] || die "MODES is empty"
 
 # contract constants (not overridable)
-MAX_GIB=96      # node total for everything this job starts: 100 GiB contract minus 4 GiB for the container runtime
+TOTAL_GIB=100   # cgroup (memory.current) + GPU memory + helper reserve: the contract's node total for this job
+HELPER_RESERVE_GIB=2   # processes outside the job's cgroup: the docker / systemd-run client and the login shell
+CG_MAX_GIB=96   # the job's cgroup memory.max must be at most this (leaves room for the GPU term's own accounting)
 DISK_GB=200
 STOP_NEW_S=1200
 CLEANUP_S=600
 GIB_KIB=1048576
 MIN_KIB=$(( MIN_GIB * GIB_KIB ))
-MAX_KIB=$(( MAX_GIB * GIB_KIB ))
+MAX_KIB=$(( TOTAL_GIB * GIB_KIB ))
 SHA12=${KIT_SHA:0:12}
 KD=$WORK/kit-$SHA12
 LOCK=$WORK/.gpu.lock
+# the venv's python, the image's /usr/local/bin/python, or the shared prefix's bin/python3.13
 PY=$VENV/bin/python
+[[ -x $PY ]] || PY=$VENV/bin/python3.13
 TWIN=$KD/repo/tools/twin
 if [[ -n ${DEADLINE:-} ]]; then
     STOP_NEW=$(( DEADLINE - STOP_NEW_S ))
@@ -107,7 +117,21 @@ export STK_K6_SRC=$KD/kandinsky6-upstream STK_K6_DIT_FATBINS=$KD/fatbins KIT_SHA
 unset STK_K6_CONFIG   # the twin's built-in Pro-distill config, never a file from elsewhere
 
 avail_kib() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
-JOB_BASE=$(avail_kib)   # MemAvailable before this job does anything: every later drop counts as ours (node total)
+JOB_BASE=$(avail_kib)   # MemAvailable before this job does anything (supplemental and fallback accounting)
+# this job's cgroup v2 directory (the container's own, or the systemd scope it was started in)
+CG=/sys/fs/cgroup$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup 2> /dev/null)
+cg_kib() { local v; v=$(cat "$CG/$1" 2> /dev/null) || { echo -1; return; }; [[ $v =~ ^[0-9]+$ ]] && echo $(( v / 1024 )) || echo -1; }
+cg_max_kib() { local v; v=$(cat "$CG/memory.max" 2> /dev/null) || { echo -1; return; }; [[ $v == max ]] && echo -2 || echo $(( v / 1024 )); }
+# device-wide GPU memory.used in KiB, or -1 unless nvidia-smi exits 0 within 10 s and every row (blank rows included) is
+# numeric (fail closed). The trailing rc line keeps $(...) from dropping trailing blank rows.
+gpu_kib() {
+    local out rc
+    out=$(timeout 10 nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2> /dev/null; echo "rc=$?")
+    rc=${out##*rc=}; out=${out%rc=*}
+    [[ $rc == 0 ]] || { echo -1; return; }
+    awk 'BEGIN {n = 0; bad = 0} {gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 ~ /^[0-9]+$/) {s += $0; n++} else bad = 1}
+         END {if (n > 0 && !bad) print s * 1024; else print -1}' <<< "${out%$'\n'}"
+}
 gib() { awk -v k="$1" 'BEGIN {printf "%.1f", k / 1048576}'; }
 du_bytes() { du -sxb "$WORK" 2> /dev/null | cut -f1; }
 df_bytes() { df -B1 --output=avail "$WORK" | tail -1 | tr -dc 0-9; }
@@ -323,6 +347,35 @@ preflight() {
     echo "disk: WORK uses $(( used / 1000000000 )) GB, $(( free / 1000000000 )) GB free; $JOB declares $(total_out_gb) GB"
     (( used + need <= DISK_GB * 1000000000 )) || { echo "FAIL WORK usage + budget over $DISK_GB GB"; bad=1; }
     (( free >= need + 5000000000 )) || { echo "FAIL filesystem has under budget + 5 GB free"; bad=1; }
+    local cgmax cgcur gk
+    cgmax=$(cg_max_kib); cgcur=$(cg_kib memory.current)
+    if (( cgmax == -1 || cgcur < 0 )); then
+        echo "FAIL no cgroup v2 memory accounting at $CG (memory.max / memory.current unreadable)"; bad=1
+    elif (( cgmax == -2 || cgmax > CG_MAX_GIB * GIB_KIB )); then
+        echo "FAIL cgroup $CG memory.max is $( (( cgmax == -2 )) && echo unlimited || echo "$(gib "$cgmax") GiB"): run in its own cgroup with memory.max <= $CG_MAX_GIB GiB"; bad=1
+    else
+        echo "ok   cgroup $CG: memory.max $(gib "$cgmax") GiB, memory.current $(gib "$cgcur") GiB, memory.peak $( p=$(cg_kib memory.peak); (( p < 0 )) && echo n/a || echo "$(gib "$p") GiB")"
+    fi
+    gk=$(gpu_kib)
+    if (( gk >= 0 )); then
+        echo "ok   GPU memory accounting: nvidia-smi memory.used, $(gib "$gk") GiB used now (+ helper reserve $HELPER_RESERVE_GIB GiB)"
+    else
+        echo "FAIL GPU memory: nvidia-smi gave no complete numeric memory.used ([N/A], unsupported, timeout or error): the job total cannot be bounded"; bad=1
+    fi
+    if [[ -n ${ORACLE_MANIFEST:-} ]]; then
+        if [[ $(sha256sum < "$ORACLE_MANIFEST" | cut -d' ' -f1) == "${ORACLE_MANIFEST_SHA256:-}" ]]; then
+            echo "ok   oracle prefix MANIFEST $ORACLE_MANIFEST sha256 $ORACLE_MANIFEST_SHA256"
+            if [[ ${ORACLE_VERIFY:-1} == 1 ]]; then
+                if (cd "$VENV" && sha256sum -c --quiet --strict "$ORACLE_MANIFEST") > "$WORK/tmp/oracle-verify.log" 2>&1; then
+                    echo "ok   every oracle prefix file matches its MANIFEST"
+                else
+                    echo "FAIL oracle prefix files differ from the MANIFEST ($WORK/tmp/oracle-verify.log)"; bad=1
+                fi
+            fi
+        else
+            echo "FAIL oracle prefix MANIFEST sha256 is not ORACLE_MANIFEST_SHA256"; bad=1
+        fi
+    fi
     avail=$(avail_kib)
     echo "memory: MemAvailable $(gib "$avail") GiB; $JOB's largest declared peak $(max_peak_gib) GiB + MIN_GIB $MIN_GIB"
     (( avail >= ($(max_peak_gib) + MIN_GIB) * GIB_KIB )) || { echo "FAIL MemAvailable too low"; bad=1; }
@@ -387,6 +440,7 @@ finalize() {
         echo "kit: $KIT_SHA"
         echo "started: $(date -u -d "@$START" +%FT%TZ)  ended: $(date -u +%FT%TZ)  deadline: $(date -u -d "@$DEADLINE" +%FT%TZ)"
         echo "result: $RESULT"
+        echo "memory: cgroup $CG memory.peak $( p=$(cg_kib memory.peak); (( p < 0 )) && echo n/a || echo "$(gib "$p") GiB"), memory.max $(gib "$(cg_max_kib)") GiB; GPU nvidia-smi memory.used; helper reserve $HELPER_RESERVE_GIB GiB"
         echo
         column -t -s $'\t' "$R/steps.tsv" 2> /dev/null || cat "$R/steps.tsv"
         echo
@@ -407,47 +461,24 @@ finalize() {
 }
 
 # the guard: one sample a second; kills only our current step's process group
-# Members of session $1 from /proc (no procps: the oracle image is python:3.13-slim) and their summed VmRSS in KiB.
-sess_pids() {
-    local f st
-    for f in /proc/[0-9]*/stat; do
-        st=$(< "$f") 2> /dev/null || continue
-        st=${st##*) }
-        read -r _ _ _ sid _ <<< "$st"
-        [[ $sid == "$1" ]] && { f=${f#/proc/}; echo "${f%/stat}"; }
-    done
-}
-sess_rss() {
-    local p k=0 v
-    for p in $(sess_pids "$1"); do
-        v=$(awk '/^VmRSS:/ {print $2}' "/proc/$p/status" 2> /dev/null)
-        k=$(( k + ${v:-0} ))
-    done
-    echo "$k"
-}
 
 guard() {
-    local now avail pid name base cur="" peak=0 rss gpu=0 drop use reason tick=0 term_at=0 apps p mib
+    local now avail pid name base cur="" peak=0 cgk gpu=0 drop use reason tick=0 term_at=0
     while :; do
         now=$(date +%s); avail=$(avail_kib); pid=""; name=""; base=0
         [[ -f $R/.step ]] && read -r pid name base < "$R/.step"
-        rss=0; drop=0; use=0
+        drop=0; use=0
+        cgk=$(cg_kib memory.current)
+        gpu=$(gpu_kib)
+        drop=$(( JOB_BASE - avail )); (( drop < 0 )) && drop=0
+        use=$(( (cgk < 0 ? 0 : cgk) + (gpu < 0 ? 0 : gpu) + HELPER_RESERVE_GIB * GIB_KIB ))
         if [[ -n $pid ]]; then
             [[ $name == "$cur" ]] || { cur=$name; peak=0; term_at=0; }
-            rss=$(sess_rss "$pid")
-            if (( tick % 5 == 0 )); then
-                gpu=0
-                apps=$(timeout 10 nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2> /dev/null)
-                for p in $(sess_pids "$pid"); do
-                    mib=$(awk -F', *' -v p="$p" '$1 == p && $2 ~ /^[0-9]+$/ {s += $2} END {print s + 0}' <<< "$apps")
-                    gpu=$(( gpu + mib * 1024 ))
-                done
-            fi
-            drop=$(( JOB_BASE - avail )); (( drop < 0 )) && drop=0
-            use=$(( rss + gpu )); (( drop > use )) && use=$drop
             if (( use > peak )); then peak=$use; echo "$peak" > "$R/.peak.$name"; fi
             reason=""
-            (( use > MAX_KIB )) && reason="our use $(gib "$use") GiB over MAX_GIB $MAX_GIB"
+            (( use > MAX_KIB )) && reason="job total $(gib "$use") GiB (cgroup $(gib "$cgk") + GPU $(gib "$gpu") + reserve $HELPER_RESERVE_GIB) over TOTAL_GIB $TOTAL_GIB"
+            (( gpu < 0 )) && reason="GPU memory query failed (no complete numeric memory.used): job total unbounded"
+            (( cgk < 0 )) && reason="cgroup memory.current unreadable: job total unbounded"
             (( avail < MIN_KIB )) && reason="MemAvailable $(gib "$avail") GiB under MIN_GIB $MIN_GIB"
             (( now >= CLEANUP_AT )) && reason="cleanup point (DEADLINE - 10 min)"
             if [[ -n $reason ]]; then
@@ -466,7 +497,7 @@ guard() {
             [[ -n $pid ]] && kill -KILL -- "-$pid" 2> /dev/null
             kill -TERM "$MAIN" 2> /dev/null
         fi
-        echo "$now $avail ${name:--} $rss $gpu $drop $use"
+        echo "$now $avail ${name:--} $cgk $gpu $drop $use"
         tick=$(( tick + 1 ))
         sleep 1
     done
@@ -489,8 +520,14 @@ run_step() {
         log "$name: not started: WORK $dub GB + budget $outgb GB over $DISK_GB GB, or $(( free / 1000000000 )) GB free"
         record "$name" "not-run: disk" - - - "$max" "$dub" -; return 1
     fi
-    if (( avail < (peak + MIN_GIB) * GIB_KIB || JOB_BASE - avail + peak * GIB_KIB > MAX_KIB )); then
-        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB, or job total $(gib $(( JOB_BASE - avail ))) GiB + $peak over MAX_GIB $MAX_GIB"
+    local cgk g
+    cgk=$(cg_kib memory.current); g=$(gpu_kib)
+    if (( cgk < 0 || g < 0 )); then
+        log "$name: not started: cgroup memory.current or GPU memory.used unreadable (fail closed)"
+        record "$name" "not-run: memory unaccounted" - - - "$max" "$dub" -; return 1
+    fi
+    if (( avail < (peak + MIN_GIB) * GIB_KIB || cgk + g + (HELPER_RESERVE_GIB + peak) * GIB_KIB > MAX_KIB )); then
+        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB, or cgroup $(gib "$cgk") + GPU $(gib "$g") + reserve $HELPER_RESERVE_GIB + peak $peak GiB over TOTAL_GIB $TOTAL_GIB"
         record "$name" "not-run: memory" - - - "$max" "$dub" -; return 1
     fi
     if ! verify_kit "$KD" >> "$R/job.log" 2>&1; then
@@ -560,7 +597,7 @@ timeout 30 nvidia-smi -q > "$R/nvidia-smi-q.txt" 2>&1
 
 guard > "$R/memavail.log" 2> "$R/guard.log" &
 GUARD=$!
-log "guard: pid $GUARD; memavail.log columns: epoch MemAvailable_kib step rss_kib gpu_kib drop_kib use_kib"
+log "guard: pid $GUARD; memavail.log columns: epoch MemAvailable_kib step cgroup_current_kib gpu_used_kib(-1 = query failed) memavail_drop_kib total_kib"
 
 RESULT=ok
 mapfile -t STEPS < <(steps)

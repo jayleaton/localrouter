@@ -64,10 +64,17 @@ Jobs 0-2 (the required set) fit even at their worst case: they end by T0+91 on b
 the estimate with 40 min to spare; if earlier steps run long, `node-job.sh` records its steps `not-run: time` and that
 job is resumed in a later window with the same kit and MODES. Export and cleanup always run before T0+110.
 
-Memory is budgeted per node, not per container: the guard counts the node-wide MemAvailable drop since the job
-started (every helper, cache and the kit included) against MAX_GIB 96, leaving 4 GiB of the 100 GiB contract for the
-container runtime; the container also runs with `--memory 96g`. The largest declared step peaks are 32 GiB
-(`blocks`), 24 GiB (`twin`, `ops`) and 8 GiB (`smoke`); gate.py's own largest site estimates are 20.3 and 9.3 GiB.
+Memory is bounded and measured for the whole job, at most 100 GiB in total. Each job runs in its own cgroup v2 with
+`memory.max` <= 96 GiB (the container with `--memory 96g`, or a host `systemd-run --scope -p MemoryMax=96G`);
+preflight refuses a shared or unlimited cgroup. All of the job's processes (guard, tar, python, page cache) are
+charged to it. Driver allocations are not cgroup-charged, so the guard adds nvidia-smi's device-wide `memory.used`
+every second, plus a fixed 2 GiB reserve for the processes outside the cgroup (the docker / systemd-run client and
+the login shell). The GPU accounting fails closed: `[N/A]`, "Not Supported", an empty or partly numeric answer, a
+timeout or an error fails preflight, refuses a step and kills a running one; no estimate replaces it. The guard kills
+a step at cgroup + GPU + reserve > 100 GiB, and a step starts only if that total plus its declared peak fits.
+MemAvailable >= 8 GiB stays as supplemental headroom. If GB10's driver does not report `memory.used`, these jobs do
+not run until a hard-bounded alternative for device allocations is agreed. The largest declared step peaks are 32 GiB
+(`blocks`), 24 GiB (`twin`, `ops`) and 8 GiB (`smoke`); gate.py's largest site estimates are 20.3 and 9.3 GiB.
 
 ## What the stager places on each node
 
@@ -80,6 +87,10 @@ All of it is files-only before T0; loading, extraction and setup happen after T0
      `oracle.Dockerfile` (pinned `python:3.13-slim-bookworm` digest, offline `--require-hashes` install of the
      `lock.txt` wheel set: `torch==2.14.1+cu130` cp313 aarch64 and its declared dependencies, nothing else). The tar
      sha256 and the loaded image ID are both checked. Inside it, `VENV=/usr/local`.
+   - **the shared oracle prefix** (staging-owned): sealed `k6-oracle-prefix.tar.gz` sha256 `74118af7…`, PBS
+     3.13.16 + the same torch pins (+ numpy 2.5.4, safetensors 0.8.0; freeze sha256 `d793ad20…`), `MANIFEST.sha256`
+     sha256 `a1af1b3b…`; one shared read-only extraction per node (staging-owned, after T0), and preflight verifies
+     every file.
    - **the offline venv fallback**: the same wheel set with `lock.txt` and `SHA256SUMS`, plus python-build-standalone
      `cpython-3.13.16+20261009-aarch64-unknown-linux-gnu-install_only.tar.gz`; `setup-venv.sh` builds `$WORK/venv`
      with no network and checks the pins.
@@ -140,8 +151,24 @@ docker run --rm --name k6-d1-$JOB --user "$(id -u):$(id -g)" --gpus all --networ
 
 Node A runs `JOB=smoke`, `twin`, then `blocks` with `-e MODES="tf32_rna tf32_truncate"`; node B runs `smoke`, `ops`,
 then `blocks` with `-e MODES=fp32`. Each job's preflight goes first.
-With the offline venv instead, the same `node-job.sh` runs on the host with `VENV=$WORK/venv` after
-`WORK=... PYTAR=... WHEELS=... bash setup-venv.sh`.
+With the shared oracle prefix: staging keeps one sealed copy per node in `k6-staging-1018d582/oracle`
+(`k6-oracle-prefix.tar.gz`, 3,344,315,223 bytes, sha256 `74118af7c8381f74ed810c6ddb3b009edc9f280d13844f2ace70f6f65ba0c474`)
+and, after T0, provides one shared read-only extraction per node (`PREFIX`, staging's path); no job copies the prefix
+into its own `WORK`. The job runs on the host inside its own memory-capped scope, and preflight checks every prefix
+file against the MANIFEST:
+
+```sh
+systemd-run --scope --quiet -p MemoryMax=96G -p MemorySwapMax=0 env -u TORCH_ALLOW_TF32_CUBLAS_OVERRIDE \
+    DEADLINE=$DEADLINE KIT_SHA=$KIT_SHA MODES="$MODES" WORK=$WORK KIT=$WORK/k6-dit-kit-<commit12>.tar.gz \
+    VENV=$PREFIX ORACLE_MANIFEST=$PREFIX/MANIFEST.sha256 \
+    ORACLE_MANIFEST_SHA256=a1af1b3b5c25bb343ebe8ecc71aaa406199a9c2c74c5957c1425251fdc124b90 \
+    bash $WORK/node-job.sh $JOB       # node-job.sh taken from the verified kit
+```
+
+The full MANIFEST check adds an estimated 2-4 min to the first preflight (inside the 10 min setup maximum);
+`ORACLE_VERIFY=0` skips it on later preflights of the same window.
+Use `systemd-run --user` where the node account has no root. The offline venv fallback is `setup-venv.sh` followed by
+the same command with `VENV=$WORK/venv` and no `ORACLE_*` variables.
 
 Each job exits 0 only if every step ran and returned 0. `twin` returns 1 if a bit-exact assertion fails; it still
 writes its receipt, and the next mode still runs. Optional environment variables: `MIN_GIB` (8), `SEED` (0),
