@@ -6,7 +6,9 @@
 #   zig build, zig build test                   must pass
 # and only then build-image.sh exports the image. BASE defaults to the merge base of COMMIT and origin/main.
 # OUT_DIR (default ~/localrouter-dist/<commit>) gets the image file and its receipt, every check's log, and batch.json:
-# the commit, base, each step's status and seconds, and the disk the batch used. The temporary worktrees are removed.
+# the commit, base, each step's status and seconds, and the change in free disk over the batch (other writers to the
+# same file system count too; build-image.sh's receipt has the image build's own figures). The temporary worktrees
+# are removed.
 # LR_SKIP_IMAGE=1 runs the checks only (result "checks-pass").
 # Run it in the machine's build slot when one is shared, e.g. heavy.sh bash tools/package/release-batch.sh <commit>.
 set -euo pipefail
@@ -41,7 +43,8 @@ finish() {
     python3 -I - "$OUT/batch.json" "$commit" "$base" "$1" "$disk0" "$(df -B1 --output=avail "$work" | tail -1)" "${steps[@]}" <<'PY'
 import json, sys
 out, commit, base, result, before, after, *steps = sys.argv[1:]
-json.dump({"commit": commit, "base": base, "result": result, "disk_used_bytes": int(before) - int(after),
+json.dump({"commit": commit, "base": base, "result": result, "free_space_drop_bytes": int(before) - int(after),
+           "free_space_drop_includes_other_writers": True,
            "steps": [{"step": s.split()[0], "exit": int(s.split()[1]), "seconds": int(s.split()[2])} for s in steps]},
           open(out, "w"), indent=1)
 PY

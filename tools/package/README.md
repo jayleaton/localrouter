@@ -8,6 +8,7 @@ that leaves a JSON receipt. The daemon holds no GPU memory while idle. The model
 | File | Does |
 | --- | --- |
 | `build-image.sh` | Builds the arm64 image from a clean commit (`docker/Dockerfile`, every engine compiled in; the model is chosen by config) and exports it as `localrouter-<commit>-arm64.tar.zst` with a receipt: commit, image id, SHA-256. It refuses to run on an arm64 host: GPU nodes build nothing |
+| `release-batch.sh` | One exact commit, checked out alone: `zig fmt --check` compared with its base by identity (a new finding fails), `zig build`, `zig build test`, then `build-image.sh`; `batch.json` records every step. Run it in the machine's build slot when one is shared |
 | `install.sh` | On the node: checks GPU, Docker and disk; checks the weights against the model's pinned manifest; checks the image file against its receipt and loads it; writes `tools.json` with the one model and `env` for `localrouterctl`. `--start` starts the daemon, `--smoke` runs the lifecycle smoke. `--uninstall` removes the image and the state, and keeps the weights |
 | `localrouterctl` | `start`, `status`, `generate MODEL PROMPT -o out.mp4`, `unload MODEL`, `release`, `stop`, `pids`, `logs`, in docker or binary mode (`LR_MODE`). `stop` returns only once the daemon and every worker and ffmpeg it started have exited |
 | `verify_assets.py` | A weight directory against a manifest: every listed file's size and SHA-256 (`lfs_sha256`), or git blob hash (`git_blob_sha1`) for small files kept in git |
@@ -21,9 +22,18 @@ video at 24 fps (121 frames) with jointly generated mono 44.1 kHz audio, from th
 `kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers` at revision `1018d5828716e8bea3de99609f45c924de9c5564`. Any other
 size, length, frame rate, step count or guidance is refused, as are `audio: false`, a negative prompt and a first frame.
 
+The image build runs in a builder of its own whose container is capped (`LR_BUILDER_MEMORY`, default 7g with no swap;
+`LR_BUILDER_CPUS`, default 0-3). A build that needs more fails with an out-of-memory error instead of pushing the build
+machine into swap. Its receipt records the cap, the builder's actual `memory.peak` and any OOM kills. That builder
+cannot see the Docker daemon's images. Name already-pulled base images in `LR_BASE_IMAGES`: they are exported once as
+OCI layouts (about their size on disk, under `~/.cache/localrouter-oci`) instead of pulled again. They are removed
+after a successful build and kept after a failure for the retry. Before exporting or building, the script checks the
+free disk against what the run can take (twice each base image, plus `LR_DISK_MARGIN_GB`, default 30) and stops if it
+does not fit. The receipt records each layout's size and the largest drop in free space during the run.
+
 ```bash
-# build machine
-bash tools/package/build-image.sh ~/localrouter-dist
+# build machine (the NGC builder image already pulled)
+LR_BASE_IMAGES=nvcr.io/nvidia/pytorch:26.07-py3 bash tools/package/release-batch.sh <commit>
 # copy localrouter-<commit>-arm64.tar.zst and .json to the node; the weights are already there
 
 # the node
