@@ -3,18 +3,21 @@
 # only: nothing of the image's CUDA toolkit or Python is used). It runs k6v-qual (src/engines/kandinsky6/video_vae/
 # qual.zig, built for aarch64-linux-gnu) on this component's sm_121a/sm_120a fatbins, the real checkpoint and the kit's
 # inputs, all cases in one process (the engine probes no memory and draws no noise, so cases share nothing).
-# Steps: verify the kit's MANIFEST.sha256 (binary, fatbins, inputs), then k6v-qual with one timeout.
+# Runs under the shared staging runner (tools/kandinsky6/staging/run-node.py: immutable image ID, --memory/--memory-swap,
+# read-only root and kit, models at /models, K6_OUTPUT, deadlines, memory and disk watch), or by hand with the same env.
+# Steps: verify the kit's SHA256SUMS (the runner's sealed kit) or MANIFEST.sha256 (build-kit.sh's), then k6v-qual with
+# one timeout.
 # Outputs under $OUT: engine/ (the record set: ops.jsonl, blobs/, env.json, summary.json), logs/<step>.log,
 # steps.jsonl ({"step","rc","s"}), memavail.log (MemAvailable each second: GB10's memory is the system's) and
 # summary.jsonl (each step's last JSON line, then the MemAvailable start / minimum / peak drop).
-# Env: KIT (default /workspace/d2-kit: bin/k6v-qual, fatbin/{conv,ops}.fatbin, inputs/, vae/), VAE (default $KIT/vae),
-# OUT (default $KIT/results/engine-<utc>), CASES (default "s_dec,f_dec,s_enc,n_enc,n_dec"), TIMEOUT (default 1200 s),
-# FREE_BYTES (default unset: decodes run the unbounded plan; set it to the oracle's recorded mem_get_info to match a
-# memory-tiled oracle plan).
+# Env: KIT (default: the directory above this script: bin/k6v-qual, fatbin/{conv,ops}.fatbin, inputs/), OUT (default
+# $K6_OUTPUT; required), VAE (default /models/vae), CASES (default "s_dec,f_dec,s_enc,n_enc,n_dec"), TIMEOUT (default
+# 1200 s), FREE_BYTES (default unset: decodes run the unbounded plan; set it to the oracle's recorded mem_get_info to
+# match a memory-tiled oracle plan).
 set -uo pipefail
-KIT=${KIT:-/workspace/d2-kit}
-VAE=${VAE:-$KIT/vae}
-OUT=${OUT:-$KIT/results/engine-$(date -u +%Y%m%d-%H%M%S)}
+KIT=${KIT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+VAE=${VAE:-/models/vae}
+OUT=${OUT:-${K6_OUTPUT:?K6_OUTPUT (or OUT) must name the output directory}}
 CASES=${CASES:-s_dec,f_dec,s_enc,n_enc,n_dec}
 mkdir -p $OUT/logs
 ( while :; do echo "$(date +%s) $(awk '/MemAvailable/ {print $2}' /proc/meminfo)"; sleep 1; done ) > $OUT/memavail.log &
@@ -32,7 +35,8 @@ run() { local name=$1; shift; echo "[d2-engine $(date +%T)] $name"; local t0=$(d
 run preflight bash -c 'echo "arch $(uname -m)"; nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.used --format=csv,noheader;
     nvidia-smi --query-compute-apps=pid,name --format=csv,noheader; awk "/MemAvailable/ {print \$2 / 1048576 \" GiB available\"}" /proc/meminfo'
 
-run manifest bash -c "cd $KIT && sha256sum -c --quiet --strict MANIFEST.sha256 && echo '{\"manifest\": \"ok\", \"files\": '\$(wc -l < MANIFEST.sha256)'}'" \
+M=$([[ -f $KIT/SHA256SUMS ]] && echo SHA256SUMS || echo MANIFEST.sha256)
+run manifest bash -c "cd $KIT && sha256sum -c --quiet --strict $M && echo '{\"manifest\": \"$M\", \"files\": '\$(wc -l < $M)'}'" \
     || { echo "[d2-engine] kit manifest check failed: not running the engine"; exit 1; }
 
 run engine timeout --kill-after=30 ${TIMEOUT:-1200} $KIT/bin/k6v-qual --vae $VAE/diffusion_pytorch_model.safetensors \

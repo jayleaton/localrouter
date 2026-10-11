@@ -12,7 +12,11 @@ the window. No threshold is applied: a checkpoint is equal or it is not.
 | `engine` | `k6v-qual` (`src/engines/kandinsky6/video_vae/qual.zig`, loading the sm_121a/sm_120a fatbins) on the same checkpoint and inputs | the binary, the fatbins, `vae/`, the inputs |
 | `compare` | host only, after both jobs: records by name, equality of sha256, first differing element of raw blobs | both record sets |
 
-The two GPU jobs share nothing at run time and run on separate nodes in parallel. The engine never consumes oracle
+The two GPU jobs share nothing at run time and run on separate nodes in parallel, under the shared staging runner
+(`tools/kandinsky6/staging/run-node.py`): each node's own immutable image ID, enforced container memory, read-only root
+and kit, the checkpoint at `/models`, outputs in `K6_OUTPUT`, window deadlines and a memory / GPU / disk watch.
+`tools/spark/k6-video-vae/operator_spec.py` writes the jobs for its sealer; the oracle takes the pinned native stack from
+the sealed shared oracle prefix and checks every file of it, and the pinned versions, before it runs. The engine never consumes oracle
 output: the posterior is checked with the kit's own `eps`, which the oracle also applies through the native ops.
 
 ## Cases
