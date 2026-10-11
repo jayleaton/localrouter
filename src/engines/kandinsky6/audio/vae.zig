@@ -9,8 +9,9 @@
 //! Activation normalization and the stored -> prepared weight transform are independent compositions of public
 //! primitives (vector norm, scaled-norm-plus-epsilon denominator in one rounding, true division) with an explicit
 //! reduction order and an explicit epsilon (no default). On CPU they reproduce every oracle fixture with zero unequal
-//! values (`NormReduce`); their target bits (SM121 for normalization, the native twin's aarch64 host for the weight
-//! transform, which the native loader runs on CPU before `.to(device)`) are not yet compared. No operator in this file is
+//! values (`NormReduce`). Their native target bits are reproduced offline from the D3 window's receipts: the weight
+//! transform (which the native loader runs on the Grace host CPU before `.to(device)`) by `.lanes4_fused`, the SM121
+//! normalization by PyTorch's CUDA reduction order (`torchSplit`, `sumSquaresTorch`). No operator in this file is
 //! qualified on the target (SM121, native pinned Python twin, zero unequal values), so production is refused; see
 //! `contract`.
 
@@ -150,20 +151,25 @@ pub const ScalarDiv = struct {
     }
 };
 
-/// The magnitude-preserving residual's constants (formula receipt, MIT expression `a * (1. - t) + b * t` over
-/// `sqrt((1 - t) ** 2 + t ** 2)`): the Python-double scalars rounded to fp32, the division explicit.
+/// The magnitude-preserving residual mp_sum(a, b, t) = lerp(a, b, t) / sqrt((1 - t)^2 + t^2) as the native twin runs
+/// it on CUDA: torch.lerp's small-weight branch a + t * (b - a), the product and the sum fused (nvcc contraction:
+/// fma(t, b - a, a)), t the Python double rounded to fp32, then the division by the CPU-scalar denominator. The D3
+/// window's job A (`mp_residual`, [1, 2048, 436] with specials, 892928 values) reproduces bit for bit with `.reciprocal`
+/// (1.0f / f32(den), PyTorch CUDA's CPU-scalar division); the weighted sum (1 - t) * a + t * b reproduces neither
+/// division and differs in the NaN mask (lerp gives inf - inf = NaN for an infinite a). torch's large-weight branch
+/// (t >= 0.5) was not compared and is refused.
 pub const MpResidual = struct {
-    c0: f32,
-    c1: f32,
+    t: f32,
     den: ScalarDiv,
 
-    pub fn of(t: f64, div: Div) MpResidual {
+    pub fn of(t: f64, div: Div) Error!MpResidual {
+        if (!(t >= 0 and t < 0.5)) return error.UnresolvedContract;
         const u = 1.0 - t;
-        return .{ .c0 = @floatCast(u), .c1 = @floatCast(t), .den = .of(@sqrt(u * u + t * t), div) };
+        return .{ .t = @floatCast(t), .den = .of(@sqrt(u * u + t * t), div) };
     }
 
     pub fn apply(m: MpResidual, a: f32, b: f32) f32 {
-        return m.den.apply(a * m.c0 + b * m.c1);
+        return m.den.apply(@mulAdd(f32, m.t, b - a, a));
     }
 };
 
@@ -229,7 +235,7 @@ pub fn contract(op: Op) Contract {
         .clamp => .{ .status = .gpu_qualification_pending, .provenance = "vae.py L237-314 (MIT) clamp(-256, 256); bigvgan.py (MIT) clamp(-1, 1); PyTorch clamp NaN propagation" },
         .upsample_nearest_exact2 => .{ .status = .gpu_qualification_pending, .provenance = "vae_modules.py L81-93 (MIT): F.interpolate(scale_factor=2.0, mode='nearest-exact')" },
         .scaled_silu => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 1: silu(x) / 0.596 (MIT lucidrains MPSiLU expression); native mp_silu bits unverified" },
-        .mp_residual => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 2: ((1-t)a + tb) / sqrt((1-t)^2 + t^2), t = 0.3 (MIT lucidrains MPAdd expression); native mp_sum bits unverified" },
+        .mp_residual => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 2: lerp(a, b, t) / sqrt((1-t)^2 + t^2), t = 0.3; torch.lerp CUDA small-weight branch fma(t, b - a, a), reciprocal CPU-scalar division: D3 job A native sha reproduced (892928 values incl. specials); k6a_mp_residual lerp form not yet run on SM121" },
         .gain_weight_scale => .{ .status = .gpu_qualification_pending, .provenance = "CPU oracle: gain multiplies the prepared weight before convolution (25/25 calls zero unequal; output-side gain differs)" },
         .conv1d_prepared => .{ .status = .gpu_qualification_pending, .provenance = "PyTorch conv1d semantics (BSD): zero padding K//2, stride 1, dilation 1, groups 1, no bias (CPU oracle boundaries); target accumulation unresolved" },
         .conv_transpose1d_prepared => .{ .status = .gpu_qualification_pending, .provenance = "PyTorch conv_transpose1d semantics (BSD); BigVGAN ups (MIT) padding (k - u) // 2" },
@@ -240,8 +246,8 @@ pub fn contract(op: Op) Contract {
         .aa_down2 => .{ .status = .gpu_qualification_pending, .provenance = "BigVGAN alias_free_activation/torch/filter.py LowPassFilter1d (Apache-2.0, alias-free-torch); loaded filter buffer" },
         .vocoder_add => .{ .status = .gpu_qualification_pending, .provenance = "BigVGAN AMPBlock1 x = xt + x (MIT)" },
         .vocoder_avg3 => .{ .status = .gpu_qualification_pending, .provenance = "BigVGAN forward xs += ...; x = xs / num_kernels (MIT)" },
-        .activation_normalize => .{ .status = .cpu_bits_matched, .provenance = "x / (eps + ||x|| * sqrt(n/N)), denominator one rounding, true division, serial reduction over the strided axis: 15/15 CPU oracle cases (40462 values) zero unequal; SM121 reduction order open (k6a_l2norm orders)" },
-        .mp_weight_prepare => .{ .status = .cpu_bits_matched, .provenance = "w / (eps + ||w_row|| * sqrt(1/fan)) / sqrt(fan) on the host CPU at load (autoencoder.py MIT: load_state_dict, remove_weight_norm, .to(device)); x86 AVX2 8-lane reduction: 5/5 raw->baked fixtures zero unequal; native aarch64 host bits open" },
+        .activation_normalize => .{ .status = .cpu_bits_matched, .provenance = "x / (eps + ||x|| * sqrt(n/N)), denominator one rounding, true division: CPU oracle serial order 15/15 cases zero unequal; SM121 native order = PyTorch Reduce.cuh split (torchSplit / sumSquaresTorch), D3 window native shas reproduced on 7/7 real shapes + zero/tiny/impulse; k6a_l2norm_torch not yet run on SM121" },
+        .mp_weight_prepare => .{ .status = .cpu_bits_matched, .provenance = "w / (eps + ||w_row|| * sqrt(1/fan)) / sqrt(fan) on the host CPU at load (autoencoder.py MIT: load_state_dict, remove_weight_norm, .to(device)); native Grace host (aarch64) = lanes4_fused + fma denominator: 29/29 decoder convs of the selected checkpoint sha-equal (D3 job A dumps); x86 AVX2 lanes8: 5/5 synthetic fixtures (diagnostic)" },
         .vocoder_weight_norm_fold => .{ .status = .not_on_native_path, .provenance = "HF 1018d582 vocoder stores 667 fp32 tensors with plain `weight` (no g / v / parametrizations); load_bigvgan_v2 (MIT) removes weight norm before loading them as stored" },
         .mid_attention_sdpa => .{ .status = .candidate_unverified, .provenance = "bare F.scaled_dot_product_attention, fp32 head 2048, no mask, default scale; native backend selection to be recorded on SM121; k6a_sdpa_math is a comparison candidate; strict FLASH unaccepted" },
     };
@@ -328,6 +334,11 @@ pub const NormReduce = enum {
     /// `lanes8`, then the length % 8 tail added serially. Reproduces the five synthetic weight fixtures (rows of 2, 6 and
     /// 15) but not every random tail row (2 of 252 differ), so it is diagnostic only.
     lanes8_tail_diagnostic,
+    /// Four lane sums, lane j over elements j, j+4, ..., each step one fused multiply-add (s = fma(x, x, s)); the lanes
+    /// then added in order 0..3. torch 2.14.1+cu130 on the Grace host (aarch64, NEON) for a contiguous innermost
+    /// reduction: reproduces the native CPU-prepared weights of all 29 decoder convs of the selected checkpoint bit for bit
+    /// (the D3 window's job A dump). Lengths that are not a multiple of 4 are refused (no decoder row has a tail).
+    lanes4_fused,
 };
 
 fn sumSquares(x: []const f32, start: usize, n: usize, stride: usize, reduce: NormReduce) Error!f32 {
@@ -356,6 +367,19 @@ fn sumSquares(x: []const f32, start: usize, n: usize, stride: usize, reduce: Nor
                 const v = x[start + k];
                 s += v * v;
             }
+            return s;
+        },
+        .lanes4_fused => {
+            if (stride != 1) return error.LayoutUnsupported;
+            if (n % 4 != 0) return error.UnresolvedContract;
+            var lanes: [4]f32 = @splat(0);
+            var i: usize = 0;
+            while (i < n) : (i += 4) for (&lanes, 0..) |*l, j| {
+                const v = x[start + i + j];
+                l.* = @mulAdd(f32, v, v, l.*);
+            };
+            var s: f32 = 0;
+            for (lanes) |l| s += l;
             return s;
         },
     }
@@ -440,6 +464,105 @@ pub fn normalizeHost(x: []const f32, y: []f32, g: NormGeometry, eps: f32, reduce
     for (0..outer) |o| for (0..inner) |i| {
         const start = o * n * inner + i;
         const d = normDen(@sqrt(try sumSquares(x, start, n, inner, reduce)), g.scale, eps, den);
+        for (0..n) |k| y[start + k * inner] = x[start + k * inner] / d;
+    };
+}
+
+/// The device whose PyTorch reduction configuration `torchSplit` reproduces: its multiprocessor count and maximum
+/// resident threads per multiprocessor, read from the running device (CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT /
+/// _MAX_THREADS_PER_MULTIPROCESSOR), never assumed.
+pub const SmLimits = struct { sm_count: u32, max_threads_per_sm: u32 };
+
+/// How PyTorch's CUDA reduction (ATen Reduce.cuh) splits one output's inputs: `y` threads of a block, `ctas` blocks.
+pub const TorchSplit = struct { y: u32, ctas: u32 };
+
+/// torch's setReduceConfig for a vector norm whose reduced axis is not the fastest moving (the activation normalization
+/// layouts): output vectorization 4 / 2 / 1 from the contiguous output extent `inner` (the native tensors are freshly
+/// allocated, so their base is aligned), block width and height from the 512-thread budget, the input split over the
+/// block height when the inputs per output reach 16 per row or 256, and the global (multi-block) split when they reach
+/// 256 per thread and the grid fits the device's resident blocks. Reproduces the D3 window's native normalization bits
+/// on all seven real shapes (residual C 512 / 1024 / 2048 x T 218 / 436, packed QKV [1,1,2048,3,218]), which exercise
+/// output vectorization 2 and 4 and split counts 1, 16 and 32; vectorization 1 and a device-bound split count are
+/// derived from the same rules but were not compared.
+pub fn torchSplit(g: NormGeometry, dev: SmLimits) Error!TorchSplit {
+    if (dev.sm_count == 0 or dev.max_threads_per_sm == 0 or g.n == 0 or g.outer * g.inner == 0) return error.InvalidArgument;
+    const outputs = g.outer * g.inner;
+    var vec: u64 = 4;
+    while (vec > 1 and g.inner % vec != 0) vec /= 2;
+    const dim0 = outputs / vec;
+    const max_threads = 512 / vec;
+    const d0 = if (dim0 < max_threads) std.math.floorPowerOfTwo(u64, dim0) else max_threads;
+    const d1 = if (g.n < max_threads) std.math.floorPowerOfTwo(u64, g.n) else max_threads;
+    var width: u64 = @min(d0, 32);
+    const height: u64 = @min(d1, max_threads / width);
+    width = @min(d0, max_threads / height);
+    if (!(g.n >= height * 16 or g.n >= 256)) return .{ .y = 1, .ctas = 1 };
+    const per_thread = (g.n + height - 1) / height;
+    const grid = (dim0 + width - 1) / width;
+    const target = @as(u64, dev.sm_count) * (dev.max_threads_per_sm / (width * height));
+    var ctas: u64 = 1;
+    if (per_thread >= 256 and grid <= target) {
+        const c1 = (target + grid - 1) / grid;
+        const c2 = (per_thread + 15) / 16;
+        const c3 = (per_thread + 255) / 256;
+        ctas = @max(@min(c1, c2), c3);
+    }
+    if (height > 32) return error.LayoutUnsupported;
+    return .{ .y = @intCast(height), .ctas = @intCast(ctas) };
+}
+
+/// The sum of squares in the `TorchSplit` order (audio.cu k6a_l2norm_torch, op for op): thread (y, c) sums the elements
+/// y + Y*c + Y*C*m in four interleaved fused accumulators (m % 4), combined ((a0 + a1) + a2) + a3; a halving tree over
+/// the Y partials of each block; with C > 1, per y the block partials c = y, y + Y, ... added in order onto 0, then a
+/// second halving tree.
+pub fn sumSquaresTorch(x: []const f32, start: usize, n: usize, stride: usize, split: TorchSplit) Error!f32 {
+    const ny: usize = split.y;
+    const nc: usize = split.ctas;
+    if (ny == 0 or ny > 32 or !std.math.isPowerOfTwo(ny) or nc == 0) return error.InvalidArgument;
+    var part: [32]f32 = undefined;
+    var carry: [32]f32 = @splat(0);
+    var total: f32 = 0;
+    for (0..nc) |c| {
+        for (0..ny) |y| {
+            var acc: [4]f32 = @splat(0);
+            var m: usize = 0;
+            var j = y + ny * c;
+            while (j < n) : ({
+                j += ny * nc;
+                m += 1;
+            }) {
+                const v = x[start + j * stride];
+                acc[m & 3] = @mulAdd(f32, v, v, acc[m & 3]);
+            }
+            part[y] = ((acc[0] + acc[1]) + acc[2]) + acc[3];
+        }
+        halve(part[0..ny]);
+        if (nc == 1) total = part[0] else carry[c % ny] += part[0];
+    }
+    if (nc > 1) {
+        halve(carry[0..ny]);
+        total = carry[0];
+    }
+    return total;
+}
+
+fn halve(v: []f32) void {
+    var h = v.len / 2;
+    while (h > 0) : (h /= 2) for (0..h) |y| {
+        v[y] += v[y + h];
+    };
+}
+
+/// `normalizeHost` with the sum of squares in the `TorchSplit` order and the denominator fused (the native twin's
+/// composition on the target).
+pub fn normalizeHostTorch(x: []const f32, y: []f32, g: NormGeometry, eps: f32, split: TorchSplit) Error!void {
+    const n: usize = @intCast(g.n);
+    const inner: usize = @intCast(g.inner);
+    const outer: usize = @intCast(g.outer);
+    if (x.len != outer * n * inner or y.len != x.len) return error.ShapeMismatch;
+    for (0..outer) |o| for (0..inner) |i| {
+        const start = o * n * inner + i;
+        const d = normDen(@sqrt(try sumSquaresTorch(x, start, n, inner, split)), g.scale, eps, .fma);
         for (0..n) |k| y[start + k * inner] = x[start + k * inner] / d;
     };
 }
@@ -1072,6 +1195,57 @@ test "CPU diagnostic: stored -> prepared weights reproduce the oracle (not targe
     try testing.expectEqual(2, try prepareFixtureUnequal(.mul_add, &values));
 }
 
+test "lanes4_fused reduction: four fused lane sums added in order, multiples of 4 only" {
+    // 4096^2 = 2^24 swallows a later +1 in a single chain; the lanes keep the ones apart until the end
+    var x: [8]f32 = @splat(1);
+    x[0] = 4096;
+    try testing.expectEqual(@as(f32, 16777222), try sumSquares(&x, 0, 8, 1, .lanes4_fused));
+    try testing.expectEqual(@as(f32, 16777216), try sumSquares(&x, 0, 8, 1, .serial));
+    try testing.expectError(error.UnresolvedContract, sumSquares(&x, 0, 6, 1, .lanes4_fused));
+    try testing.expectError(error.LayoutUnsupported, sumSquares(&x, 0, 4, 2, .lanes4_fused));
+}
+
+test "torchSplit: the split of the seven native normalization shapes of the D3 window" {
+    const dev: SmLimits = .{ .sm_count = 48, .max_threads_per_sm = 1536 };
+    const cases = [_]struct { outer: u64, n: u64, inner: u64, y: u32, ctas: u32 }{
+        .{ .outer = 1, .n = 512, .inner = 218, .y = 8, .ctas = 1 },       .{ .outer = 1, .n = 512, .inner = 436, .y = 4, .ctas = 1 },
+        .{ .outer = 1, .n = 1024, .inner = 218, .y = 8, .ctas = 1 },      .{ .outer = 1, .n = 1024, .inner = 436, .y = 4, .ctas = 16 },
+        .{ .outer = 1, .n = 2048, .inner = 218, .y = 8, .ctas = 16 },     .{ .outer = 1, .n = 2048, .inner = 436, .y = 4, .ctas = 32 },
+        .{ .outer = 1, .n = 2048, .inner = 3 * 218, .y = 8, .ctas = 16 },
+    };
+    for (cases) |c| {
+        const sp = try torchSplit(.{ .outer = c.outer, .n = c.n, .inner = c.inner, .scale = 0 }, dev);
+        try testing.expectEqual(c.y, sp.y);
+        try testing.expectEqual(c.ctas, sp.ctas);
+    }
+    // few inputs per output: no input split, one serial thread of four accumulators
+    const small = try torchSplit(.{ .outer = 1, .n = 40, .inner = 218, .scale = 0 }, dev);
+    try testing.expectEqual(@as(u32, 1), small.y);
+    try testing.expectError(error.InvalidArgument, torchSplit(.{ .outer = 1, .n = 8, .inner = 8, .scale = 0 }, .{ .sm_count = 0, .max_threads_per_sm = 1536 }));
+}
+
+test "sumSquaresTorch: thread, block and cross-block order" {
+    // Y = 2, C = 2, N = 8: threads (y, c) take {y + 2c, y + 2c + 4}; s = ((x0^2 + x4^2) + (x1^2 + x5^2)) + ((x2^2 +
+    // x6^2) + (x3^2 + x7^2)): 2^24 + 1 rounds back to 2^24, the other ones survive in pairs (16777222); one thread
+    // (Y = C = 1) keeps four accumulators and gives the same here, the serial chain loses every one
+    var x: [8]f32 = @splat(1);
+    x[0] = 4096;
+    try testing.expectEqual(@as(f32, 16777222), try sumSquaresTorch(&x, 0, 8, 1, .{ .y = 2, .ctas = 2 }));
+    try testing.expectEqual(@as(f32, 16777222), try sumSquaresTorch(&x, 0, 8, 1, .{ .y = 1, .ctas = 1 }));
+    try testing.expectEqual(@as(f32, 16777216), try sumSquares(&x, 0, 8, 1, .serial));
+    // the split is visible: with x4 = 4096 too, Y = 2, C = 2 adds the block of ones (4) to 2^25 in one step, a single
+    // thread adds them two at a time onto 2^25, where each +2 rounds away
+    x[4] = 4096;
+    try testing.expectEqual(@as(f32, 33554436), try sumSquaresTorch(&x, 0, 8, 1, .{ .y = 2, .ctas = 2 }));
+    try testing.expectEqual(@as(f32, 33554432), try sumSquaresTorch(&x, 0, 8, 1, .{ .y = 1, .ctas = 1 }));
+    try testing.expectError(error.InvalidArgument, sumSquaresTorch(&x, 0, 8, 1, .{ .y = 3, .ctas = 1 }));
+    var y: [8]f32 = undefined;
+    const g: NormGeometry = .{ .outer = 1, .n = 8, .inner = 1, .scale = @floatCast(@sqrt(1.0 / 8.0)) };
+    try normalizeHostTorch(&x, &y, g, 1e-4, .{ .y = 2, .ctas = 2 });
+    const den = @mulAdd(f32, @sqrt(@as(f32, 33554436)), g.scale, 1e-4);
+    try testing.expectEqual(bits(@as(f32, 4096) / den), bits(y[0]));
+}
+
 test "lanes8 reduction: eight lane sums added in order, multiples of 8 only" {
     var x: [16]f32 = undefined;
     for (&x, 0..) |*v, i| v.* = @floatFromInt(i + 1);
@@ -1170,10 +1344,17 @@ test "elementwise references: latent unscale, clamp, nearest-exact, residual con
     var uy: [6]f32 = undefined;
     upsampleNearestExact2(&ux, &uy, 1, 3);
     try testing.expectEqualSlices(f32, &.{ 1, 1, 2, 2, 3, 3 }, &uy);
-    const m = MpResidual.of(residual_t, .true_div);
-    try testing.expectEqual(bits(@as(f32, 0.7)), bits(m.c0));
-    try testing.expectEqual(bits(@as(f32, 0.3)), bits(m.c1));
+    const m = try MpResidual.of(residual_t, .true_div);
+    try testing.expectEqual(bits(@as(f32, 0.3)), bits(m.t));
     try testing.expectEqual(bits(@as(f32, @floatCast(@as(f64, 0.7615773105863908)))), bits(m.den.c));
+    try testing.expectError(error.UnresolvedContract, MpResidual.of(0.5, .reciprocal));
+    // the lerp form: an infinite shortcut gives inf - inf = NaN (the weighted sum would keep inf), and each value is
+    // one fused step a + t * (b - a) before the division
+    const r2 = try MpResidual.of(residual_t, .reciprocal);
+    try testing.expect(std.math.isNan(r2.apply(std.math.inf(f32), 1)));
+    const a0: f32 = 1.7;
+    const b0: f32 = -0.45;
+    try testing.expectEqual(bits(@mulAdd(f32, 0.3, b0 - a0, a0) * (1.0 / @as(f32, @floatCast(@as(f64, 0.7615773105863908))))), bits(r2.apply(a0, b0)));
 }
 
 test "qkv split and merge follow the reshape [B,1,2048,3,T] channel order" {

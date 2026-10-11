@@ -22,7 +22,11 @@
 //!                                "norm_qkv": {"eps": 1e-4, "reduce": {"serial_fma": {}}, "den": "fma"},
 //!                                "attention": "math_candidate"},
 //!                     "vocode": {"conv_acc": "fma", "aa_acc": "fma", "avg": "true_div"}}
-//!                    (the shape only: the values native uses are what the audio gates determine).
+//!                    (the shape only: the values native uses are what the audio gates determine). `prepare.reduce`
+//!                    is serial | lanes8 | lanes8_tail_diagnostic | lanes4_fused; a normalization `reduce` is
+//!                    {"serial_fma": {}} | {"serial_mul_add": {}} | {"strided_tree": N} |
+//!                    {"torch_reduce": {"sm_count": S, "max_threads_per_sm": T}}, whose limits must equal the
+//!                    running device's (refused at load otherwise).
 //!   vae_free_mb      the free-memory figure the video VAE's tile plan uses (upstream derives its tiling from the free
 //!                    memory it sees; the plan decides the bits, so it is configuration, never a probe). Default 8192.
 //!   resident_mb      the scheduler's estimate of the loaded footprint.
@@ -196,9 +200,9 @@ test "arithmetic options have no default" {
 test "every arithmetic and audio policy option is parsed whole or refused" {
     const json =
         \\{"fp32_linear": "fp32", "clip_linear": "fp32", "qwen_rope_freq": "fp32", "qwen_inv_freq": "/f",
-        \\ "audio": {"prepare": {"eps": 1e-4, "reduce": "serial", "den": "fma"},
+        \\ "audio": {"prepare": {"eps": 1e-4, "reduce": "lanes4_fused", "den": "fma"},
         \\  "decode": {"acc": "fma", "unscale": "true_div", "silu": "true_div", "residual": "true_div",
-        \\    "norm_residual": {"eps": 1e-4, "reduce": {"strided_tree": 256}, "den": "fma"},
+        \\    "norm_residual": {"eps": 1e-4, "reduce": {"torch_reduce": {"sm_count": 48, "max_threads_per_sm": 1536}}, "den": "fma"},
         \\    "norm_qkv": {"eps": 1e-4, "reduce": {"serial_fma": {}}, "den": "mul_add"}, "attention": "math_candidate"},
         \\  "vocode": {"conv_acc": "fma", "aa_acc": "mul_add", "avg": "reciprocal"}}}
     ;
@@ -206,8 +210,12 @@ test "every arithmetic and audio policy option is parsed whole or refused" {
     defer parsed.deinit();
     const cfg: ToolConfig = .{ .id = "k", .kind = .video, .engine = "kandinsky6", .weights = "/w", .options = parsed.value };
     const a = (try P.parseOptions(cfg.options, .production)).audio;
-    try std.testing.expectEqual(@as(u32, 256), a.decode.norm_residual.reduce.strided_tree);
+    try std.testing.expectEqual(@as(u32, 48), a.decode.norm_residual.reduce.torch_reduce.sm_count);
+    try std.testing.expectEqual(.lanes4_fused, a.prepare.reduce);
     try std.testing.expectEqual(.mul_add, a.vocode.aa_acc);
+    // torch_reduce's limits are the running device's, never another's
+    try a.checkDevice(.{ .sm_count = 48, .max_threads_per_sm = 1536 });
+    try std.testing.expectError(error.AudioDeviceLimitsMismatch, a.checkDevice(.{ .sm_count = 84, .max_threads_per_sm = 1536 }));
     // a missing field is refused, not defaulted
     const partial = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{"fp32_linear": "fp32", "clip_linear": "fp32", "qwen_rope_freq": "fp32", "qwen_inv_freq": "/f",

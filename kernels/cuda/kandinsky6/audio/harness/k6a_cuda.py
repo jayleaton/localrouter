@@ -17,6 +17,7 @@ import torch
 ACC_FMA, ACC_MUL_ADD = 0, 1
 DIV_TRUE, DIV_RECIP = 0, 1
 RED_SERIAL_FMA, RED_SERIAL_MUL_ADD, RED_STRIDED_TREE = 0, 1, 2
+RED_TORCH = 3  # k6a_l2norm_torch (PyTorch Reduce.cuh order), not an audio.cu K6A_RED_* mode of k6a_l2norm
 BLOCK, CONV_BLOCK, CONV_OT, FILTER_TAPS = 256, 128, 4, 12
 
 # audio.cu extern "C" signatures: p pointer (u64), q long long (i64), i int (i32), f float (f32).
@@ -26,7 +27,7 @@ SIGNATURES = {
     "k6a_clamp": "ppqff",
     "k6a_upsample_nearest_exact2": "ppqq",
     "k6a_scaled_silu": "ppqfi",
-    "k6a_mp_residual": "pppqfffi",
+    "k6a_mp_residual": "pppqffi",
     "k6a_scale_weights": "ppqf",
     "k6a_add": "pppq",
     "k6a_avg3": "ppppqfi",
@@ -38,6 +39,7 @@ SIGNATURES = {
     "k6a_qkv_split": "ppppqqqq",
     "k6a_attn_merge": "ppqqqq",
     "k6a_l2norm": "ppqqqii",
+    "k6a_l2norm_torch": "ppqqqii",
     "k6a_normalize_apply": "pppqqqffi",
     "k6a_sdpa_math": "pppppqqf",
 }
@@ -68,9 +70,41 @@ def scalar_div(divisor, div):
 
 
 def mp_residual_consts(t, div):
-    """vae.zig MpResidual.of: c0 = f32(1 - t), c1 = f32(t), den = f32(sqrt((1 - t)^2 + t^2)) (or its reciprocal)."""
+    """vae.zig MpResidual.of: t = f32(t) (lerp small-weight branch only, t in [0, 0.5)), den = f32(sqrt((1 - t)^2 +
+    t^2)) (or its reciprocal)."""
+    if not 0.0 <= t < 0.5:
+        raise ValueError("mp_residual: only torch.lerp's small-weight branch (t < 0.5) is specified")
     u = 1.0 - t
-    return f32(u), f32(t), scalar_div(math.sqrt(u * u + t * t), div)
+    return f32(t), scalar_div(math.sqrt(u * u + t * t), div)
+
+
+def torch_split(outer, N, inner, sm_count, max_threads_per_sm):
+    """vae.zig torchSplit: (Y, C) of PyTorch's CUDA reduction (setReduceConfig) for a vector norm over a non-fastest
+    axis, from the device's multiprocessor count and max threads per multiprocessor."""
+    if sm_count <= 0 or max_threads_per_sm <= 0 or N <= 0 or outer * inner <= 0:
+        raise ValueError("torch_split: invalid geometry or device limits")
+    outputs = outer * inner
+    vec = 4
+    while vec > 1 and inner % vec:
+        vec //= 2
+    dim0, mx = outputs // vec, 512 // vec
+    p2 = lambda n: 1 << (n.bit_length() - 1)  # noqa: E731
+    d0 = p2(dim0) if dim0 < mx else mx
+    d1 = p2(N) if N < mx else mx
+    width = min(d0, 32)
+    height = min(d1, mx // width)
+    width = min(d0, mx // height)
+    if not (N >= height * 16 or N >= 256):
+        return 1, 1
+    per_thread = -(-N // height)
+    grid = -(-dim0 // width)
+    target = sm_count * (max_threads_per_sm // (width * height))
+    ctas = 1
+    if per_thread >= 256 and grid <= target:
+        ctas = max(min(-(-target // grid), -(-per_thread // 16)), -(-per_thread // 256))
+    if height > 32:
+        raise ValueError("torch_split: block height above 32 is not supported by k6a_l2norm_torch")
+    return height, ctas
 
 
 def _blocks(n, b=BLOCK):
@@ -256,8 +290,8 @@ class K6A:
         _check_mode("div", div, (DIV_TRUE, DIV_RECIP))
         _t(b, _t(a).shape, "b")
         y = torch.empty_like(a)
-        c0, c1, den = mp_residual_consts(t, div)
-        self._go("k6a_mp_residual", (_blocks(a.numel()),), BLOCK, 0, a, b, y, a.numel(), c0, c1, den, div)
+        tv, den = mp_residual_consts(t, div)
+        self._go("k6a_mp_residual", (_blocks(a.numel()),), BLOCK, 0, a, b, y, a.numel(), tv, den, div)
         return y
 
     def scale_weights(self, w, *, gain):
@@ -368,6 +402,15 @@ class K6A:
         n = torch.empty(outer * inner, device=x.device)
         block = max(32, (R + 31) // 32 * 32)
         self._go("k6a_l2norm", (outer * inner,), block, 4 * R, x, n, outer, N, inner, order, R)
+        return n
+
+    def l2norm_torch(self, x, *, axis, sm_count, max_threads_per_sm):
+        """Candidate: n[outer * inner] in PyTorch's CUDA reduction order (k6a_l2norm_torch, split by torch_split from
+        the device limits). Block 128, grid ceil(outer * inner / 128)."""
+        outer, N, inner = self._axis_view(_t(x), axis)
+        Y, C = torch_split(outer, N, inner, sm_count, max_threads_per_sm)
+        n = torch.empty(outer * inner, device=x.device)
+        self._go("k6a_l2norm_torch", (_blocks(outer * inner, 128),), 128, 0, x, n, outer, N, inner, Y, C)
         return n
 
     def normalize_apply(self, x, n, *, axis, s, eps, den_fused):

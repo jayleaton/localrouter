@@ -40,14 +40,19 @@ If BigVGAN or alias-free-torch source is ever copied rather than reimplemented, 
 No kernel here is qualified. The required gate is zero unequal values against the native pinned Python twin on SM121,
 checked per operator, per chain, on the full mel and on raw PCM. CPU diagnostics do not count toward it.
 
-CPU bits matched (diagnostic only; target bits not yet compared):
+Native bits reproduced offline (diagnostic only; the kernels below are not yet run on SM121):
 
-- activation normalization `x / (eps + ||x|| * sqrt(1/n))`, denominator in one rounding, serial reduction over the
-  strided axis: 15/15 oracle cases, 0 of 40462 values unequal (two-rounding denominator: 7171). On SM121 the reduction
-  order is open; `k6a_l2norm` takes it as an argument for the harness to sweep.
-- decoder weight preparation `w / (eps + ||w_row|| * sqrt(1/fan)) / sqrt(fan)`, eps 1e-4 explicit: 5/5 synthetic
-  raw -> baked fixtures, 0 of 56 unequal (two-rounding denominator: 2). x86 AVX2 reduction is 8 lane sums added in
-  order; every decoder row (Cin * K) is a multiple of 8. The native twin's aarch64 host bits are open.
+- activation normalization `x / (eps + ||x|| * sqrt(1/n))`, denominator in one rounding, true division. CPU oracle:
+  serial reduction, 15/15 cases, 0 of 40462 values unequal. SM121 native: PyTorch's own CUDA reduction order
+  (`k6a_l2norm_torch`, split per shape and device by vae.zig `torchSplit`) reproduces the D3 window's native output
+  sha on all seven real shapes and the zero / tiny / impulse inputs; none of the `k6a_l2norm` orders does.
+- decoder weight preparation `w / (eps + ||w_row|| * sqrt(1/fan)) / sqrt(fan)`, eps 1e-4 explicit, on the host at
+  load. Native Grace host (aarch64): 4 fused lane sums added in order (`lanes4_fused`), fused denominator: 29/29
+  decoder convs of the selected checkpoint sha-equal to the D3 window's native dumps. x86 AVX2 (8 lane sums):
+  5/5 synthetic fixtures, diagnostic.
+- magnitude-preserving residual: torch.lerp's small-weight form `fma(t, b - a, a)` times the fp32 reciprocal of
+  sqrt((1-t)^2 + t^2) reproduces the native sha of the D3 window's [1, 2048, 436] case with specials
+  (`k6a_mp_residual`); the earlier weighted-sum form did not.
 
 Candidate only: the middle attention's SDPA (fp32, head dimension 2048). The native backend choice is not yet recorded;
 `k6a_sdpa_math` is a comparison candidate. Strict FLASH is not accepted.

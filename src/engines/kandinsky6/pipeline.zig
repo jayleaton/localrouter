@@ -111,6 +111,16 @@ pub const AudioPolicy = struct {
     prepare: audio_vae.PrepareParams,
     decode: audio_launch.DecodePolicy,
     vocode: audio_launch.VocodePolicy,
+
+    /// A `torch_reduce` normalization splits by the device limits it names; PR #6 requires them read from the running
+    /// device, so a policy naming any other device is refused before the audio weights load.
+    pub fn checkDevice(p: AudioPolicy, dev: noise.Device) error{AudioDeviceLimitsMismatch}!void {
+        for ([_]audio_launch.DeviceReduce{ p.decode.norm_residual.reduce, p.decode.norm_qkv.reduce }) |r| switch (r) {
+            .torch_reduce => |l| if (l.sm_count != dev.sm_count or l.max_threads_per_sm != dev.max_threads_per_sm)
+                return error.AudioDeviceLimitsMismatch,
+            .serial_fma, .serial_mul_add, .strided_tree => {},
+        };
+    }
 };
 
 /// Per-op observers for the check gates; null in production.
@@ -316,6 +326,7 @@ pub const Pipeline = struct {
         errdefer p.s.deinit();
         if (opts.hooks.rec) |r| r.attach(&p.d, p.s);
         p.dev = try central.device(&p.ctx);
+        if (parts.audio) try opts.audio.checkDevice(p.dev);
         p.ops = try central.Ops.load(&p.d, kmod.central);
         errdefer p.ops.unload();
         p.text_k = try qwen25.Kernels.load(&p.d, .{ .text = kmod.text, .qwen_te = qi.kernels.te, .qwen_gemm = qi.kernels.gemm, .qwen_attention = qi.kernels.attention });
