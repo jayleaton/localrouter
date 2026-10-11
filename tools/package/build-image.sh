@@ -8,9 +8,10 @@
 # It refuses to run on an arm64 host (a GPU node such as a DGX Spark builds nothing: its memory belongs to the models)
 # unless LR_BUILD_ON_ARM=1, and refuses a checkout with uncommitted changes (the receipt names a commit).
 # Env: BUILD_ARGS ("KEY=VALUE ..." passed as --build-arg, e.g. an engine selection the Dockerfile takes),
-#      DOCKERFILE (default docker/Dockerfile), LR_ALLOW_DIRTY=1 (a dev build; the receipt records "dirty": true).
+#      DOCKERFILE (default docker/Dockerfile), LR_ALLOW_DIRTY=1 (a dev build; the receipt records "dirty": true),
+#      SRC (the checkout to build; default this one).
 set -euo pipefail
-REPO=$(cd "$(dirname "$0")/../.." && pwd)
+REPO=$(cd "${SRC:-$(dirname "$0")/../..}" && pwd)
 OUT=${1:-$HOME/localrouter-dist}
 DOCKERFILE=${DOCKERFILE:-$REPO/docker/Dockerfile}
 die() { echo "build-image: $*" >&2; exit 1; }
