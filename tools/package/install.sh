@@ -13,8 +13,8 @@
 # 5. with --start, starts the daemon (it holds no GPU memory until a request); with --smoke, also runs
 #    lifecycle_smoke.py and leaves its receipt in $LR_HOME/smoke-receipt.json, then stops the daemon.
 # Nothing starts at boot and nothing restarts on its own: localrouterctl start / stop is the service.
-# A profile field that is null (not decided yet, e.g. a precision mode a GPU qualification picks) must be given in the
-# environment: TOOL_ID, TOOL_ENGINE, TOOL_OPTIONS (JSON, merged over the profile's options), e.g.
+# A profile field that is null, at any depth (not decided yet, e.g. a precision mode a GPU qualification picks), must be
+# given in the environment: TOOL_ID, TOOL_ENGINE, TOOL_OPTIONS (JSON, merged over the profile's options), e.g.
 #   TOOL_OPTIONS='{"fp32_linear": "...", "clip_linear": "..."}'
 # An option the profile lists in "file_options" names a file on this machine: it is checked (size, when the profile
 # gives one), copied to $LR_HOME/files, given to the daemon at /etc/localrouter/files/<option> (read-only) and its
@@ -67,7 +67,12 @@ for key, env in (("id", "TOOL_ID"), ("engine", "TOOL_ENGINE")):
         t[key] = os.environ[env]
 if os.environ.get("TOOL_OPTIONS"):  # merged over the profile's options
     t["options"] = {**(t.get("options") or {}), **json.loads(os.environ["TOOL_OPTIONS"])}
-missing = [k for k in ("id", "engine") if t.get(k) is None] + ["options." + k for k, v in (t.get("options") or {}).items() if v is None]
+def nulls(v, path):  # every null, at any depth: an option object given in part is as unset as one not given
+    if v is None:
+        return [path]
+    items = v.items() if isinstance(v, dict) else enumerate(v) if isinstance(v, list) else ()
+    return [x for k, w in items for x in nulls(w, "%s.%s" % (path, k))]
+missing = [k for k in ("id", "engine") if t.get(k) is None] + nulls(t.get("options") or {}, "options")
 if missing:
     sys.exit("install: the profile leaves %s unset (the engine's owner or a qualification decides them): set them with "
              "TOOL_ID, TOOL_ENGINE or TOOL_OPTIONS (JSON, merged over the profile's options)" % ", ".join(missing))

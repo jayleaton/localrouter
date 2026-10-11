@@ -1,7 +1,7 @@
 {
- "about": "Kandinsky-6 Pro distilled (kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers @ 1018d5828716e8bea3de99609f45c924de9c5564, code kandinskylab/kandinsky-6 @ eac06e39b904940baff2c408e925cdb0c4529269): text to 5 s video with joint audio (121 frames at 24 fps, mono 44.1 kHz), native Zig engine `kandinsky6`, on demand. The weights are the unmodified Hugging Face snapshot directory of that revision. options.fp32_linear, clip_linear and qwen_rope_freq (tf32_rna, tf32_truncate or fp32) and qwen_inv_freq (a file of 64 little-endian f32, Qwen2.5-VL's rotary inv_freq captured on the target) have no default: the engine refuses to load without them, and their values come from the GPU qualification, so install.sh takes them from TOOL_OPTIONS. vae_free_mb defaults to 8192 in the engine. Fields in `provisional` are not final; a smoke run with this profile reports `provisional`, never `pass`.",
+ "about": "Kandinsky-6 Pro distilled (kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers @ 1018d5828716e8bea3de99609f45c924de9c5564, code kandinskylab/kandinsky-6 @ eac06e39b904940baff2c408e925cdb0c4529269): text to 5 s video with joint audio (121 frames at 24 fps, mono 44.1 kHz), native Zig engine `kandinsky6`, on demand. The weights are the unmodified Hugging Face snapshot directory of that revision. options.fp32_linear, clip_linear and qwen_rope_freq (tf32_rna, tf32_truncate or fp32) and qwen_inv_freq (a file of 64 little-endian f32, Qwen2.5-VL's rotary inv_freq captured on the target) and audio (the audio decoder's and vocoder's numeric choices, one JSON object with every field named; its shape is documented in src/engines/kandinsky6_tool.zig) have no default: the engine refuses to load without them, or with any of them partial, and their values come from the GPU qualification (audio: the audio gates), so install.sh takes them from TOOL_OPTIONS. vae_free_mb defaults to 8192 in the engine. Fields in `provisional` are not final; a smoke run with this profile reports `provisional`, never `pass`.",
  "provisional": [
-  "tool.options (fp32_linear, clip_linear, qwen_rope_freq and the qwen_inv_freq file from GPU qualification; resident_mb, an estimate until measured)",
+  "tool.options (fp32_linear, clip_linear, qwen_rope_freq, the qwen_inv_freq file and the audio object from GPU qualification; resident_mb, an estimate until measured)",
   "cancel_phases",
   "crash_phase"
  ],
@@ -15,7 +15,8 @@
    "fp32_linear": null,
    "clip_linear": null,
    "qwen_rope_freq": null,
-   "qwen_inv_freq": null
+   "qwen_inv_freq": null,
+   "audio": null
   },
   "idle_ttl_s": 0,
   "keep_loaded": false,
