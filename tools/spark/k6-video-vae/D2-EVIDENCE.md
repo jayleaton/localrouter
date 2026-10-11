@@ -22,12 +22,13 @@ the floor and the guard stay in force for the whole job.
 | `d2-probe-torch` | dgx01 | d2-pybundle `ead020cb…` (NumPy 2.5.3) | Torch probe | nothing | 600 s | 32 GiB | 1 GB / 256 MiB |
 | `d2-oracle-short` | dgx01 | the same | 6 Torch segments | this window's PASS of `d2-probe-torch` | 2100 s | 48 GiB | 12 GB / 4 GiB |
 | `d2-probe-native` | dgx02 | none | native probe | nothing | 600 s | 32 GiB | 1 GB / 256 MiB |
-| `d2-engine` | dgx02 | none | native ledger | this window's PASS of `d2-probe-native` | 1500 s | 40 GiB | 8 GB / 4 GiB |
+| `d2-engine` | dgx02 | none | native ledger | this window's PASS of `d2-probe-native` | 1140 s (engine `TIMEOUT` 1020 s) | 40 GiB | 8 GB / 1 GiB |
 
 `d2-oracle`, the full-length oracle, is in the approved admission table. It is not scheduled: the window is N = 95
 with `d2-oracle-short` only. `operator_spec.py` writes the four jobs above. Each carries `memory_policy`,
 `allocator_cap_bytes`, `container_memory_bytes`, `host_memavailable_floor_bytes`, and where it applies
-`requires_probe_pass` (the gate) and `segments` (the sealed order).
+`requires_probe_pass` (the gate) and `segments` (the sealed order). Each also carries the window fields `latest_start_seconds_from_open` and
+`finish_margin_seconds` (section 7).
 
 ## 2. Runner variables
 
@@ -242,3 +243,88 @@ python3 -I d2_evidence.py producer DIR --kind torch|native --job ID --nonce HEX 
 python3 -I d2_evidence.py segments DIR --job d2-oracle-short --job-nonce HEX --nonces env-probe:HEX,...
 python3 -I d2_evidence.py probe DIR --kind torch|native
 ```
+
+## 7. Window budget (owner's SHORT95 rulings)
+
+`operator_spec.py` derives two sealed integers per job from one itemized budget per node and emits the budget itself as
+`window_budget`. Nothing in it is entered by hand. `python3 -I operator_spec.py --self-test` checks it at its
+boundaries.
+
+**Reference.** All values are whole seconds from T0, the grant's `opened_at`. The window ends at T0 + 5700, the grant's
+`expires_at`. The runner (`run-node-d2-v2.py`) applies the two fields as follows.
+
+| Field | Runner rule | Semantics |
+|---|---|---|
+| `latest_start_seconds_from_open` (L) | launch cutoff `min(expires - 1200, opened + L)`; admitted only if `now < cutoff` at plan time and again right after `docker create` | strictly less: a container created at T0 + L is refused; L <= 4500, so L always binds |
+| `finish_margin_seconds` (F) | stop `min(expires - 690, expires - F - 60)`; a job starts only if `started + timeout_seconds <= stop` | equality admitted: the payload ends by T0 + 5640 - F, which is the budget's payload end |
+
+**Readiness.** This is the event the setup budget serves: job 1 (the node's probe) is admitted, at T0 + L1 at the
+latest. The setup deadline is `min(ceiling, L1 - runner checks - 125 s pre-payload bound - 1 s)`, where the ceiling is
+2310 on dgx01 and 840 on dgx02. The ceilings remain separate, additional caps.
+
+**Rounding.** Reservations are rounded up to whole seconds and deadlines follow from them, so every deadline is
+rounded down. Every chain also reserves 1 s for strict admission.
+
+**Itemized reservations, from T0:**
+
+- operator handover: 300 s;
+- input copy: 2 x hops x bytes / 25 MB/s;
+- setup verification: 2 x the devbox's measured cold time, receipt `457d14de`.
+
+That sum must fit under the setup deadline.
+
+**Between the jobs:**
+
+- job 1's timeout;
+- the runner's 80 s post-payload bound;
+- 2 x its measured checks;
+- the 125 s pre-payload bound;
+- 1 s strict admission.
+
+**After job 2:**
+
+- the 80 s post-payload bound;
+- the output export: 2 x hops x both jobs' output caps / 25 MB/s;
+- the export's hash verification: 2 x (hops + 1) x the caps / the devbox's 559 MB/s;
+- cleanup: 120 s;
+- marker removal: 60 s.
+
+That chain ends exactly at the node's hard end:
+
+- dgx01 at T0 + 5100 (N - 10 min);
+- dgx02 at T0 + 2940, which includes the both-hop export via dgx01, the verified saved copy, cleanup and marker removal.
+
+**The 2x factor.** The 25 MB/s rate is the owner's cap. It is assumed, not measured, and so is node hashing, which is
+why both are doubled.
+
+**Inputs.**
+
+- dgx02's checkpoint is owner-verified present at `~/k6-staging-1018d582/models/vae/`. It is rehashed in the window,
+  not copied.
+- dgx02's kit takes both hops in the window, reserved at 64 MiB.
+- dgx01's checkpoint is reserved as a one-hop copy. Its bundle and kit are pre-staged under their own receipt.
+
+| Node | Job | timeout | output cap | L | F | payload end |
+|---|---|---|---|---|---|---|
+| dgx01 | `d2-probe-torch` | 600 | 256 MiB | 1512 | 3528 | 2112 |
+| dgx01 | `d2-oracle-short` | 2100 | 4 GiB | 2341 | 1199 | 4441 |
+| dgx02 | `d2-probe-native` | 600 | 256 MiB | 502 | 4538 | 1102 |
+| dgx02 | `d2-engine` | 1140 | 1 GiB | 1310 | 3190 | 2450 |
+
+**Setup.**
+
+| Node | Setup deadline | Reserved | Slack |
+|---|---|---|---|
+| dgx01 | 1363 | 427 | 936 |
+| dgx02 | 374 | 313 | 61 |
+
+**dgx02's shorter payload.** Every case and record is kept. The engine's own `TIMEOUT` is 1020 s inside a 1140 s job.
+The output cap is 1 GiB. The engine's records hold at most 843,015,168 B of raw blobs plus about 69 KB of `ops.jsonl`,
+taken from a `--sim` run's exact shapes (receipt `d2-engine-output-sizing` `658be32d`). The engine's GPU time is
+unmeasured: a case past `TIMEOUT` fails the job, and the FAIL is sticky.
+
+**Outcomes.**
+
+- A node not ready by its setup deadline aborts setup before any payload. It saves its cleanup evidence and releases
+  per the owner's setup-abort protocol. That is a setup abort, not a payload FAIL.
+- Once a payload has started, a refusal for L or for the stop is a sticky FAIL (section 5).
