@@ -368,6 +368,23 @@ Qwen-Image 2.1 on this GB10 too (the M2 pass above was on a PRO 6000). Against t
 
 Whole image against the diffusers pipeline: Turbo 24.9 dB (8 steps), 2.1 26.8 dB (25 steps).
 
+**Against an fp32 reference** (2026-10-11, the same GB10, `stk_twin fp32ref` via `tools/spark/fp32ref-window.sh`):
+the gate's inputs (sha256 1bb19550, identical for both checkpoints and across both processes) through the bf16 twin
+and bf16 diffusers with cuDNN and with memory-efficient attention, each compared with the diffusers transformer run
+in fp32 on the same inputs (its bf16 weights upcast). Relative L2 (cos in brackets):
+
+| sigma | Turbo: twin | diffusers cuDNN | diffusers efficient | 2.1: twin | diffusers cuDNN | diffusers efficient |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.0 | 0.00803 (0.999951) | 0.01062 (0.999928) | 0.00979 (0.999938) | 0.00966 (0.999936) | 0.01070 (0.999924) | 0.00957 (0.999935) |
+| 0.6 | 0.00883 (0.999948) | 0.00903 (0.999946) | 0.00917 (0.999944) | 0.00812 (0.999954) | 0.00844 (0.999953) | 0.00961 (0.999942) |
+| 0.2 | 0.03074 (0.999515) | 0.04063 (0.999164) | 0.03975 (0.999196) | 0.01437 (0.999882) | 0.01927 (0.999802) | 0.01868 (0.999813) |
+
+The twin's distance to this reference is of the same order as diffusers' own bf16 distances: smaller in 11 of the 12
+comparisons, slightly larger in one (2.1 at sigma 1.0: 0.00966 against memory-efficient attention's 0.00957), and
+about a quarter smaller for both models at sigma 0.2. The reference shares diffusers' code and the bf16 weights, so
+these distances do not attribute the gate's gap to a cause and do not rule out an implementation defect. The gate is
+unchanged: cos >= 0.9999 at every step is not met (Turbo 0.99980, 2.1 on GB10 0.99988 at sigma 0.2), so it **fails**.
+
 **Through the daemon** (`tools/spark/compare_models.py`, `tools/twin/prompts/compare.json`, 1024x1024, FP8, each model
 with its own defaults, 3 warm repeats, every repeat byte-identical):
 
