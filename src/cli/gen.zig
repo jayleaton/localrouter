@@ -1,7 +1,9 @@
 //! `localrouter gen`: the command-line client over the HTTP API, for people and agents without an OpenAI SDK.
 //!   localrouter gen image PROMPT [-o out.png] [--size WxH] [--n N] [--seed N] [--steps N] [--model ID] [--url URL]
 //!   localrouter gen video PROMPT [-o out.mp4] [--size WxH] [--seconds N] [--seed N] [--steps N] [--model ID] [--url URL]
+//!   localrouter models [--url URL]
 //! The server is $LOCALROUTER_URL, else http://127.0.0.1:8190. Videos are created, polled each 2 s, then downloaded.
+//! Without --model a request goes to the server's default model for what it needs (`localrouter models`, DEFAULT FOR).
 
 const std = @import("std");
 const Io = std.Io;
@@ -21,6 +23,31 @@ pub fn run(gpa: std.mem.Allocator, io: Io, a: std.mem.Allocator, args: []const [
     if (eql(kind, "image")) return image(&client, io, a, o);
     if (eql(kind, "video")) return video(&client, io, a, o);
     return usageError();
+}
+
+/// `localrouter models`: one line per model on the server (GET /v1/models).
+pub fn models(gpa: std.mem.Allocator, io: Io, a: std.mem.Allocator, args: []const []const u8, environ: *const std.process.Environ.Map) !u8 {
+    var url = environ.get("LOCALROUTER_URL") orelse "http://127.0.0.1:8190";
+    if (args.len == 2 and eql(args[0], "--url")) url = args[1] else if (args.len != 0) return usageError();
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const r = try call(&client, a, .GET, url, "/v1/models", null);
+    if (r.status != .ok) return report(r.body);
+    const M = struct { id: []const u8, kind: []const u8, running: bool = false, capabilities: []const []const u8 = &.{}, default_for: []const []const u8 = &.{} };
+    const list = try std.json.parseFromSliceLeaky(struct { data: []const M }, a, r.body, .{ .ignore_unknown_fields = true });
+    var buf: [4096]u8 = undefined;
+    var w = Io.File.stdout().writer(io, &buf);
+    const out = &w.interface;
+    try out.print("{s:<28} {s:<6} {s:<7} {s:<40} {s}\n", .{ "ID", "KIND", "LOADED", "CAPABILITIES", "DEFAULT FOR" });
+    for (list.data) |m| {
+        try out.print("{s:<28} {s:<6} {s:<7} {s:<40} {s}\n", .{ m.id, m.kind, if (m.running) "yes" else "no", try joined(a, m.capabilities), try joined(a, m.default_for) });
+    }
+    try out.flush();
+    return 0;
+}
+
+fn joined(a: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    return if (items.len == 0) "-" else std.mem.join(a, ",", items);
 }
 
 const Opts = struct {
@@ -120,6 +147,7 @@ fn eql(x: []const u8, y: []const u8) bool {
 }
 
 fn usageError() u8 {
-    std.debug.print("usage: localrouter gen image|video PROMPT [-o FILE] [--size WxH] [--n N] [--seconds N] [--seed N] [--steps N] [--model ID] [--url URL]\n", .{});
+    std.debug.print("usage: localrouter gen image|video PROMPT [-o FILE] [--size WxH] [--n N] [--seconds N] [--seed N] [--steps N] [--model ID] [--url URL]\n" ++
+        "       localrouter models [--url URL]   (the model ids, and which one serves each capability by default)\n", .{});
     return 2;
 }

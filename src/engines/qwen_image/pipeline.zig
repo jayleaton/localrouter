@@ -1,7 +1,9 @@
 //! Qwen-Image 2.1 end to end in one process, as the twin's `QwenImage.generate` with LocalRouter's kernels: the
 //! template's token ids, the text encoder, the DiT's prefix and `steps` Euler steps from the portable noise, the VAE
 //! decoder, uint8 pixels (HWC). Three packs: the DiT's (NVFP4 or FP8), the text encoder's (with the tokenizer and the
-//! scheduler's config) and the VAE's. Heap-allocated: its parts point at each other.
+//! scheduler's config) and the VAE's. A DiT pack with its own `scheduler` (Qwen-Image 2.1 Turbo's: the checkpoint's 8
+//! sigmas) overrides the text encoder's, so DiTs of one family share the text encoder and VAE packs. Heap-allocated:
+//! its parts point at each other.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -140,7 +142,8 @@ pub const Pipeline = struct {
         errdefer p.te_pack.close(io);
         p.vae_pack = try Pack.open(gpa, io, packs.vae);
         errdefer p.vae_pack.close(io);
-        p.sched = try schedulerConfig(p.arena.allocator(), io, packs.te);
+        p.sched = try schedulerConfig(p.arena.allocator(), io, packs.dit) orelse
+            try schedulerConfig(p.arena.allocator(), io, packs.te) orelse return error.NoSchedulerConfig;
 
         var up = try upload_mod.Uploader.init(&p.d, io, p.s);
         defer up.deinit();
@@ -289,9 +292,10 @@ const Clock = struct {
     }
 };
 
-fn schedulerConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !sampler.Config {
+/// The `scheduler` of a pack's manifest, null when it has none.
+fn schedulerConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?sampler.Config {
     const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(16 << 20));
-    const M = struct { scheduler: sampler.Config };
+    const M = struct { scheduler: ?sampler.Config = null };
     const m = try std.json.parseFromSliceLeaky(M, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     return m.scheduler;
 }

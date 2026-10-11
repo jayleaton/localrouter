@@ -56,8 +56,9 @@ A request has a kind (`image`, `video`) and needs one capability:
 | `text_to_video` | prompt |
 | `image_to_video` | prompt + 1 input image |
 
-A tool's capabilities come from its engine (or from its config). A request names a model, or gets the first one of its
-kind that has the capability; a model that lacks it refuses with a message saying so.
+A tool's capabilities come from its engine (or from its config). A request names a model, or gets the config's default
+for its capability (`defaults`, checked at start), else the first one of its kind that has it; a model that lacks it,
+or is of the other kind, refuses with a message saying so and naming the models that can.
 
 ## Adding a model
 
@@ -71,6 +72,7 @@ pub const entry: engine.Entry = .{
     .capabilities = &.{ .text_to_image, .image_edit },
     .needs = needs,     // fn (cfg, request) Needs: resident + working bytes, pure and cheap (no I/O)
     .create = create,   // fn (env, cfg) Engine: allocate the engine; nothing heavy yet
+    .check = check,     // optional fn (cfg, request, why) bool: refuse what the model cannot serve, before it loads
 };
 ```
 
@@ -110,7 +112,7 @@ The scheduler, memory accounting, priorities, idle unloading and the worker prot
 
 ## Engines and correctness
 
-The first engines (Qwen-Image 2.1 and MiniMax H3) are written in Zig with their own CUDA kernels, built on
+The first engines (Qwen-Image 2.1, its Turbo checkpoint, and MiniMax H3) are written in Zig with their own CUDA kernels, built on
 [TensorFold](https://github.com/ashhart/TensorFold)'s runtime and kernels. Each is checked against a Python reference
 of the same model (`tools/twin`) bit for bit: every operation alone and chained, then prompt to pixels and audio
 samples, on the GPU it ships for. Speed changes keep those bits, or they do not ship. `docs/dev/` has the measured

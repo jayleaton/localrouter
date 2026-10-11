@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Qwen-Image 2.1 Turbo (`qwen_image_turbo`, installed as `qwen-image-2.1-turbo`): the official Turbo checkpoint on
+  the same native Zig engine, with its own 8-step schedule (the checkpoint's `sample_sigmas`, shift 1, CFG 1). On GB10
+  its sigmas, context, latents and pixels equal the twin's; the bf16 twin's cosine gate against diffusers fails at
+  sigma 0.2 for Turbo and for Qwen-Image 2.1 alike (`docs/dev/RESULTS.md`). Its FP8 pack is calibrated and digest-checked like the base model's; the text encoder and
+  VAE packs are shared (the same tensors). The installer adds it beside Qwen-Image 2.1 and makes it the default image
+  model (`IMAGE_MODELS`, `IMAGE_DEFAULT`).
+- Model choice per capability: the config's `defaults` names the model a request without `model` gets (checked at
+  start); `/v1/models` and `list_models` show each model's `default_for`; `localrouter models` prints them. Unknown and
+  wrong-kind models are refused with the models that can serve the request; engines can refuse requests they cannot
+  serve (sizes, step counts) before loading (`Entry.check`).
+
 ## v0.1.0
 
 First public release.

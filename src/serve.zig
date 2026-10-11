@@ -11,6 +11,7 @@ const sched = @import("sched/scheduler.zig");
 const routes = @import("api/routes.zig");
 const http = @import("api/http.zig");
 const bind = @import("bind.zig");
+const engine = @import("engine/engine.zig");
 
 var stop_flag: std.atomic.Value(bool) = .init(false);
 
@@ -43,6 +44,12 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             std.log.err("{s}: {s}", .{ p, @errorName(err) });
             return 2;
         };
+    }
+    var why_buf: [256]u8 = undefined;
+    var why: Io.Writer = .fixed(&why_buf);
+    if (!engine.checkDefaults(&cfg, &why)) {
+        std.log.err("{s}: {s}", .{ path orelse "config", why.buffered() });
+        return 2;
     }
     if (host) |v| cfg.host = v;
     if (port) |v| cfg.port = v;

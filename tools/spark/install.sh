@@ -15,7 +15,9 @@
 # `tailscale ip -4`), "all" (every interface) or an IPv4 address; asked once on a terminal when unset, and remembered in
 # $LOCALROUTER_HOME/.env), MODELS ("image video"; "image" or "video" installs one; about 200 GB free for both, 110 GB for
 # images only), PRECISIONS (the image model: "fp8s", the default and primary; "fp8s nvfp4" adds the faster NVFP4 as
-# qwen-image-2.1-nvfp4), LOCALROUTER_SKIP_SMOKE=1.
+# qwen-image-2.1-nvfp4), IMAGE_MODELS (the image checkpoints: "qwen-image-2.1 qwen-image-2.1-turbo", the default, or
+# either alone; Turbo adds about 25 GB), IMAGE_DEFAULT (the model a request without one gets: qwen-image-2.1-turbo when
+# installed, else qwen-image-2.1; it is also the one kept warm), LOCALROUTER_SKIP_SMOKE=1.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 LOCALROUTER_HOME=${LOCALROUTER_HOME:-/data/localrouter}
@@ -24,6 +26,7 @@ envsaved() { { [[ -f $ENVFILE ]] && sed -n "s/^$1=//p" "$ENVFILE" | tail -1; } |
 LOCALROUTER_PORT=${LOCALROUTER_PORT:-$(envsaved LOCALROUTER_PORT)}; LOCALROUTER_PORT=${LOCALROUTER_PORT:-8190}
 PRECISIONS=${PRECISIONS:-fp8s}
 MODELS=${MODELS:-image video}
+IMAGE_MODELS=${IMAGE_MODELS:-qwen-image-2.1 qwen-image-2.1-turbo}
 NGC=nvcr.io/nvidia/pytorch:26.07-py3
 step() { echo "[install $(date +%T)] $*"; }
 die() { echo "install: $*" >&2; exit 1; }
@@ -31,6 +34,10 @@ die() { echo "install: $*" >&2; exit 1; }
 want() { [[ " $MODELS " == *" $1 "* ]]; }
 [[ -n ${PRECISIONS//[[:space:]]/} ]] || die "PRECISIONS is empty: use \"fp8s\" (default) or \"fp8s nvfp4\""
 for p in $PRECISIONS; do [[ $p == fp8s || $p == nvfp4 ]] || die "PRECISIONS has '$p': use \"fp8s\", \"nvfp4\" or \"fp8s nvfp4\""; done
+for m in $IMAGE_MODELS; do [[ $m == qwen-image-2.1 || $m == qwen-image-2.1-turbo ]] || die "IMAGE_MODELS has '$m': use qwen-image-2.1 and/or qwen-image-2.1-turbo"; done
+[[ " $IMAGE_MODELS " == *" qwen-image-2.1-turbo "* ]] && IMAGE_DEFAULT=${IMAGE_DEFAULT:-qwen-image-2.1-turbo}
+IMAGE_DEFAULT=${IMAGE_DEFAULT:-qwen-image-2.1}
+[[ " $IMAGE_MODELS " == *" $IMAGE_DEFAULT "* ]] || die "IMAGE_DEFAULT '$IMAGE_DEFAULT' is not in IMAGE_MODELS"
 
 # ---- who may connect: LOCALROUTER_BIND, else what an earlier run saved, else (on a terminal) ask, else this machine only
 BIND_MODE=${LOCALROUTER_BIND:-$(envsaved LOCALROUTER_BIND_MODE)}
@@ -72,6 +79,7 @@ mkdir -p "$LOCALROUTER_HOME" 2> /dev/null || sudo install -d -o "$(id -u)" -g "$
 free_gb=$(df -BG --output=avail "$LOCALROUTER_HOME" | tail -1 | tr -dc 0-9)
 need=0   # what is still to make: images about 110 GB (checkpoint, packs, caches), video about 90 GB more (61 GB of checkpoints, the pack, scratch)
 if want image && [[ ! -f $LOCALROUTER_HOME/weights/qwen-image-2.1/te/manifest.json ]]; then need=$(( need + 110 )); fi
+if want image && [[ " $IMAGE_MODELS " == *" qwen-image-2.1-turbo "* && ! -d $LOCALROUTER_HOME/weights/qwen-image-2.1/turbo-fp8s ]]; then need=$(( need + 25 )); fi
 if want video && [[ ! -f $LOCALROUTER_HOME/weights/minimax-h3/h3-turbo-nvfp4/manifest.json ]]; then need=$(( need + 90 )); fi
 (( free_gb >= need )) ||
     die "$LOCALROUTER_HOME has ${free_gb} GB free; installing [$MODELS] needs about ${need} GB more (images 110, video 90; both 200)"
@@ -86,34 +94,44 @@ for d in tools/twin:twin kernels:kernels .:repo; do   # the container's copy of 
     tar -C "$REPO/$src" --exclude=.zig-cache --exclude=zig-out --exclude=zig-pkg --exclude=results --exclude=__pycache__ \
         --exclude=.git -cf - . | tar -C "$LOCALROUTER_HOME/$dst" -xf -
 done
-docker run --rm --gpus all --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" \
+docker run --rm --gpus all --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" -e IMAGE_MODELS="$IMAGE_MODELS" \
     -v "$LOCALROUTER_HOME":/workspace/localrouter "$NGC" bash /workspace/localrouter/repo/tools/spark/prepare.sh
 
 # ---- 3. the service
 step "config"
 mkdir -p "$LOCALROUTER_HOME/data" && chmod 777 "$LOCALROUTER_HOME/data"   # the image runs as uid 10001
-python3 - "$LOCALROUTER_HOME/tools.json" "$PRECISIONS" "$(hostname)" "$MODELS" <<'PY'
-import json, sys
+python3 - "$LOCALROUTER_HOME/tools.json" "$PRECISIONS" "$(hostname)" "$MODELS" "$IMAGE_MODELS" "$IMAGE_DEFAULT" "$REPO/tools/twin/packs" <<'PY'
+import json, os, sys
 tools = []
 models = sys.argv[4].split()
+defaults = {}
 if "image" in models:
     precisions = sys.argv[2].split()
     primary = "fp8s" if "fp8s" in precisions else precisions[0]
-    for p in precisions:
-        # FP8 is the primary image model (id qwen-image-2.1; closest to the original model): kept warm, and kept past
-        # the others when memory is needed. NVFP4 (faster) is qwen-image-2.1-nvfp4, loaded on demand. If only NVFP4
-        # was asked for, it takes the primary id.
-        tools.append({"id": "qwen-image-2.1" if p == primary else f"qwen-image-2.1-{p.replace('fp8s', 'fp8')}", "kind": "image",
-                      "name": f"Qwen-Image 2.1 ({'NVFP4' if p == 'nvfp4' else 'FP8'})", "engine": "qwen_image",
-                      "weights": "/models/qwen-image-2.1", "idle_ttl_s": 300, "priority": 10, "keep_loaded": p == primary,
-                      "options": {"precision": p, "max_side": 1664}})
+    image_default = sys.argv[6]
+    for model in sys.argv[5].split():
+        turbo = model.endswith("-turbo")
+        for p in precisions:
+            if turbo and not os.path.exists(f"{sys.argv[7]}/acts-{p.removesuffix('s')}-turbo.json"):
+                continue  # no committed Turbo scales for this precision: prepare.sh made no pack
+            # FP8 is each checkpoint's primary model (closest to the original); NVFP4 (faster) gets the -nvfp4 id. If
+            # only NVFP4 was asked for, it takes the primary id. The image default is kept warm and kept past the others
+            # when memory is needed; the other image models load on demand.
+            tid = model if p == primary else f"{model}-{p.replace('fp8s', 'fp8')}"
+            label = "NVFP4" if p == "nvfp4" else "FP8"
+            tools.append({"id": tid, "kind": "image", "engine": "qwen_image_turbo" if turbo else "qwen_image",
+                          "name": f"Qwen-Image 2.1 Turbo ({label}, 8 steps)" if turbo else f"Qwen-Image 2.1 ({label})",
+                          "weights": "/models/qwen-image-2.1", "idle_ttl_s": 300, "priority": 10 if tid == image_default else 5,
+                          "keep_loaded": tid == image_default, "options": {"precision": p, "max_side": 1664}})
+    if any(t["id"] == image_default for t in tools):
+        defaults["text_to_image"] = image_default
 if "video" in models:
     # the video tool loads on demand (priority 0): it makes room by unloading idle tools, the image model last
     tools.append({"id": "minimax-h3", "kind": "video", "name": "MiniMax H3 (video with audio, Turbo 8 steps)",
                   "engine": "minimax_h3", "weights": "/models/minimax-h3", "idle_ttl_s": 300,
                   "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}})
 # machine: this host's name for list_models (inside the container the hostname is the container's id)
-json.dump({"machine": sys.argv[3], "reserve_bytes": 8 << 30, "tools": tools}, open(sys.argv[1], "w"), indent=1)
+json.dump({"machine": sys.argv[3], "reserve_bytes": 8 << 30, "defaults": defaults, "tools": tools}, open(sys.argv[1], "w"), indent=1)
 PY
 step "image and service"
 export LOCALROUTER_MODELS=$LOCALROUTER_HOME/weights LOCALROUTER_DATA=$LOCALROUTER_HOME/data LOCALROUTER_CONFIG=$LOCALROUTER_HOME/tools.json

@@ -1,7 +1,8 @@
 //! The self-test engine: deterministic seeded images and videos (with a tone) made on the CPU, through the same
 //! PNG and MP4 paths, progress reports and memory accounting as the GPU engines. `localrouter check selftest` runs it.
 //! Input images (an edit's references, a video's first frame) are hashed into the pattern, so a test can see that
-//! they reached the engine. It declares every capability. Options: `resident_mb` (held while loaded, really allocated), `load_ms`, `step_ms` (a sleep each step).
+//! they reached the engine. It declares every capability. Options: `resident_mb` (held while loaded, really allocated), `load_ms`, `step_ms` (a sleep each step),
+//! `max_side` (pixels: larger requests are refused before loading, as a GPU engine's are).
 
 const std = @import("std");
 const engine = @import("../engine/engine.zig");
@@ -10,7 +11,17 @@ const mp4 = @import("../media/mp4.zig");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "testpattern", .capabilities = &.{ .text_to_image, .image_edit, .text_to_video, .image_to_video }, .needs = needs, .create = create };
+pub const entry: engine.Entry = .{ .name = "testpattern", .capabilities = &.{ .text_to_image, .image_edit, .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check };
+
+fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
+    const max = engine.optionInt(cfg, "max_side", 0);
+    const side: u64 = switch (req.*) {
+        inline else => |v| @max(v.width, v.height),
+    };
+    if (max == 0 or side <= max) return true;
+    why.print("model '{s}' takes sizes up to {d} pixels a side", .{ cfg.id, max }) catch {};
+    return false;
+}
 
 const default_steps = 4;
 
