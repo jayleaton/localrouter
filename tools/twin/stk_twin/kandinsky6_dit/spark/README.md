@@ -1,0 +1,157 @@
+# Kandinsky-6 DiT: the Spark GPU job kit
+
+Two scripts qualify the Kandinsky-6 Pro-distill DiT kernels and the block runtime against the twin and upstream
+kandinsky-6 `eac06e39` on DGX Spark nodes (GB10, sm_121):
+
+- `kit.sh` runs on the dev host. It builds one immutable, reproducible tarball from committed `HEAD` (no network, no
+  docker, no build step).
+- `node-job.sh` runs one job on one node, inside a time window, from that tarball. Its header documents the hard
+  contract (kit sha, deadline, memory guard, disk, GPU lock, offline, oracle settings), and the script checks each item.
+
+No step builds an image, downloads anything or reads weights: every input is random at the checkpoint's shapes
+(`test_ops.random_weights`, and gate.py's own inputs). The oracle environment comes prebuilt from the dev host, as
+either the pinned image or the offline venv fallback (see "What the stager places on each node").
+
+## Jobs
+
+All times and sizes below are **estimates**. None of them is measured yet, and each is deliberately conservative.
+`max min` is a hard timeout. A step starts only if its `max min` ends before `DEADLINE - 10 min`. The output budget
+and the declared peak are checked before each step starts.
+
+| job | steps (one python process each) | purpose | est. minutes | max min | est. peak GiB (declared) | output |
+| --- | --- | --- | --- | --- | --- | --- |
+| `smoke` | `import`, `kernels`, `test_ops_small` | checks that the twin and pinned upstream import from the kit only, the three fatbins load and match the MANIFEST digests, and `test_ops --small --fp32-linear tf32_rna` runs | 5 | 3 + 3 + 15 | 4 (step peak 8) | < 10 MB |
+| `twin` | `test_ops_{tf32_rna,tf32_truncate,fp32}` | `test_ops` at the checkpoint's widths (model_dim 4096, ff 16384, 2 fused + 1 text block, 231 visual tokens): the bit-exact assertions plus the faithfulness receipt for each Fp32Linear form | 3 x 8 = 24 | 3 x 20 | 12 (24) | < 30 MB |
+| `ops` | `gate_ops_tf32_rna`, `gate_fp32_{tf32_truncate,fp32}` | every `gate --phase ops` site once (37 sites plus the RoPE / time-freq tables), then only the 12 `fp32/*` sites for the other two Fp32Linear forms (no other ops site depends on the form) | 25 + 2 x 5 = 35 | 40 + 2 x 10 | 9.3 per site (24, 16) | < 7 GB budget (expected far less) |
+| `blocks` | `gate_blocks_{tf32_rna,tf32_truncate,fp32}` | `gate --phase blocks` (time chain, both text blocks, embeddings, one fused block at 50,220 tokens) for each form | 3 x 10 = 30 | 3 x 20 | 20.3 (32) | < 30 GB budget (expected far less) |
+
+Basis for the estimates:
+
+- The `twin` figures come from test_ops' shapes. A fused block holds about 29 B / 60, or 0.5 B, parameters (about
+  1 GiB in bf16). The reduced forward plus embeddings is a few GiB, and the twin and native modules share one weight
+  dict.
+- The `ops` and `blocks` peaks are gate.py's own per-site estimates (`gate --list`, run in the oracle image): the
+  largest ops site is `ffn/video_up` at 9.3 GiB, the largest block unit `block/fused` at 20.3 GiB. gate.py runs one
+  child per site, checks each estimate against `--max-gib` (GATE_MAX_GIB, default 90) and records the real peak.
+  Minutes assume 10-20 s per site plus native 50,220^2 attention; replace them with measured ones after the first
+  window.
+- The guard records each step's real peak in `SUMMARY.txt`. That peak is the larger of the step session's RSS plus
+  GPU memory and the drop in MemAvailable since the step started. GB10 memory is unified, so a device allocation
+  shows up as a drop in MemAvailable, not in RSS.
+- `STEP_MAX_MIN=<n>` overrides the max minutes of the `twin`, `ops` and `blocks` steps.
+
+## Two nodes, one window (under 120 min)
+
+Set `DEADLINE` to the window's end on both nodes. No step starts after `DEADLINE - 20 min`. Each script cleans up at
+`DEADLINE - 10 min` and stops hard at `DEADLINE`. Node A is dgx01 (`WORK=/home/dgx01/k6-d1-qual`), node B is dgx02
+(`WORK=/root/k6-d1-qual`, reached through dgx01); each node writes only its own `WORK`.
+
+| time (est.) | node A (dgx01) | node B (dgx02) |
+| --- | --- | --- |
+| 0 to 10 | verify kit + image tar sha256, `docker load`, check the loaded image ID (or the offline venv: about 10 min) | the same |
+| 10 to 15 | `smoke` (preflight + steps) | `smoke` |
+| 15 to 40 | `twin` | `ops` (until about 50) |
+| 40 to 70 | `blocks` | sends results back |
+| 70 to 90 | margin, sends results back | |
+
+Estimated totals: about 70 min on node A and 50 min on node B, inside a 90 min window (120 min allowed). If a step
+runs to its maximum, a later step that no longer fits is recorded as `not-run: time` rather than started. The jobs on
+one node run one after another; the GPU lock refuses a second job.
+
+## What the stager places on each node
+
+All of it is files-only before T0; loading, extraction and setup happen after T0, inside the window.
+
+1. **The kit tarball** (`k6-dit-kit-<commit12>.tar.gz`) and its sha256 (`KIT_SHA`, printed by `kit.sh` and stored
+   in its `.sha256` file). Nothing else from the repository is needed.
+2. **The oracle environment**, one of:
+   - **the image** (preferred): the `docker save` tar of `k6-dit-oracle:<lock12>`, built on the dev host from
+     `oracle.Dockerfile` (pinned `python:3.13-slim-bookworm` digest, offline `--require-hashes` install of the
+     `lock.txt` wheel set: `torch==2.14.1+cu130` cp313 aarch64 and its declared dependencies, nothing else). The tar
+     sha256 and the loaded image ID are both checked. Inside it, `VENV=/usr/local`.
+   - **the offline venv fallback**: the same wheel set with `lock.txt` and `SHA256SUMS`, plus python-build-standalone
+     `cpython-3.13.16+20261009-aarch64-unknown-linux-gnu-install_only.tar.gz`; `setup-venv.sh` builds `$WORK/venv`
+     with no network and checks the pins.
+
+   `flash_attn`, `flash_attn_interface` and `sageattention` are absent on purpose: the native reference uses SDPA.
+3. **The NVIDIA driver**: `libcuda.so.1` with CUDA 13.0 support, and `nvidia-smi`, on a GB10 (capability 12.1); with
+   the image, the NVIDIA container runtime (`--gpus all`).
+4. **`WORK`**: a directory this job alone writes, on a filesystem with at least the job's budget plus 5 GB free.
+   `WORK` (the extracted kit, results, caches and TMPDIR) stays under 200 GB.
+5. **Tools** (present in the image): bash, util-linux `flock` and `setsid`, coreutils (`timeout`, `sha256sum`, `du`,
+   `df`), GNU tar, gzip, awk and cmp. The memory guard reads `/proc` directly (no procps). Preflight checks for each.
+
+The third-party Python imports of the DiT path, listed in full. Each entry is `file:line` in the kit; upstream paths
+are under `kandinsky6-upstream/`.
+
+| import | where | required |
+| --- | --- | --- |
+| `torch`, `torch.nn`, `torch.nn.functional` | `kandinsky6_dit/kernels.py:22`, `block.py:19`, `native.py:29-30`, `test_ops.py:31-33`; `kandinsky/core/components/dit.py:13-15`, `rope.py:3-4`, `kandinsky/core/tensors.py:5-6`, `kandinsky/core/algo/prepare_ropes.py:9-10`, `kandinsky/runtime/kernels/sdpa.py:5-6` | yes |
+| `torch`, `torch.nn`, `torch.nn.functional` (gate) | `kandinsky6_dit/gate.py:100-102`; the rest of gate.py's imports are the standard library (`gate.py:79-98`) | yes |
+| `libcuda.so.1` (ctypes, the driver API) | `kandinsky6_dit/kernels.py:161` | yes (driver) |
+| `flash_attn` | `kandinsky/runtime/kernels/flash_attention_2.py:6`, via `attention_engine.py:7` via `core/components/attention/dispatch.py:6` via `dit.py:23` | no: `try`/`except Exception` |
+| `flash_attn_interface` | `kandinsky/runtime/kernels/flash_attention_3.py:6`, via `attention_engine.py:8` | no: `try`/`except Exception` |
+| `sageattention` | `kandinsky/runtime/kernels/sage.py:6`, via `attention_engine.py:9` | no: `try`/`except Exception` |
+
+Everything else in the path is the standard library (`kernels.py:15-20`, `native.py:19-27`, `test_ops.py:26-29`,
+`attention_engine.py:5`) or the pinned checkout's own modules. These are `piflow_dit.py:5`, `dit.py:17-24`,
+`rope.py:6`, `attention/dispatch.py:6` and `attention_engine.py:7-10`; the package `__init__.py` files of
+`kandinsky.core`, `kandinsky.core.components`, `kandinsky.core.components.attention` and `kandinsky.core.algo` are
+empty.
+
+`native.upstream()` stands empty namespace modules in for `kandinsky`, `kandinsky.runtime` and
+`kandinsky.runtime.kernels`. As a result, `kandinsky/__init__.py` (the whole pipeline: diffusers, transformers,
+pydantic) and `kandinsky/runtime/kernels/__init__.py:9` (`..base`, pydantic) never execute. The smoke `import` step
+imports gate.py too, and fails if anything else is needed.
+
+## Commands
+
+On the dev host, from a clean, committed tree with gate.py committed:
+
+```sh
+FATBINS=/path/to/fatbins K6_SRC=/tmp/kandinsky6-upstream \
+    bash tools/twin/stk_twin/kandinsky6_dit/spark/kit.sh /path/to/kits
+# prints KIT_SHA=<sha256> and CREATED_UTC=...; the same inputs + CREATED_UTC reproduce the same sha256
+```
+
+Each job is one container run from the loaded oracle image (`IMAGE` is the checked image ID). The container
+verifies the kit sha256 before taking `node-job.sh` out of it, and writes only the bind-mounted `WORK`:
+
+```sh
+# node A: WORK=/home/dgx01/k6-d1-qual   node B: WORK=/root/k6-d1-qual   (the kit tarball inside WORK)
+docker run --rm --name k6-d1-$JOB --user "$(id -u):$(id -g)" --gpus all --network none \
+    --memory 100g --memory-swap 100g \
+    -e DEADLINE -e KIT_SHA -e WORK=/work -e KIT=/work/k6-dit-kit-<commit12>.tar.gz -e VENV=/usr/local \
+    -v "$WORK":/work "$IMAGE" bash -c 'echo "$KIT_SHA  $KIT" | sha256sum -c --quiet - &&
+    tar -xzOf "$KIT" ./repo/tools/twin/stk_twin/kandinsky6_dit/spark/node-job.sh > /tmp/node-job.sh &&
+    exec bash /tmp/node-job.sh "$@"' _ $JOB        # append --preflight for the preflight
+```
+
+Node A runs `JOB=smoke`, then `twin`, then `blocks`; node B runs `smoke`, then `ops`. Each job's preflight goes first.
+With the offline venv instead, the same `node-job.sh` runs on the host with `VENV=$WORK/venv` after
+`WORK=... PYTAR=... WHEELS=... bash setup-venv.sh`.
+
+Each job exits 0 only if every step ran and returned 0. `twin` returns 1 if a bit-exact assertion fails; it still
+writes its receipt, and the next mode still runs. Optional environment variables: `MIN_GIB` (8), `SEED` (0),
+`GATE_MAX_GIB` (90) and `STEP_MAX_MIN`.
+
+## What to send back
+
+From each node, send these:
+
+- every `$WORK/results/<job>-<UTC>.tar.gz` and its `.sha256`, as printed in each job's `RESULTS_SHA=` line;
+- the console output of the preflights and of the jobs.
+
+Each results directory holds:
+
+- `env.json`: hostname, `nvidia-smi -q` summary, driver, kernel, kit sha and MANIFEST header, python, torch, CUDA and
+  cuDNN versions, the relevant environment;
+- `nvidia-smi-q.txt` and `preflight.log`;
+- `job.log`: every decision, plus du before and after each step;
+- `steps.tsv` and `SUMMARY.txt`: per step, status, rc, minutes, peak GiB, max min and du;
+- `memavail.log`: one sample a second, as epoch, MemAvailable, step, RSS, GPU, drop and use;
+- `guard.log`: the guard's kills;
+- `<step>/log`, `<step>/exit_code` and `<step>/command.txt`;
+- the receipts: `test_ops` `receipt.json`, `kernels.json`, and gate.py's `--out` directory.
+
+Do not send the extracted kit (`$WORK/kit-<sha12>`); it is read-only and identical to the tarball.

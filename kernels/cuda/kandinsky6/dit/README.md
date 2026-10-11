@@ -169,3 +169,9 @@ These paths are new and touch no central file. To wire them (serialized with oth
   per-op / per-capture native comparison at the oracle's own settings), then Zig vs twin per op / per block / full
   forward bit-equality, native SM121 byte fixtures for every UNQUALIFIED row (algorithm evidence included), per-op
   GPU events and measured scratch.
+- Native receipts at production shapes: `python -m stk_twin.kandinsky6_dit.gate --phase {ops,blocks} --fp32-linear
+  MODE --fatbins DIR --out DIR` (`--list` prints the sites). One child process per site, each with its own cuBLAS /
+  cuBLASLt log, profiler trace (kernel names, SDPA backend) and twin bit comparison; `receipt.json` reports every
+  site and the first diverging capture of each block, and the RoPE / time-freq tables are stored as fixtures for the
+  runtime's table producer. Exit 0 only when every gated site is bit-equal. The bounded two-node Spark job kit
+  (pinned oracle image, offline venv fallback, window contract) is in `tools/twin/stk_twin/kandinsky6_dit/spark/`.
