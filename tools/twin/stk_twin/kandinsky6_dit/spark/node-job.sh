@@ -17,20 +17,24 @@
 #   time    STOP_NEW = DEADLINE - 20 min: no step starts at or after it, and none starts unless its max minutes end by
 #           CLEANUP = DEADLINE - 10 min (a step's timeout is also capped at CLEANUP). At CLEANUP the guard terminates our
 #           step's process group (KILL 10 s later); at DEADLINE it KILLs the group and stops this script.
-#   memory  a guard samples MemAvailable every second and our step's use: max(RSS of every process in the step's
-#           session + their nvidia-smi used memory, MemAvailable at step start - MemAvailable now). It kills the step if
-#           that exceeds MAX_GIB (100) or MemAvailable falls under MIN_GIB (default 8). A step does not start unless
-#           MemAvailable >= its declared peak + MIN_GIB. Logged: memavail.log (every sample), guard.log (actions).
+#   memory  the node total of everything this job starts: a guard samples MemAvailable every second and takes our use
+#           as max(RSS of every process in the step's session + their nvidia-smi used memory, MemAvailable when this
+#           job started - MemAvailable now), so the guard, the kit, caches and any helper count too (GB10 memory is
+#           unified: device allocations show up there). It kills the step if that exceeds MAX_GIB (96: the 100 GiB
+#           contract minus 4 GiB for the container runtime started before this script) or MemAvailable falls under
+#           MIN_GIB (default 8). A step does not start unless MemAvailable >= its declared peak + MIN_GIB and the job
+#           total + that peak stays within MAX_GIB. Logged: memavail.log (every sample), guard.log (actions).
 #   disk    a step does not start if du($WORK) + its output budget exceeds 200 GB, or the filesystem lacks the budget
 #           + 5 GB; du before and after every step is recorded.
 #   GPU     one heavy job per node: an exclusive flock on $WORK/.gpu.lock, held for the whole run (refused if another
 #           k6 job holds it). Other GPU compute apps are reported (preflight, env.json, cleanup), never touched.
-#   scope   no docker, no image builds, no network: proxies unset, NCCL/UCX/MPI pinned to loopback with IB off, HF/pip
+#   scope   no docker inside the job, no image builds, no network: proxies unset, NCCL/UCX/MPI pinned to loopback with IB off, HF/pip
 #           offline. Only $WORK is written (TMPDIR and every cache are under it); only our own process groups are killed.
 #   oracle  NVIDIA_TF32_OVERRIDE, TORCH_ALLOW_TF32* and CUBLASLT_LOG_* must not be set (refused); this script never
 #           sets them (gate.py sets CUBLASLT_LOG_* itself where it wants them).
 # Optional env: MIN_GIB (8), SEED (0, passed to test_ops / gate), GATE_MAX_GIB (90, gate --max-gib), STEP_MAX_MIN (the
-# max minutes of every twin / ops / blocks step; defaults 20 / 20 / 30).
+# max minutes of every twin / ops / blocks step; defaults 20 / 40 (+10 per further fp32/* form) / 20), MODES (a subset
+# of "tf32_rna tf32_truncate fp32", in order: splits a job into discrete runs; ops runs every site under the first).
 # Output: $WORK/results/<job>-<UTC>/: env.json, nvidia-smi-q.txt, preflight.log, job.log, steps.tsv, memavail.log,
 # guard.log, <step>/{log,exit_code,<receipts>}, SUMMARY.txt; then $WORK/results/<job>-<UTC>.tar.gz and its sha256.
 set -uo pipefail
@@ -65,13 +69,15 @@ SEED=${SEED:-0}
 GATE_MAX_GIB=${GATE_MAX_GIB:-90}
 for v in MIN_GIB SEED GATE_MAX_GIB; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a non-negative integer"; done
 [[ -z ${STEP_MAX_MIN:-} || ${STEP_MAX_MIN:-} =~ ^[1-9][0-9]*$ ]] || die "STEP_MAX_MIN must be a positive integer"
+MODES=${MODES:-tf32_rna tf32_truncate fp32}   # a subset splits twin / ops / blocks into discrete, resumable jobs
+for m in $MODES; do [[ " tf32_rna tf32_truncate fp32 " == *" $m "* ]] || die "MODES: unknown Fp32Linear form $m"; done
+[[ -n ${MODES// /} ]] || die "MODES is empty"
 
 # contract constants (not overridable)
-MAX_GIB=100
+MAX_GIB=96      # node total for everything this job starts: 100 GiB contract minus 4 GiB for the container runtime
 DISK_GB=200
 STOP_NEW_S=1200
 CLEANUP_S=600
-MODES="tf32_rna tf32_truncate fp32"
 GIB_KIB=1048576
 MIN_KIB=$(( MIN_GIB * GIB_KIB ))
 MAX_KIB=$(( MAX_GIB * GIB_KIB ))
@@ -101,6 +107,7 @@ export STK_K6_SRC=$KD/kandinsky6-upstream STK_K6_DIT_FATBINS=$KD/fatbins KIT_SHA
 unset STK_K6_CONFIG   # the twin's built-in Pro-distill config, never a file from elsewhere
 
 avail_kib() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
+JOB_BASE=$(avail_kib)   # MemAvailable before this job does anything: every later drop counts as ours (node total)
 gib() { awk -v k="$1" 'BEGIN {printf "%.1f", k / 1048576}'; }
 du_bytes() { du -sxb "$WORK" 2> /dev/null | cut -f1; }
 df_bytes() { df -B1 --output=avail "$WORK" | tail -1 | tr -dc 0-9; }
@@ -116,8 +123,11 @@ steps() {
         echo "test_ops_small 15 1 8 1" ;;
     twin) for m in $MODES; do echo "test_ops_$m ${STEP_MAX_MIN:-20} 1 24 0"; done ;;
     # only the fp32/* sites depend on the Fp32Linear form: every site once (tf32_rna), then fp32/* for the others
-    ops) echo "gate_ops_tf32_rna ${STEP_MAX_MIN:-40} 5 24 0"
-        for m in tf32_truncate fp32; do echo "gate_fp32_$m ${STEP_MAX_MIN:-10} 1 16 0"; done ;;
+    ops) local first=1
+        for m in $MODES; do
+            if (( first )); then echo "gate_ops_$m ${STEP_MAX_MIN:-40} 5 24 0"; first=0
+            else echo "gate_fp32_$m ${STEP_MAX_MIN:-10} 1 16 0"; fi
+        done ;;
     blocks) for m in $MODES; do echo "gate_blocks_$m ${STEP_MAX_MIN:-20} 10 32 0"; done ;;
     esac
 }
@@ -433,7 +443,7 @@ guard() {
                     gpu=$(( gpu + mib * 1024 ))
                 done
             fi
-            drop=$(( base - avail )); (( drop < 0 )) && drop=0
+            drop=$(( JOB_BASE - avail )); (( drop < 0 )) && drop=0
             use=$(( rss + gpu )); (( drop > use )) && use=$drop
             if (( use > peak )); then peak=$use; echo "$peak" > "$R/.peak.$name"; fi
             reason=""
@@ -479,8 +489,8 @@ run_step() {
         log "$name: not started: WORK $dub GB + budget $outgb GB over $DISK_GB GB, or $(( free / 1000000000 )) GB free"
         record "$name" "not-run: disk" - - - "$max" "$dub" -; return 1
     fi
-    if (( avail < (peak + MIN_GIB) * GIB_KIB )); then
-        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB"
+    if (( avail < (peak + MIN_GIB) * GIB_KIB || JOB_BASE - avail + peak * GIB_KIB > MAX_KIB )); then
+        log "$name: not started: MemAvailable $(gib "$avail") GiB under its declared peak $peak + MIN_GIB $MIN_GIB, or job total $(gib $(( JOB_BASE - avail ))) GiB + $peak over MAX_GIB $MAX_GIB"
         record "$name" "not-run: memory" - - - "$max" "$dub" -; return 1
     fi
     if ! verify_kit "$KD" >> "$R/job.log" 2>&1; then

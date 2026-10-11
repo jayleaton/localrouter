@@ -40,23 +40,34 @@ Basis for the estimates:
   shows up as a drop in MemAvailable, not in RSS.
 - `STEP_MAX_MIN=<n>` overrides the max minutes of the `twin`, `ops` and `blocks` steps.
 
-## Two nodes, one window (under 120 min)
+## Two nodes, one window (N = 120 min)
 
-Set `DEADLINE` to the window's end on both nodes. No step starts after `DEADLINE - 20 min`. Each script cleans up at
-`DEADLINE - 10 min` and stops hard at `DEADLINE`. Node A is dgx01 (`WORK=/home/dgx01/k6-d1-qual`), node B is dgx02
-(`WORK=/root/k6-d1-qual`, reached through dgx01); each node writes only its own `WORK`.
+Owner deadlines, with T0 the window start: no new work at T0+100 (N-20), everything cleaned by T0+110 (N-10), expiry
+T0+120 (N). `node-job.sh` enforces them with `DEADLINE=T0+120`: a step starts only if its max minutes end by T0+110.
+Node A is dgx01 (`WORK=/home/dgx01/k6-d1-qual`), node B is dgx02 (`WORK=/root/k6-d1-qual`, reached through dgx01);
+each node writes only its own `WORK`. Every job is a separate container run (discrete, resumable): `MODES` splits a job
+by Fp32Linear form, so a job that no longer fits is resumed in a later window instead of truncated.
 
-| time (est.) | node A (dgx01) | node B (dgx02) |
-| --- | --- | --- |
-| 0 to 10 | verify kit + image tar sha256, `docker load`, check the loaded image ID (or the offline venv: about 10 min) | the same |
-| 10 to 15 | `smoke` (preflight + steps) | `smoke` |
-| 15 to 40 | `twin` | `ops` (until about 50) |
-| 40 to 70 | `blocks` | sends results back |
-| 70 to 90 | margin, sends results back | |
+Per job, estimate / worst case (worst = every step at its timeout), in minutes:
 
-Estimated totals: about 70 min on node A and 50 min on node B, inside a 90 min window (120 min allowed). If a step
-runs to its maximum, a later step that no longer fits is recorded as `not-run: time` rather than started. The jobs on
-one node run one after another; the GPU lock refuses a second job.
+| # | node A (dgx01) | est | max | node B (dgx02) | est | max |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | setup: sha256 of image tar + kit, `docker load`, check image ID, preflight | 6 | 10 | the same | 6 | 10 |
+| 1 | `smoke` | 5 | 21 | `smoke` | 5 | 21 |
+| 2 | `twin` (all 3 forms) | 24 | 60 | `ops` (every site under tf32_rna, then `fp32/*` under the other two) | 35 | 60 |
+| 3 | `blocks` MODES="tf32_rna tf32_truncate" | 20 | 40 | `blocks` MODES=fp32 | 10 | 20 |
+| 4 | export: results tarballs + sha256 | 2 | 5 | the same | 2 | 5 |
+| 5 | cleanup: `docker rmi`, remove the extracted kit (results stay in WORK) | 2 | 5 | the same | 2 | 5 |
+| | **end (est)** | **T0+59** | | | **T0+60** | |
+
+Jobs 0-2 (the required set) fit even at their worst case: they end by T0+91 on both nodes, inside T0+100. Job 3 fits
+the estimate with 40 min to spare; if earlier steps run long, `node-job.sh` records its steps `not-run: time` and that
+job is resumed in a later window with the same kit and MODES. Export and cleanup always run before T0+110.
+
+Memory is budgeted per node, not per container: the guard counts the node-wide MemAvailable drop since the job
+started (every helper, cache and the kit included) against MAX_GIB 96, leaving 4 GiB of the 100 GiB contract for the
+container runtime; the container also runs with `--memory 96g`. The largest declared step peaks are 32 GiB
+(`blocks`), 24 GiB (`twin`, `ops`) and 8 GiB (`smoke`); gate.py's own largest site estimates are 20.3 and 9.3 GiB.
 
 ## What the stager places on each node
 
@@ -120,14 +131,15 @@ verifies the kit sha256 before taking `node-job.sh` out of it, and writes only t
 ```sh
 # node A: WORK=/home/dgx01/k6-d1-qual   node B: WORK=/root/k6-d1-qual   (the kit tarball inside WORK)
 docker run --rm --name k6-d1-$JOB --user "$(id -u):$(id -g)" --gpus all --network none \
-    --memory 100g --memory-swap 100g \
-    -e DEADLINE -e KIT_SHA -e WORK=/work -e KIT=/work/k6-dit-kit-<commit12>.tar.gz -e VENV=/usr/local \
+    --memory 96g --memory-swap 96g \
+    -e DEADLINE -e KIT_SHA -e MODES -e WORK=/work -e KIT=/work/k6-dit-kit-<commit12>.tar.gz -e VENV=/usr/local \
     -v "$WORK":/work "$IMAGE" bash -c 'echo "$KIT_SHA  $KIT" | sha256sum -c --quiet - &&
     tar -xzOf "$KIT" ./repo/tools/twin/stk_twin/kandinsky6_dit/spark/node-job.sh > /tmp/node-job.sh &&
     exec bash /tmp/node-job.sh "$@"' _ $JOB        # append --preflight for the preflight
 ```
 
-Node A runs `JOB=smoke`, then `twin`, then `blocks`; node B runs `smoke`, then `ops`. Each job's preflight goes first.
+Node A runs `JOB=smoke`, `twin`, then `blocks` with `-e MODES="tf32_rna tf32_truncate"`; node B runs `smoke`, `ops`,
+then `blocks` with `-e MODES=fp32`. Each job's preflight goes first.
 With the offline venv instead, the same `node-job.sh` runs on the host with `VENV=$WORK/venv` after
 `WORK=... PYTAR=... WHEELS=... bash setup-venv.sh`.
 
