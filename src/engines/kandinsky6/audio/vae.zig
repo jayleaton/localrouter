@@ -583,12 +583,10 @@ pub const Decoder = struct {
         return @as(u64, d.frames) * downsample_factor;
     }
 
-    pub fn memory(d: Decoder) Memory {
-        const p = decoderParams();
-        const conv_out_gain_copy: u64 = 512 * mel_channels * 3;
-        const t: u64 = d.frames;
+    /// The largest C*T of one sample over the graph (an activation slot).
+    fn maxCt(d: Decoder) u64 {
         var max_ct: u64 = 0;
-        var len = t;
+        var len: u64 = d.frames;
         for (decoder_graph) |n| switch (n) {
             .conv => |c| max_ct = @max(max_ct, @max(c.cin, c.cout) * len),
             .resblock => |r| max_ct = @max(max_ct, @max(r.cin, r.cout) * len),
@@ -599,11 +597,47 @@ pub const Decoder = struct {
             },
             else => {},
         };
+        return max_ct;
+    }
+
+    pub fn memory(d: Decoder) Memory {
+        const p = decoderParams();
+        const conv_out_gain_copy: u64 = 512 * mel_channels * 3;
+        const t: u64 = d.frames;
         const attn = 6144 * t + 3 * 2048 * t + 2048 * t + t * t;
         return .{
             .resident_bytes = (p.conv_weights + conv_out_gain_copy + p.scalars) * 4,
-            .working_bytes = (6 * max_ct + attn) * @as(u64, d.batch) * 4,
+            .working_bytes = (6 * d.maxCt() + attn) * @as(u64, d.batch) * 4,
         };
+    }
+
+    /// The working memory `memory().working_bytes` partitioned into regions (offsets in floats from the start of one
+    /// contiguous scratch allocation). `act` are the five activation slots (block input / output, normalized input, two
+    /// branch buffers, shortcut); `aux` holds the unscaled latent until conv_in, then the per-normalization norms; the
+    /// rest is the middle attention's packed qkv, q / k / v, output and score matrix.
+    pub const Scratch = struct { slot: u64, act: [5]u64, aux: u64, qkv: u64, q: u64, k: u64, v: u64, out: u64, scores: u64, floats: u64 };
+
+    pub fn scratch(d: Decoder) Scratch {
+        const b: u64 = d.batch;
+        const t: u64 = d.frames;
+        var r: Scratch = undefined;
+        r.slot = d.maxCt() * b;
+        var o: u64 = 0;
+        for (&r.act) |*a| {
+            a.* = o;
+            o += r.slot;
+        }
+        inline for (.{ .{ "aux", r.slot }, .{ "qkv", 6144 * t * b }, .{ "q", 2048 * t * b }, .{ "k", 2048 * t * b }, .{ "v", 2048 * t * b }, .{ "out", 2048 * t * b }, .{ "scores", t * t * b } }) |e| {
+            @field(r, e[0]) = o;
+            o += e[1];
+        }
+        r.floats = o;
+        return r;
+    }
+
+    /// Bytes of the one scratch allocation `decode` (launch.zig) carves its working tensors from.
+    pub fn scratchBytes(d: Decoder) u64 {
+        return d.scratch().floats * 4;
     }
 
     /// Whether the whole decoder may run under `use`, with weights in `state`. Checks every operator before anything is
@@ -635,6 +669,118 @@ pub const Decoder = struct {
         return out[0 .. n + 1];
     }
 };
+
+// ------------------------------------------------------------------------------------------------ weight binding
+//
+// The binder reads checkpoint tensors by name from the caller's reader, does the host work the native loader does at
+// load (the decoder's stored -> prepared transform, conv_out's gain), and hands the bytes to the caller's sink, which
+// places them (device upload) and returns the view. Nothing here opens files or allocates device memory.
+
+/// One fp32 tensor as read from a checkpoint: row-major `shape` (empty for a scalar) and its `data`, valid until the
+/// next read.
+pub const HostTensor = struct { shape: []const u64, data: []const f32 };
+
+/// The caller's name -> fp32 tensor reader (central's safetensors reader). An unknown name is the reader's error.
+pub const Source = struct {
+    ctx: *anyopaque,
+    readFn: *const fn (ctx: *anyopaque, name: []const u8) anyerror!HostTensor,
+
+    /// The tensor `name`, checked against the shape the graph expects, and its sha256 (of the bytes as read).
+    pub fn read(s: Source, name: []const u8, shape: []const u64, sha: *[32]u8) !HostTensor {
+        const t = try s.readFn(s.ctx, name);
+        if (!std.mem.eql(u64, t.shape, shape)) return error.ShapeMismatch;
+        var n: u64 = 1;
+        for (shape) |d| n *= d;
+        if (t.data.len != n) return error.ShapeMismatch;
+        std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(t.data), sha, .{});
+        return t;
+    }
+};
+
+/// The caller's placement of one bound tensor: copies `data` (contiguous, `shape`) before returning and returns the
+/// view of the copy (for the kernels, a `.cuda` view of an allocation the caller owns).
+pub const Sink = struct {
+    ctx: *anyopaque,
+    placeFn: *const fn (ctx: *anyopaque, name: []const u8, data: []const f32, shape: []const u64) anyerror!View,
+
+    pub fn place(s: Sink, name: []const u8, data: []const f32, shape: []const u64) !View {
+        const v = try s.placeFn(s.ctx, name, data, shape);
+        try v.validate();
+        try v.expectShape(shape);
+        if (!v.isContiguous()) return error.LayoutUnsupported;
+        return v;
+    }
+};
+
+/// One decoder convolution weight [Cout, Cin, K] as the checkpoint names it, in the order `decoder_graph` runs them.
+pub const DecoderConv = struct { name: []const u8, cout: u32, cin: u32, k: u32, gain: Gain = .one };
+
+pub const decoder_convs: [decoderParams().convs]DecoderConv = blk: {
+    @setEvalBranchQuota(20000);
+    var out: [decoderParams().convs]DecoderConv = undefined;
+    var n: usize = 0;
+    for (decoder_graph) |node| {
+        const list: []const DecoderConv = switch (node) {
+            .conv, .upsample => |c| &.{.{ .name = "vae." ++ c.path ++ ".weight", .cout = c.cout, .cin = c.cin, .k = c.k, .gain = c.gain }},
+            .resblock => |r| &([_]DecoderConv{
+                .{ .name = "vae." ++ r.path ++ ".conv1.weight", .cout = r.cout, .cin = r.cin, .k = 3 },
+                .{ .name = "vae." ++ r.path ++ ".conv2.weight", .cout = r.cout, .cin = r.cout, .k = 3 },
+            } ++ if (r.cin != r.cout) [_]DecoderConv{.{ .name = "vae." ++ r.path ++ ".nin_shortcut.weight", .cout = r.cout, .cin = r.cin, .k = 1 }} else [_]DecoderConv{}),
+            .attention => |a| &.{
+                .{ .name = "vae." ++ a.path ++ ".qkv.weight", .cout = 3 * a.c, .cin = a.c, .k = 1 },
+                .{ .name = "vae." ++ a.path ++ ".proj_out.weight", .cout = a.c, .cin = a.c, .k = 1 },
+            },
+            else => &.{},
+        };
+        for (list) |c| {
+            out[n] = c;
+            n += 1;
+        }
+    }
+    break :blk out;
+};
+
+pub const learnable_gain_name = "vae.decoder.learnable_gain";
+pub const data_std_name = "vae.data_std";
+pub const data_mean_name = "vae.data_mean";
+
+/// The decoder's bound weights: `convs` in `decoder_convs` order, every one prepared once on the host; the conv_out entry
+/// is already the gain-scaled copy (prepared weight x f32(learnable_gain + 1), one fp32 multiply per element, which the
+/// native forward does on the device: the same IEEE product). data_std / data_mean are [128].
+pub const DecoderWeights = struct {
+    convs: [decoder_convs.len]Weight,
+    gain: f32,
+    data_std: View,
+    data_mean: View,
+};
+
+/// Reads, prepares and places every decoder weight. `gpa` holds one host staging buffer (the largest weight) for the
+/// duration. Diagnostic only until the Grace host prepare bits are compared (`prepare` refuses production).
+pub fn bindDecoder(gpa: std.mem.Allocator, src: Source, sink: Sink, p: PrepareParams, use: Use) !DecoderWeights {
+    var out: DecoderWeights = undefined;
+    var sha: [32]u8 = undefined;
+    const lg = try src.read(learnable_gain_name, &.{}, &sha);
+    out.gain = lg.data[0] + 1.0;
+    var largest: usize = 0;
+    for (decoder_convs) |c| largest = @max(largest, @as(usize, c.cout) * c.cin * c.k);
+    const buf = try gpa.alloc(f32, largest);
+    defer gpa.free(buf);
+    for (decoder_convs, &out.convs) |c, *w| {
+        const shape = [3]u64{ c.cout, c.cin, c.k };
+        const t = try src.read(c.name, &shape, &sha);
+        const bytes = t.data.len * 4;
+        const stored = Weight.stored(.contiguous(c.name, .host, @intFromPtr(t.data.ptr), bytes, .borrowed, &shape), c.name, sha);
+        const prepared = buf[0..t.data.len];
+        w.* = try prepare(stored, .mp_weight_prepare, t.data, .contiguous(c.name, .host, @intFromPtr(prepared.ptr), bytes, .borrowed, &shape), prepared, p, use);
+        if (c.gain == .loaded_plus_one) scaleWeights(prepared, prepared, out.gain);
+        w.view = try sink.place(c.name, prepared, &shape);
+    }
+    inline for (.{ .{ "data_std", data_std_name }, .{ "data_mean", data_mean_name } }) |e| {
+        const t = try src.read(e[1], &.{ 1, mel_channels, 1 }, &sha);
+        @field(out, e[0]) = try sink.place(e[1], t.data, &.{mel_channels});
+    }
+    return out;
+}
 
 // -------------------------------------------------------------------------------------- host references (fp32)
 //
@@ -1108,4 +1254,145 @@ test "CPU diagnostic: boundary impulses fix zero padding K//2" {
             try testing.expectEqual(0, unequal(&y, &want));
         }
     }
+}
+
+/// Test reader over fixtures/checkpoint-keys-1018d582.txt (the selected checkpoints' names and shapes, read from their
+/// safetensors headers): serves each listed tensor of `file` with constant data, refuses unknown names, counts reads
+/// and refuses a second read of the same name.
+pub const KeyFixtureSource = struct {
+    const text = @embedFile("fixtures/checkpoint-keys-1018d582.txt");
+    const max_lines = 1024;
+
+    file: []const u8,
+    data: []const f32,
+    /// served for the rank-0 learnable_gain
+    scalar: [1]f32 = .{0.25},
+    shape: [max_rank]u64 = undefined,
+    seen: [max_lines]bool = @splat(false),
+    reads: usize = 0,
+
+    pub fn source(f: *KeyFixtureSource) Source {
+        return .{ .ctx = f, .readFn = read };
+    }
+
+    /// The names the fixture lists for `file`.
+    pub fn count(file: []const u8) usize {
+        var n: usize = 0;
+        var it = std.mem.tokenizeScalar(u8, text, '\n');
+        while (it.next()) |line| if (std.mem.startsWith(u8, line, file) and line.len > file.len and line[file.len] == ' ') {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn read(ctx: *anyopaque, name: []const u8) anyerror!HostTensor {
+        const f: *KeyFixtureSource = @ptrCast(@alignCast(ctx));
+        var it = std.mem.tokenizeScalar(u8, text, '\n');
+        var i: usize = 0;
+        while (it.next()) |line| : (i += 1) {
+            if (line[0] == '#') continue;
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            if (!std.mem.eql(u8, fields.next().?, f.file) or !std.mem.eql(u8, fields.next().?, name)) continue;
+            if (f.seen[i]) return error.DuplicateRead;
+            f.seen[i] = true;
+            f.reads += 1;
+            const dims = fields.next().?;
+            if (std.mem.eql(u8, dims, "scalar")) return .{ .shape = &.{}, .data = &f.scalar };
+            var rank: usize = 0;
+            var n: usize = 1;
+            var ds = std.mem.tokenizeScalar(u8, dims, 'x');
+            while (ds.next()) |d| : (rank += 1) {
+                f.shape[rank] = try std.fmt.parseInt(u64, d, 10);
+                n *= f.shape[rank];
+            }
+            if (n > f.data.len) return error.OutOfBounds;
+            return .{ .shape = f.shape[0..rank], .data = f.data[0..n] };
+        }
+        return error.UnknownTensor;
+    }
+};
+
+/// Test sink: places nothing, returns a host view of the given bytes and keeps the first value of named tensors.
+pub const RecordingSink = struct {
+    placed: usize = 0,
+    watch: []const []const u8 = &.{},
+    first: [4]f32 = @splat(std.math.nan(f32)),
+
+    pub fn sink(r: *RecordingSink) Sink {
+        return .{ .ctx = r, .placeFn = place };
+    }
+
+    fn place(ctx: *anyopaque, name: []const u8, data: []const f32, shape: []const u64) anyerror!View {
+        const r: *RecordingSink = @ptrCast(@alignCast(ctx));
+        r.placed += 1;
+        for (r.watch, 0..) |w, i| if (std.mem.eql(u8, w, name)) {
+            r.first[i] = data[0];
+        };
+        return .contiguous(name, .host, @intFromPtr(data.ptr), data.len * 4, .borrowed, shape);
+    }
+};
+
+test "decoder scratch partitions exactly its working memory" {
+    for ([_][2]u32{ .{ 1, native_latent_frames }, .{ 3, 5 } }) |bt| {
+        const d = try Decoder.init(bt[0], bt[1]);
+        const s = d.scratch();
+        try testing.expectEqual(d.memory().working_bytes, d.scratchBytes());
+        const t: u64 = bt[1];
+        const b: u64 = bt[0];
+        try testing.expectEqual(s.qkv, 6 * s.slot);
+        try testing.expectEqual(s.scores + t * t * b, s.floats);
+        for (s.act, 0..) |a, i| try testing.expectEqual(i * s.slot, a);
+        // the aux slot holds the latent [B, 40, T] and the largest norms [B, 3T]
+        try testing.expect(s.slot >= 40 * t * b and s.slot >= 3 * t * b);
+    }
+}
+
+test "decoder weight table: the checkpoint's 29 conv names once each, the gain on conv_out only" {
+    // 29 convs and the gain, std and mean are exactly the fixture's audio_vae lines (the decoder keys)
+    try testing.expectEqual(decoder_convs.len + 3, KeyFixtureSource.count("audio_vae"));
+    var names: [decoder_convs.len][]const u8 = undefined;
+    for (decoder_convs, &names) |c, *n| n.* = c.name;
+    for (names, 0..) |a, i| for (names[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
+    try testing.expectEqualStrings("vae.decoder.conv_in.weight", decoder_convs[0].name);
+    try testing.expectEqualStrings("vae.decoder.conv_out.weight", decoder_convs[decoder_convs.len - 1].name);
+    try testing.expectEqual(Gain.loaded_plus_one, decoder_convs[decoder_convs.len - 1].gain);
+    for (decoder_convs[0 .. decoder_convs.len - 1]) |c| try testing.expectEqual(Gain.one, c.gain);
+}
+
+test "decoder binder: prepares every checkpoint weight once, gains conv_out only, refuses production" {
+    var largest: usize = 0;
+    for (decoder_convs) |c| largest = @max(largest, @as(usize, c.cout) * c.cin * c.k);
+    const data = try testing.allocator.alloc(f32, largest);
+    defer testing.allocator.free(data);
+    @memset(data, 1.0);
+    const p: PrepareParams = .{ .eps = 1e-4, .reduce = .lanes8, .den = .fma };
+
+    var refused: KeyFixtureSource = .{ .file = "audio_vae", .data = data };
+    var rs: RecordingSink = .{};
+    try testing.expectError(error.GpuQualificationPending, bindDecoder(testing.allocator, refused.source(), rs.sink(), p, .production));
+    try testing.expectEqual(0, rs.placed);
+
+    var f: KeyFixtureSource = .{ .file = "audio_vae", .data = data };
+    // conv_out and up.0.block.0.conv2 both have fan 512 * 3, so with equal stored data they differ by the gain alone
+    var sk: RecordingSink = .{ .watch = &.{ "vae.decoder.conv_out.weight", "vae.decoder.up.0.block.0.conv2.weight" } };
+    const w = try bindDecoder(testing.allocator, f.source(), sk.sink(), p, .diagnostic);
+    try testing.expectEqual(decoder_convs.len + 3, f.reads);
+    try testing.expectEqual(decoder_convs.len + 2, sk.placed);
+    try testing.expectEqual(@as(f32, 1.25), w.gain);
+    try testing.expectEqual(sk.first[1] * w.gain, sk.first[0]);
+    try testing.expect(sk.first[1] != sk.first[0]);
+    for (w.convs, decoder_convs) |cw, c| {
+        try testing.expectEqual(WeightState.prepared_native_reference, cw.state);
+        try testing.expectEqual(1, cw.preparations);
+        try testing.expectEqualStrings(c.name, cw.source);
+        try cw.requirePrepared(.diagnostic);
+    }
+    try w.data_std.expectShape(&.{mel_channels});
+    try w.data_mean.expectShape(&.{mel_channels});
+
+    // a reader over the wrong checkpoint is refused at its first name, before anything is placed
+    var wrong: KeyFixtureSource = .{ .file = "vocoder", .data = data };
+    var ws: RecordingSink = .{};
+    try testing.expectError(error.UnknownTensor, bindDecoder(testing.allocator, wrong.source(), ws.sink(), p, .diagnostic));
+    try testing.expectEqual(0, ws.placed);
 }
