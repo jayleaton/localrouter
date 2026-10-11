@@ -258,6 +258,8 @@ def env_record(R):
         p = torch.cuda.get_device_properties(R.dev)
         e.update(device_name=p.name, capability=list(torch.cuda.get_device_capability(R.dev)),
                  total_memory=p.total_memory, arch_list=torch.cuda.get_arch_list(),
+                 multi_processor_count=p.multi_processor_count,
+                 max_threads_per_multi_processor=p.max_threads_per_multi_processor,
                  sdp_flags={n: getattr(torch.backends.cuda, n)() for n in
                             ("flash_sdp_enabled", "mem_efficient_sdp_enabled", "math_sdp_enabled",
                              "cudnn_sdp_enabled") if hasattr(torch.backends.cuda, n)})
@@ -297,7 +299,7 @@ def safetensor_get(path, keys):
 
 # ================================================================================================ job A: decoder
 
-NORM_REDUCTIONS = [(0, 32), (1, 32)] + [(2, 1 << p) for p in range(1, 11)]
+NORM_REDUCTIONS = [(0, 32), (1, 32)] + [(2, 1 << p) for p in range(1, 11)] + [(3, 0)]  # 3: k6a_l2norm_torch
 NORM_VARIANTS = [(o, r, sm, fu) for o, r in NORM_REDUCTIONS for sm in ("s64", "s32") for fu in (0, 1)]
 
 
@@ -308,7 +310,7 @@ def norm_s(N, mode):
 
 def vname(v):
     o, r, sm, fu = v
-    return f"order{o}" + (f"-R{r}" if o == 2 else "") + f"-{sm}-den_{'fused' if fu else 'split'}"
+    return f"order{o}" + (f"-R{r}" if o == 2 else "-torch" if o == 3 else "") + f"-{sm}-den_{'fused' if fu else 'split'}"
 
 
 def norm_eps(R):
@@ -320,7 +322,12 @@ def norm_eps(R):
 
 def k_normalize(R, x, axis, v):
     o, r, sm, fu = v
-    n = R.k.l2norm(x, axis=axis, order=o, R=r)
+    if o == 3:
+        p = torch.cuda.get_device_properties(x.device)
+        n = R.k.l2norm_torch(x, axis=axis, sm_count=p.multi_processor_count,
+                             max_threads_per_sm=p.max_threads_per_multi_processor)
+    else:
+        n = R.k.l2norm(x, axis=axis, order=o, R=r)
     return R.k.normalize_apply(x, n, axis=axis, s=norm_s(x.shape[axis], sm), eps=norm_eps(R), den_fused=fu)
 
 

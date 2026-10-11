@@ -28,10 +28,12 @@ const ScalarDiv = vae.ScalarDiv;
 const Div = vae.Div;
 const Error = vae.Error;
 
-/// The device sum-of-squares order (audio.cu K6A_RED_*): one serial chain fused or in two roundings, or `strided_tree`
-/// lanes (a power of two up to 1024) each summing a strided slice, then a halving tree. The order SM121's native
-/// reduction uses is what the GPU harness determines; nothing here picks one.
-pub const DeviceReduce = union(enum) { serial_fma, serial_mul_add, strided_tree: u32 };
+/// The device sum-of-squares order (audio.cu K6A_RED_*): one serial chain fused or in two roundings, `strided_tree`
+/// lanes (a power of two up to 1024) each summing a strided slice, then a halving tree, or `torch_reduce`: PyTorch's
+/// own CUDA reduction order for the running device (k6a_l2norm_torch, split per shape by `vae.torchSplit` from the
+/// device's queried limits). `torch_reduce` reproduces the D3 window's native normalization shas offline on every real
+/// shape; the kernel itself is not yet run on SM121. Nothing here picks one.
+pub const DeviceReduce = union(enum) { serial_fma, serial_mul_add, strided_tree: u32, torch_reduce: vae.SmLimits };
 
 const block: u32 = 256;
 const conv_block: u32 = 128;
@@ -68,6 +70,7 @@ pub const Ops = struct {
     qkv_split_fn: cuda.Function,
     attn_merge_fn: cuda.Function,
     l2norm_fn: cuda.Function,
+    l2norm_torch_fn: cuda.Function,
     normalize_apply_fn: cuda.Function,
     sdpa_math_fn: cuda.Function,
 
@@ -86,7 +89,7 @@ pub const Ops = struct {
             .{ "up2_fn", "k6a_aa_up2" },                    .{ "down2_fn", "k6a_aa_down2" },
             .{ "qkv_split_fn", "k6a_qkv_split" },           .{ "attn_merge_fn", "k6a_attn_merge" },
             .{ "l2norm_fn", "k6a_l2norm" },                 .{ "normalize_apply_fn", "k6a_normalize_apply" },
-            .{ "sdpa_math_fn", "k6a_sdpa_math" },
+            .{ "l2norm_torch_fn", "k6a_l2norm_torch" },     .{ "sdpa_math_fn", "k6a_sdpa_math" },
         }) |e| @field(o, e[0]) = try m.function(e[1]);
         return o;
     }
@@ -180,7 +183,7 @@ pub const Ops = struct {
         try flat(o.silu_fn, s, x.numel(), &a);
     }
 
-    /// mp_sum(a = shortcut, b = branch, t) with `vae.MpResidual` constants; y may alias a or b.
+    /// mp_sum(a = shortcut, b = branch, t) in the lerp form with `vae.MpResidual` constants; y may alias a or b.
     pub fn mpResidual(o: *const Ops, s: cuda.Stream, use: Use, x: View, h: View, y: View, m: vae.MpResidual) !void {
         try vae.admitOp(.mp_residual, use);
         try x.expect(.cuda, x.shape[0..x.rank]);
@@ -189,8 +192,7 @@ pub const Ops = struct {
         var a: cuda.Args = .{};
         inline for (.{ x.addr(), h.addr(), y.addr() }) |p| a.add(p);
         a.add(i64of(x.numel()));
-        a.add(m.c0);
-        a.add(m.c1);
+        a.add(m.t);
         a.add(m.den.c);
         a.add(@backingInt(m.den.div));
         try flat(o.mp_residual_fn, s, x.numel(), &a);
@@ -381,25 +383,39 @@ pub const Ops = struct {
         try x.expect(.cuda, x.shape[0..x.rank]);
         try y.expect(.cuda, x.shape[0..x.rank]);
         try norms.expect(.cuda, &.{ g.outer, g.inner });
-        const lanes: u32 = switch (reduce) {
-            .serial_fma, .serial_mul_add => 1,
-            .strided_tree => |r| blk: {
-                if (r == 0 or r > 1024 or !std.math.isPowerOfTwo(r)) return error.InvalidArgument;
-                break :blk r;
+        switch (reduce) {
+            .torch_reduce => |dev| {
+                const sp = try vae.torchSplit(g, dev);
+                var a: cuda.Args = .{};
+                a.add(x.addr());
+                a.add(norms.addr());
+                inline for (.{ g.outer, g.n, g.inner }) |v| a.add(i64of(v));
+                a.add(i32of(sp.y));
+                a.add(i32of(sp.ctas));
+                try go(o.l2norm_torch_fn, s, .{ .x = @intCast((g.outer * g.inner + 127) / 128) }, 128, &a);
             },
-        };
-        var a: cuda.Args = .{};
-        a.add(x.addr());
-        a.add(norms.addr());
-        inline for (.{ g.outer, g.n, g.inner }) |v| a.add(i64of(v));
-        a.add(@as(i32, switch (reduce) {
-            .serial_fma => 0,
-            .serial_mul_add => 1,
-            .strided_tree => 2,
-        }));
-        a.add(i32of(lanes));
-        const threads = @max(32, (lanes + 31) / 32 * 32);
-        try cuda.launch.launch(o.l2norm_fn, .{ .grid = .{ .x = @intCast(g.outer * g.inner) }, .block = .{ .x = threads }, .shared = lanes * @sizeOf(f32) }, s, &a);
+            .serial_fma, .serial_mul_add, .strided_tree => {
+                const lanes: u32 = switch (reduce) {
+                    .strided_tree => |r| blk: {
+                        if (r == 0 or r > 1024 or !std.math.isPowerOfTwo(r)) return error.InvalidArgument;
+                        break :blk r;
+                    },
+                    else => 1,
+                };
+                var a: cuda.Args = .{};
+                a.add(x.addr());
+                a.add(norms.addr());
+                inline for (.{ g.outer, g.n, g.inner }) |v| a.add(i64of(v));
+                a.add(@as(i32, switch (reduce) {
+                    .serial_fma => 0,
+                    .serial_mul_add => 1,
+                    else => 2,
+                }));
+                a.add(i32of(lanes));
+                const threads = @max(32, (lanes + 31) / 32 * 32);
+                try cuda.launch.launch(o.l2norm_fn, .{ .grid = .{ .x = @intCast(g.outer * g.inner) }, .block = .{ .x = threads }, .shared = lanes * @sizeOf(f32) }, s, &a);
+            },
+        }
         var b: cuda.Args = .{};
         inline for (.{ x.addr(), norms.addr(), y.addr() }) |p| b.add(p);
         inline for (.{ g.outer, g.n, g.inner }) |v| b.add(i64of(v));
@@ -456,13 +472,16 @@ pub const NormPolicy = struct { eps: f32, reduce: DeviceReduce, den: Acc };
 /// Every numeric choice of a decoder forward, named; none has a default. The values the native twin uses on the target
 /// are what the GPU harness determines; until then a decode is a diagnostic comparison run.
 pub const DecodePolicy = struct {
-    /// Convolution accumulation (every decoder conv).
+    /// Convolution accumulation (every decoder conv). D3 window: `.fma` (c, k ascending) equals native cuDNN on conv_in,
+    /// the 1x1 convs and qkv; the Cin 2048 K 3 convs (mid / up.2 conv1, conv2, conv_out) use another cuDNN algorithm,
+    /// unresolved.
     acc: Acc,
-    /// latent_unscale's division by scaling_factor.
+    /// latent_unscale's division by scaling_factor (native, D3 window: `.reciprocal`).
     unscale: Div,
-    /// scaled SiLU's division by 0.596.
+    /// scaled SiLU's division by 0.596. Unresolved: neither division reproduces native (expf under this build's flags
+    /// is the open question).
     silu: Div,
-    /// mp_sum's division by sqrt((1 - t)^2 + t^2).
+    /// mp_sum's division by sqrt((1 - t)^2 + t^2) (native, D3 window: `.reciprocal`).
     residual: Div,
     /// The residual blocks' normalization (axis 1) and the attention's packed-QKV normalization (axis 2).
     norm_residual: NormPolicy,
@@ -489,7 +508,7 @@ fn decodeWith(o: anytype, s: anytype, use: Use, d: vae.Decoder, w: *const vae.De
     const b: u64 = d.batch;
     var t: u64 = d.frames;
     const silu = ScalarDiv.of(vae.silu_divisor, p.silu);
-    const mix = vae.MpResidual.of(vae.residual_t, p.residual);
+    const mix = try vae.MpResidual.of(vae.residual_t, p.residual);
     const z = cv.at("k6a.decoder.z", sc.aux, &.{ b, vae.latent_channels, t });
     try o.latentUnscale(s, use, rows, z, .of(vae.scaling_factor, p.unscale), vae.mean_value);
     var wi: usize = 0;
@@ -580,11 +599,13 @@ fn decoderChannels(wi: usize) Error!u64 {
 
 /// The vocoder's numeric choices, named; none has a default (see DecodePolicy).
 pub const VocodePolicy = struct {
-    /// conv_pre, the upsamplers, the AMP-block convs and conv_post.
+    /// conv_pre, the upsamplers, the AMP-block convs and conv_post. D3 window: `.fma` equals native on all six
+    /// upsamplers, the dilated AMP convs and conv_post; dilation-1 convs at some shapes (conv_pre, the T 2048 AMP convs,
+    /// the stage-0 blocks) use another cuDNN algorithm, unresolved.
     conv_acc: Acc,
-    /// Activation1d's anti-aliasing FIRs.
+    /// Activation1d's anti-aliasing FIRs (native, D3 window: `.fma`, all stages).
     aa_acc: Acc,
-    /// The stage merge's division by num_kernels (3).
+    /// The stage merge's division by num_kernels (3) (native, D3 window: `.reciprocal`).
     avg: Div,
 };
 

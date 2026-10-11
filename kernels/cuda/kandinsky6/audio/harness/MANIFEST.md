@@ -57,7 +57,7 @@ Local CPU smoke (tiny shapes, native paths only, no kernel launches):
 
 | | Limit | Estimate |
 | --- | --- | --- |
-| Wall clock | < 30 min (28 min hard timeout, 25 min self-limit checked between cases; later cases are recorded as skipped) | A 5-10 min (checkpoint hashing, CPU load + prepare, 29 re-preparations, 528 normalization launches, 4 decoder passes); B 5-10 min (4 BigVGAN passes of ~1 TFLOP through the direct kernels). Plus ~1 min prefix verification before the timeout starts. |
+| Wall clock | < 30 min (28 min hard timeout, 25 min self-limit checked between cases; later cases are recorded as skipped) | A 5-10 min (checkpoint hashing, CPU load + prepare, 29 re-preparations, 572 normalization launches, 4 decoder passes); B 5-10 min (4 BigVGAN passes of ~1 TFLOP through the direct kernels). Plus ~1 min prefix verification before the timeout starts. |
 | GPU memory | < 40 GiB (self-checked) | A < 4 GiB; B < 3 GiB |
 | Host RSS | < 100 GiB (self-checked) | A < 10 GiB (1.7 GB checkpoint + encoder/decoder on CPU); B < 4 GiB |
 | Disk | < 20 GB (`ulimit -f` caps each file) | A ~0.8 GB (CPU-prepared decoder weights); B ~10 MB |
@@ -74,8 +74,9 @@ Local CPU smoke (tiny shapes, native paths only, no kernel launches):
   seeded latent rows [1,218,40], native z and mel, kernel mel per acc. Job B: the seeded mel, native PCM, kernel PCM per acc.
 - `job-X.log`, `SHA256SUMS` over everything in OUT.
 
-What each job records: A: per normalization variant (orders 0 / 1, order 2 with R = 2..1024; s rounding; fused /
-split denominator) the unequal count per case and the variants zero in all cases; the 29 checkpoint convs re-prepared
+What each job records: A: per normalization variant (orders 0 / 1, order 2 with R = 2..1024, order 3 = PyTorch's
+reduction order `k6a_l2norm_torch` split from the recorded multiprocessor count and max threads per multiprocessor;
+s rounding; fused / split denominator) the unequal count per case and the variants zero in all cases; the 29 checkpoint convs re-prepared
 on CPU and on the device against the loaded CPU-prepared weights, plus synthetic shapes [2048,40,3], [2048,2048,3],
 [1024,2048,1], [6144,2048,1], [128,512,3] with the device each ran on; conv1d over prepared weights for gain 1, 1.3 and
 the loaded `learnable_gain + 1`, acc 0 / 1; div 0 / 1 for SiLU, mp_sum, latent unscale; SDPA for q/k/v [1,1,218,2048]

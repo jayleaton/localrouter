@@ -17,8 +17,8 @@
 //
 // Layout: native PyTorch channel-first, contiguous [B, C, T] fp32 (the decoder's and the vocoder's own layout), so no
 // operator hides a permutation. Convolution weights are the PREPARED fp32 tensors in PyTorch's own layouts:
-// Conv1d [Cout, Cin, K], ConvTranspose1d [Cin, Cout, K]. Activation normalization and weight preparation are NOT
-// here: their arithmetic contracts are unresolved and the Zig side rejects them before any launch.
+// Conv1d [Cout, Cin, K], ConvTranspose1d [Cin, Cout, K]. Weight preparation is not here: it runs on the host at load
+// (vae.zig `prepare`). Activation normalization's candidate orders are at the end of this file.
 #include <stdint.h>
 
 #define K6A_BLOCK 256
@@ -97,15 +97,16 @@ extern "C" __global__ void k6a_scaled_silu(const float* x, float* y, long long n
     y[e] = k6a_div(s, c, div);
 }
 
-// Magnitude-preserving residual (formula receipt: ((1 - t) * a + t * b) / sqrt((1 - t)^2 + t^2)): num = a * c0 + b * c1
-// (two products then one add, each rounded), then the explicit division by `den` (or multiply by its reciprocal).
-// c0, c1, den are fp32 constants the host computed and names (vae.zig `MpResidual`). y may alias a or b. launch: block
-// 256, grid ceil(n / 256).
-extern "C" __global__ void k6a_mp_residual(const float* a, const float* b, float* y, long long n, float c0, float c1,
-                                           float den, int div) {
+// Magnitude-preserving residual mp_sum = lerp(a, b, t) / sqrt((1 - t)^2 + t^2) in torch.lerp's CUDA small-weight
+// form: num = fmaf(t, b - a, a) (the subtraction rounded, then one fused step; t < 0.5, checked by the host, vae.zig
+// `MpResidual`), then the division by `den` (or multiply by its reciprocal). t and den are fp32 constants the host
+// computed. y may alias a or b. launch: block 256, grid ceil(n / 256).
+extern "C" __global__ void k6a_mp_residual(const float* a, const float* b, float* y, long long n, float t, float den,
+                                           int div) {
     const long long e = (long long)blockIdx.x * K6A_BLOCK + threadIdx.x;
     if (e >= n) return;
-    const float num = __fadd_rn(__fmul_rn(a[e], c0), __fmul_rn(b[e], c1));
+    const float av = a[e];
+    const float num = __fmaf_rn(t, __fsub_rn(b[e], av), av);
     y[e] = k6a_div(num, den, div);
 }
 
@@ -344,6 +345,46 @@ extern "C" __global__ void k6a_l2norm(const float* x, float* n, long long outer,
         __syncthreads();
     }
     if (r == 0) n[out] = __fsqrt_rn(lane[0]);
+}
+
+// L2 norm in PyTorch's CUDA reduction order (ATen Reduce.cuh) for an axis that is not the fastest moving, with the
+// input split over Y threads of a block and C blocks per output (the host derives Y and C from the shape and the
+// device as torch's setReduceConfig does, launch.zig `torchSplit`): thread (y, c) sums the elements y + Y*c + Y*C*m in
+// four interleaved fma accumulators (m % 4), combined ((a0 + a1) + a2) + a3; the Y partials of a block a halving tree
+// (y += y + h); with C > 1 then per y the block partials c = y, y + Y, ... added in order onto 0, and a second halving
+// tree. One thread computes one output's whole order (Y <= 32, a power of two; C >= 1). n[o, i] = sqrtf(sum).
+// launch: block 128, grid ceil(outer * inner / 128).
+extern "C" __global__ void k6a_l2norm_torch(const float* x, float* n, long long outer, long long N, long long inner,
+                                            int Y, int C) {
+    const long long out = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (out >= outer * inner || Y < 1 || Y > 32 || C < 1) return;
+    const long long o = out / inner, i = out % inner;
+    const float* base = x + o * N * inner + i;
+    const long long step = (long long)Y * C;
+    float part[32], carry[32];
+    for (int y = 0; y < Y; ++y) carry[y] = 0.0f;
+    float block_sum = 0.0f;
+    for (int c = 0; c < C; ++c) {
+        for (int y = 0; y < Y; ++y) {
+            float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            long long m = 0;
+            for (long long j = y + (long long)Y * c; j < N; j += step, ++m) {
+                const float v = base[j * inner];
+                acc[m & 3] = __fmaf_rn(v, v, acc[m & 3]);
+            }
+            part[y] = __fadd_rn(__fadd_rn(__fadd_rn(acc[0], acc[1]), acc[2]), acc[3]);
+        }
+        for (int h = Y / 2; h > 0; h /= 2)
+            for (int y = 0; y < h; ++y) part[y] = __fadd_rn(part[y], part[y + h]);
+        if (C == 1) block_sum = part[0];
+        else carry[c % Y] = __fadd_rn(carry[c % Y], part[0]);
+    }
+    if (C > 1) {
+        for (int h = Y / 2; h > 0; h /= 2)
+            for (int y = 0; y < h; ++y) carry[y] = __fadd_rn(carry[y], carry[y + h]);
+        block_sum = carry[0];
+    }
+    n[out] = __fsqrt_rn(block_sum);
 }
 
 // Activation normalization apply: y[o, j, i] = x[o, j, i] / den[o, i], den = eps + n * s, s = fp32(sqrt(1 / N)).
