@@ -10,6 +10,11 @@ local ID per node), the command inside the container (the kit is mounted at /ws/
 The oracle jobs run the pinned native stack from this component's own checked bundle (pybundle.sh), copied unchanged to
 each node and mounted read-only at /opt/k6-oracle-d2: its identity (manifest, requirements, versions) is pinned below,
 must match the kit's pybundle/, and is what the runner admits (layout python/bin/python3.13 + site-packages).
+
+Every job runs under the D2 memory policy gb10-unified-d2-v1 (D2-EVIDENCE.md): on each node its attribution probe
+first, then that node's payload, admitted only with the probe's PASS from the same window (per-node gate). dgx01:
+d2-probe-torch, d2-oracle-short (the oracle's sealed segments); dgx02: d2-probe-native, d2-engine. The full-length
+d2-oracle is not emitted: the approved window is N = 95 with d2-oracle-short only.
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ import json
 from pathlib import Path
 
 GIB = 1024**3
+MIB = 1024**2
+POLICY = "gb10-unified-d2-v1"
+SEGMENTS = ["env-probe", "s_dec", "f_dec", "s_enc", "n_enc", "n_dec"]
 WORKSPACE = "~/k6-d2-qual"
 # the original D2 bundle, as the runner admits it (kind d2-pybundle): node path, identity, layout, container mount
 ORACLE = {"kind": "d2-pybundle", "root": "~/k6-d2-oracle-ead020cbc102/pybundle",
@@ -70,26 +78,45 @@ def main() -> None:
     common = {"workspace": WORKSPACE, "container_workspace": "/ws", "artifacts": arts, "asset_paths": ASSETS,
               "node_image_receipt": {"source": str(a.node_images), "sha256": sha256(a.node_images)}}
 
-    def oracle(job_id, node, timeout, n_dec, other):
-        env = {"VAE": "/models/vae", "ORACLE_ROOT": ORACLE["container_root"],
-               "ORACLE_MANIFEST_SHA256": ORACLE["manifest_sha256"], "JOB_BUDGET_S": str(timeout - 120),
-               "TIMEOUT_N_DEC": str(n_dec), **{f"TIMEOUT_{c}": str(other) for c in ("S_DEC", "F_DEC", "S_ENC", "N_ENC")}}
-        return {"id": job_id, "node": node, "image_id": images[node], **common,
-                "command": ["/bin/bash", "/ws/kit/tools/run-oracle.sh"], "environment": env,
-                "shared_oracle": ORACLE,
-                "timeout_seconds": timeout,
-                # runner accounting on unified memory: max(cgroup + GPU, MemAvailable drop + GPU) + 4 GiB helpers,
-                # so the GPU share is counted twice: ~2 x 30 GiB device + 10 GiB host + 4 GiB, not measured
-                "max_resident_bytes": 80 * GIB, "max_disk_bytes": 12_000_000_000, "output_budget_bytes": 4 * GIB}
+    def policy(cap, gate=None, segments=None):
+        # the runner's unified accounting under the D2-only policy: max(max(memory.current, memory.peak) + helpers
+        # + 4 GiB, MemAvailable drop + 4 GiB) <= max_resident_bytes, host floor 10 GiB, --memory/--memory-swap 48g
+        p = {"memory_policy": POLICY, "allocator_cap_bytes": cap, "container_memory_bytes": 48 * GIB,
+             "host_memavailable_floor_bytes": 10 * GIB}
+        if gate:
+            p["requires_probe_pass"] = gate   # this node's probe, this window (hash-bound by the runner)
+        if segments:
+            p["segments"] = segments          # sealed order, one fresh process and nonce each
+        return p
 
+    def probe(job_id, node, kind, oracle):
+        env = {"ORACLE_ROOT": ORACLE["container_root"], "ORACLE_MANIFEST_SHA256": ORACLE["manifest_sha256"]} if oracle else {}
+        return {"id": job_id, "node": node, "image_id": images[node], **common,
+                "command": ["/bin/bash", "/ws/kit/tools/run-probe.sh", kind], "environment": env,
+                **({"shared_oracle": ORACLE} if oracle else {}),
+                **policy(38 * GIB if oracle else 24 * GIB), "timeout_seconds": 600,
+                # 16 GiB probe allocation + context + interpreter, accounted
+                "max_resident_bytes": 32 * GIB, "max_disk_bytes": 1_000_000_000, "output_budget_bytes": 256 * MIB}
+
+    oracle = {"id": "d2-oracle-short", "node": "dgx01", "image_id": images["dgx01"], **common,
+              "command": ["/bin/bash", "/ws/kit/tools/run-oracle.sh"],
+              "environment": {"VAE": "/models/vae", "ORACLE_ROOT": ORACLE["container_root"],
+                              "ORACLE_MANIFEST_SHA256": ORACLE["manifest_sha256"], "JOB_BUDGET_S": "1980",
+                              "TIMEOUT_ENV_PROBE": "240", "TIMEOUT_N_DEC": "900",
+                              **{f"TIMEOUT_{c}": "240" for c in ("S_DEC", "F_DEC", "S_ENC", "N_ENC")}},
+              "shared_oracle": ORACLE, **policy(38 * GIB, "d2-probe-torch", SEGMENTS), "timeout_seconds": 2100,
+              # = the container cap: the n_dec Torch peak is unmeasured (estimate 20-30 GiB) + host + helpers + 4 GiB
+              "max_resident_bytes": 48 * GIB, "max_disk_bytes": 12_000_000_000, "output_budget_bytes": 4 * GIB}
     engine = {"id": "d2-engine", "node": "dgx02", "image_id": images["dgx02"], **common,
               "command": ["/bin/bash", "/ws/kit/tools/run-engine.sh"],
-              "environment": {"VAE": "/models/vae", "TIMEOUT": "1200"}, "timeout_seconds": 1500,
-              # 15.6 GB scratch + 0.5 GB weights on the device (counted twice, as above), ~5 GiB host, 4 GiB helpers
-              "max_resident_bytes": 48 * GIB, "max_disk_bytes": 8_000_000_000, "output_budget_bytes": 4 * GIB}
-    oracles = [oracle("d2-oracle", "dgx01", 2700, 1200, 300),         # windows of 70+ minutes
-               oracle("d2-oracle-short", "dgx01", 2100, 900, 240)]   # a 60-minute window
-    spec = {"schema": 1, "component": "d2-video-vae", "jobs": [engine] + oracles}
+              "environment": {"VAE": "/models/vae", "TIMEOUT": "1200"},
+              **policy(24 * GIB, "d2-probe-native"), "timeout_seconds": 1500,
+              # ledger peak 15.55 GB (n_dec case buffer + weights image), ~3 GiB host, helpers, 4 GiB
+              "max_resident_bytes": 40 * GIB, "max_disk_bytes": 8_000_000_000, "output_budget_bytes": 4 * GIB}
+    jobs = [probe("d2-probe-torch", "dgx01", "torch", True), oracle,
+            probe("d2-probe-native", "dgx02", "native", False), engine]
+    spec = {"schema": 1, "component": "d2-video-vae", "memory_policy": POLICY, "gate": "per-node", "window_minutes": 95,
+            "jobs": jobs}
     print(json.dumps(spec, indent=1))
 
 

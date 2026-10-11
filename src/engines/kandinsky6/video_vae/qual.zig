@@ -4,11 +4,17 @@
 //!
 //!   k6v-qual --vae FILE --inputs DIR --conv FATBIN --ops FATBIN --out DIR [--cases s_dec,f_dec,s_enc,n_enc,n_dec]
 //!            [--free-bytes N] [--sim]
+//!   k6v-qual --probe [--sim [--hold-ms N]]       the D2 attribution probe (phases P0..P5, tools/spark/k6-video-vae/D2-EVIDENCE.md)
+//!   k6v-qual --record-exit CODE                  the launcher's reaped record of the producer it waited for
 //!
 //! --vae is vae/diffusion_pytorch_model.safetensors. Decodes run tiles.decodePlan(.., .unbounded), or `.free_bytes = N`
 //! with --free-bytes (the figure the oracle's mem_get_info saw), and env.json records the plan. --sim needs no GPU: every
 //! launch goes through launch.Sim's bounds and race checks and ops.jsonl lists each checkpoint's name and shape with no
 //! data (sha ""), so the kit can be smoke-tested on any host. Exit 0 when every case ran.
+//!
+//! Every device buffer goes through evidence.zig's ledger (24 GiB of live buffers: an allocation past it is refused before
+//! it is made). Under the runner's D2 memory policy (K6_MEMORY_POLICY=gb10-unified-d2-v1) the process also writes the
+//! run-bound allocator evidence: ready receipt, a sample each second (cuMemGetInfo and the ledger), terminal receipt.
 
 const std = @import("std");
 const Io = std.Io;
@@ -18,6 +24,7 @@ const tiles = @import("tiles.zig");
 const encode = @import("encode.zig");
 const decode = @import("decode.zig");
 const weights = @import("weights.zig");
+const evidence = @import("evidence.zig");
 
 const View = launch.View;
 
@@ -56,7 +63,22 @@ const Gpu = struct {
         }
         try cuda.launch.launch(self.fns[@backingInt(l.call)], .{ .grid = .{ .x = l.grid[0], .y = l.grid[1], .z = l.grid[2] }, .block = .{ .x = l.block[0], .y = l.block[1], .z = l.block[2] } }, self.stream, &a);
     }
+
+    fn memInfo(ctx: *anyopaque) anyerror!evidence.MemInfo {
+        const self: *Gpu = @ptrCast(@alignCast(ctx));
+        try self.ctx.makeCurrent();
+        const m = try self.ctx.memInfo();
+        return .{ .free = m.free, .total = m.total };
+    }
 };
+
+/// --sim's stand-in for cuMemGetInfo (the ready receipt then says runtime "sim", which the runner refuses).
+fn simMemInfo(_: *anyopaque) anyerror!evidence.MemInfo {
+    return .{ .free = 64 << 30, .total = 128 << 30 };
+}
+
+/// The live device buffers, capped (evidence.zig).
+var ledger: evidence.Ledger = .{};
 
 const Buf = struct {
     dev: ?cuda.DeviceBuffer,
@@ -64,6 +86,8 @@ const Buf = struct {
     len: u64,
 
     fn alloc(gpu: ?*Gpu, len: u64, fake: u64) !Buf {
+        try ledger.reserve(len);
+        errdefer ledger.release(len);
         if (gpu) |g| {
             const b = try cuda.DeviceBuffer.alloc(&g.d, len);
             return .{ .dev = b, .base = b.ptr, .len = len };
@@ -73,6 +97,9 @@ const Buf = struct {
 
     fn free(self: *Buf) void {
         if (self.dev) |*b| b.free();
+        ledger.release(self.len);
+        self.dev = null;
+        self.len = 0;
     }
 
     fn upload(self: Buf, off: u64, bytes: []const u8) !void {
@@ -192,6 +219,7 @@ fn loadInput(a: std.mem.Allocator, io: Io, dir: Io.Dir, index: std.json.Value, n
 }
 
 pub fn main(init: std.process.Init) !u8 {
+    const start_s = evidence.monotonic();
     const gpa = init.gpa;
     const io = init.io;
     const a = init.arena.allocator();
@@ -204,6 +232,9 @@ pub fn main(init: std.process.Init) !u8 {
     var cases_arg: []const u8 = "s_dec,f_dec,s_enc,n_enc,n_dec";
     var policy: tiles.MemPolicy = .unbounded;
     var sim = false;
+    var probe = false;
+    var hold_ms: ?u64 = null;
+    var record_exit: ?u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const k = args[i];
@@ -211,11 +242,32 @@ pub fn main(init: std.process.Init) !u8 {
             sim = true;
             continue;
         }
+        if (std.mem.eql(u8, k, "--probe")) {
+            probe = true;
+            continue;
+        }
         if (i + 1 >= args.len) return usage();
         i += 1;
         const v = args[i];
-        if (std.mem.eql(u8, k, "--vae")) vae_path = v else if (std.mem.eql(u8, k, "--inputs")) inputs_path = v else if (std.mem.eql(u8, k, "--conv")) conv_path = v else if (std.mem.eql(u8, k, "--ops")) ops_path = v else if (std.mem.eql(u8, k, "--out")) out_path = v else if (std.mem.eql(u8, k, "--cases")) cases_arg = v else if (std.mem.eql(u8, k, "--free-bytes")) policy = .{ .free_bytes = try std.fmt.parseInt(u64, v, 10) } else return usage();
+        if (std.mem.eql(u8, k, "--vae")) vae_path = v else if (std.mem.eql(u8, k, "--inputs")) inputs_path = v else if (std.mem.eql(u8, k, "--conv")) conv_path = v else if (std.mem.eql(u8, k, "--ops")) ops_path = v else if (std.mem.eql(u8, k, "--out")) out_path = v else if (std.mem.eql(u8, k, "--cases")) cases_arg = v else if (std.mem.eql(u8, k, "--free-bytes")) policy = .{ .free_bytes = try std.fmt.parseInt(u64, v, 10) } else if (std.mem.eql(u8, k, "--hold-ms")) hold_ms = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--record-exit")) record_exit = try std.fmt.parseInt(u8, v, 10) else return usage();
     }
+    if (record_exit) |code| {
+        const job = std.meta.stringToEnum(evidence.Job, init.environ_map.get("K6_JOB_ID") orelse "") orelse return error.MemoryPolicyJobDiffers;
+        const env = try evidence.Env.read(init.environ_map, a, job) orelse return error.MemoryPolicyMissing;
+        try evidence.recordExit(a, env, code);
+        return 0;
+    }
+    const self_exe = cwd_exe: {
+        const b = Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", a, .limited(256 << 20)) catch break :cwd_exe null;
+        break :cwd_exe sha(b);
+    };
+    const exe_sha: []const u8 = if (self_exe) |*h| h else "";
+    if (probe) {
+        if (hold_ms != null and !sim) return usage(); // the sealed 10 s holds, except in a host smoke test
+        return runProbe(a, init.environ_map, sim, hold_ms orelse 10_000, exe_sha, start_s);
+    }
+    if (hold_ms != null) return usage();
+    const ev = try evidence.Env.read(init.environ_map, a, .@"d2-engine");
     if (vae_path == null or inputs_path == null or out_path == null or (!sim and (conv_path == null or ops_path == null))) return usage();
 
     const cwd = Io.Dir.cwd();
@@ -239,6 +291,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var gpu_store: Gpu = undefined;
     var gpu: ?*Gpu = null;
+    var producer: ?evidence.Producer = null;
     defer if (gpu) |g| {
         for (&g.mods) |*m| m.unload();
         g.stream.deinit();
@@ -251,6 +304,10 @@ pub fn main(init: std.process.Init) !u8 {
         gpu_store.stream = try cuda.Stream.init(&gpu_store.d, false);
         gpu = &gpu_store;
         const g = gpu.?;
+        if (ev) |e| {
+            producer = .{ .a = a, .env = e, .ledger = &ledger, .query = .{ .ctx = g, .func = Gpu.memInfo }, .period_ms = 1000 };
+            try producer.?.start("cuda-driver", exe_sha, start_s);
+        }
         var names: [2][]const u8 = undefined;
         for ([_][]const u8{ conv_path.?, ops_path.? }, 0..) |p, m| {
             const img = try cwd.readFileAllocOptions(io, p, a, .limited(256 << 20), .of(u64), null);
@@ -265,8 +322,11 @@ pub fn main(init: std.process.Init) !u8 {
         const mem = try g.ctx.memInfo();
         try env.writer.print(", \"gpu\": {{\"name\": \"{s}\", \"capability\": {d}, \"driver\": {d}, \"mem_free\": {d}, \"mem_total\": {d}}}, \"conv_fatbin_sha256\": \"{s}\", \"ops_fatbin_sha256\": \"{s}\"", .{ try g.ctx.name(&nb), try g.ctx.capability(), try g.d.version(), mem.free, mem.total, names[0], names[1] });
     }
-    const self_exe = cwd.readFileAlloc(io, "/proc/self/exe", a, .limited(256 << 20)) catch null;
-    if (self_exe) |b| try env.writer.print(", \"binary_sha256\": \"{s}\"", .{&sha(b)});
+    if (sim) if (ev) |e| {
+        producer = .{ .a = a, .env = e, .ledger = &ledger, .query = .{ .ctx = &gpu_store, .func = simMemInfo }, .period_ms = 1000 };
+        try producer.?.start("sim", exe_sha, start_s);
+    };
+    if (self_exe != null) try env.writer.print(", \"binary_sha256\": \"{s}\"", .{exe_sha});
 
     var wbuf = try Buf.alloc(gpu, image.bytes.len, 0x1000_0000_0000);
     defer wbuf.free();
@@ -314,7 +374,52 @@ pub fn main(init: std.process.Init) !u8 {
     try env.writer.writeAll("}}\n");
     try out.writeFile(io, .{ .sub_path = "env.json", .data = env.written() });
     try Io.File.stdout().writeStreamingAll(io, try std.fmt.allocPrint(a, "{s}}}}}\n", .{summary.written()}));
-    return if (all_ok) 0 else 1;
+    const code: u8 = if (all_ok) 0 else 1;
+    if (producer) |*p| {
+        return p.finish(code, try std.fmt.allocPrint(a, ", \"cases\": \"{s}\"", .{cases_arg}));
+    }
+    return code;
+}
+
+/// The attribution probe (D2-EVIDENCE.md): six sealed phases, each held `hold_ms`, around one context and two
+/// allocations of 4 and 16 GiB through the ledger (cuMemAlloc, cuMemsetD8, synchronize). P0 ends before the driver is
+/// loaded; the allocator evidence starts with the context, so the runner can correlate its samples with each phase.
+fn runProbe(a: std.mem.Allocator, environ: *const std.process.Environ.Map, sim: bool, hold_ms: u64, exe_sha: []const u8, start_s: f64) !u8 {
+    const env = try evidence.Env.read(environ, a, .@"d2-probe-native") orelse return error.MemoryPolicyMissing;
+    var phases = try evidence.Phases.open(env);
+    var t = evidence.monotonic();
+    evidence.sleepMs(hold_ms);
+    try phases.record(0, t);
+    var g: Gpu = undefined;
+    if (!sim) {
+        g.d = try cuda.Driver.open();
+        g.ctx = try cuda.Context.init(&g.d, 0);
+    }
+    defer if (!sim) {
+        g.ctx.deinit();
+        g.d.close();
+    };
+    var producer: evidence.Producer = .{ .a = a, .env = env, .ledger = &ledger, .query = if (sim) .{ .ctx = &g, .func = simMemInfo } else .{ .ctx = &g, .func = Gpu.memInfo }, .period_ms = 500 };
+    try producer.start(if (sim) "sim" else "cuda-driver", exe_sha, start_s);
+    t = evidence.monotonic();
+    evidence.sleepMs(hold_ms);
+    try phases.record(0, t);
+    for ([_]u64{ 4 << 30, 16 << 30 }) |x| {
+        var b = try Buf.alloc(if (sim) null else &g, x, 0x3000_0000_0000);
+        if (b.dev) |d| {
+            try d.fill8(1, null);
+            try g.ctx.synchronize();
+        }
+        t = evidence.monotonic();
+        evidence.sleepMs(hold_ms);
+        try phases.record(x, t);
+        b.free();
+        if (!sim) try g.ctx.synchronize();
+        t = evidence.monotonic();
+        evidence.sleepMs(hold_ms);
+        try phases.record(x, t);
+    }
+    return producer.finish(0, try phases.seal(a));
 }
 
 /// One case: inputs uploaded, the graph run under the probe, the io boundaries recorded. Returns the case's device bytes.
@@ -379,6 +484,6 @@ fn runCase(a: std.mem.Allocator, io: Io, gpu: ?*Gpu, simr: *launch.Sim, l: launc
 }
 
 fn usage() u8 {
-    std.debug.print("usage: k6v-qual --vae FILE --inputs DIR --conv FATBIN --ops FATBIN --out DIR [--cases s_dec,f_dec,s_enc,n_enc,n_dec] [--free-bytes N] [--sim]\n", .{});
+    std.debug.print("usage: k6v-qual --vae FILE --inputs DIR --conv FATBIN --ops FATBIN --out DIR [--cases s_dec,f_dec,s_enc,n_enc,n_dec] [--free-bytes N] [--sim]\n       k6v-qual --probe [--sim [--hold-ms N]]\n       k6v-qual --record-exit CODE\n", .{});
     return 2;
 }

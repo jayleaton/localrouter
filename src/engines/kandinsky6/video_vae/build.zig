@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(b.addExecutable(.{ .name = "k6v-qual", .root_module = qual }));
 
     const test_step = b.step("test", "Video VAE unit tests");
-    for ([_][]const u8{ "launch.zig", "tiles.zig", "encode.zig", "decode.zig", "weights.zig" }) |f| {
+    for ([_][]const u8{ "launch.zig", "tiles.zig", "encode.zig", "decode.zig", "weights.zig", "evidence.zig" }) |f| {
         const m = b.createModule(.{ .root_source_file = b.path(f), .target = b.graph.host, .optimize = .Debug });
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     }

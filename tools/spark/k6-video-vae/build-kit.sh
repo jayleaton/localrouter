@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the D2 (Kandinsky-6 video VAE) qualification kit on the dev host (x86-64, no GPU), for the GB10 jobs
-# run-oracle.sh and run-engine.sh. Heavy: run it under the host's heavy-job gate.
+# run-probe.sh, run-oracle.sh and run-engine.sh. Heavy: run it under the host's heavy-job gate.
 #   KIT=DIR tools/spark/k6-video-vae/build-kit.sh
 # KIT must already hold pybundle/, pybundle.json, upstream/ and inputs/ (pybundle.sh, the pinned upstream checkout,
 # inputs.py). This adds:
@@ -16,6 +16,8 @@
 #                         checked against this kit's) as the runner's read-only D2 oracle root.
 # TOOLS_ONLY=1 restages tools/ and the spec over an existing kit without rebuilding bin/ or fatbin/, which must still
 # match MANIFEST.sha256 (the checked binary and kernels stay byte-identical).
+# FATBIN_FROM=DIR (a new KIT, bin/ rebuilt) takes fatbin/ from an earlier kit instead of nvcc, when the kernel sources are
+# unchanged since that kit's head: its fatbins are checked against its MANIFEST.sha256 and its nvcc version is kept.
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 KIT=${KIT:?KIT=DIR}
@@ -35,6 +37,16 @@ mkdir -p $OBJ
 (cd $VV && zig build -Dtarget=aarch64-linux-gnu --prefix $OBJ/zig)
 install -m 0755 $OBJ/zig/bin/k6v-qual $KIT/bin/k6v-qual
 
+if [[ -n ${FATBIN_FROM:-} ]]; then
+    OLD=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["head"])' $FATBIN_FROM/build.json)
+    [[ -z $(git -C $REPO diff --name-only $OLD HEAD -- kernels/cuda/kandinsky6/video_vae) && -z $(git -C $REPO status --porcelain -- kernels/cuda/kandinsky6/video_vae) ]] \
+        || { echo "FATBIN_FROM: kernel sources changed since $OLD" >&2; exit 1; }
+    (cd $FATBIN_FROM && grep -E '  fatbin/' MANIFEST.sha256 | sha256sum -c --strict --quiet) \
+        || { echo "FATBIN_FROM: fatbin/ differs from its MANIFEST.sha256" >&2; exit 1; }
+    install -m 0644 $FATBIN_FROM/fatbin/conv.fatbin $FATBIN_FROM/fatbin/ops.fatbin $KIT/fatbin/
+    NVCC=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["nvcc"])' $FATBIN_FROM/build.json)
+else
+
 FLAGS=(-D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__
        -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -std=c++20 -O3 -fatbin
        -gencode=arch=compute_121a,code=sm_121a -gencode=arch=compute_120a,code=sm_120a -Xptxas -v)
@@ -44,9 +56,11 @@ for f in conv ops; do
 done
 NVCC=$(cd $REPO && kernels/cuda/nvcc-docker.sh --version | tail -2 | tr '\n' ' ')
 fi
+fi
 
 chmod -R u+w $KIT/tools
-for f in inputs.py oracle.py compare.py operator_spec.py pybundle.sh run-oracle.sh run-engine.sh build-kit.sh; do
+for f in inputs.py oracle.py compare.py operator_spec.py pybundle.sh run-oracle.sh run-engine.sh run-probe.sh \
+         d2-allocator-guard.py d2_evidence.py D2-EVIDENCE.md build-kit.sh; do
     install -m 0644 $REPO/tools/spark/k6-video-vae/$f $KIT/tools/$f
 done
 chmod 0755 $KIT/tools/*.sh
