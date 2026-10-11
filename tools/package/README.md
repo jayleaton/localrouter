@@ -33,11 +33,13 @@ does not fit. The receipt records each layout's size and the largest drop in fre
 
 ```bash
 # build machine (the NGC builder image already pulled)
-LR_BASE_IMAGES=nvcr.io/nvidia/pytorch:26.07-py3 bash tools/package/release-batch.sh <commit>
+docker pull --platform linux/arm64 nvidia/cuda:13.0.1-base-ubuntu24.04   # the runtime base, once
+LR_BASE_IMAGES="nvcr.io/nvidia/pytorch:26.07-py3 nvidia/cuda:13.0.1-base-ubuntu24.04=linux/arm64" \
+  bash tools/package/release-batch.sh <commit>
 # copy localrouter-<commit>-arm64.tar.zst and .json to the node; the weights are already there
 
 # the node
-TOOL_OPTIONS='{"fp32_linear": "<mode>", "clip_linear": "<mode>"}' \
+TOOL_OPTIONS='{"fp32_linear": "<mode>", "clip_linear": "<mode>", "qwen_rope_freq": "<mode>", "qwen_inv_freq": "<file>"}' \
   bash tools/package/install.sh --profile tools/package/profiles/kandinsky6-pro-distill.json \
     --weights <snapshot dir> --image localrouter-<commit>-arm64.tar.zst \
     [--manifest tools/kandinsky6/staging/assets.json] --smoke
@@ -46,9 +48,12 @@ LR_HOME=~/.localrouter tools/package/localrouterctl generate kandinsky6-pro-dist
 LR_HOME=~/.localrouter tools/package/localrouterctl stop
 ```
 
-`fp32_linear` and `clip_linear` (`tf32_rna`, `tf32_truncate` or `fp32`) have no default: the engine refuses to load
-without them, and their values come from the model's GPU qualification. The profile marks them, and the stage names
-the cancel checks target, as `provisional`.
+`fp32_linear`, `clip_linear` and `qwen_rope_freq` (`tf32_rna`, `tf32_truncate` or `fp32`) and `qwen_inv_freq` (a
+256-byte file: 64 little-endian f32, Qwen2.5-VL's rotary `inv_freq` as captured on the target) have no default: the
+engine refuses to load without them, and their values come from the model's GPU qualification. `install.sh` copies
+the `qwen_inv_freq` file (a profile's `file_options`) into `$LR_HOME/files`, checks its size, records its SHA-256 and
+gives it to the container read-only. The profile marks these options, and the stage names the cancel checks target
+(`load`, `text`, `denoise`, `decode`, `audio`, `encode`), as `provisional`.
 
 ## The lifecycle smoke
 

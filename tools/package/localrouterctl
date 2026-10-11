@@ -12,6 +12,7 @@
 #   LR_IMAGE    the image, ideally by digest (docker mode; default localrouter:dev)
 #   LR_NAME     the container name (docker mode; default localrouter)
 #   LR_MODELS   the weights directory, mounted read-only at /models (docker mode)
+#               ($LR_HOME/files, when present, is mounted read-only at /etc/localrouter/files: files options name)
 #   LR_CONFIG   the tools.json to serve (default $LR_HOME/tools.json)
 #   LR_HOST     the address to listen on: 127.0.0.1 (default), tailscale, all or an IP. Published port in docker mode
 #   LR_PORT     the port (default 8190)
@@ -85,8 +86,10 @@ cmd_start() {
         case $LR_HOST in localhost) publish=127.0.0.1 ;; all) publish=0.0.0.0 ;; tailscale) publish=$(tailscale ip -4 | head -n1) ;; esac
         docker rm -f "$LR_NAME" > /dev/null 2>&1 || true
         chmod 777 "$LR_HOME/data"   # the image runs as uid 10001
+        local files=()   # options that name a file (install.sh's file_options)
+        [[ ! -d $LR_HOME/files ]] || files=(-v "$LR_HOME/files:/etc/localrouter/files:ro")
         docker run -d --name "$LR_NAME" --gpus all --restart no -p "$publish:$LR_PORT:8190" \
-            -v "$LR_MODELS:/models:ro" -v "$LR_HOME/data:/data" -v "$LR_CONFIG:/etc/localrouter/tools.json:ro" \
+            -v "$LR_MODELS:/models:ro" -v "$LR_HOME/data:/data" -v "$LR_CONFIG:/etc/localrouter/tools.json:ro" "${files[@]}" \
             "$LR_IMAGE" serve --host all --config /etc/localrouter/tools.json --data /data > /dev/null
     else
         local exe; exe=$(bin)
@@ -148,7 +151,7 @@ print(json.dumps(b))' "$model" "$prompt" "$size" "$seconds" "$seed")
 # unload MODEL: unload it now and wait until its worker is gone.
 cmd_unload() {
     local model=${1:?model}
-    curl -sSf -X POST -d "" "$URL/v1/tools/$model/unload" > /dev/null   # with a Content-Length: the daemon needs one on a POST
+    curl -sSf -X POST -d "" "$URL/v1/tools/$model/unload" > /dev/null   # with a Content-Length: daemons before the empty-body fix need one on a POST
     for _ in $(seq 1 300); do
         [[ $(curl -sS "$URL/v1/tools" | python3 -I -c 'import json,sys; print(next(t["state"] for t in json.load(sys.stdin)["data"] if t["id"]==sys.argv[1]))' "$model") == unloaded ]] &&
             (($(tree "$(daemon_pid)" | wc -l) <= 1)) && { echo "unloaded: $model"; return 0; }

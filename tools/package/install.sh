@@ -16,6 +16,9 @@
 # A profile field that is null (not decided yet, e.g. a precision mode a GPU qualification picks) must be given in the
 # environment: TOOL_ID, TOOL_ENGINE, TOOL_OPTIONS (JSON, merged over the profile's options), e.g.
 #   TOOL_OPTIONS='{"fp32_linear": "...", "clip_linear": "..."}'
+# An option the profile lists in "file_options" names a file on this machine: it is checked (size, when the profile
+# gives one), copied to $LR_HOME/files, given to the daemon at /etc/localrouter/files/<option> (read-only) and its
+# SHA-256 recorded in $LR_HOME/profile.json ("installed_files").
 # Env: LR_HOME (default ~/.localrouter), LR_HOST (127.0.0.1), LR_PORT (8190).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -43,7 +46,7 @@ if ((uninstall)); then
     "$CTL" stop || true
     img=$(sed -n 's/^LR_IMAGE=//p' "$LR_HOME/env" 2> /dev/null || true)
     [[ -z $img ]] || docker rmi "$img" > /dev/null 2>&1 || true
-    rm -rf "$LR_HOME/tools.json" "$LR_HOME/env" "$LR_HOME/profile.json" "$LR_HOME/data" "$LR_HOME/daemon.log" \
+    rm -rf "$LR_HOME/tools.json" "$LR_HOME/env" "$LR_HOME/profile.json" "$LR_HOME/data" "$LR_HOME/files" "$LR_HOME/daemon.log" \
         "$LR_HOME/assets-receipt.json" "$LR_HOME/smoke-receipt.json"
     step "uninstalled (weights untouched)"
     exit 0
@@ -68,6 +71,20 @@ missing = [k for k in ("id", "engine") if t.get(k) is None] + ["options." + k fo
 if missing:
     sys.exit("install: the profile leaves %s unset (the engine's owner or a qualification decides them): set them with "
              "TOOL_ID, TOOL_ENGINE or TOOL_OPTIONS (JSON, merged over the profile's options)" % ", ".join(missing))
+import hashlib, shutil
+files = os.path.join(os.environ["LR_HOME"], "files")
+shutil.rmtree(files, ignore_errors=True)
+p["installed_files"] = {}
+for key, want in (p.get("file_options") or {}).items():  # options naming a file: copied in, mounted read-only
+    src = t["options"][key]
+    if not os.path.isfile(src):
+        sys.exit("install: options.%s names %s, which is not a file" % (key, src))
+    if want.get("bytes") is not None and os.path.getsize(src) != want["bytes"]:
+        sys.exit("install: options.%s (%s) is %d bytes, not %d" % (key, src, os.path.getsize(src), want["bytes"]))
+    os.makedirs(files, exist_ok=True)
+    shutil.copyfile(src, os.path.join(files, key))
+    p["installed_files"][key] = {"from": os.path.realpath(src), "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
+    t["options"][key] = "/etc/localrouter/files/" + key
 p["model"] = t["id"]
 if t.get("keep_loaded") or "idle_ttl_s" not in t:
     sys.exit("install: an on-demand profile sets keep_loaded false and an explicit idle_ttl_s")
