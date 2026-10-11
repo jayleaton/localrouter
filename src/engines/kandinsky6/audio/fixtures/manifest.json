@@ -3,7 +3,7 @@
  "producer": "Captain audio-closure capture_cpu_oracle.py: CPU black-box diagnostic oracle, Torch 2.14.1+cpu x86_64, 1 thread, deterministic algorithms; synthetic inputs only, no model weights, no GPU",
  "source_commit": "eac06e39b904940baff2c408e925cdb0c4529269",
  "oracle_observations_sha256": "df52f9fa349adf233c0622937cbe483dab6a1993c955aa444f4dbad47691ba55",
- "role": "CPU diagnostic for ConvPrepared1D (gain before convolution, zero padding K//2, stride 1, dilation 1, groups 1, no bias) over ORACLE-PREPARED weights. Not the accepted SM121 baseline; does not certify the stored->prepared weight transform, the checkpoint loader or any CUDA kernel.",
+ "role": "CPU diagnostic for ConvPrepared1D (gain before convolution, zero padding K//2, stride 1, dilation 1, groups 1, no bias) over ORACLE-PREPARED weights. Not the accepted SM121 baseline; does not certify the stored->prepared weight transform, the checkpoint loader or any CUDA kernel. Raw stored weights test the candidate stored->prepared transform on CPU only.",
  "layout": "little-endian float32, contiguous, PyTorch shapes (input [B,Cin,L], weight [Cout,Cin,K], output [B,Cout,L])",
  "files": [
   {
@@ -445,6 +445,554 @@
    ],
    "dtype": "float32",
    "sha256": "addd8c135deaf3ba1cf646c9532158dd64720ae79db7f2bd10dab73b9c65d94c"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-raw.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "716707780862263735b493ae2b383eb7f5900a3357cb0b2a18009ea6557a85ec",
+   "role": "synthetic stored (pre-preparation) weight"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-raw.f32le",
+   "shape": [
+    2,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "5f61408149026253954af141f8c3d007bcd06c2d45d0d5aee5fe7fd15f52b98c",
+   "role": "synthetic stored (pre-preparation) weight"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-raw.f32le",
+   "shape": [
+    2,
+    3,
+    5
+   ],
+   "dtype": "float32",
+   "sha256": "4fc1a7ad1bd1d9ade3c7b709820d723b84243355a324e336534e5ebfe76a64ce",
+   "role": "synthetic stored (pre-preparation) weight"
+  },
+  {
+   "file": "conv-2-1-3-tiny-raw.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "331d13acafab09f0a18a783ebd389e28c96f2406779598056cec0c2956d674ad",
+   "role": "synthetic stored (pre-preparation) weight"
+  },
+  {
+   "file": "conv-2-1-3-zero-raw.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "4bfc74e95ac3e7eff044ba21fa5e0dd106a880b56c696184f029bb1cc7acdac5",
+   "role": "synthetic stored (pre-preparation) weight"
+  },
+  {
+   "file": "norm-zero-input.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+   "normalization": {
+    "case": "zero",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-zero-output.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+   "normalization": {
+    "case": "zero",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-tiny-input.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "8e8365e205d882699acf9625452cff9a5ea7c000d7bcf3ec7e6d1c8fa4b095ff",
+   "normalization": {
+    "case": "tiny",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-tiny-output.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "bb2c05788a7d0207a429f0782351dc262a2db494f52e9f12f1ca9add442a80aa",
+   "normalization": {
+    "case": "tiny",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-signed_zero-input.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "a9765c4805658a968e5abdccd437e25907681a1cff6375e363239c53b125fcd4",
+   "normalization": {
+    "case": "signed_zero",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-signed_zero-output.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "a9765c4805658a968e5abdccd437e25907681a1cff6375e363239c53b125fcd4",
+   "normalization": {
+    "case": "signed_zero",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-ordinary-input.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "1cb2f8fcaee102d6e073bede544b324fe2fdd71d3c49fec37d46f883735c868a",
+   "normalization": {
+    "case": "ordinary",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-ordinary-output.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "4fbef97e3e2d70e2454f20a4df24e853924ccf0d445b26ad622a859702d439fc",
+   "normalization": {
+    "case": "ordinary",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-epsilon_override-input.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "8e8365e205d882699acf9625452cff9a5ea7c000d7bcf3ec7e6d1c8fa4b095ff",
+   "normalization": {
+    "case": "epsilon_override",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.001
+   }
+  },
+  {
+   "file": "norm-epsilon_override-output.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "a7f43ace0026010bd74dc1aa2a3a4cdd06149332770ac81c36f0a9131a28d30c",
+   "normalization": {
+    "case": "epsilon_override",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.001
+   }
+  },
+  {
+   "file": "norm-overflow-input.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "68f411145913035e8676b890c02d84fa8e90a396baabb7bd0e919d60a139ffd2",
+   "normalization": {
+    "case": "overflow",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-overflow-output.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+   "normalization": {
+    "case": "overflow",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-underflow-input.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "25720ccd8f4bbe8bba7d91ebd77db938c76c34315aac7609f9da513c7be6361a",
+   "normalization": {
+    "case": "underflow",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-underflow-output.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "8ba48586058f38e1c55e8aa9c00335165cf5609dcb27746441a677e0ecd59487",
+   "normalization": {
+    "case": "underflow",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_40-input.f32le",
+   "shape": [
+    1,
+    40,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "23ea3104360254fb5b1f48cac2b51c883537f1b1246fac07bd1860e288f6ec8a",
+   "normalization": {
+    "case": "channels_40",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_40-output.f32le",
+   "shape": [
+    1,
+    40,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "156fe3900555aae233cfc76f22a618e1716aebb1d52b1a29261a9b44b0da8d1e",
+   "normalization": {
+    "case": "channels_40",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_128-input.f32le",
+   "shape": [
+    1,
+    128,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "f0ea7a2da17da46c65aee2d82733f866eb0f68bcb1460a9c8b6e2157064f7327",
+   "normalization": {
+    "case": "channels_128",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_128-output.f32le",
+   "shape": [
+    1,
+    128,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "d50d67a88c2e3c12d27aad2f4b23424d6b758adcb32e0441f9c63db3ae2bc300",
+   "normalization": {
+    "case": "channels_128",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_512-input.f32le",
+   "shape": [
+    1,
+    512,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "f48b78807a1327c82369f0a427596cbdbcb9278fb048bea3f477b693d7687872",
+   "normalization": {
+    "case": "channels_512",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_512-output.f32le",
+   "shape": [
+    1,
+    512,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "dc5854ab908b68d3086e50cb0fd63fe70d4255e9c56c91ee41f1d3a55c04617c",
+   "normalization": {
+    "case": "channels_512",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_1024-input.f32le",
+   "shape": [
+    1,
+    1024,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "e3b30cbbf44ef8af8caf4bed572b80898434e1be8d6044c7676344bda817f102",
+   "normalization": {
+    "case": "channels_1024",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_1024-output.f32le",
+   "shape": [
+    1,
+    1024,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "ff7004266d952abe727f0359353adeb76a2a8020f38f126db285ba932c23e764",
+   "normalization": {
+    "case": "channels_1024",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_2048-input.f32le",
+   "shape": [
+    1,
+    2048,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "59f11fa0349479f6d0495c497d8fe1e74ed4637e8b1f01be42fb0af4db270bc4",
+   "normalization": {
+    "case": "channels_2048",
+    "role": "input",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-channels_2048-output.f32le",
+   "shape": [
+    1,
+    2048,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "75c5e6b92a38abf0908dcfdf83da098fedb1b2651b54371316a4ddbbcae5eaee",
+   "normalization": {
+    "case": "channels_2048",
+    "role": "output",
+    "axis": 1,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-packed_qkv-input.f32le",
+   "shape": [
+    2,
+    1,
+    128,
+    3,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "cf46e8550196db2feab79a72feaf0860326d1db4408b371ee484f8a0bd5b7f4a",
+   "normalization": {
+    "case": "packed_qkv",
+    "role": "input",
+    "axis": 2,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-packed_qkv-output.f32le",
+   "shape": [
+    2,
+    1,
+    128,
+    3,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "6f42b629451ea17008ed064417812663f65361ee84d9a021096c1e6bc248257c",
+   "normalization": {
+    "case": "packed_qkv",
+    "role": "output",
+    "axis": 2,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-packed_qkv_native_2048-input.f32le",
+   "shape": [
+    1,
+    1,
+    2048,
+    3,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "6fc20feebe35b2b49df3a9b6cf3f8f9ebb4904d6be9c4afe57b24f8f0a16b330",
+   "normalization": {
+    "case": "packed_qkv_native_2048",
+    "role": "input",
+    "axis": 2,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-packed_qkv_native_2048-output.f32le",
+   "shape": [
+    1,
+    1,
+    2048,
+    3,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "a8d4302ae332ae390e207948c8222fd12c6a741e4db32063b040b17a984e1749",
+   "normalization": {
+    "case": "packed_qkv_native_2048",
+    "role": "output",
+    "axis": 2,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-noncontiguous_channels-input.f32le",
+   "shape": [
+    2,
+    1,
+    7,
+    3,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "b8990e2f95c530d40945e3b14b2cfba4d997443e83f687571500febc176ff674",
+   "normalization": {
+    "case": "noncontiguous_channels",
+    "role": "input",
+    "axis": 4,
+    "epsilon": 0.0001
+   }
+  },
+  {
+   "file": "norm-noncontiguous_channels-output.f32le",
+   "shape": [
+    2,
+    1,
+    7,
+    3,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "ef3933b3fc0f005da7df54631c7b2c9eaaffcb88e037bb75bc825915f516a61e",
+   "normalization": {
+    "case": "noncontiguous_channels",
+    "role": "output",
+    "axis": 4,
+    "epsilon": 0.0001
+   }
   }
- ]
+ ],
+ "normalization_note": "Activation-normalization oracle cases (CPU, synthetic). Files are the logical tensor in contiguous order; the oracle input of noncontiguous_channels was a permuted view with element strides [2688,2688,1,7,21], so its reduced axis was strided in memory."
 }

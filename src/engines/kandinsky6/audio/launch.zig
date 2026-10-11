@@ -6,8 +6,10 @@
 //! with `-O3 --fmad=false` and no fast math (audio.cu header); without nvcc the caller has no image to load.
 //!
 //! Every kernel is gpu-qualification-pending: `Use.production` is refused until the SM121 operator, chain, mel and PCM
-//! gates against the native twin pass with zero unequal values. Activation normalization, decoder weight preparation,
-//! the vocoder weight-norm fold and the middle attention's SDPA have no launch: they are explicit unsupported calls.
+//! gates against the native twin pass with zero unequal values. Activation normalization takes its reduction order and
+//! denominator rounding as explicit arguments, which the GPU harness sweeps against the native twin; the middle
+//! attention's `k6a_sdpa_math` is a diagnostic comparison candidate only. Decoder weight preparation runs on the host at
+//! load (vae.zig `prepare`), and the vocoder weight-norm fold is not on the native path.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -20,6 +22,11 @@ const Use = vae.Use;
 const Acc = vae.Acc;
 const ScalarDiv = vae.ScalarDiv;
 const Error = vae.Error;
+
+/// The device sum-of-squares order (audio.cu K6A_RED_*): one serial chain fused or in two roundings, or `strided_tree`
+/// lanes (a power of two up to 1024) each summing a strided slice, then a halving tree. The order SM121's native
+/// reduction uses is what the GPU harness determines; nothing here picks one.
+pub const DeviceReduce = union(enum) { serial_fma, serial_mul_add, strided_tree: u32 };
 
 const block: u32 = 256;
 const conv_block: u32 = 128;
@@ -55,6 +62,9 @@ pub const Ops = struct {
     down2_fn: cuda.Function,
     qkv_split_fn: cuda.Function,
     attn_merge_fn: cuda.Function,
+    l2norm_fn: cuda.Function,
+    normalize_apply_fn: cuda.Function,
+    sdpa_math_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
         var m = try cuda.Module.load(d, image);
@@ -70,6 +80,8 @@ pub const Ops = struct {
             .{ "conv_t_fn", "k6a_conv_transpose1d" },       .{ "snake_fn", "k6a_snake_beta_log" },
             .{ "up2_fn", "k6a_aa_up2" },                    .{ "down2_fn", "k6a_aa_down2" },
             .{ "qkv_split_fn", "k6a_qkv_split" },           .{ "attn_merge_fn", "k6a_attn_merge" },
+            .{ "l2norm_fn", "k6a_l2norm" },                 .{ "normalize_apply_fn", "k6a_normalize_apply" },
+            .{ "sdpa_math_fn", "k6a_sdpa_math" },
         }) |e| @field(o, e[0]) = try m.function(e[1]);
         return o;
     }
@@ -353,20 +365,62 @@ pub const Ops = struct {
         try flat(o.attn_merge_fn, s, b * h * d * t, &a);
     }
 
-    // -------------------------------------------------------------------------- explicit unsupported operators
+    // ------------------------------------------------- operators whose target arithmetic is still being compared
 
-    /// Activation normalization (residual axis 1, packed QKV axis 2): refused, see vae.normalizeActivation.
-    pub fn normalizeActivation(o: *const Ops, input: View, output: View, axis: u8) Error!void {
-        _ = o;
-        return vae.normalizeActivation(input, output, axis);
+    /// Activation normalization (residual [B, C, T] axis 1, packed QKV [B, H, D, 3, T] axis 2), in place or not:
+    /// norms [outer, inner] = ||x||_axis under `reduce`, then y = x / (eps + norm * f32(sqrt(1/n))) with the denominator
+    /// rounded per `den`. eps, reduce and den have no defaults. Diagnostic only (vae `activation_normalize`).
+    pub fn normalizeActivation(o: *const Ops, s: cuda.Stream, use: Use, x: View, norms: View, y: View, axis: u8, eps: f32, reduce: DeviceReduce, den: Acc) !void {
+        try vae.admitOp(.activation_normalize, use);
+        const g = try vae.normalizeActivation(x, y, axis);
+        try x.expect(.cuda, x.shape[0..x.rank]);
+        try y.expect(.cuda, x.shape[0..x.rank]);
+        try norms.expect(.cuda, &.{ g.outer, g.inner });
+        const lanes: u32 = switch (reduce) {
+            .serial_fma, .serial_mul_add => 1,
+            .strided_tree => |r| blk: {
+                if (r == 0 or r > 1024 or !std.math.isPowerOfTwo(r)) return error.InvalidArgument;
+                break :blk r;
+            },
+        };
+        var a: cuda.Args = .{};
+        a.add(x.addr());
+        a.add(norms.addr());
+        inline for (.{ g.outer, g.n, g.inner }) |v| a.add(i64of(v));
+        a.add(@as(i32, switch (reduce) {
+            .serial_fma => 0,
+            .serial_mul_add => 1,
+            .strided_tree => 2,
+        }));
+        a.add(i32of(lanes));
+        const threads = @max(32, (lanes + 31) / 32 * 32);
+        try cuda.launch.launch(o.l2norm_fn, .{ .grid = .{ .x = @intCast(g.outer * g.inner) }, .block = .{ .x = threads }, .shared = lanes * @sizeOf(f32) }, s, &a);
+        var b: cuda.Args = .{};
+        inline for (.{ x.addr(), norms.addr(), y.addr() }) |p| b.add(p);
+        inline for (.{ g.outer, g.n, g.inner }) |v| b.add(i64of(v));
+        b.add(g.scale);
+        b.add(eps);
+        b.add(@as(i32, @intFromBool(den == .fma)));
+        try flat(o.normalize_apply_fn, s, x.numel(), &b);
     }
 
-    /// The middle attention's native SDPA (fp32 q, k, v [B, 1, T, 2048], default scale, no mask): refused. The backend
-    /// and its reductions are not fixtured; no FLASH, math or memory-efficient substitute is selected automatically.
-    pub fn midAttention(o: *const Ops, use: Use, q: View, k: View, v: View, out: View) Error!void {
-        _ = o;
-        for ([_]View{ q, k, v, out }) |x| try x.validate();
-        return vae.admitOp(.mid_attention_sdpa, use);
+    /// The middle attention, math formulation (audio.cu k6a_sdpa_math), q, k, v, out [BH, T, D] contiguous, softmax
+    /// scale 1/sqrt(D) applied as sqrt of it on each operand; `scratch` holds BH * T * T floats. A comparison candidate
+    /// for the native SDPA, whose backend choice is not yet recorded: diagnostic only, never selected automatically.
+    pub fn midAttentionMath(o: *const Ops, s: cuda.Stream, use: Use, q: View, k: View, v: View, out: View, scratch: View) !void {
+        try vae.admitOp(.mid_attention_sdpa, use);
+        const bh = q.shape[0];
+        const t = q.shape[1];
+        const d = q.shape[2];
+        for ([_]View{ q, k, v, out }) |x| try x.expect(.cuda, &.{ bh, t, d });
+        try scratch.expect(.cuda, &.{ bh, t, t });
+        const c: f32 = @floatCast(@sqrt(1.0 / @sqrt(@as(f64, @floatFromInt(d)))));
+        var a: cuda.Args = .{};
+        inline for (.{ q.addr(), k.addr(), v.addr(), out.addr(), scratch.addr() }) |p| a.add(p);
+        a.add(i64of(t));
+        a.add(i64of(d));
+        a.add(c);
+        try go(o.sdpa_math_fn, s, .{ .x = @intCast(t), .y = @intCast(bh) }, block, &a);
     }
 };
 

@@ -18,7 +18,19 @@ published mathematical definitions and graph facts, recorded per operator in `va
 Restricted and not used: NVIDIA EDM2 `edm2_utils.py` (CC BY-NC-SA 4.0), imported by the native `MPConv1D`, `normalize`,
 `mp_silu` and `mp_sum`. Its text was not read, copied, translated or called by this code. The CPU oracle fixtures in
 `fixtures/` came from a black-box invocation in Captain's audio-closure research (synthetic inputs, no model weights).
-They exercise ordinary convolution over oracle-prepared weights only.
+
+The activation normalization and the stored -> prepared weight transform were narrowed only by black-box comparison:
+compositions of public PyTorch primitives (`torch.linalg.vector_norm`, `torch.add(..., alpha=)`, true division) were
+scored for exact bit equality against those fixtures, and the winning composition was then written independently in Zig
+and CUDA. The restricted implementation was not read or imported for this. The CPU reduction orders (`vae.zig`
+`NormReduce`) were found the same way, against `torch.linalg.vector_norm` on random rows. The GPU harness may import the
+native module (and through it `edm2_utils.py`) only as the black-box reference it is, after checking its sha256; nothing
+from it is copied.
+
+Native load-path facts (MIT `autoencoder.py`, `vae_audio.py`, `pipeline/factory.py` at `eac06e39`): the decoder weights
+are prepared once on the host CPU (`load_state_dict`, `remove_weight_norm`, then `.to(device)`). The vocoder loads the
+HF `1018d582` checkpoint's plain `weight` tensors (667 fp32, no `weight_g` / `weight_v` / parametrizations) after removing
+weight norm, so no fold runs.
 
 If BigVGAN or alias-free-torch source is ever copied rather than reimplemented, the copy must carry the BigVGAN
 `LICENSE` and `incl_licenses/LICENSE_1..8` closure. The release inventory decides which notices ship.
@@ -28,12 +40,19 @@ If BigVGAN or alias-free-torch source is ever copied rather than reimplemented, 
 No kernel here is qualified. The required gate is zero unequal values against the native pinned Python twin on SM121,
 checked per operator, per chain, on the full mel and on raw PCM. CPU diagnostics do not count toward it.
 
-Unresolved, rejected before allocation, no substitute:
+CPU bits matched (diagnostic only; target bits not yet compared):
 
-- activation normalization (residual axis 1, packed QKV axis 2): every independent family mismatches the oracle
-- decoder stored -> prepared weight transform: every family mismatches, and the oracle transform is not idempotent
-- vocoder weight-norm fold: the PyTorch formula is known, but the checkpoint state and target bits are unverified
-- middle attention SDPA (fp32, head dimension 2048): the native backend is not fixtured; strict FLASH is not accepted
+- activation normalization `x / (eps + ||x|| * sqrt(1/n))`, denominator in one rounding, serial reduction over the
+  strided axis: 15/15 oracle cases, 0 of 40462 values unequal (two-rounding denominator: 7171). On SM121 the reduction
+  order is open; `k6a_l2norm` takes it as an argument for the harness to sweep.
+- decoder weight preparation `w / (eps + ||w_row|| * sqrt(1/fan)) / sqrt(fan)`, eps 1e-4 explicit: 5/5 synthetic
+  raw -> baked fixtures, 0 of 56 unequal (two-rounding denominator: 2). x86 AVX2 reduction is 8 lane sums added in
+  order; every decoder row (Cin * K) is a multiple of 8. The native twin's aarch64 host bits are open.
+
+Candidate only: the middle attention's SDPA (fp32, head dimension 2048). The native backend choice is not yet recorded;
+`k6a_sdpa_math` is a comparison candidate. Strict FLASH is not accepted.
+
+Not on the native path, refused: the vocoder weight-norm fold.
 
 Open choices that the native fixtures must settle: the per-term rounding of each reduction (`Acc`) and how each scalar
 division executes (`Div`). Neither has a default.

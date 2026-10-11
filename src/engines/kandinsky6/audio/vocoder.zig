@@ -3,9 +3,11 @@
 //! weights and memory plan, the admission check, and fp32 host references of SnakeBeta and the anti-aliasing FIR
 //! resamplers written op for op like kernels/cuda/kandinsky6/audio/audio.cu. Shares the audio ABI of vae.zig.
 //!
-//! Prepared weights only: if the checkpoint stores weight-norm parametrizations (g, v) their fold is the explicit
-//! unresolved `vocoder_weight_norm_fold` contract, never done implicitly. The 12-tap FIR filters are the modules'
-//! loaded `filter` buffers; `kaiserSincDesign` below is a diagnostic design in f64, not a production source.
+//! Weights as stored: the selected HF `1018d582` vocoder checkpoint holds 667 fp32 tensors with plain `weight` (no
+//! weight-norm g / v), and the native loader (`load_bigvgan_v2`, MIT) removes weight norm before loading them, so they
+//! are the effective weights (`vae.Weight.checkpointEffective`). A weight-norm fold is not on the native path and is
+//! refused (`vocoder_weight_norm_fold`). The 12-tap FIR filters are the modules' loaded `filter` buffers;
+//! `kaiserSincDesign` below is a diagnostic design in f64, not a production source.
 
 const std = @import("std");
 const vae = @import("vae.zig");
@@ -120,11 +122,13 @@ pub const Vocoder = struct {
         };
     }
 
-    /// Every operator under `use` with weights in `state`, before any allocation. Stored weights need the unresolved
-    /// weight-norm fold; prepared weights leave only target qualification pending (refused for production).
+    /// Every operator under `use` with weights in `state`, before any allocation. Checkpoint weights are used as stored;
+    /// stored weight-norm parametrizations would need a fold the native path never runs (refused). What remains is
+    /// target qualification (refused for production).
     pub fn admit(v: Vocoder, use: Use, state: vae.WeightState) Error!void {
         _ = v;
         if (state == .stored_checkpoint) try vae.admitOp(.vocoder_weight_norm_fold, use);
+        if (state == .prepared_native_reference) return error.InvalidArgument; // nothing prepares vocoder weights
         for (forward_ops) |op| try vae.admitOp(op, use);
     }
 };
@@ -254,11 +258,12 @@ test "vocoder graph: channels, lengths, parameters, memory" {
     try testing.expectEqual(@as(u64, 8 * 5357568 * 4), m.working_bytes);
 }
 
-test "vocoder admission: stored weights need the unresolved fold; prepared is diagnostic only" {
+test "vocoder admission: checkpoint weights as stored, the fold refused, production pending" {
     const v = try Vocoder.init(1, 436);
-    try testing.expectError(error.UnresolvedContract, v.admit(.diagnostic, .stored_checkpoint));
-    try v.admit(.diagnostic, .prepared_native_reference);
-    try testing.expectError(error.GpuQualificationPending, v.admit(.production, .prepared_native_reference));
+    try testing.expectError(error.NotOnNativePath, v.admit(.diagnostic, .stored_checkpoint));
+    try testing.expectError(error.InvalidArgument, v.admit(.diagnostic, .prepared_native_reference));
+    try v.admit(.diagnostic, .checkpoint_effective);
+    try testing.expectError(error.GpuQualificationPending, v.admit(.production, .checkpoint_effective));
 }
 
 test "anti-alias resamplers: impulse responses and replicate edges" {

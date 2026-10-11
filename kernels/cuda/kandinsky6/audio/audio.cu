@@ -295,3 +295,104 @@ extern "C" __global__ void k6a_attn_merge(const float* h, float* y, long long B,
     const long long t = e % T, d = (e / T) % D, bh = e / (T * D);
     y[e] = h[(bh * T + t) * D + d];
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Candidate kernels for the operators whose TARGET arithmetic is still open. Their formulas come from black-box
+// narrowing over permissive PyTorch primitive compositions against the CPU oracle fixtures (src/engines/kandinsky6/
+// audio/vae.zig `contract`: 15/15 normalization and 5/5 weight-preparation cases with zero unequal values on CPU); the
+// SM121 reduction order is not known, so the order is a launch argument the GPU harness sweeps against the native
+// twin. No restricted source was read. None of these is admitted for production. (The weight preparation itself runs on
+// the host at load, as the native loader does; see vae.zig `prepare`.)
+
+#define K6A_RED_SERIAL_FMA 0      // one chain, element ascending, acc = fma(v, v, acc)
+#define K6A_RED_SERIAL_MUL_ADD 1  // one chain, element ascending, acc = acc + v * v (two roundings)
+#define K6A_RED_STRIDED_TREE 2    // R lanes: lane r takes elements r, r + R, ... (fma chain), then a halving tree
+
+// L2 norm over the axis of extent N of a contiguous tensor viewed as [outer, N, inner] (the reduced axis has stride
+// inner): n[o, i] = sqrtf(sum_j x[o, j, i]^2) under `order`. R is the lane count of K6A_RED_STRIDED_TREE only (a
+// power of two <= blockDim.x, checked by the caller, launch.zig); the serial orders run on thread 0 and ignore R.
+// launch: block (R rounded up to 32, at least 32; 32 for the serial orders), grid (outer * inner); shared R floats.
+extern "C" __global__ void k6a_l2norm(const float* x, float* n, long long outer, long long N, long long inner,
+                                      int order, int R) {
+    extern __shared__ float lane[];
+    const long long out = blockIdx.x;
+    if (out >= outer * inner) return;
+    const long long o = out / inner, i = out % inner;
+    const float* base = x + o * N * inner + i;
+    if (order != K6A_RED_STRIDED_TREE) {
+        if (threadIdx.x != 0) return;
+        float acc = 0.0f;
+        for (long long j = 0; j < N; ++j) {
+            const float v = base[j * inner];
+            acc = order == K6A_RED_SERIAL_FMA ? __fmaf_rn(v, v, acc) : __fadd_rn(acc, __fmul_rn(v, v));
+        }
+        n[out] = __fsqrt_rn(acc);
+        return;
+    }
+    const int r = threadIdx.x;
+    if (r < R) {
+        float acc = 0.0f;
+        for (long long j = r; j < N; j += R) {
+            const float v = base[j * inner];
+            acc = __fmaf_rn(v, v, acc);
+        }
+        lane[r] = acc;
+    }
+    __syncthreads();
+    for (int h = R / 2; h > 0; h /= 2) {
+        if (r < h) lane[r] = __fadd_rn(lane[r], lane[r + h]);
+        __syncthreads();
+    }
+    if (r == 0) n[out] = __fsqrt_rn(lane[0]);
+}
+
+// Activation normalization apply: y[o, j, i] = x[o, j, i] / den[o, i], den = eps + n * s, s = fp32(sqrt(1 / N)).
+// den_fused 1: den = fmaf(n, s, eps) (one rounding; the composition that matched the CPU oracle), 0: two roundings.
+// y may alias x. launch: block 256, grid ceil(outer * N * inner / 256).
+extern "C" __global__ void k6a_normalize_apply(const float* x, const float* n, float* y, long long outer, long long N,
+                                               long long inner, float s, float eps, int den_fused) {
+    const long long e = (long long)blockIdx.x * K6A_BLOCK + threadIdx.x;
+    if (e >= outer * N * inner) return;
+    const long long i = e % inner, o = e / (N * inner);
+    const float nv = n[o * inner + i];
+    const float den = den_fused ? __fmaf_rn(nv, s, eps) : __fadd_rn(eps, __fmul_rn(nv, s));
+    y[e] = __fdiv_rn(x[e], den);
+}
+
+// Attention, math formulation (one candidate for the native fp32 SDPA; the native backend choice is open): per row
+// i of q [BH, T, D]: s_j = sum_d (q[i,d] * c) * (k[j,d] * c) with c = sqrt(scale) applied to each operand (fma chain,
+// d ascending); m = max_j s_j; p_j = expf(s_j - m); z = sum_j p_j (ascending); out[i,d] = sum_j (p_j / z) * v[j,d]
+// (fma chain, j ascending). The row max propagates NaN like torch's softmax. c = fp32(sqrt(1 / sqrt(D))) computed in
+// double by the caller. q, k, v, out contiguous [BH, T, D]; scratch holds BH * T * T floats. launch: block 256,
+// grid (T, BH).
+extern "C" __global__ void k6a_sdpa_math(const float* q, const float* k, const float* v, float* out, float* scratch,
+                                         long long T, long long D, float c) {
+    const long long i = blockIdx.x, bh = blockIdx.y;
+    if (i >= T) return;  // uniform per block
+    const float* qi = q + (bh * T + i) * D;
+    float* p = scratch + (bh * T + i) * T;
+    for (long long j = threadIdx.x; j < T; j += blockDim.x) {
+        const float* kj = k + (bh * T + j) * D;
+        float acc = 0.0f;
+        for (long long d = 0; d < D; ++d) acc = __fmaf_rn(__fmul_rn(qi[d], c), __fmul_rn(kj[d], c), acc);
+        p[j] = acc;
+    }
+    __syncthreads();
+    __shared__ float z_s;
+    if (threadIdx.x == 0) {
+        float m = p[0];
+        for (long long j = 1; j < T; ++j) m = (p[j] > m || p[j] != p[j]) && m == m ? p[j] : m;
+        float z = 0.0f;
+        for (long long j = 0; j < T; ++j) {
+            p[j] = expf(__fsub_rn(p[j], m));
+            z = __fadd_rn(z, p[j]);
+        }
+        z_s = z;
+    }
+    __syncthreads();
+    for (long long d = threadIdx.x; d < D; d += blockDim.x) {
+        float acc = 0.0f;
+        for (long long j = 0; j < T; ++j) acc = __fmaf_rn(__fdiv_rn(p[j], z_s), v[(bh * T + j) * D + d], acc);
+        out[(bh * T + i) * D + d] = acc;
+    }
+}
