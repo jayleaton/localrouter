@@ -1,0 +1,9 @@
+{
+ "reserve_bytes": 0,
+ "tools": [
+  {"id": "testpattern-video", "kind": "video", "name": "Test pattern video (self-test)", "engine": "testpattern",
+   "idle_ttl_s": 0, "options": {"resident_mb": 256, "load_ms": 1500, "step_ms": 500, "max_side": 1024}},
+  {"id": "testpattern-after", "kind": "video", "name": "Test pattern video (second tool)", "engine": "testpattern",
+   "idle_ttl_s": 0, "options": {"resident_mb": 64}}
+ ]
+}

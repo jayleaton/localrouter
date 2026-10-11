@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# On-demand control of one LocalRouter daemon, as a plain process or as a container:
+#   localrouterctl start | status | generate | unload | release | stop | pids | logs
+# The daemon holds no GPU memory while idle. A model loads on its first request and unloads after its idle TTL
+# (0 in the on-demand configs: right after each job), on `unload`, or with the daemon on `stop`. `stop` waits for the
+# daemon and every worker it started to exit before it returns, and fails if any is left.
+#
+# Settings (environment):
+#   LR_HOME     state directory: tools.json, env, data/ (jobs, worker logs), daemon.pid, daemon.log (default ~/.localrouter)
+#   LR_MODE     "binary" (default) or "docker"
+#   LR_BIN      the localrouter executable (binary mode; default: `localrouter` on PATH, else zig-out/bin/localrouter)
+#   LR_IMAGE    the image, ideally by digest (docker mode; default localrouter:dev)
+#   LR_NAME     the container name (docker mode; default localrouter)
+#   LR_MODELS   the weights directory, mounted read-only at /models (docker mode)
+#   LR_CONFIG   the tools.json to serve (default $LR_HOME/tools.json)
+#   LR_HOST     the address to listen on: 127.0.0.1 (default), tailscale, all or an IP. Published port in docker mode
+#   LR_PORT     the port (default 8190)
+#   LR_STOP_S   how long `stop` waits for a clean exit before it kills (default 30)
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+LR_HOME=${LR_HOME:-$HOME/.localrouter}
+# $LR_HOME/env (written by an installer): KEY=VALUE lines for the settings above; the environment overrides them
+if [[ -f $LR_HOME/env ]]; then
+    while IFS='=' read -r k v; do
+        [[ $k =~ ^LR_[A-Z_]+$ && -z ${!k:-} ]] && export "$k=$v"
+    done < "$LR_HOME/env"
+fi
+LR_MODE=${LR_MODE:-binary}
+LR_NAME=${LR_NAME:-localrouter}
+LR_IMAGE=${LR_IMAGE:-localrouter:dev}
+LR_CONFIG=${LR_CONFIG:-$LR_HOME/tools.json}
+LR_HOST=${LR_HOST:-127.0.0.1}
+LR_PORT=${LR_PORT:-8190}
+LR_STOP_S=${LR_STOP_S:-30}
+PIDFILE=$LR_HOME/daemon.pid
+die() { echo "localrouterctl: $*" >&2; exit 1; }
+
+url() {
+    case $LR_HOST in
+        127.0.0.1 | localhost | all | 0.0.0.0) echo "http://127.0.0.1:$LR_PORT" ;;
+        tailscale) echo "http://$(tailscale ip -4 | head -n1):$LR_PORT" ;;
+        *) echo "http://$LR_HOST:$LR_PORT" ;;
+    esac
+}
+URL=${LR_URL:-$(url)}
+json() { python3 -I -c 'import json,sys; v=json.load(sys.stdin)
+for k in sys.argv[1:]: v=v[int(k)] if isinstance(v,list) else v.get(k)
+print("" if v is None else (json.dumps(v) if isinstance(v,(dict,list)) else v))' "$@"; }
+healthy() { curl -sf -m 2 "$URL/health" > /dev/null 2>&1; }
+
+daemon_pid() {
+    if [[ $LR_MODE == docker ]]; then
+        docker inspect -f '{{if .State.Running}}{{.State.Pid}}{{end}}' "$LR_NAME" 2> /dev/null || true
+    elif [[ -f $PIDFILE ]]; then
+        local pid; pid=$(< "$PIDFILE")
+        [[ -d /proc/$pid ]] && echo "$pid" || true
+    fi
+}
+
+# The daemon and all of its descendants (workers, their ffmpeg), as host pids, daemon first.
+tree() {
+    local root=$1
+    [[ -n $root ]] || return 0
+    ps -e -o pid=,ppid= | awk -v root="$root" '{ parent[$1] = $2 } END {
+        print root; n = 1; queue[1] = root
+        while (n > 0) { p = queue[n--]; for (c in parent) if (parent[c] == p) { print c; queue[++n] = c } } }'
+}
+
+bin() {
+    if [[ -n ${LR_BIN:-} ]]; then echo "$LR_BIN"
+    elif command -v localrouter > /dev/null; then command -v localrouter
+    elif [[ -x $HERE/../../zig-out/bin/localrouter ]]; then echo "$HERE/../../zig-out/bin/localrouter"
+    else die "no localrouter executable: set LR_BIN"; fi
+}
+
+cmd_start() {
+    [[ -f $LR_CONFIG ]] || die "no config at $LR_CONFIG"
+    if [[ -n $(daemon_pid) ]]; then healthy && { echo "already running: $URL"; return 0; }; die "a daemon is running but $URL/health does not answer"; fi
+    healthy && die "something else already answers on $URL"
+    mkdir -p "$LR_HOME/data"
+    local t0; t0=$(date +%s.%N)
+    if [[ $LR_MODE == docker ]]; then
+        [[ -n ${LR_MODELS:-} ]] || die "LR_MODELS (the weights directory) is not set"
+        local publish=$LR_HOST
+        case $LR_HOST in localhost) publish=127.0.0.1 ;; all) publish=0.0.0.0 ;; tailscale) publish=$(tailscale ip -4 | head -n1) ;; esac
+        docker rm -f "$LR_NAME" > /dev/null 2>&1 || true
+        chmod 777 "$LR_HOME/data"   # the image runs as uid 10001
+        docker run -d --name "$LR_NAME" --gpus all --restart no -p "$publish:$LR_PORT:8190" \
+            -v "$LR_MODELS:/models:ro" -v "$LR_HOME/data:/data" -v "$LR_CONFIG:/etc/localrouter/tools.json:ro" \
+            "$LR_IMAGE" serve --host all --config /etc/localrouter/tools.json --data /data > /dev/null
+    else
+        local exe; exe=$(bin)
+        # its own session, so a stuck daemon and everything it left can be killed as one group
+        setsid "$exe" serve --config "$LR_CONFIG" --host "$LR_HOST" --port "$LR_PORT" --data "$LR_HOME/data" \
+            >> "$LR_HOME/daemon.log" 2>&1 < /dev/null &
+        echo $! > "$PIDFILE"
+    fi
+    for _ in $(seq 1 600); do healthy && break; [[ -n $(daemon_pid) ]] || break; sleep 0.1; done
+    healthy || { cmd_logs | tail -n 20 >&2; die "the daemon did not come up"; }
+    echo "started: $URL ($(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }') s)"
+}
+
+cmd_status() {
+    healthy || { echo "stopped"; return 3; }
+    curl -sf "$URL/v1/tools" | python3 -I -c 'import json,sys; d=json.load(sys.stdin)
+print("running: mem_available %.1f GiB, reserve %.1f GiB" % (d["mem_available_bytes"] / 2**30, d["reserve_bytes"] / 2**30))
+for t in d["data"]:
+    print("  %-32s %-9s resident %6.2f GiB  ttl %d s  %s" % (t["id"], t["state"], t["resident_bytes"] / 2**30, t["idle_ttl_s"], t["last_error"]))'
+}
+
+# generate MODEL PROMPT [-o FILE] [--size WxH] [--seconds N] [--seed N] [--timeout S]: one video job, waited for.
+cmd_generate() {
+    local model=${1:?model} prompt=${2:?prompt} out=out.mp4 size="" seconds="" seed="" timeout=3600
+    shift 2
+    while (($#)); do
+        case $1 in
+            -o) out=$2 ;; --size) size=$2 ;; --seconds) seconds=$2 ;; --seed) seed=$2 ;; --timeout) timeout=$2 ;;
+            *) die "generate: unknown option $1" ;;
+        esac
+        shift 2
+    done
+    local body
+    body=$(python3 -I -c 'import json,sys; m,p,sz,s,sd=sys.argv[1:]
+b={"model":m,"prompt":p}
+if sz: b["size"]=sz
+if s: b["seconds"]=s
+if sd: b["seed"]=int(sd)
+print(json.dumps(b))' "$model" "$prompt" "$size" "$seconds" "$seed")
+    local reply id t0 status
+    reply=$(curl -sS "$URL/v1/videos" -H 'content-type: application/json' -d "$body")
+    id=$(json id <<< "$reply")
+    [[ -n $id ]] || die "refused: $(json error message <<< "$reply")"
+    t0=$(date +%s)
+    while :; do
+        reply=$(curl -sS "$URL/v1/videos/$id")
+        status=$(json status <<< "$reply")
+        [[ $status == queued || $status == in_progress ]] || break
+        (($(date +%s) - t0 < timeout)) || { curl -sS -X DELETE "$URL/v1/videos/$id" > /dev/null; die "timed out after $timeout s; cancelled $id"; }
+        printf '\r%s %s %s%%   ' "$id" "$(json phase <<< "$reply")" "$(json progress <<< "$reply")" >&2
+        sleep 2
+    done
+    echo >&2
+    [[ $status == completed ]] || die "$id $status: $(json error message <<< "$reply")"
+    curl -sSf -o "$out" "$URL/v1/videos/$id/content"
+    echo "$out ($id, seed $(json seed <<< "$reply"), $(($(date +%s) - t0)) s)"
+}
+
+# unload MODEL: unload it now and wait until its worker is gone.
+cmd_unload() {
+    local model=${1:?model}
+    curl -sSf -X POST -d "" "$URL/v1/tools/$model/unload" > /dev/null   # with a Content-Length: the daemon needs one on a POST
+    for _ in $(seq 1 300); do
+        [[ $(curl -sS "$URL/v1/tools" | python3 -I -c 'import json,sys; print(next(t["state"] for t in json.load(sys.stdin)["data"] if t["id"]==sys.argv[1]))' "$model") == unloaded ]] &&
+            (($(tree "$(daemon_pid)" | wc -l) <= 1)) && { echo "unloaded: $model"; return 0; }
+        sleep 0.1
+    done
+    die "$model did not unload within 30 s"
+}
+
+cmd_release() { curl -sSf -X POST -d "" "$URL/v1/tools/release" > /dev/null; echo "released all models"; }
+
+# stop: the daemon unloads its models as it exits (each worker exits with it); wait for all of them, else kill.
+cmd_stop() {
+    local pid pids
+    pid=$(daemon_pid)
+    [[ -n $pid ]] || { echo "stopped"; rm -f "$PIDFILE"; return 0; }
+    pids=$(tree "$pid")
+    if [[ $LR_MODE == docker ]]; then
+        docker stop -t "$LR_STOP_S" "$LR_NAME" > /dev/null || true
+        docker rm "$LR_NAME" > /dev/null 2>&1 || true
+    else
+        kill -TERM "$pid" 2> /dev/null || true
+        for _ in $(seq 1 $((LR_STOP_S * 10))); do [[ -d /proc/$pid ]] || break; sleep 0.1; done
+        if [[ -d /proc/$pid ]]; then
+            echo "localrouterctl: the daemon did not exit in $LR_STOP_S s; killing it and its workers" >&2
+            kill -KILL -- "-$pid" $pids 2> /dev/null || true
+        fi
+    fi
+    local left=""
+    for _ in $(seq 1 100); do
+        left=""
+        for p in $pids; do [[ -d /proc/$p ]] && left+=" $p"; done
+        [[ -z $left ]] && break
+        sleep 0.1
+    done
+    rm -f "$PIDFILE"
+    [[ -z $left ]] || die "processes still alive after stop:$left"
+    healthy && die "stopped, but $URL still answers"
+    echo "stopped"
+}
+
+cmd_pids() { tree "$(daemon_pid)"; }
+
+cmd_logs() {
+    if [[ $LR_MODE == docker ]]; then docker logs "$LR_NAME" 2>&1; else cat "$LR_HOME/daemon.log" 2> /dev/null || true; fi
+    for f in "$LR_HOME"/data/logs/*.log; do [[ -f $f ]] && { echo "== $f"; tail -n 50 "$f"; }; done
+}
+
+case ${1:-} in
+    start | status | generate | unload | release | stop | pids | logs) c=$1; shift; "cmd_$c" "$@" ;;
+    url) echo "$URL" ;;
+    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

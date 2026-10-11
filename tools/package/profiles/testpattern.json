@@ -1,0 +1,16 @@
+{
+ "model": "testpattern-video",
+ "request": {"prompt": "waves at dusk", "size": "512x288", "seconds": "4", "seed": 42},
+ "expect": {"width": 512, "height": 288, "frames": 96, "fps": 24, "audio": {"sample_rate": 48000, "channels": 1}},
+ "refusals": [
+  {"why": "larger than the model's max_side", "body": {"size": "2048x1152"}},
+  {"why": "size not WIDTHxHEIGHT", "body": {"size": "big"}},
+  {"why": "seconds not a whole number", "body": {"seconds": "five"}},
+  {"why": "unknown model", "body": {"model": "no-such-model"}, "status": 404}
+ ],
+ "cancel_phases": ["load", "denoise", "encode"],
+ "crash_phase": "denoise",
+ "after_request": {"size": "256x256", "seconds": "1"},
+ "job_timeout_s": 120,
+ "unload_timeout_s": 15
+}
