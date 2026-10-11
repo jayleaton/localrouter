@@ -1,0 +1,450 @@
+{
+ "schema": 1,
+ "producer": "Captain audio-closure capture_cpu_oracle.py: CPU black-box diagnostic oracle, Torch 2.14.1+cpu x86_64, 1 thread, deterministic algorithms; synthetic inputs only, no model weights, no GPU",
+ "source_commit": "eac06e39b904940baff2c408e925cdb0c4529269",
+ "oracle_observations_sha256": "df52f9fa349adf233c0622937cbe483dab6a1993c955aa444f4dbad47691ba55",
+ "role": "CPU diagnostic for ConvPrepared1D (gain before convolution, zero padding K//2, stride 1, dilation 1, groups 1, no bias) over ORACLE-PREPARED weights. Not the accepted SM121 baseline; does not certify the stored->prepared weight transform, the checkpoint loader or any CUDA kernel.",
+ "layout": "little-endian float32, contiguous, PyTorch shapes (input [B,Cin,L], weight [Cout,Cin,K], output [B,Cout,L])",
+ "files": [
+  {
+   "file": "conv-2-1-1-ordinary-baked.f32le",
+   "shape": [
+    1,
+    2,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "ab7b8e77f6105a5f3977d09f2222163649f523c05faf7939972bef6c39da1e04"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-input.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "70669dd298afbbfaa9448cebdb780f19e2f8bbc8f68c70d914cd560efb9ea4b4"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-gain-0.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-gain-1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "7c26818bfe53d06f5817ce6d514bc098c270cabe5e70b07954e8c61051cfb0cc"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-gain-0.25.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "aa421773f7534c5193ae45340f40d0da399a5be6330734fdc65c5d14a7281605"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-gain-1.3.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "a4d9300fff5b48557d2ed8a48546de12a4bd653a8b67bca5f50c5eeaf33e0830"
+  },
+  {
+   "file": "conv-2-1-1-ordinary-gain--1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "64233caf6f77c482677aed6b2a08b757741e1d4761b96def9667cb09b1c83f96"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-baked.f32le",
+   "shape": [
+    2,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "68965513ae2fb1be79d27c5f9b4356411bdf504857317dfea111e8361fb417a4"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-input.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "70669dd298afbbfaa9448cebdb780f19e2f8bbc8f68c70d914cd560efb9ea4b4"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-gain-0.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "d4817aa5497628e7c77e6b606107042bbba3130888c5f47a375e6179be789fbb"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-gain-1.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "711c11e4d3b9e5070401e5544f4cca0b1984680cd943af7d16dd779c21ed80c2"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-gain-0.25.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "5b24bf75c82ba0a0bc8b2ec5454a9e36fb8909cec1434dac92bc9a1b1b8d6f11"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-gain-1.3.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "00d44d6a0a83086cc2332e0234f6cdf2cc7f57d80759b5e6853a61b353005900"
+  },
+  {
+   "file": "conv-2-2-3-ordinary-gain--1.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "38515ba2c753d81c435e5ec41dad724b7d3817ad3714b6aaa172692ef1b0a85d"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-baked.f32le",
+   "shape": [
+    2,
+    3,
+    5
+   ],
+   "dtype": "float32",
+   "sha256": "7fcc3d6d48a197010c76715c80df5b96a6ff11ffea8f859bd58d454bddd2acfd"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-input.f32le",
+   "shape": [
+    1,
+    3,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "5d6b92e5c56866dc50d2632a9d4156d1a0bb2170b6eb7ef8efa6c70651b22df1"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-gain-0.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "d4817aa5497628e7c77e6b606107042bbba3130888c5f47a375e6179be789fbb"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-gain-1.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "46d6cd11c6b34ae6eed9ca5475f250cfa60d03d7a24a42fff8b68c81b23256c9"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-gain-0.25.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "f960793d05b6c2c0540f8986946f218a748c2d6642f212ff01a3ee7320a68d69"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-gain-1.3.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "24128f07bc0c602dd2af10fc10ccf3ff06ce5e6350e634df37f67804702dc098"
+  },
+  {
+   "file": "conv-3-2-5-ordinary-gain--1.0.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "162ad55658bda37c0d69f91aafcd4187a085b6cf0ffb0722ab1b5ba08c9ca3f7"
+  },
+  {
+   "file": "conv-2-1-3-tiny-baked.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "d7f7814f8712363911bc99a156094cf0988a5b2b1798c40e002f09bce4880547"
+  },
+  {
+   "file": "conv-2-1-3-tiny-input.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "70669dd298afbbfaa9448cebdb780f19e2f8bbc8f68c70d914cd560efb9ea4b4"
+  },
+  {
+   "file": "conv-2-1-3-tiny-gain-0.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-3-tiny-gain-1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "b4968a50192310723c22d277b37409ca3189c19b121d9d102c53bea545dd2d54"
+  },
+  {
+   "file": "conv-2-1-3-tiny-gain-0.25.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "7869f5b8f0c5577d371cdb974ec384bca6c7b78b8623f62274e03ec3c65e34b5"
+  },
+  {
+   "file": "conv-2-1-3-tiny-gain-1.3.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "02040608281dfb0f836a92b519ba8984d0db436641d0450a993e3fd539230ad5"
+  },
+  {
+   "file": "conv-2-1-3-tiny-gain--1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "b5bc153b4fdb2d158b4f770943075f7579ba363b81208573a8080069238b58a4"
+  },
+  {
+   "file": "conv-2-1-3-zero-baked.f32le",
+   "shape": [
+    1,
+    2,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "4bfc74e95ac3e7eff044ba21fa5e0dd106a880b56c696184f029bb1cc7acdac5"
+  },
+  {
+   "file": "conv-2-1-3-zero-input.f32le",
+   "shape": [
+    1,
+    2,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "70669dd298afbbfaa9448cebdb780f19e2f8bbc8f68c70d914cd560efb9ea4b4"
+  },
+  {
+   "file": "conv-2-1-3-zero-gain-0.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-3-zero-gain-1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-3-zero-gain-0.25.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-3-zero-gain-1.3.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "conv-2-1-3-zero-gain--1.0.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "3addfb141cd7c9c4c6543a82191a3707ac29c7a041217782e61d4d91c691aee8"
+  },
+  {
+   "file": "boundary-prepared-weight.f32le",
+   "shape": [
+    1,
+    1,
+    3
+   ],
+   "dtype": "float32",
+   "sha256": "ecdb3f24a6cc52a0f19c761d397267c28156c35f9198b204ae361667534e4a50"
+  },
+  {
+   "file": "boundary-0-input.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "5d9fd5e0959822cd94105e518fc2e03b75685231d689fddc26dcedda8d8be06a"
+  },
+  {
+   "file": "boundary-0-output.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "9131102058c7a88bd53258e62f772424bf55aa007591111e909d95eee8c9bdb0"
+  },
+  {
+   "file": "boundary-1-input.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "0c028287c274bf97517c3e10900f4a1d774ec08d7aa6350eb5d76b45b69811d5"
+  },
+  {
+   "file": "boundary-1-output.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "b41d680cbec3b952ad4c59f6da1c069c25179510a1fa3e2467e312a547d2d486"
+  },
+  {
+   "file": "boundary-3-input.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "b85992acf28be2e336558ae9a321bb850494f94d83e006924dec0b8302934ab6"
+  },
+  {
+   "file": "boundary-3-output.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "cfb527de9eca16a3e98bc23bfe77c9f391bd127fac38e9c2c450b5751e7115a6"
+  },
+  {
+   "file": "boundary-6-input.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "5b9b333da9aef69a1da1e68744424578726c887215c97076e3529c2a6bc0b019"
+  },
+  {
+   "file": "boundary-6-output.f32le",
+   "shape": [
+    1,
+    1,
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "addd8c135deaf3ba1cf646c9532158dd64720ae79db7f2bd10dab73b9c65d94c"
+  }
+ ]
+}
