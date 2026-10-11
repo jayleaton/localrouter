@@ -473,13 +473,13 @@ pub const NormPolicy = struct { eps: f32, reduce: DeviceReduce, den: Acc };
 /// are what the GPU harness determines; until then a decode is a diagnostic comparison run.
 pub const DecodePolicy = struct {
     /// Convolution accumulation (every decoder conv). D3 window: `.fma` (c, k ascending) equals native cuDNN on conv_in,
-    /// the 1x1 convs and qkv; the Cin 2048 K 3 convs (mid / up.2 conv1, conv2, conv_out) use another cuDNN algorithm,
-    /// unresolved.
+    /// the 1x1 convs and qkv (implicit-GEMM engines 28 / 1); every K 3 conv with Cin >= 512 runs cuDNN's FFT engine 4
+    /// (D3 probe API log and trace), which no direct accumulation order reproduces: unresolved.
     acc: Acc,
     /// latent_unscale's division by scaling_factor (native, D3 window: `.reciprocal`).
     unscale: Div,
-    /// scaled SiLU's division by 0.596. Unresolved: neither division reproduces native (expf under this build's flags
-    /// is the open question).
+    /// scaled SiLU's division by 0.596 (native, D3 probe dumps: `.reciprocal`, f32(1 / 0.596); expf and the build flags
+    /// are not a factor, torch's silu equals x / (1 + expf(-x)) bit for bit).
     silu: Div,
     /// mp_sum's division by sqrt((1 - t)^2 + t^2) (native, D3 window: `.reciprocal`).
     residual: Div,
@@ -601,7 +601,7 @@ fn decoderChannels(wi: usize) Error!u64 {
 pub const VocodePolicy = struct {
     /// conv_pre, the upsamplers, the AMP-block convs and conv_post. D3 window: `.fma` equals native on all six
     /// upsamplers, the dilated AMP convs and conv_post; dilation-1 convs at some shapes (conv_pre, the T 2048 AMP convs,
-    /// the stage-0 blocks) use another cuDNN algorithm, unresolved.
+    /// the stage-0 blocks) run cuDNN's FFT engine 4 (D3 probe), unresolved.
     conv_acc: Acc,
     /// Activation1d's anti-aliasing FIRs (native, D3 window: `.fma`, all stages).
     aa_acc: Acc,

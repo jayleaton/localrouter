@@ -132,7 +132,8 @@ pub const View = struct {
 pub const Acc = enum(i32) { fma = 0, mul_add = 1 };
 
 /// How a division by a host scalar is executed (audio.cu K6A_DIV_*): a true division, or a multiplication by the fp32
-/// reciprocal `1.0f / f32(divisor)` (PyTorch CUDA's handling of a CPU scalar divisor). Named per call site.
+/// reciprocal `f32(1.0 / divisor)`, the reciprocal of the Python double rounded once (PyTorch's division by a Python
+/// scalar, a `MulFunctor` kernel in the D3 probe trace). Named per call site.
 pub const Div = enum(i32) { true_div = 0, reciprocal = 1 };
 
 pub const ScalarDiv = struct {
@@ -140,10 +141,11 @@ pub const ScalarDiv = struct {
     /// The divisor (true_div) or its fp32 reciprocal (reciprocal), the value the kernel receives.
     c: f32,
 
-    /// From a Python-float divisor: rounded to fp32 first, then (reciprocal) 1.0f / that in fp32.
+    /// From a Python-float divisor: true_div rounds it to fp32; reciprocal rounds 1.0 / divisor (in f64) to fp32 once.
+    /// The two reciprocal forms differ for 0.596 (scaled SiLU: f32(1 / 0.596) reproduces native mp_silu, 0 / 892928
+    /// unequal in the D3 probe dumps, while 1.0f / f32(0.596) is one ulp low) and coincide for 0.417, sqrt(0.58) and 3.
     pub fn of(divisor: f64, div: Div) ScalarDiv {
-        const d: f32 = @floatCast(divisor);
-        return .{ .div = div, .c = if (div == .true_div) d else 1.0 / d };
+        return .{ .div = div, .c = @floatCast(if (div == .true_div) divisor else 1.0 / divisor) };
     }
 
     pub fn apply(s: ScalarDiv, v: f32) f32 {
@@ -234,7 +236,7 @@ pub fn contract(op: Op) Contract {
         .mel_affine => .{ .status = .gpu_qualification_pending, .provenance = "vae.py L56-103 (MIT): x * data_std + data_mean, fp32 buffers [1,128,1]" },
         .clamp => .{ .status = .gpu_qualification_pending, .provenance = "vae.py L237-314 (MIT) clamp(-256, 256); bigvgan.py (MIT) clamp(-1, 1); PyTorch clamp NaN propagation" },
         .upsample_nearest_exact2 => .{ .status = .gpu_qualification_pending, .provenance = "vae_modules.py L81-93 (MIT): F.interpolate(scale_factor=2.0, mode='nearest-exact')" },
-        .scaled_silu => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 1: silu(x) / 0.596 (MIT lucidrains MPSiLU expression); native mp_silu bits unverified" },
+        .scaled_silu => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 1: silu(x) / 0.596 (MIT lucidrains MPSiLU expression); D3 probe dumps: torch silu = x / (1 + expf(-x)) bit for bit, native = f32(silu * f32(1 / 0.596)) (reciprocal of the double), 0 / 892928 unequal offline; the fixed kernel has not run on SM121" },
         .mp_residual => .{ .status = .gpu_qualification_pending, .provenance = "formula receipt 2: lerp(a, b, t) / sqrt((1-t)^2 + t^2), t = 0.3; torch.lerp CUDA small-weight branch fma(t, b - a, a), reciprocal CPU-scalar division: D3 job A native sha reproduced (892928 values incl. specials); k6a_mp_residual lerp form not yet run on SM121" },
         .gain_weight_scale => .{ .status = .gpu_qualification_pending, .provenance = "CPU oracle: gain multiplies the prepared weight before convolution (25/25 calls zero unequal; output-side gain differs)" },
         .conv1d_prepared => .{ .status = .gpu_qualification_pending, .provenance = "PyTorch conv1d semantics (BSD): zero padding K//2, stride 1, dilation 1, groups 1, no bias (CPU oracle boundaries); target accumulation unresolved" },
@@ -1334,6 +1336,9 @@ test "elementwise references: latent unscale, clamp, nearest-exact, residual con
     try testing.expectEqual(@as(u32, 0), bits(z[2])); // +0.0, not -0.0
     const r = ScalarDiv.of(scaling_factor, .reciprocal);
     try testing.expectEqual(bits(1.0 / @as(f32, 0.417)), bits(r.c));
+    // the reciprocal of the double, rounded once: one ulp above 1.0f / f32(0.596)
+    try testing.expectEqual(@as(u32, 0x3fd6c3de), bits(ScalarDiv.of(silu_divisor, .reciprocal).c));
+    try testing.expectEqual(bits(1.0 / @as(f32, 0.596)) + 1, bits(ScalarDiv.of(silu_divisor, .reciprocal).c));
     // clamp keeps NaN
     const cx = [_]f32{ std.math.nan(f32), -300, 300, 5 };
     var cy: [4]f32 = undefined;

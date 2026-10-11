@@ -56,8 +56,9 @@ def f32(x):
 
 
 def recip32(d):
-    """1.0f / f32(d) in fp32 (division in double then one rounding is exact for fp32 operands)."""
-    return f32(1.0 / f32(d))
+    """f32(1.0 / d): the reciprocal of the Python double, rounded to fp32 once (vae.zig ScalarDiv.of, PyTorch's
+    division by a Python scalar)."""
+    return f32(1.0 / d)
 
 
 def scalar_div(divisor, div):

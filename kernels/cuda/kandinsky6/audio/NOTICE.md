@@ -52,10 +52,22 @@ Native bits reproduced offline (diagnostic only; the kernels below are not yet r
   5/5 synthetic fixtures, diagnostic.
 - magnitude-preserving residual: torch.lerp's small-weight form `fma(t, b - a, a)` times the fp32 reciprocal of
   sqrt((1-t)^2 + t^2) reproduces the native sha of the D3 window's [1, 2048, 436] case with specials
-  (`k6a_mp_residual`); the earlier weighted-sum form did not.
+  (`k6a_mp_residual`); the earlier weighted-sum form did not. The second D3 job A window (`--probe`) ran the fixed
+  kernels on SM121: the PyTorch-order normalization is zero unequal on all 11 cases and the lerp residual on its case.
+- scaled SiLU: the probe dumps show torch's silu equals `x / (1 + expf(-x))` bit for bit and native mp_silu equals that
+  times `f32(1 / 0.596)`, the reciprocal of the Python double rounded once (one ulp above `1.0f / f32(0.596)`): 0 of
+  892928 values unequal offline. The scalar reciprocal is now built that way for every divisor (0.417, sqrt(0.58) and 3
+  give the same bits either way). The fixed constant has not run on SM121.
 
-Candidate only: the middle attention's SDPA (fp32, head dimension 2048). The native backend choice is not yet recorded;
-`k6a_sdpa_math` is a comparison candidate. Strict FLASH is not accepted.
+Recorded, not reproduced (gates stay open):
+- the decoder's K 3 convs (Cin 512 / 1024 / 2048) and the vocoder's dilation-1 convs with K >= 3 run cuDNN 9.24's FFT
+  engine (engine id 4: `fft1d_r2c` / complex `gemvx` / `fft1d_c2r`), which no direct accumulation order reproduces;
+  conv_in, the 1x1 convs, qkv and the dilated convs run implicit-GEMM engines, which `.fma` reproduces.
+- the middle attention's SDPA (fp32, head dimension 2048) dispatches MATH. Its steps composed from public ops (q and
+  k^T scaled by sqrt(1 / sqrt(D)), matmul, softmax, matmul) reproduce the native output; `probs @ v` (cuBLASLt algo 16)
+  is one serial fma chain, reproduced offline; the scores GEMM (cuBLASLt algo 20, SIMT 64x64 tile, 8x5 stages, 12
+  K splits, compute-type reduction) is not reproduced by any split / order tried offline. `k6a_sdpa_math` stays a
+  comparison candidate. Strict FLASH is not accepted.
 
 Not on the native path, refused: the vocoder weight-norm fold.
 
