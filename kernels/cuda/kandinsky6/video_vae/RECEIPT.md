@@ -39,7 +39,7 @@ encode (I2V, opt_tiling=False: always one direct pass)
   -> GroupNorm+SiLU -> conv_out 512->32 -> quant_conv 1x1x1 -> posterior (mean, std, latent * 0.476986)
 
 decode (per temporal tile of 5 latent frames at the native size; 14 tiles for 31 latent frames)
-  bf16 latent -> latent_in (/ 0.476986 in bf16, then fp16) -> post_quant_conv 1x1x1 -> conv_in 16->512
+  fp32 latent -> latent_in (half(z * float(1 / 0.476986))) -> post_quant_conv 1x1x1 -> conv_in 16->512
   -> mid [resnet, attention, resnet] -> up0 [3 resnets 512, nearest (1,2,2) + conv] -> up1 [3 x 512, (2,2,2) + conv]
   -> up2 [512->256, (2,2,2) + conv] -> up3 [256->128] -> GroupNorm+SiLU -> conv_out 128->3
   -> blend_t with the previous tile (8 frames) -> rgb_out of the kept frames into the caller's uint8 output
@@ -67,8 +67,14 @@ cites `pro-distill.yaml:12-20`, `pipeline/config.py:134`, `pipeline.py:345,437-4
 - `latent_dist.sample()` (`prepare_latents.py:236`) passes no generator: `eps` comes from torch's implicit default CUDA
   generator, drawn before the seeded video noise (all 31 frames, video generator) and the audio noise (seed + 1).
   Fixtures must capture that `eps` (or the generator state) separately; the video seed does not determine it.
-- Decode (`postprocess_video.py:32-37`): `frames / scaling_factor` on the DiT's bf16 latent, `.to(float16)`,
-  `vae.decode`, `((x.clamp(-1, 1) + 1) * 127.5).to(uint8)`. The VAE loads as fp16 (`vae_video.py:11`).
+- Decode (`postprocess_video.py:32-37`): `frames / scaling_factor`, `.to(float16)`, `vae.decode`,
+  `((x.clamp(-1, 1) + 1) * 127.5).to(uint8)`. The VAE loads as fp16 (`vae_video.py:11`). In the Pro-distill sampler
+  the latent reaching it is fp32, not the DiT's bf16: the sigmas are fp32 tensors of shape `(batch, 1, ...)`
+  (`piflow_sampler.py:88,123-129`), so `policy_rollout_fm`'s `x_t + velocity * (sigma_t_minus - sigma_t)` and
+  `torch.where` (`piflow_math.py:182-185`) promote the bf16 state to fp32 from the first outer step on;
+  `sample_video` keeps that rollout (`piflow_sampler.py:156-164`) and `pipeline.py:616-631` passes it to
+  `postprocess_video` without a cast. (Reported by the central runtime and checked against the pinned source; the
+  oracle's f_dec and n_dec cases decode fp32 latents.)
 - Backend settings: the native pipeline sets `torch.set_float32_matmul_precision("high")` before model construction
   (`factory.py:162`). That governs fp32 matmuls and does not set convolution precision; the VAE's convolutions,
   linears and attention run on fp16 operands. Neither that flag nor `allow_tf32` identifies the SM121 cuDNN / cuBLASLt
@@ -87,8 +93,10 @@ cites `pro-distill.yaml:12-20`, `pipeline/config.py:134`, `pipeline.py:345,437-4
 - Weights: the loader converts each checkpoint fp32 tensor to fp16 with round-to-nearest-even (torch `.to(float16)`);
   convolution and linear weights are repacked to `[co][ldw]` rows, `k = ((dt*kh + dy)*kw + dx)*ci + c`, zero padded to
   `ldw = round_up(k, 8)` (`launch.repackConv`). Biases, GroupNorm weights fp16 `[c]`.
-- Activations are channels last (`[T][H][W][C]`). Decode input: the packed THWC bf16 latent the DiT produces
-  (`[frames][lh][lw][16]`), all 31 frames for T2V and for default I2V (see Native call contract).
+- Activations are channels last (`[T][H][W][C]`). Decode input: the packed THWC latent (`[frames][lh][lw][16]`), all
+  31 frames for T2V and for default I2V (see Native call contract), fp32 (the Pro-distill sampler's output,
+  `launch.latent_in_dtype = .f32`) or bf16, chosen by `decode.Io.latent_dtype`. The tile plan is the caller's:
+  `tiles.decodePlan(frames, lh, lw, policy)` with the caller's free-memory figure; the component probes no memory.
   Decode output: uint8 `[(frames-1)*4+1][8 lh][8 lw][3]`. Encode output: fp16 `[lt][lh][lw][16]` latent (and optionally
   mean / std); the caller supplies `eps` (fp16 standard normal noise) for `.sample()`, or none for `.mode()`. Native
   draws `eps` from torch's implicit default generator (see Native call contract); this component owns no RNG.
@@ -120,7 +128,7 @@ a threshold or the reduction order to suit them.
 | SiLU | `half(s / (1 + expf(-s)))` on the fp16 norm output | torch silu: same expression |
 | Attention (1 head, dim 512, frame-causal mask) | `S = fp32 q.k`, `x = S * 512^-0.5`, fp32 max / `expf` / fixed-tree sum, `P = half(e / l)`, `O = half(fp32 P.V)` (row blocks of 1,024) | diffusers `Attention` (`hunyuan_vae.py:238`, `upcast_softmax=True`) through SDPA; the backend actually selected for fp16 + float mask + head dim 512 on SM121 is undeclared and must be captured with the fixture (the math backend scales q and k by sqrt(scale) in fp16 first) |
 | Nearest upsample, replicate pad | index arithmetic only | exact |
-| Decode input | `half(bf16(float(z) * (1/float(0.476986))))` | torch `div` by a CPU scalar uses the reciprocal in opmath (to confirm on the pinned torch) |
+| Decode input | fp32 `z`: `half(z * inv)`; bf16 `z`: `half(float(bf16(float(z) * inv)))`; `inv = float(1.0 / 0.476986)` = `0x40062d04` | torch 2.14.1 `div_true_kernel_cuda` (`BinaryDivTrueKernel.cu:35-52`, file sha256 `db073437…`): a CPU scalar divisor becomes `a * inv_b` in opmath float with `inv_b = float(1.0 / double(b))`, the quotient in the input dtype. The double and the float reciprocal are the same bits for this factor; over every finite fp32 input, `half(x * inv)` differs from `half(x / float(0.476986))` (true fp32 division) for 35,718 inputs, so the reciprocal form is the one to match. Source-derived; bits still to be confirmed by the SM121 fixture (f_dec, n_dec) |
 | Decode output | `uint8(trunc(half(half(clamp(x,-1,1) + 1) * 127.5)))` | same ops |
 | I2V input | `half(float(u) / 127.5 - 1)` (true division) | CPU float division then `.to(float16)` |
 | Posterior | `std = half(expf(half(0.5 * clamp(logvar, -30, 20))))`, `x = half(mean + half(std * eps))`, `latent = half(x * float(0.476986))` | same ops |

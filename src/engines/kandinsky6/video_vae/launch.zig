@@ -102,7 +102,15 @@ pub const GnArgs = extern struct { x: u64, partial: u64, stats: u64, positions: 
 pub const GnApplyArgs = extern struct { x: u64, y: u64, gamma: u64, beta: u64, stats: u64, positions: i64, c: i32, groups: i32, silu: i32 };
 pub const SoftmaxArgs = extern struct { s: u64, p: u64, lds: i64, ldp: i64, row0: i32, spf: i32, cols: i32, scale: f32 };
 pub const TransposeArgs = extern struct { x: u64, y: u64, n: i64, ldn: i64, c: i32 };
-pub const LatentInArgs = extern struct { z: u64, y: u64, count: i64, inv_sf: f32 };
+/// The dtype of the latent `decode` reads (k6v_latent_in): fp32 from the Pro-distill PiFlow sampler (its rollout
+/// promotes the bf16 DiT state to fp32), bf16 from a caller that keeps the DiT dtype. Both are packed [T][h][w][16].
+pub const LatentDtype = enum { f32, bf16 };
+
+/// The latent dtype of the native Pro-distill pipeline, for callers to admit against. It states the input dtype only;
+/// GPU precision is qualified separately (kernels/cuda/kandinsky6/video_vae/QUALIFICATION.md).
+pub const latent_in_dtype: LatentDtype = .f32;
+
+pub const LatentInArgs = extern struct { z: u64, y: u64, count: i64, inv_sf: f32, z_f32: i32 };
 pub const Rgb8InArgs = extern struct { x: u64, y: u64, count: i64 };
 pub const RgbOutArgs = extern struct { x: u64, y: u64, count: i64 };
 pub const PosteriorArgs = extern struct { moments: u64, eps: u64, mean: u64, stdv: u64, latent: u64, positions: i64, lc: i32, sf: f32 };
@@ -164,10 +172,28 @@ pub const Launch = struct {
 pub const Launcher = struct {
     ctx: *anyopaque,
     func: *const fn (ctx: *anyopaque, l: Launch) anyerror!void,
+    /// Optional observer of named intermediate values (qualification only; QUALIFICATION.md names them). Null in
+    /// production: the graphs then build no names and call nothing.
+    probe: ?Probe = null,
 
     pub fn run(self: Launcher, l: Launch) !void {
         return self.func(self.ctx, l);
     }
+
+    /// Reports `v` (fp16) under the checkpoint `fmt` / `args` once the launches before it are queued; `tokens`: a
+    /// sequence `[t*h*w][c]` (attention internals) rather than an activation `[t][h][w][c]`.
+    pub fn mark(self: Launcher, comptime fmt: []const u8, args: anytype, v: View, tokens: bool) !void {
+        const p = self.probe orelse return;
+        var buf: [160]u8 = undefined;
+        try p.func(p.ctx, try std.fmt.bufPrint(&buf, fmt, args), v, tokens);
+    }
+};
+
+/// See `Launcher.probe`: called with the checkpoint's name and its fp16 channels-last view, valid until the next
+/// launch is queued.
+pub const Probe = struct {
+    ctx: *anyopaque,
+    func: *const fn (ctx: *anyopaque, name: []const u8, v: View, tokens: bool) anyerror!void,
 };
 
 pub const Error = error{ InvalidShape, Misaligned, BufferTooSmall };
@@ -509,22 +535,29 @@ pub fn groupNorm(l: Launcher, work: Work, x: View, n: NormW, silu: bool, y: u64)
 }
 
 /// HunyuanVideoResnetBlockCausal3D: y = conv2(silu(norm2(conv1(silu(norm1(x)))))) + (shortcut(x) or x).
-/// x and y dense, distinct; uses work.a and work.b. Returns y's view.
-pub fn resnet(l: Launcher, work: Work, x: View, r: ResnetW, y: u64) !View {
+/// x and y dense, distinct; uses work.a and work.b. Returns y's view. `name`: its module name, for `Launcher.mark`.
+pub fn resnet(l: Launcher, work: Work, x: View, r: ResnetW, y: u64, name: []const u8) !View {
     const co = r.conv1.co;
     try fits(work, x.positions() * @max(x.c, co));
     const a = View.dense(work.a, x.t, x.h, x.w, x.c);
     try groupNorm(l, work, x, r.norm1, true, a.ptr);
+    try l.mark("{s}.nonlinearity.0", .{name}, a, false);
     try l.run(try conv(a, r.conv1, .{}, work.b));
     const b = View.dense(work.b, x.t, x.h, x.w, co);
+    try l.mark("{s}.conv1", .{name}, b, false);
     try groupNorm(l, work, b, r.norm2, true, work.a);
+    const h = View.dense(work.a, x.t, x.h, x.w, co);
+    try l.mark("{s}.nonlinearity.1", .{name}, h, false);
     var res = x.ptr;
     if (r.shortcut) |sc| {
         try l.run(try conv(x, sc, .{}, work.b));
         res = work.b;
+        try l.mark("{s}.conv_shortcut", .{name}, View.dense(work.b, x.t, x.h, x.w, co), false);
     } else if (x.c != co) return error.InvalidShape;
-    try l.run(try conv(View.dense(work.a, x.t, x.h, x.w, co), r.conv2, .{ .res = res }, y));
-    return View.dense(y, x.t, x.h, x.w, co);
+    try l.run(try conv(h, r.conv2, .{ .res = res }, y));
+    const out = View.dense(y, x.t, x.h, x.w, co);
+    try l.mark("{s}", .{name}, out, false);
+    return out;
 }
 
 pub fn attnScale(c: u32) f32 {
@@ -532,7 +565,8 @@ pub fn attnScale(c: u32) f32 {
 }
 
 /// The mid block's Attention (one head of dim C, group_norm, frame-causal mask, residual): y = to_out(sdpa(q, k, v)) + x.
-pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64) !View {
+/// `name`: its module name, for `Launcher.mark`.
+pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64, name: []const u8) !View {
     const n64 = x.positions();
     const c = x.c;
     if (n64 > work.attn.tokens or c != w.q.ci) return error.BufferTooSmall;
@@ -541,9 +575,11 @@ pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64) !View {
     const ldn = std.mem.alignForward(u32, n, 8);
     try fits(work, n64 * c);
     try groupNorm(l, work, x, w.norm, false, work.a);
+    try l.mark("{s}.group_norm", .{name}, View.dense(work.a, x.t, x.h, x.w, c), true);
     const at = work.attn;
-    for ([_]struct { ConvW, u64 }{ .{ w.q, at.q }, .{ w.k, at.k }, .{ w.v, at.v } }) |pw| {
+    for ([_]struct { ConvW, u64, []const u8 }{ .{ w.q, at.q, "to_q" }, .{ w.k, at.k, "to_k" }, .{ w.v, at.v, "to_v" } }) |pw| {
         try l.run(try dense(.{ .a = work.a, .lda = c, .b = pw[0].w, .ldb = pw[0].ldw(), .bias = pw[0].b, .c = pw[1], .ldc = c, .m = n, .n = c, .k = c }));
+        try l.mark("{s}.{s}", .{ name, pw[2] }, View.dense(pw[1], x.t, x.h, x.w, c), true);
     }
     try l.run(.{ .call = .{ .transpose = .{ .x = at.v, .y = at.vt, .n = n, .ldn = ldn, .c = i32of(c) } }, .grid = .{ (ldn + 31) / 32, (c + 31) / 32, 1 }, .block = .{ 32, 8, 1 } });
     var r0: u32 = 0;
@@ -555,15 +591,18 @@ pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64) !View {
         try l.run(try dense(.{ .a = at.p, .lda = ldn, .b = at.vt, .ldb = ldn, .c = at.o + @as(u64, r0) * c * 2, .ldc = c, .m = rows, .n = c, .k = cols }));
     }
     try l.run(try dense(.{ .a = at.o, .lda = c, .b = w.out.w, .ldb = w.out.ldw(), .bias = w.out.b, .res = x.ptr, .c = y, .ldc = c, .m = n, .n = c, .k = c }));
-    return View.dense(y, x.t, x.h, x.w, c);
+    const out = View.dense(y, x.t, x.h, x.w, c);
+    try l.mark("{s}", .{name}, out, false);
+    return out;
 }
 
 /// HunyuanVideoMidBlock3D: resnet, attention, resnet. x is consumed (its buffer is reused); returns the output view,
-/// in `x` or `spare`.
-pub fn midBlock(l: Launcher, work: Work, x: View, m: MidW, spare: u64) !View {
-    const r0 = try resnet(l, work, x, m.res0, spare);
-    const at = try attention(l, work, r0, m.attn, x.ptr);
-    return resnet(l, work, at, m.res1, spare);
+/// in `x` or `spare`. `prefix`: `encoder` or `decoder`, for `Launcher.mark`.
+pub fn midBlock(l: Launcher, work: Work, x: View, m: MidW, spare: u64, prefix: []const u8) !View {
+    var b: [3][64]u8 = undefined;
+    const r0 = try resnet(l, work, x, m.res0, spare, try std.fmt.bufPrint(&b[0], "{s}.mid_block.resnets.0", .{prefix}));
+    const at = try attention(l, work, r0, m.attn, x.ptr, try std.fmt.bufPrint(&b[1], "{s}.mid_block.attentions.0", .{prefix}));
+    return resnet(l, work, at, m.res1, spare, try std.fmt.bufPrint(&b[2], "{s}.mid_block.resnets.1", .{prefix}));
 }
 
 // ---- Weight names (the checkpoint's) ----------------------------------------------------------------------------------
@@ -623,6 +662,42 @@ pub fn forEachTensor(ctx: anytype, comptime f: fn (@TypeOf(ctx), []const u8, []c
     }
     try S.normT(ctx, &buf, f, "decoder.conv_norm_out", 128);
     try S.convT(ctx, &buf, f, "decoder.conv_out.conv", 3, 128, 3);
+}
+
+test "latent_in: an fp32 latent rounds once to fp16; a bf16 latent keeps torch's bf16 quotient first" {
+    const inv: f32 = @floatCast(1.0 / @as(f64, 0.476986)); // decode.invScale
+    try std.testing.expectEqual(@as(u32, 0x40062d04), @as(u32, @bitCast(inv)));
+    const n = 4096;
+    var zf: [n]f32 = undefined;
+    var zb: [n]u16 = undefined;
+    for (&zf, &zb, 0..) |*f, *b, i| {
+        f.* = (@as(f32, @floatFromInt(i)) - 2048.0) * 0.00173; // spans [-3.5, 3.5] off the bf16 grid
+        b.* = bf16Rne(f.*);
+    }
+    var yf: [n]f16 = undefined;
+    var yb: [n]f16 = undefined;
+    var sim: Sim = .{ .execute = true };
+    sim.region(@intFromPtr(&zf), @sizeOf(@TypeOf(zf)), "zf");
+    sim.region(@intFromPtr(&zb), @sizeOf(@TypeOf(zb)), "zb");
+    sim.region(@intFromPtr(&yf), @sizeOf(@TypeOf(yf)), "yf");
+    sim.region(@intFromPtr(&yb), @sizeOf(@TypeOf(yb)), "yb");
+    const l = sim.launcher();
+    try l.run(.{ .call = .{ .latent_in = .{ .z = @intFromPtr(&zf), .y = @intFromPtr(&yf), .count = n, .inv_sf = inv, .z_f32 = 1 } }, .grid = .{ n / 256, 1, 1 }, .block = .{ 256, 1, 1 } });
+    try l.run(.{ .call = .{ .latent_in = .{ .z = @intFromPtr(&zb), .y = @intFromPtr(&yb), .count = n, .inv_sf = inv, .z_f32 = 0 } }, .grid = .{ n / 256, 1, 1 }, .block = .{ 256, 1, 1 } });
+    var through_bf16: u32 = 0; // fp32 inputs whose fp16 result a bf16 intermediate would change
+    for (zf, zb, yf, yb) |f, b, hf, hb| {
+        try std.testing.expectEqual(@as(f16, @floatCast(f * inv)), hf);
+        const qb: f32 = @bitCast(@as(u32, bf16Rne(@as(f32, @bitCast(@as(u32, b) << 16)) * inv)) << 16);
+        try std.testing.expectEqual(@as(f16, @floatCast(qb)), hb);
+        const via: f32 = @bitCast(@as(u32, bf16Rne(f * inv)) << 16);
+        if (@as(u16, @bitCast(hf)) != @as(u16, @bitCast(@as(f16, @floatCast(via))))) through_bf16 += 1;
+    }
+    try std.testing.expect(through_bf16 > n / 4);
+}
+
+fn bf16Rne(f: f32) u16 {
+    const u: u32 = @bitCast(f);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
 test "parameter blocks match the CUDA structs, symbols and images" {
@@ -849,16 +924,21 @@ pub const Sim = struct {
             },
             .latent_in => |a| {
                 const n: u64 = @intCast(a.count);
-                reads[nr] = rng(a.z, n * 2);
+                reads[nr] = rng(a.z, n * @as(u64, if (a.z_f32 != 0) 4 else 2));
                 nr += 1;
                 writes[nw] = rng(a.y, n * 2);
                 nw += 1;
                 if (self.execute) {
-                    const z: [*]const u16 = @ptrFromInt(a.z);
                     const y: [*]f16 = @ptrFromInt(a.y);
-                    for (0..n) |i| {
-                        const f: f32 = @bitCast(@as(u32, z[i]) << 16);
-                        y[i] = @floatCast(@as(f32, @bitCast(@as(u32, bf16Bits(f * a.inv_sf)) << 16)));
+                    if (a.z_f32 != 0) {
+                        const z: [*]const f32 = @ptrFromInt(a.z);
+                        for (0..n) |i| y[i] = @floatCast(z[i] * a.inv_sf);
+                    } else {
+                        const z: [*]const u16 = @ptrFromInt(a.z);
+                        for (0..n) |i| {
+                            const f: f32 = @bitCast(@as(u32, z[i]) << 16);
+                            y[i] = @floatCast(@as(f32, @bitCast(@as(u32, bf16Bits(f * a.inv_sf)) << 16)));
+                        }
                     }
                 }
             },
