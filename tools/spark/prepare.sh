@@ -4,6 +4,11 @@
 #   image: the official Qwen-Image 2.1 checkpoint downloaded once, then the packs the image tool serves (checked byte for
 #          byte against the committed digests) and each precision's Triton cubins for this GPU (PRECISIONS: "fp8s", the
 #          default; "fp8s nvfp4" adds the faster NVFP4). Result: weights/qwen-image-2.1/ (fp8s/, nvfp4/, te/, vae/).
+#          IMAGE_MODELS ("qwen-image-2.1 qwen-image-2.1-turbo", the default; either alone) picks the checkpoints. Turbo
+#          downloads only its own files (the DiT, the scheduler, model_index.json with its 8 sample_sigmas): its text
+#          encoder, processor and VAE are Qwen-Image 2.1's tensors, so they are linked from that snapshot and its te/ and
+#          vae/ packs serve both. Its DiT packs are turbo-<precision>/ beside the others (for each precision with
+#          committed scales: acts-<p>-turbo.json and digests-turbo-<p>.json).
 #   video: the MiniMax H3 checkpoints (Comfy-Org/MiniMax-H3, about 61 GB) into models/minimax-h3/ in the layout of
 #          tools/twin/pod/video-setup.sh (diffusion_models, text_encoders, vae, loras; resumable, existing files kept), the
 #          video venv (WITH_COMFY=0: no ComfyUI is needed to build), and the Turbo-LoRA NVFP4 pack (python -m
@@ -28,7 +33,10 @@ W=$STK/weights/qwen-image-2.1; PK=$STK/repo/tools/twin/packs; C=$STK/captures
 T="python -m stk_twin"
 mkdir -p $W
 
+IMAGE_MODELS=${IMAGE_MODELS:-qwen-image-2.1 qwen-image-2.1-turbo}
+wantimg() { [[ " $IMAGE_MODELS " == *" $1 "* ]]; }
 for p in ${PRECISIONS:-fp8s}; do
+    wantimg qwen-image-2.1 || continue
     pp=${p%s}   # the pack command's name: nvfp4 or fp8
     if [[ ! -f $W/$p/manifest.json ]]; then
         step "pack $p"
@@ -43,6 +51,31 @@ for p in ${PRECISIONS:-fp8s}; do
         rm -rf $C/prepare-$p
     fi
 done
+if wantimg qwen-image-2.1-turbo; then
+    TW=$STK/models/Qwen-Image-2.1-Turbo; TURBO_REV=d65dbc9a7e8f6b5479e33dee6030eaab2a906509
+    if [[ ! -f $TW/.complete ]]; then
+        step "download Qwen-Image-2.1-Turbo (its own files, about 14 GB)"
+        hf download Qwen/Qwen-Image-2.1-Turbo --revision $TURBO_REV --include "transformer/*" "scheduler/*" model_index.json LICENSE README.md \
+            --local-dir $TW --max-workers 16 > /dev/null && touch $TW/.complete
+    fi
+    for d in text_encoder processor vae; do [[ -e $TW/$d ]] || ln -s ../Qwen-Image-2.1/$d $TW/$d; done
+    for p in ${PRECISIONS:-fp8s}; do
+        pp=${p%s}
+        [[ -f $PK/acts-$pp-turbo.json ]] || { echo "prepare: no committed Turbo scales for $p (acts-$pp-turbo.json); skipping turbo-$p" >&2; continue; }
+        if [[ ! -f $W/turbo-$p/manifest.json ]]; then
+            step "pack turbo-$p"
+            $T pack --model $TW --repo Qwen/Qwen-Image-2.1-Turbo --precision $pp --acts $PK/acts-$pp-turbo.json --out $W/turbo-$p
+        fi
+        python $PK/check.py $W/turbo-$p $PK/digests-turbo-$p.json > /dev/null || { echo "pack turbo-$p differs from the reference digests" >&2; exit 1; }
+        if [[ ! -f $W/turbo-$p/triton/triton.json ]]; then
+            step "triton turbo-$p"
+            rm -rf $C/prepare-turbo-$p
+            $T capture --model $TW --pack $W/turbo-$p --size 512x512 --out $C/prepare-turbo-$p > /dev/null
+            $T triton --model $TW --pack $C/prepare-turbo-$p --out $W/turbo-$p
+            rm -rf $C/prepare-turbo-$p
+        fi
+    done
+fi
 [[ -f $W/te/manifest.json ]] || { step "pack te"; $T pack --model $MODEL --precision te --out $W/te; }
 [[ -f $W/vae/manifest.json ]] || { step "pack vae"; $T pack --model $MODEL --precision vae --out $W/vae; }
 python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.files import readable; readable('$W')"

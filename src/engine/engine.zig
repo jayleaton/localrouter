@@ -6,7 +6,8 @@ const tool = @import("../tool/tool.zig");
 const request = @import("../tool/request.zig");
 const Request = request.Request;
 pub const Capability = request.Capability;
-const ToolConfig = @import("../config.zig").ToolConfig;
+const config = @import("../config.zig");
+const ToolConfig = config.ToolConfig;
 
 pub const Needs = tool.Needs;
 pub const Job = tool.Job;
@@ -51,11 +52,15 @@ pub const Entry = struct {
     capabilities: []const Capability, // what the engine can do; a tool's `kind` picks its share
     needs: *const fn (cfg: *const ToolConfig, req: *const Request) Needs,
     create: *const fn (env: Env, cfg: *const ToolConfig) anyerror!Engine,
+    /// Refuses a request this model cannot serve (a step count its schedule lacks, a size past its buffers) before it
+    /// is queued or loaded, writing why to `why`. Pure and cheap, like `needs`. Null: whatever `request.validate` passes.
+    check: ?*const fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool = null,
 };
 
 pub const entries = [_]Entry{
     @import("../engines/testpattern.zig").entry,
     @import("../engines/qwen_image_tool.zig").entry,
+    @import("../engines/qwen_image_tool.zig").turbo_entry,
     @import("../engines/minimax_h3_tool.zig").entry,
 };
 
@@ -72,6 +77,49 @@ pub fn capabilityList(a: std.mem.Allocator, cfg: *const ToolConfig) ![]const Cap
     var list: std.ArrayList(Capability) = .empty;
     for (std.enums.values(Capability)) |c| if (supports(cfg, c)) try list.append(a, c);
     return list.items;
+}
+
+/// Whether the tool's engine takes `req` (see `Entry.check`); a `cmd` tool takes anything valid.
+pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
+    const e = find(cfg.engine) orelse return true;
+    const f = e.check orelse return true;
+    return f(cfg, req, why);
+}
+
+/// Whether each configured default (`Config.defaults`) names a tool that has its capability; the first that does not
+/// is written to `why`.
+pub fn checkDefaults(c: *const config.Config, why: *std.Io.Writer) bool {
+    for (std.enums.values(Capability)) |cap| {
+        const id = c.defaults.get(cap) orelse continue;
+        const t = c.tool(id) orelse {
+            why.print("defaults.{s} names '{s}', which is not a configured tool", .{ @tagName(cap), id }) catch {};
+            return false;
+        };
+        if (!supports(t, cap)) {
+            why.print("defaults.{s} names '{s}', which cannot do {s}", .{ @tagName(cap), id, @tagName(cap) }) catch {};
+            return false;
+        }
+    }
+    return true;
+}
+
+test "defaults must name a tool that has the capability" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const tools =
+        \\"tools": [{"id": "img", "kind": "image", "engine": "testpattern", "capabilities": ["text_to_image"]},
+        \\          {"id": "vid", "kind": "video", "engine": "testpattern"}]
+    ;
+    var buf: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(checkDefaults(&try config.parse(arena.allocator(), "{\"defaults\": {\"text_to_image\": \"img\", \"image_to_video\": \"vid\"}," ++ tools ++ "}"), &why));
+    try std.testing.expect(!checkDefaults(&try config.parse(arena.allocator(), "{\"defaults\": {\"image_edit\": \"img\"}," ++ tools ++ "}"), &why));
+    try std.testing.expectEqualStrings("defaults.image_edit names 'img', which cannot do image_edit", why.buffered());
+    why = .fixed(&buf);
+    try std.testing.expect(!checkDefaults(&try config.parse(arena.allocator(), "{\"defaults\": {\"text_to_image\": \"vid\"}," ++ tools ++ "}"), &why));
+    why = .fixed(&buf);
+    try std.testing.expect(!checkDefaults(&try config.parse(arena.allocator(), "{\"defaults\": {\"text_to_image\": \"nope\"}," ++ tools ++ "}"), &why));
+    try std.testing.expectEqualStrings("defaults.text_to_image names 'nope', which is not a configured tool", why.buffered());
 }
 
 pub fn find(name: []const u8) ?*const Entry {

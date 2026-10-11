@@ -1,12 +1,16 @@
 """Qwen-Image 2.1 end to end, the reference the Zig engine is checked against.
 
 Text encoder (Qwen3-VL 8B, last decoder layer before its final norm), prompt template, sigmas and VAE come from the
-official diffusers pipeline (`Qwen/Qwen-Image-2.1`, diffusers 0.41); the DiT is `dit.QwenImageDiT` (tfimage's
-arithmetic, recorded op by op). Noise is LocalRouter's own portable generator (`noise`), so Zig can reproduce it.
+official diffusers pipeline (`Qwen/Qwen-Image-2.1` or `Qwen/Qwen-Image-2.1-Turbo`, diffusers 0.41); the DiT is
+`dit.QwenImageDiT` (tfimage's arithmetic, recorded op by op). Noise is LocalRouter's own portable generator (`noise`),
+so Zig can reproduce it. A checkpoint's `sample_sigmas` (Turbo's 8-step schedule, a pipeline key in model_index.json)
+are read from the snapshot itself, as diffusers' pipeline uses them (huggingface/diffusers#14950), whatever diffusers
+version is installed.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -60,6 +64,23 @@ def noise(seed: int, n: int) -> np.ndarray:
     return out.astype(np.float32)
 
 
+def sample_sigmas(model_dir: str | Path) -> list[float] | None:
+    """The pipeline's own sigmas (model_index.json `sample_sigmas`, without the final 0), or None."""
+    return json.loads((Path(model_dir) / "model_index.json").read_text()).get("sample_sigmas")
+
+
+SCHEDULER_KEYS = ("base_image_seq_len", "max_image_seq_len", "base_shift", "max_shift", "shift_terminal",
+                  "use_dynamic_shifting", "time_shift_type", "use_karras_sigmas", "use_exponential_sigmas",
+                  "use_beta_sigmas", "invert_sigmas", "shift")
+
+
+def scheduler_settings(model_dir: str | Path) -> dict:
+    """What the Zig sampler needs of the checkpoint's schedule (`sampler.Config`): the scheduler's settings and the
+    pipeline's `sample_sigmas`."""
+    sc = json.loads((Path(model_dir) / "scheduler" / "scheduler_config.json").read_text())
+    return {**{k: sc.get(k) for k in SCHEDULER_KEYS}, "sample_sigmas": sample_sigmas(model_dir)}
+
+
 @dataclass
 class Result:
     image: object  # PIL.Image
@@ -76,6 +97,7 @@ class QwenImage:
         self.pipe.text_encoder.to(self.dev)
         self.pipe.vae.to(self.dev)
         self.dit = dit
+        self.sample_sigmas = sample_sigmas(model_dir)
         self.te = TextEncoder(self.pipe.text_encoder, self.dev) if TE == "stk" else None
         if VAE == "stk":
             from . import vae_ops
@@ -91,14 +113,17 @@ class QwenImage:
         return emb[:, : int(mask.sum())]
 
     def sigmas(self, height: int, width: int, steps: int) -> list[float]:
-        """The pipeline's schedule for this size (dynamic exponential shift, terminal 0.02), with the final 0."""
+        """The pipeline's schedule for this size, with the final 0: Qwen-Image 2.1's `steps` linspace sigmas with the
+        dynamic exponential shift and terminal 0.02, or the checkpoint's own `sample_sigmas` (Turbo: 8, shift 1)."""
         from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_shift
 
         sc = self.pipe.scheduler
         seq = (height // 16) * (width // 16)
         mu = calculate_shift(seq, sc.config.get("base_image_seq_len", 256), sc.config.get("max_image_seq_len", 4096),
                              sc.config.get("base_shift", 0.5), sc.config.get("max_shift", 1.15))
-        sigmas = self.pipe.config.get("sample_sigmas") or np.linspace(1.0, 1 / steps, steps)
+        if self.sample_sigmas is not None and len(self.sample_sigmas) != steps:
+            raise ValueError(f"this checkpoint's schedule has {len(self.sample_sigmas)} steps, not {steps}")
+        sigmas = self.sample_sigmas or np.linspace(1.0, 1 / steps, steps)
         sc.set_timesteps(sigmas=sigmas, mu=mu, device="cpu")
         return [float(s) for s in sc.sigmas]
 

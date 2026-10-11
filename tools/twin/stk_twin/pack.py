@@ -4,7 +4,8 @@
   nvfp4: `.codes` uint8 [N, K/2] (e2m1, low nibble first), `.scales` e4m3 [N, K/16], `.global` f32 [1], `.act` f32 [1]
   fp8:   `.w8` e4m3 [N, K], `.scale` f32 [1]  (inputs are scaled per call from their own absmax)
 Side weights stay bf16 under their diffusers names (img_in, txt_in.*, time_text_embed.*, modulation.1, norm_out.linear,
-proj_out) and the q/k norms fp32. The manifest has each tensor's sha256, the source revision and the calibration.
+proj_out) and the q/k norms fp32. The manifest has each tensor's sha256, the source revision, the calibration and the
+checkpoint's schedule.
 
 The text encoder's pack (`write_te`, precision "bf16"): every weight bf16 under the twin's op names (te.embed,
 te.{i}.{input_layernorm,q_proj,k_proj,v_proj,q_norm,k_norm,o_proj,post_attention_layernorm,gate_proj,up_proj,
@@ -28,6 +29,7 @@ from tfimage import linear as L
 
 from .dit import Config, policy
 from .files import readable
+from .qwen_image import scheduler_settings
 
 SIDE = ["img_in.weight", "txt_in.text_norm.weight", "txt_in.in_layer.weight", "txt_in.out_layer.weight",
         "time_text_embed.timestep_embedder.linear_1.weight", "time_text_embed.timestep_embedder.linear_2.weight",
@@ -79,11 +81,7 @@ def write_te(pipe, out: str | Path, source: dict) -> dict:
     tok.save_pretrained(str(tok_dir))
     shutil.copy(tok_dir / "tokenizer.json", out / "tokenizer.json")
     cfg = getattr(pipe.text_encoder.model, "language_model", pipe.text_encoder.model).config
-    sc = pipe.scheduler.config
-    sched = {k: sc.get(k) for k in ("base_image_seq_len", "max_image_seq_len", "base_shift", "max_shift", "shift_terminal",
-                                     "use_dynamic_shifting", "time_shift_type", "use_karras_sigmas",
-                                     "use_exponential_sigmas", "use_beta_sigmas", "invert_sigmas", "shift")}
-    sched["sample_sigmas"] = pipe.config.get("sample_sigmas")
+    sched = scheduler_settings(source["dir"])
     return _save(t, out, {"model": "qwen-image-2.1-te", "precision": "bf16", "source": source, "kinds": {},
                           "template": pipe.prompt_template_t2i, "drop": pipe._drop_idx, "scheduler": sched,
                           "config": {"layers": len(te.layers), "hidden": cfg.hidden_size, "heads": cfg.num_attention_heads,
@@ -127,7 +125,10 @@ def write_vae(vae, out: str | Path, source: dict) -> dict:
                           "convs": convs, "norms": norms, "dups": dups, "out_channels": int(vae.decoder.conv_out.weight.shape[0])})
 
 
-def write(w: dict[str, torch.Tensor], precision: str, acts: dict, out: str | Path, source: dict, cfg=Config()):
+def write(w: dict[str, torch.Tensor], precision: str, acts: dict, out: str | Path, source: dict, cfg=Config(),
+          model: str = "qwen-image-2.1"):
+    """The DiT's pack. Its manifest carries the checkpoint's schedule (`scheduler`, as the text encoder's pack does),
+    which the engine takes over the text encoder pack's: a DiT with its own schedule (Turbo) shares the te and vae packs."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     pick = policy(precision, cfg.layers)
@@ -156,5 +157,5 @@ def write(w: dict[str, torch.Tensor], precision: str, acts: dict, out: str | Pat
                     t[key + ".act"] = torch.tensor([acts[f"{i}.{name}"]], dtype=torch.float32)
             else:
                 t[key + ".weight"] = wt.cpu().contiguous()
-    return _save(t, out, {"model": "qwen-image-2.1", "precision": precision, "source": source, "kinds": kinds,
-                           "acts": acts})
+    return _save(t, out, {"model": model, "precision": precision, "source": source, "kinds": kinds,
+                           "acts": acts, "scheduler": scheduler_settings(source["dir"])})

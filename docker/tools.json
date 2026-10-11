@@ -1,9 +1,12 @@
 {
   "reserve_bytes": 8589934592,
+  "defaults": {"text_to_image": "qwen-image-2.1-turbo"},
   "tools": [
     {"id": "testpattern", "kind": "image", "name": "Test pattern (self-test)", "engine": "testpattern", "idle_ttl_s": 30},
     {"id": "qwen-image-2.1", "kind": "image", "name": "Qwen-Image 2.1 (FP8)", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
      "idle_ttl_s": 300, "options": {"precision": "fp8s", "max_side": 1664}},
+    {"id": "qwen-image-2.1-turbo", "kind": "image", "name": "Qwen-Image 2.1 Turbo (FP8, 8 steps)", "engine": "qwen_image_turbo",
+     "weights": "/models/qwen-image-2.1", "idle_ttl_s": 300, "options": {"precision": "fp8s", "max_side": 1664}},
     {"id": "minimax-h3", "kind": "video", "name": "MiniMax H3 (NVFP4, Turbo 8 steps, with audio)", "engine": "minimax_h3", "weights": "/models/minimax-h3",
      "idle_ttl_s": 300, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}},
     {"id": "testpattern-video", "kind": "video", "name": "Test pattern video (self-test)", "engine": "testpattern", "idle_ttl_s": 30}
