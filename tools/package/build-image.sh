@@ -3,8 +3,9 @@
 # compressed file a GPU node loads without building anything:
 #   bash tools/package/build-image.sh [OUT_DIR]          (default ~/localrouter-dist)
 # Writes OUT_DIR/localrouter-<commit>-arm64.tar.zst and OUT_DIR/localrouter-<commit>-arm64.json: the source commit,
-# the image id, the file's SHA-256 and size, the build arguments and the Dockerfile's SHA-256. install scripts check
-# the file against that receipt before `docker load`.
+# the image id, the archive's manifest and config digests (a daemon names the loaded image by one of the two), the
+# file's SHA-256 and size, the build arguments and the Dockerfile's SHA-256. install scripts check the file against
+# that receipt before `docker load`.
 # It refuses to run on an arm64 host (a GPU node such as a DGX Spark builds nothing: its memory belongs to the models)
 # unless LR_BUILD_ON_ARM=1, and refuses a checkout with uncommitted changes (the receipt names a commit).
 # Env: BUILD_ARGS ("KEY=VALUE ..." passed as --build-arg, e.g. an engine selection the Dockerfile takes),
@@ -117,16 +118,20 @@ echo "[build-image] export $id"
 docker save "$tag" | zstd -T0 -10 -q -o "$base.tar.zst.part"
 mv "$base.tar.zst.part" "$base.tar.zst"
 sha=$(sha256sum "$base.tar.zst" | cut -d' ' -f1)
+digests=$(python3 -I "$(dirname "$0")/image_digests.py" "$base.tar.zst") || die "the exported file is not a readable image archive"
 stop_sampler
 disk_peak=$(( start_free - $(cat "$OUT/.disk-min.$$" 2> /dev/null || echo "$start_free") ))
 oci_sizes=""
 for d in "${dirs[@]}"; do oci_sizes+="$(basename "$d")=$(du -sb "$d" | cut -f1) "; done
 python3 -I - "$base.json" "$commit" "$dirty" "$tag" "$id" "$base.tar.zst" "$sha" "$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)" \
-    "${BUILD_ARGS:-}" "$MEM" "$CPUS" "$peak" "$ooms" "${LR_BASE_IMAGES:-}" "$disk_peak" "$oci_sizes" <<'PY'
+    "${BUILD_ARGS:-}" "$MEM" "$CPUS" "$peak" "$ooms" "${LR_BASE_IMAGES:-}" "$disk_peak" "$oci_sizes" "$digests" <<'PY'
 import json, os, sys
-out, commit, dirty, tag, image_id, path, sha, dockerfile, build_args, mem, cpus, peak, ooms, bases, disk_peak, oci = sys.argv[1:]
+out, commit, dirty, tag, image_id, path, sha, dockerfile, build_args, mem, cpus, peak, ooms, bases, disk_peak, oci, digests = sys.argv[1:]
+digests = json.loads(digests)
 num = lambda v: None if v == "null" else int(v)
+# image_id is what this build machine's daemon calls the image; a daemon names it by its manifest's or its config's digest
 json.dump({"commit": commit, "dirty": dirty == "true", "tag": tag, "image_id": image_id, "platform": "linux/arm64",
+           "manifest_digest": digests["manifest_digest"], "config_digest": digests["config_digest"],
            "file": os.path.basename(path), "file_bytes": os.path.getsize(path), "file_sha256": sha,
            "dockerfile_sha256": dockerfile, "build_args": build_args.split(), "base_images_from_local_store": bases.split(),
            "builder": {"memory_max": mem, "cpuset": cpus, "memory_peak_bytes": num(peak), "oom_kills": num(ooms)},

@@ -129,11 +129,19 @@ read -r want_sha want_id dirty < <(python3 -I -c 'import json,sys; r=json.load(o
 [[ $dirty == False ]] || echo "  note: the image was built from a checkout with uncommitted changes (a dev build)"
 got_sha=$(sha256sum "$image" | cut -d' ' -f1)
 [[ $got_sha == "$want_sha" ]] || die "the image file's SHA-256 is $got_sha, its receipt says $want_sha"
-if [[ $(docker image inspect -f '{{.Id}}' "$want_id" 2> /dev/null) != "$want_id" ]]; then
-    zstd -dc "$image" | docker load > /dev/null
+# A daemon names the loaded image by its manifest's digest (containerd image store) or its config's (classic store):
+# both come from the archive's own bytes, and the receipt's image_id must be one of them.
+read -r manifest_digest config_digest tag < <(python3 -I -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["manifest_digest"], d["config_digest"], (d["repo_tags"] or [""])[0])' \
+    < <(python3 -I "$HERE/image_digests.py" "$image")) || die "cannot read the image archive's digests"
+[[ $want_id == "$manifest_digest" || $want_id == "$config_digest" ]] ||
+    die "the receipt's image_id $want_id is neither the archive's manifest ($manifest_digest) nor its config ($config_digest)"
+loaded() { local id; id=$(docker image inspect -f '{{.Id}}' "$1" 2> /dev/null) && [[ $id == "$manifest_digest" || $id == "$config_digest" ]] && echo "$id"; }
+image_id=$(loaded "$tag") || image_id=""
+if [[ -z $image_id ]]; then
+    zstd -dc < "$image" | docker load > /dev/null   # on stdin: zstd skips a file argument that is a symbolic link
+    image_id=$(loaded "$tag") || die "after docker load, $tag is not the archive's image (manifest $manifest_digest, config $config_digest)"
 fi
-[[ $(docker image inspect -f '{{.Id}}' "$want_id" 2> /dev/null) == "$want_id" ]] || die "after docker load, image $want_id is not present"
-echo "  $want_id"
+echo "  $tag: $image_id (manifest $manifest_digest, config $config_digest)"
 
 # ---- 4. the configuration
 step "config: $LR_HOME"
@@ -146,7 +154,7 @@ cfg = {"reserve_bytes": p.get("reserve_bytes", 8 << 30), "keep_outputs_s": p.get
 json.dump(cfg, open(sys.argv[2], "w"), indent=1)
 PY
 mkdir -p "$LR_HOME/data"
-printf '%s\n' "LR_MODE=docker" "LR_IMAGE=$want_id" "LR_NAME=localrouter" "LR_MODELS=$weights" "LR_CONFIG=$LR_HOME/tools.json" \
+printf '%s\n' "LR_MODE=docker" "LR_IMAGE=$image_id" "LR_NAME=localrouter" "LR_MODELS=$weights" "LR_CONFIG=$LR_HOME/tools.json" \
     "LR_HOST=$LR_HOST" "LR_PORT=$LR_PORT" > "$LR_HOME/env.new"
 mv "$LR_HOME/env.new" "$LR_HOME/env"
 model=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["model"])' "$LR_HOME/profile.json")
