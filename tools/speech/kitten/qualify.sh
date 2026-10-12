@@ -37,13 +37,22 @@ step() { # name seconds command...
   nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv 2>&1 || true
 } > "$out/environment.txt" 2>&1
 
+# Memory every 0.5 s while the model runs: MemAvailable (GB10 memory is unified) and what nvidia-smi reports.
+( while true; do
+    printf '%s %s %s\n' "$(date +%s.%N)" "$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)" \
+      "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    sleep 0.5
+  done ) > "$out/memory.log" 2>/dev/null &
+sampler=$!
+trap 'kill $sampler 2>/dev/null' EXIT
+
 step unit 120 "$py" -I -m unittest discover -s "$here" -p 'test_*.py' || status=1
 step assets 900 "$py" -I -c '
 import sys; sys.path.insert(0, sys.argv[1]); import kitten_worker as kw
 kw.verify_assets(sys.argv[2], kw.load_pins(), "sha256", "packed", "default"); print("pinned files verified (sha256)")
 ' "$here" "$root" || status=1
-step gate 5400 "$py" -I "$here/qualify.py" gate "$root" "$out/gate" --fixtures "$fixtures" --device "$device" || status=1
-step bench 2700 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device" || true
+step gate 2700 "$py" -I "$here/qualify.py" gate "$root" "$out/gate" --fixtures "$fixtures" --device "$device" || status=1
+step bench 1200 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device" || true
 
 # The reports and the audio, not the float dumps (large, reproducible from the commands above).
 find "$out" -name '*.f32' -delete

@@ -93,7 +93,16 @@ Fixtures: F1 a short sentence (Bruno), F2 numbers, money, a date and a percentag
 emotion, event and emphasis markup with the expressive preset (Kiki), F4 German with the normalizer off (German), F5
 a 640-character paragraph that splits into chunks and joins (Bruno).
 
-RESULTS_GATE
+Results:
+
+| Target | Fixtures | Result |
+| --- | --- | --- |
+| DEV: AMD Ryzen 7 6800U, CPU, torch 2.11.0+cpu, 8 threads | F1 | **pass**, 13 of 13 checks bitwise equal: normalized text and prompt ids, prefill logits (158,241 fp32), flow mel, vocoder waveform; tokens and chunk samples; float32 waveform (sha256 `2be41205…`), PCM16 (`c20521fa…`), cold = warm |
+| DEV, through the daemon (`/v1/audio/speech` wav and pcm, MCP `synthesize_speech`) | F1 | the same PCM16 bytes (`c20521fa…`) on every path |
+| GB10 (dgx02), CUDA | F1 to F5 | pending: `tools/speech/kitten/qualify.sh` in an owner-granted window. Until it passes, CUDA is not qualified |
+
+A GPU run is a separate baseline from a CPU run: the gate compares worker and reference on the same device, threads
+and seed, never across devices.
 
 ### The kitten-tts-2-cpp runtime
 
@@ -104,11 +113,30 @@ README states that output is not bit-identical to Python and that a seed does no
 therefore not a LocalRouter backend: it cannot pass the gate, and no numerical baseline for it has been accepted. Its
 measured speed, for the trade-off:
 
-RESULTS_CPP
+| Runtime (DEV, F1, Bruno, seed 7, 8 threads, shared box) | Wall | Audio | RTF | Peak RSS | Bits vs reference |
+| --- | --- | --- | --- | --- | --- |
+| kittenml / torch 2.11 CPU (the worker) | 37.2 s | 3.62 s | 10.3 | 5.5 GB | equal (the gate) |
+| kitten-tts-2-cpp `1ce0bb50`, AVX2 (no AMX), default decoder | 13.3 s (LM 5.8 s at 25.3 tokens/s, decoder 4.0 s) | 3.78 s | 2.6 (3.5 incl. load) | 2.04 GiB | not equal: other tokens from the same seed; KittenML's own validation reports prefill logits max abs 0.21 against Python |
+
+The C++ runtime is about 3x faster on this CPU and uses 40% of the memory. Using it would need an accepted numerical
+baseline of its own (an explicit, documented decision, not taken here); on GB10 the reference itself runs on the GPU.
 
 ## Measurements
 
-RESULTS_BENCH
+DEV (AMD Ryzen 7 6800U, 16 threads, 27 GB, shared with other jobs: load average 14 to 30), CPU, 8 threads:
+
+| | |
+| --- | --- |
+| Worker load (process start to ready: imports, model build, normalizer, default voice) | 33 to 87 s (two runs) |
+| Resident after load (reported to the daemon) | 5.51 GB (bf16 language model 3.5 GB, s3gen fp32 about 1 GB, torch) |
+| F1 (3.62 s of speech), warm | 34.7 to 44 s: RTF about 10. Time to first audio is the whole chunk: audio arrives per chunk |
+| F1 cold through the daemon (includes the load) | 90.9 s |
+| Cancel (MCP `cancel_job` mid-generation) | the request ends 409 `cancelled` in 1.0 s; the worker process is gone 1.08 s after the cancel; MemAvailable returns 4.68 GB above its loaded level; no files left in the job |
+| Unload (`POST /v1/tools/kitten-tts-2/unload`) | worker gone in 0.82 s |
+
+CPU torch is a correctness baseline, not a serving target: at RTF 10 it is too slow to speak to anyone. The GB10 numbers
+(cold load, first audio, warm RTF for F1 and the 640-character F5, peak RSS and CUDA memory, cancel reclaim) come
+from `qualify.sh bench` on dgx02.
 
 ## Lifecycle
 
