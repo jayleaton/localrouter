@@ -47,7 +47,9 @@ Basis for the estimates:
 ## Two nodes, one window (N = 120 min)
 
 Owner deadlines, with T0 the window start: no new work at T0+100 (N-20), everything cleaned by T0+110 (N-10), expiry
-T0+120 (N). `node-job.sh` enforces them with `DEADLINE=T0+120`: a step starts only if its max minutes end by T0+110.
+T0+120 (N). Each job gets `DEADLINE=T0+110`, the time its node must be cleaned by. node-job.sh then starts no step
+after T0+90 and only a step whose max minutes end by T0+100; its guard stops a step still running at T0+100, and the
+job itself at T0+110. That leaves T0+100 to T0+110 for after, export and cleanup.
 Node A is dgx01 (`WORK=/home/dgx01/k6-d1-qual`), node B is dgx02 (`WORK=/root/k6-d1-qual`, reached through dgx01);
 each node writes only its own `WORK`. Every job is a separate host run in its own memory scope (discrete, resumable): `MODES` splits a job
 by Fp32Linear form, so a job that no longer fits is resumed in a later window instead of truncated.
@@ -56,17 +58,19 @@ Per job, estimate / worst case (worst = every step at its timeout), in minutes:
 
 | # | node A (dgx01) | est | max | node B (dgx02) | est | max |
 | --- | --- | --- | --- | --- | --- | --- |
+| H | handover at T0: read-only node checks, production marker, kit staged, `vmstat` before | 2 | 3 | the same | 2 | 3 |
 | 0 | setup: kit sha256, take `node-job.sh` out of it, preflight (first one checks every prefix file) | 6 | 10 | the same | 6 | 10 |
 | 1 | `smoke` | 6 | 24 | `smoke` | 6 | 24 |
 | 2 | `twin` (all 3 forms) | 25 | 63 | `ops` (every site under tf32_rna, then `fp32/*` under the other two) | 36 | 63 |
 | 3 | `blocks` MODES="tf32_rna tf32_truncate" | 21 | 43 | `blocks` MODES=fp32 | 11 | 23 |
 | 4 | after: `after.sh` classification, then export of the results tarballs + sha256 | 2 | 5 | the same | 2 | 5 |
 | 5 | cleanup: remove the extracted kit (results stay in WORK) | 2 | 5 | the same | 2 | 5 |
-| | **end (est)** | **T0+62** | | | **T0+63** | |
+| | **end (est)** | **T0+64** | | | **T0+65** | |
 
-Jobs 0-2 (the required set) fit even at their worst case: they end by T0+97 on both nodes, inside T0+100. Job 3 fits
-the estimate with 35 min to spare; if earlier steps run long, `node-job.sh` records its steps `not-run: time` and that
-job is resumed in a later window with the same kit and MODES. After, export and cleanup always run before T0+110.
+Jobs H and 0-2 (the required set) fit even at their worst case: they end by T0+100 on both nodes. Job 3 fits the
+estimate with at least 39 min to spare; if earlier steps run long, `node-job.sh` records its steps `not-run: time` and
+that job is resumed in a later window with the same kit and MODES. After, export and cleanup run between T0+100 and
+T0+110 at the latest.
 
 ## Memory (owner GB10 uma-node policy, 2026-10-12)
 
