@@ -44,6 +44,8 @@ __device__ __forceinline__ long long k6a_clampi(long long i, long long lo, long 
     return i < lo ? lo : (i > hi ? hi : i);
 }
 
+__device__ __forceinline__ float k6a_neg_inf() { return __int_as_float(0xff800000); }
+
 // postprocess_audio's latent unscale and layout: rows fp32 [B, T, C] (the sampler's per-sample audio latent, C = 40)
 // -> z fp32 [B, C, T] = (rows / scaling_factor) + mean_value, two roundings (a scalar divide, then an add; the add runs
 // even for mean 0.0, so a -0.0 becomes +0.0 as in the reference). `scale` is the divisor (div K6A_DIV_TRUE) or its fp32
@@ -400,14 +402,21 @@ extern "C" __global__ void k6a_normalize_apply(const float* x, const float* n, f
     y[e] = __fdiv_rn(x[e], den);
 }
 
-// Attention, math formulation (one candidate for the native fp32 SDPA; the native backend choice is open): per row
-// i of q [BH, T, D]: s_j = sum_d (q[i,d] * c) * (k[j,d] * c) with c = sqrt(scale) applied to each operand (fma chain,
-// d ascending); m = max_j s_j; p_j = expf(s_j - m); z = sum_j p_j (ascending); out[i,d] = sum_j (p_j / z) * v[j,d]
-// (fma chain, j ascending). The row max propagates NaN like torch's softmax. c = fp32(sqrt(1 / sqrt(D))) computed in
-// double by the caller. q, k, v, out contiguous [BH, T, D]; scratch holds BH * T * T floats. launch: block 256,
-// grid (T, BH).
+// Attention, math formulation (one candidate for the native fp32 SDPA; the native backend choice is open), per row i
+// of q [BH, T, D], with c = sqrt(scale) applied to each operand, c = fp32(sqrt(1 / sqrt(D))) computed in double by the
+// caller:
+// - scores, as a split-K GEMM: d is cut into slices of `kslice` (the last one shorter); each slice is an fma chain of
+//   (q[i,d] * c) * (k[j,d] * c) from 0, d ascending; s_j is the first slice's sum plus each later one, in slice order.
+//   kslice >= D is one fma chain over all of d.
+// - softmax, in the order of torch's softmax_warp_forward (ATen PersistentSoftmax.cuh): one warp of W = min(P, 32)
+//   lanes, P the next power of two >= T, lane l holding the scores l + it * W (it < P / W, -inf past T); a lane max
+//   from its first element (keep the max when greater), an xor butterfly of (a < b ? b : a); e = expf(s - m) and a
+//   lane sum from 0 over every it, an xor butterfly of a + b; p_j = e_j / z (NaN when z == 0), stored to `scratch`.
+// - out[i,d] = sum_j p_j * v[j,d] (fma chain from 0, j ascending).
+// q, k, v, out contiguous [BH, T, D]; scratch holds BH * T * T floats; T <= 1024 (the launcher refuses more: torch
+// uses another softmax kernel there), kslice >= 1. launch: block 256, grid (T, BH).
 extern "C" __global__ void k6a_sdpa_math(const float* q, const float* k, const float* v, float* out, float* scratch,
-                                         long long T, long long D, float c) {
+                                         long long T, long long D, long long kslice, float c) {
     const long long i = blockIdx.x, bh = blockIdx.y;
     if (i >= T) return;  // uniform per block
     const float* qi = q + (bh * T + i) * D;
@@ -415,25 +424,48 @@ extern "C" __global__ void k6a_sdpa_math(const float* q, const float* k, const f
     for (long long j = threadIdx.x; j < T; j += blockDim.x) {
         const float* kj = k + (bh * T + j) * D;
         float acc = 0.0f;
-        for (long long d = 0; d < D; ++d) acc = __fmaf_rn(__fmul_rn(qi[d], c), __fmul_rn(kj[d], c), acc);
+        for (long long d0 = 0; d0 < D; d0 += kslice) {
+            const long long d1 = d0 + kslice < D ? d0 + kslice : D;
+            float part = 0.0f;
+            for (long long d = d0; d < d1; ++d) part = __fmaf_rn(__fmul_rn(qi[d], c), __fmul_rn(kj[d], c), part);
+            acc = d0 == 0 ? part : __fadd_rn(acc, part);
+        }
         p[j] = acc;
     }
     __syncthreads();
-    __shared__ float z_s;
-    if (threadIdx.x == 0) {
-        float m = p[0];
-        for (long long j = 1; j < T; ++j) m = (p[j] > m || p[j] != p[j]) && m == m ? p[j] : m;
-        float z = 0.0f;
-        for (long long j = 0; j < T; ++j) {
-            p[j] = expf(__fsub_rn(p[j], m));
-            z = __fadd_rn(z, p[j]);
+    if (threadIdx.x < 32) {
+        int P = 1;
+        while (P < T) P <<= 1;
+        const int W = P < 32 ? P : 32, iters = P / W, l = threadIdx.x & (W - 1);  // lanes >= W repeat lanes < W
+        float m = l < T ? p[l] : k6a_neg_inf();
+        for (int it = 0; it < iters; ++it) {
+            const long long j = l + (long long)it * W;
+            const float x = j < T ? p[j] : k6a_neg_inf();
+            m = m > x ? m : x;
         }
-        z_s = z;
+        for (int off = W / 2; off > 0; off /= 2) {
+            const float o = __shfl_xor_sync(0xffffffffu, m, off, W);
+            m = m < o ? o : m;
+        }
+        float z = 0.0f;
+        for (int it = 0; it < iters; ++it) {
+            const long long j = l + (long long)it * W;
+            const float e = expf(__fsub_rn(j < T ? p[j] : k6a_neg_inf(), m));
+            z = __fadd_rn(z, e);
+        }
+        for (int off = W / 2; off > 0; off /= 2) z = __fadd_rn(z, __shfl_xor_sync(0xffffffffu, z, off, W));
+        __syncwarp();
+        if (threadIdx.x < W) {
+            for (int it = 0; it < iters; ++it) {
+                const long long j = l + (long long)it * W;
+                if (j < T) p[j] = z == 0.0f ? __int_as_float(0x7fc00000) : __fdiv_rn(expf(__fsub_rn(p[j], m)), z);
+            }
+        }
     }
     __syncthreads();
     for (long long d = threadIdx.x; d < D; d += blockDim.x) {
         float acc = 0.0f;
-        for (long long j = 0; j < T; ++j) acc = __fmaf_rn(__fdiv_rn(p[j], z_s), v[(bh * T + j) * D + d], acc);
+        for (long long j = 0; j < T; ++j) acc = __fmaf_rn(p[j], v[(bh * T + j) * D + d], acc);
         out[(bh * T + i) * D + d] = acc;
     }
 }

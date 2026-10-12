@@ -14,6 +14,8 @@ published mathematical definitions and graph facts, recorded per operator in `va
 | kandinsky-6 `bigvgan_v2/alias_free_activation/torch/{resample,filter}.py` (from junjun3518/alias-free-torch) | Apache-2.0 | Activation1d padding/stride/crop arithmetic. The 12-tap filters are loaded from the checkpoint |
 | lucidrains/denoising-diffusion-pytorch `c8155b1d` `karras_unet_1d.py` | MIT, Phil Wang 2020 | Scaled SiLU expression `silu(x) / 0.596`, residual expression `(a(1-t) + bt) / sqrt((1-t)^2 + t^2)` |
 | PyTorch 2.14 conv1d / conv_transpose1d / clamp / interpolate docs | BSD-3-Clause | Primitive semantics: padding, output lengths, nearest-exact, NaN-propagating clamp |
+| PyTorch 2.14.1 `aten/src/ATen/native/cuda/PersistentSoftmax.cuh` (`softmax_warp_forward`) | BSD-3-Clause | The fp32 softmax's order for rows of <= 1024: lane layout, max and sum butterflies, comparators, NaN for a zero sum (`k6a_sdpa_math`) |
+| NVIDIA CUTLASS split-K GEMM partition | BSD-3-Clause | The K slice length `round_up(ceil(K / splits), 4)` for fp32 (`k6a_sdpa_math` `kslice`); the split count is the one cuBLASLt logged |
 
 Restricted and not used: NVIDIA EDM2 `edm2_utils.py` (CC BY-NC-SA 4.0), imported by the native `MPConv1D`, `normalize`,
 `mp_silu` and `mp_sum`. Its text was not read, copied, translated or called by this code. The CPU oracle fixtures in
@@ -65,9 +67,12 @@ Recorded, not reproduced (gates stay open):
   conv_in, the 1x1 convs, qkv and the dilated convs run implicit-GEMM engines, which `.fma` reproduces.
 - the middle attention's SDPA (fp32, head dimension 2048) dispatches MATH. Its steps composed from public ops (q and
   k^T scaled by sqrt(1 / sqrt(D)), matmul, softmax, matmul) reproduce the native output; `probs @ v` (cuBLASLt algo 16)
-  is one serial fma chain, reproduced offline; the scores GEMM (cuBLASLt algo 20, SIMT 64x64 tile, 8x5 stages, 12
-  K splits, compute-type reduction) is not reproduced by any split / order tried offline. `k6a_sdpa_math` stays a
-  comparison candidate. Strict FLASH is not accepted.
+  is one serial fma chain, reproduced offline. The scores GEMM at T 218 (cuBLASLt algo 20, SIMT 64x64 tile, 8x5
+  stages, 12 K splits, compute-type reduction) is reproduced offline (0 of 47524 unequal) by 12 K slices of 172, each
+  an fma chain from 0, summed in slice order; at T 436 cuBLASLt logged 6 splits with an in-place reduction, not
+  verified. The softmax follows torch's warp softmax order; with a correctly rounded exp offline it is not exact, and
+  CUDA's `expf` is not correctly rounded, so only SM121 can settle it. `k6a_sdpa_math` (split-K scores, warp softmax)
+  stays a comparison candidate until it runs there. Strict FLASH is not accepted.
 
 Not on the native path, refused: the vocoder weight-norm fold.
 

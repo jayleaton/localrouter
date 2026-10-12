@@ -41,7 +41,7 @@ SIGNATURES = {
     "k6a_l2norm": "ppqqqii",
     "k6a_l2norm_torch": "ppqqqii",
     "k6a_normalize_apply": "pppqqqffi",
-    "k6a_sdpa_math": "pppppqqf",
+    "k6a_sdpa_math": "pppppqqqf",
 }
 _CTYPE = {"p": ctypes.c_uint64, "q": ctypes.c_int64, "i": ctypes.c_int32, "f": ctypes.c_float}
 
@@ -423,12 +423,16 @@ class K6A:
                  den_fused)
         return y
 
-    def sdpa_math(self, q, k, v, *, c):
-        """Candidate math SDPA over contiguous [..., T, D] (leading dims flattened to BH)."""
+    def sdpa_math(self, q, k, v, *, c, kslice, probs=False):
+        """Candidate math SDPA over contiguous [..., T, D] (leading dims flattened to BH): the scores summed over D in
+        slices of `kslice` (>= D: one chain), torch's warp softmax (T <= 1024). With probs, also the probabilities
+        [..., T, T]."""
         T, D = _t(q).shape[-2:]
         _t(k, q.shape, "k"), _t(v, q.shape, "v")
+        if T > 1024 or kslice < 1:
+            raise ValueError(f"sdpa_math: T {T} > 1024 or kslice {kslice} < 1")
         BH = q.numel() // (T * D)
         out = torch.empty_like(q)
         scratch = torch.empty(BH * T * T, device=q.device)
-        self._go("k6a_sdpa_math", (T, BH), BLOCK, 0, q, k, v, out, scratch, T, D, f32(c))
-        return out
+        self._go("k6a_sdpa_math", (T, BH), BLOCK, 0, q, k, v, out, scratch, T, D, min(kslice, D), f32(c))
+        return (out, scratch.view(*q.shape[:-1], T)) if probs else out

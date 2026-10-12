@@ -162,7 +162,8 @@ class Run:
         self.k = self.ns = self.vae = self.decode = self.voc = None
         self.cur, self.hashes, self.norm_totals = "setup", [], {}
         self.best = dict(norm=(1, 32, "s64", 1), silu_div=DIV_RECIP, res_div=DIV_RECIP, lat_div=DIV_RECIP,
-                         avg_div=DIV_RECIP, chosen_from="defaults (no op-level result yet)")
+                         avg_div=DIV_RECIP, sdpa_kslice={},
+                         chosen_from="defaults (no op-level result yet)")
         self.tensors = os.path.join(a.out, "tensors")
         self.doc = {"job": a.job, "route": native.ROUTE, "dry_run_cpu": self.dry, "weights": a.weights,
                     "pass_criterion": "0 unequal float32 bit patterns per comparison; max_abs_diff and "
@@ -553,6 +554,18 @@ def sdpa_c(D):
     return f32(math.sqrt(1.0 / math.sqrt(D)))
 
 
+def sdpa_kslices(D):
+    """Candidate split-K slice lengths for the scores' sum over D: one fma chain, and CUTLASS's slice rule
+    round_up(ceil(D / splits), 4) for the split counts cuBLASLt chose in the D3 window (12 at T 218, 6 at T 436)."""
+    return {"one_chain": D, **{f"splitk{n}": ((D + n - 1) // n + 3) // 4 * 4 for n in (12, 6)}}
+
+
+def sdpa_math_probs(q, k, D):
+    """The math backend's probabilities composed from public ops, as probe_sdpa composes them."""
+    s = math.sqrt(1.0 / math.sqrt(D))
+    return torch.softmax(torch.matmul(q * s, k.transpose(-2, -1) * s), -1)
+
+
 def sdpa_choice(q, k, v):
     try:
         i = int(torch._fused_sdp_choice(q, k, v))
@@ -581,8 +594,16 @@ def case_sdpa(R, T, D):
                 lr[b] = {"ok": False, "error": f"{type(e).__name__}: {e}"[:400]}
         lr["backends_bit_equal_to_default"] = [b for b in outs if b != "default" and lr[b]["vs_default"]["pass_"]]
         if R.k:
-            km = R.k.sdpa_math(*(t.contiguous() for t in (q, k, v)), c=sdpa_c(D))
-            lr["k6a_sdpa_math_vs"] = {n: compare(km, o) for n, o in outs.items()}
+            probs = sdpa_math_probs(q, k, D)
+            lr["k6a_sdpa_math"] = {}
+            for vn, ks in sdpa_kslices(D).items():
+                km, kp = R.k.sdpa_math(*(t.contiguous() for t in (q, k, v)), c=sdpa_c(D), kslice=ks, probs=True)
+                lr["k6a_sdpa_math"][vn] = {"kslice": ks, "probs_vs_math_composition": brief(compare(kp, probs)),
+                                           "vs": {n: compare(km, o) for n, o in outs.items()}}
+            if lname == "native_strided":
+                best = best_of({vn: r["vs"]["default"] for vn, r in lr["k6a_sdpa_math"].items()})
+                if best is not None:
+                    R.best["sdpa_kslice"][T] = lr["k6a_sdpa_math"][best]["kslice"]
         res[lname] = lr
     return res
 
@@ -639,7 +660,10 @@ class DecoderKernels:
             B, C3, T = y.shape
             D = C3 // 3 // m.num_heads
             q, k, v = self.k.qkv_split(k_normalize(self.R, y.view(B, m.num_heads, D, 3, T), 2, self.cfg["norm"]))
-            return self.res(x, self.conv(self.k.attn_merge(self.k.sdpa_math(q, k, v, c=sdpa_c(D))), m.proj_out))
+            if T not in self.cfg["sdpa_kslice"]:
+                raise RuntimeError(f"no op-level k6a_sdpa_math result at T {T} to choose kslice from")
+            att = self.k.sdpa_math(q, k, v, c=sdpa_c(D), kslice=self.cfg["sdpa_kslice"][T])
+            return self.res(x, self.conv(self.k.attn_merge(att), m.proj_out))
         if isinstance(m, ns.Upsample1D):
             return self.conv(self.k.upsample_nearest_exact2(x), m.conv)
         raise TypeError(type(m).__name__)

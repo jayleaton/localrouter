@@ -109,8 +109,10 @@ on CPU and on the device against the loaded CPU-prepared weights, plus synthetic
 [1024,2048,1], [6144,2048,1], [128,512,3] with the device each ran on; conv1d over prepared weights for gain 1, 1.3 and
 the loaded `learnable_gain + 1`, acc 0 / 1; div 0 / 1 for SiLU, mp_sum, latent unscale; SDPA for q/k/v [1,1,218,2048]
 and [1,1,436,2048] in the native strided layout and contiguous: `_fused_sdp_choice`, each backend forced (ok / error,
-hash, equal to default), and `k6a_sdpa_math` against each; the decoder chain free-running and teacher-forced per node.
-The chain's normalization and attention are candidate kernels (best op-level variant of the same run). B: the
+hash, equal to default), and `k6a_sdpa_math` for each scores slice length (one chain; split-K 12 and 6 under CUTLASS's
+slice rule) against each, with its probabilities against the composed math backend's; the decoder chain free-running
+and teacher-forced per node. The chain's normalization and attention are candidate kernels (best op-level variant of
+the same run; the attention's slice length is the best at the chain's T, refused when there is none). B: the
 checkpoint key set (667 plain tensors, no `weight_g` / `weight_v` / parametrizations; the native loader runs no fold),
 per-op results on the checkpoint's own modules (stage 3, 96 channels), one AMPBlock1 step by step, and the vocoder
 chain per stage, free-running and teacher-forced, with the final PCM.

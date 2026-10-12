@@ -426,20 +426,24 @@ pub const Ops = struct {
     }
 
     /// The middle attention, math formulation (audio.cu k6a_sdpa_math), q, k, v, out [BH, T, D] contiguous, softmax
-    /// scale 1/sqrt(D) applied as sqrt of it on each operand; `scratch` holds BH * T * T floats. A comparison candidate
-    /// for the native SDPA, whose backend choice is not yet recorded: diagnostic only, never selected automatically.
-    pub fn midAttentionMath(o: *const Ops, s: cuda.Stream, use: Use, q: View, k: View, v: View, out: View, scratch: View) !void {
+    /// scale 1/sqrt(D) applied as sqrt of it on each operand; `scratch` holds BH * T * T floats (the probabilities after
+    /// the call). The scores sum d in slices of `kslice` (>= D: one chain); the softmax is torch's warp softmax, which
+    /// covers T <= 1024 only. A comparison candidate for the native SDPA, whose backend choice is not yet recorded:
+    /// diagnostic only, never selected automatically.
+    pub fn midAttentionMath(o: *const Ops, s: cuda.Stream, use: Use, q: View, k: View, v: View, out: View, scratch: View, kslice: u64) !void {
         try vae.admitOp(.mid_attention_sdpa, use);
         const bh = q.shape[0];
         const t = q.shape[1];
         const d = q.shape[2];
         for ([_]View{ q, k, v, out }) |x| try x.expect(.cuda, &.{ bh, t, d });
         try scratch.expect(.cuda, &.{ bh, t, t });
+        if (t > 1024 or kslice == 0) return error.InvalidArgument;
         const c: f32 = @floatCast(@sqrt(1.0 / @sqrt(@as(f64, @floatFromInt(d)))));
         var a: cuda.Args = .{};
         inline for (.{ q.addr(), k.addr(), v.addr(), out.addr(), scratch.addr() }) |p| a.add(p);
         a.add(i64of(t));
         a.add(i64of(d));
+        a.add(i64of(@min(kslice, d)));
         a.add(c);
         try go(o.sdpa_math_fn, s, .{ .x = @intCast(t), .y = @intCast(bh) }, block, &a);
     }
@@ -487,8 +491,10 @@ pub const DecodePolicy = struct {
     norm_residual: NormPolicy,
     norm_qkv: NormPolicy,
     /// The middle attention. Only the `k6a_sdpa_math` comparison candidate exists, and its contract refuses production;
-    /// strict FLASH is not accepted for head dimension 2048.
-    attention: enum { math_candidate },
+    /// strict FLASH is not accepted for head dimension 2048. `kslice`: the scores' split-K slice length (D3 probe dumps,
+    /// T 218: 172, cuBLASLt's split-K 12 under CUTLASS's slice rule, reproduces the native scores offline; T 436 is
+    /// unverified).
+    attention: union(enum) { math_candidate: struct { kslice: u64 } },
 };
 
 /// Decoder1D + VAE.unnormalize: `rows` the sampler's latent rows [B, T, 40] -> `mel` [B, 128, 2T], with the weights from
@@ -554,7 +560,7 @@ fn decodeWith(o: anytype, s: anytype, use: Use, d: vae.Decoder, w: *const vae.De
             const v = cv.at("k6a.decoder.v", sc.v, &.{ b, a.heads, t, hd });
             try o.qkvSplit(s, use, packed_qkv, q, k, v);
             switch (p.attention) {
-                .math_candidate => try o.midAttentionMath(
+                .math_candidate => |m| try o.midAttentionMath(
                     s,
                     use,
                     cv.at("k6a.decoder.q", sc.q, &.{ bh, t, hd }),
@@ -562,6 +568,7 @@ fn decodeWith(o: anytype, s: anytype, use: Use, d: vae.Decoder, w: *const vae.De
                     cv.at("k6a.decoder.v", sc.v, &.{ bh, t, hd }),
                     cv.at("k6a.decoder.attn_out", sc.out, &.{ bh, t, hd }),
                     cv.at("k6a.decoder.scores", sc.scores, &.{ bh, t, t }),
+                    m.kslice,
                 ),
             }
             const merged = cv.at("k6a.decoder.act1", sc.act[1], &.{ b, a.c, t });
@@ -790,7 +797,7 @@ const Recorder = struct {
         try r.write(k);
         try r.write(v);
     }
-    fn midAttentionMath(r: *Recorder, _: void, use: Use, q: View, k: View, v: View, out: View, scores: View) !void {
+    fn midAttentionMath(r: *Recorder, _: void, use: Use, q: View, k: View, v: View, out: View, scores: View, _: u64) !void {
         try r.read(k);
         try r.read(v);
         try r.write(scores);
@@ -820,7 +827,7 @@ test "decode: the native operator order over the scratch, each input the tensor 
     w.data_mean = testView("mean", 101 << 40, &.{vae.mel_channels});
     var r: Recorder = .{ .scratch_base = 200 << 40 };
     const scratch = testView("scratch", r.scratch_base, &.{d.scratch().floats});
-    const policy: DecodePolicy = .{ .acc = .fma, .unscale = .reciprocal, .silu = .true_div, .residual = .true_div, .norm_residual = norm_policy, .norm_qkv = norm_policy, .attention = .math_candidate };
+    const policy: DecodePolicy = .{ .acc = .fma, .unscale = .reciprocal, .silu = .true_div, .residual = .true_div, .norm_residual = norm_policy, .norm_qkv = norm_policy, .attention = .{ .math_candidate = .{ .kslice = 172 } } };
     const mel = testView("mel", 202 << 40, &d.melShape());
     try decodeWith(&r, {}, .diagnostic, d, &w, testView("rows", 201 << 40, &d.latentRowsShape()), scratch, mel, policy);
 
