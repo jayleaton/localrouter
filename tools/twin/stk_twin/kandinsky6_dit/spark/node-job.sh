@@ -23,11 +23,11 @@
 #               readback == set and cap <= budget (budget.py; STK_K6_TORCH_BUDGET_BYTES, records in <step>/caps).
 #               After the step, every record is checked, and there must be at least one per CUDA process.
 #           (b) non-allocator overhead (CUDA context, module images, cuBLAS / cuDNN state, host python): not yet
-#               measured for this kit, so a conservative allowance: CUDA_OVERHEAD_GIB 6 per CUDA process (2 x an
-#               estimated 3 GiB unmeasured part) and HOST_PROC_GIB 4 per host-only process (2 x 1.5, raised to the
-#               4 GiB minimum), plus JOB_SHELL_GIB 1 for this script, its guard and tar. The kit's code makes no raw
-#               CUDA allocation (fatbins are loaded into torch's context and launched on torch tensors), so the raw
-#               allocation ledger is empty (test_policy.py checks the sources for raw allocation calls).
+#               measured for this exact job, so every process counted gets the owner's unmeasured minimum, 4 GiB with
+#               2x margin = 8 GiB: CUDA_OVERHEAD_GIB 8 per CUDA process, HOST_PROC_GIB 8 per host-only process and
+#               JOB_SHELL_GIB 8 for this script, its guard, tar and the supervisor. The job's processes make no native
+#               allocation outside torch (fatbins are loaded into torch's context and launched on torch tensors), so
+#               the raw allocation ledger is empty (test_policy.py lists every native allocation call site).
 #               step budget = cuda_procs x (torch + CUDA_OVERHEAD_GIB) + host_procs x HOST_PROC_GIB + JOB_SHELL_GIB.
 #           (c) host guard: a step starts only if MemAvailable >= its budget + FLOOR_GIB (12, never lower). Steps
 #               run one at a time, so that is the sum of the budgets running at once. supervise.py runs each step in
@@ -103,9 +103,9 @@ for m in $MODES; do [[ " tf32_rna tf32_truncate fp32 " == *" $m "* ]] || die "MO
 
 # contract constants (not overridable)
 CG_MAX_GIB=96          # the job's cgroup memory.max must be at most this: host accounting and refusal, not a GPU bound
-CUDA_OVERHEAD_GIB=6    # policy (b): per CUDA process, unmeasured for this kit: 2 x an estimated 3 GiB (>= 4 GiB)
-HOST_PROC_GIB=4        # policy (b): per host-only process (gate's parent): 2 x an estimated 1.5 GiB, raised to 4
-JOB_SHELL_GIB=1        # this script, its guard, tar and the supervisor
+CUDA_OVERHEAD_GIB=8    # policy (b), unmeasured for this job: 2 x the 4 GiB minimum, per CUDA process
+HOST_PROC_GIB=8        # the same, per host-only process (gate's parent)
+JOB_SHELL_GIB=8        # the same, for this script, its guard, tar and the supervisor
 POLL_S=0.1             # policy (c): supervise.py samples MemAvailable this often ...
 MAX_GAP_S=0.5          # ... and kills the step if two samples are further apart than this
 DISK_GB=200

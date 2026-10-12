@@ -268,8 +268,9 @@ class NodeJob(unittest.TestCase):
         for job in ("smoke", "twin", "ops", "blocks"):
             rows, c = self.budgets(job)
             self.assertGreaterEqual(int(c["floor_gib"]), 12)
-            self.assertGreaterEqual(int(c["cuda_overhead_gib"]), 4)
-            self.assertGreaterEqual(int(c["host_proc_gib"]), 4)
+            # (b) unmeasured for this job: at least the 4 GiB minimum with 2x margin, for every process counted
+            for k in ("cuda_overhead_gib", "host_proc_gib", "job_shell_gib"):
+                self.assertGreaterEqual(int(c[k]), 8, k)
             self.assertLessEqual(float(c["poll_s"]), 0.5)
             self.assertLessEqual(float(c["max_gap_s"]), 0.5)
             self.assertEqual(rows[0]["step"], "env")
@@ -359,25 +360,86 @@ class NodeJob(unittest.TestCase):
                     self.assertTrue(reasons["local_reasons"][0].startswith(local), reasons["local_reasons"])
 
 
-RAW_ALLOC = re.compile(r"\b(cuMemAlloc\w*|cuMemCreate|cuMemHostAlloc|cuMemAllocManaged|cudaMalloc\w*|cudaHostAlloc|"
-                       r"cuMemPoolCreate|cudaMemPoolCreate)\b")
-# Raw CUDA allocations outside torch, with their per-allocation ledger entries (owner policy (b)): none.
+# Every native allocation entry point the owner ruling names (cuMemAlloc*, cuMemHostAlloc*, cudaMalloc*, cuMemCreate),
+# plus the other pinned-host / pool / registration entry points.
+RAW_ALLOC = re.compile(r"\b(cuMemAlloc\w*|cuMemHostAlloc\w*|cudaMalloc\w*|cuMemCreate\w*|cudaHostAlloc\w*|"
+                       r"cuMemHostRegister\w*|cudaHostRegister\w*|cuMemPoolCreate\w*|cudaMemPoolCreate\w*)\b")
+# Native allocations outside torch in the job's processes, with their per-allocation ledger entries (owner policy (b)):
+# none. torch's own CUDA allocations go through its caching allocator (capped by (a)); the CUDA context and module
+# images are the (b) overhead allowance.
 RAW_ALLOCATION_LEDGER = {}
+# The driver symbols kernels.py binds (the only native code of the twin's processes): module load and launch only.
+DRIVER_SYMBOLS = {"cuCtxGetCurrent", "cuCtxSetCurrent", "cuDeviceGet", "cuDevicePrimaryCtxRetain", "cuFuncSetAttribute",
+                  "cuGetErrorString", "cuInit", "cuLaunchKernel", "cuModuleGetFunction", "cuModuleLoadData",
+                  "cuModuleUnload"}
+# What PR #5's Zig engine uses of TensorFold's cuda module: no DeviceBuffer / HostBuffer / Carveout (the only TensorFold
+# paths that allocate); the pipeline owns every buffer and the engine borrows them.
+ZIG_CUDA_USES = {"Driver", "Error", "Function", "Module", "Stream", "launch"}
+# Every mention in TensorFold v1.0.7 (K6_TF_DIR = its root): the calls are reached only through DeviceBuffer, HostBuffer
+# and Carveout, which PR #5's engine never uses.
+TF_CALL_SITES = {"zig/src/cuda/memory.zig:61": "call, DeviceBuffer.alloc (cuMemAlloc_v2)",
+                 "zig/src/cuda/memory.zig:175": "call, HostBuffer.alloc / allocMapped (cuMemHostAlloc)",
+                 "zig/src/cuda/carveout.zig:128": "call, Carveout (cuMemHostRegister_v2)",
+                 "zig/src/cuda/carveout.zig:130": "call, Carveout (cuMemHostRegister_v2)",
+                 "zig/src/cuda/carveout.zig:16": "comment (alignment constant)",
+                 "zig/src/cuda/abi.zig:157": "declaration, driver table", "zig/src/cuda/abi.zig:159": "declaration, driver table",
+                 "zig/src/cuda/abi.zig:162": "declaration, driver table"}
+
+
+def call_sites(root, files):
+    found = {}
+    for p in files:
+        for n, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+            if RAW_ALLOC.search(line) and not line.lstrip().startswith(("//", "#")):
+                found[f"{p.relative_to(root)}:{n}"] = line.strip()
+    return found
 
 
 class RawAllocationLedger(unittest.TestCase):
-    """(b): every device buffer of the job's code paths is a torch tensor; a raw allocation needs a ledger entry."""
+    """(b): every native allocation call site of every binary of the job, against the (empty) ledger."""
 
-    def test_sources_match_ledger(self):
-        files = [p for p in PKG.rglob("*.py") if not p.name.startswith("test_")]
-        files += list((REPO / "src" / "engines" / "kandinsky6").rglob("*.zig"))
-        self.assertTrue(any(p.name == "kernels.py" for p in files))
-        found = {}
-        for p in files:
-            for n, line in enumerate(p.read_text().splitlines(), 1):
-                if RAW_ALLOC.search(line):
-                    found[f"{p.relative_to(REPO)}:{n}"] = line.strip()
-        self.assertEqual(found, RAW_ALLOCATION_LEDGER)
+    def binaries(self):
+        k6 = REPO / "kernels" / "cuda" / "kandinsky6"
+        return {
+            "twin python processes": [p for p in PKG.rglob("*.py") if not p.name.startswith("test_")],
+            "fatbins (device code)": [p for p in k6.rglob("*") if p.suffix in (".cu", ".cuh", ".zig")],
+            "PR5 Zig engine": list((REPO / "src" / "engines" / "kandinsky6").rglob("*.zig")),
+        }
+
+    def test_every_binary_matches_ledger(self):
+        ledger = {}
+        for name, files in self.binaries().items():
+            self.assertTrue(files, name)
+            ledger[name] = {"files": len(files), "call_sites": call_sites(REPO, files)}
+            self.assertEqual(ledger[name]["call_sites"], RAW_ALLOCATION_LEDGER, name)
+        self.assertIn("kernels.py", {p.name for p in self.binaries()["twin python processes"]})
+        out = os.environ.get("K6_LEDGER_OUT")
+        if out:
+            with open(out, "w") as f:
+                json.dump({"pattern": RAW_ALLOC.pattern, "ledger": RAW_ALLOCATION_LEDGER, "binaries": ledger,
+                           "driver_symbols": sorted(DRIVER_SYMBOLS), "zig_cuda_uses": sorted(ZIG_CUDA_USES),
+                           "tensorfold_call_sites_unused": TF_CALL_SITES}, f, indent=1, sort_keys=True)
+
+    def test_pattern_catches_every_family(self):
+        for name in ("cuMemAlloc_v2", "cuMemAllocManaged", "cuMemAllocHost", "cuMemAllocAsync", "cuMemHostAlloc",
+                     "cudaMalloc", "cudaMallocHost", "cudaMallocManaged", "cudaMallocAsync", "cuMemCreate",
+                     "cudaHostAlloc", "cuMemHostRegister_v2", "cudaHostRegister", "cuMemPoolCreate"):
+            self.assertRegex(f"x = lib.{name}(p, n)", RAW_ALLOC, name)
+
+    def test_twin_binds_only_load_and_launch(self):
+        src = (PKG / "kernels.py").read_text()
+        self.assertEqual(set(re.findall(r'"(cu[A-Z]\w+)"', src)), DRIVER_SYMBOLS)
+
+    def test_zig_engine_borrows_buffers(self):
+        uses = set()
+        for p in self.binaries()["PR5 Zig engine"]:
+            uses |= set(re.findall(r"\bcuda\.([A-Za-z_]+)", p.read_text()))
+        self.assertEqual(uses, ZIG_CUDA_USES)
+
+    @unittest.skipUnless(os.environ.get("K6_TF_DIR"), "K6_TF_DIR (TensorFold v1.0.7 root) not set")
+    def test_tensorfold_call_sites_are_the_known_unused_ones(self):
+        root = Path(os.environ["K6_TF_DIR"])
+        self.assertEqual(set(call_sites(root, list((root / "zig").rglob("*.zig")))), set(TF_CALL_SITES))
 
 
 if __name__ == "__main__":

@@ -23,10 +23,10 @@ and the step's memory admission (see Memory) are checked before each step starts
 
 | job | steps (one supervised process tree each) | purpose | est. minutes | max min | Torch GiB per CUDA process (step budget GiB) | output |
 | --- | --- | --- | --- | --- | --- | --- |
-| `smoke` | `env`, `import`, `kernels`, `test_ops_small` | checks that the twin and pinned upstream import from the kit only, the three fatbins load and match the MANIFEST digests, and `test_ops --small --fp32-linear tf32_rna` runs | 6 | 3 + 3 + 3 + 15 | 1, 1, 1, 4 (8, 8, 8, 11) | < 10 MB |
-| `twin` | `env`, `test_ops_{tf32_rna,tf32_truncate,fp32}` | `test_ops` at the checkpoint's widths (model_dim 4096, ff 16384, 2 fused + 1 text block, 231 visual tokens): the bit-exact assertions plus the faithfulness receipt for each Fp32Linear form | 1 + 3 x 8 = 25 | 3 + 3 x 20 | 16 (23) | < 30 MB |
-| `ops` | `env`, `gate_ops_tf32_rna`, `gate_fp32_{tf32_truncate,fp32}` | every `gate --phase ops` site once (37 sites plus the RoPE / time-freq tables), then only the 12 `fp32/*` sites for the other two Fp32Linear forms (no other ops site depends on the form) | 1 + 25 + 2 x 5 = 36 | 3 + 40 + 2 x 10 | 16 (27) | < 7 GB budget (expected far less) |
-| `blocks` | `env`, `gate_blocks_{tf32_rna,tf32_truncate,fp32}` | `gate --phase blocks` (time chain, both text blocks, embeddings, one fused block at 50,220 tokens) for each form | 1 + 3 x 10 = 31 | 3 + 3 x 20 | 28 (39) | < 30 GB budget (expected far less) |
+| `smoke` | `env`, `import`, `kernels`, `test_ops_small` | checks that the twin and pinned upstream import from the kit only, the three fatbins load and match the MANIFEST digests, and `test_ops --small --fp32-linear tf32_rna` runs | 6 | 3 + 3 + 3 + 15 | 1, 1, 1, 4 (17, 17, 17, 20) | < 10 MB |
+| `twin` | `env`, `test_ops_{tf32_rna,tf32_truncate,fp32}` | `test_ops` at the checkpoint's widths (model_dim 4096, ff 16384, 2 fused + 1 text block, 231 visual tokens): the bit-exact assertions plus the faithfulness receipt for each Fp32Linear form | 1 + 3 x 8 = 25 | 3 + 3 x 20 | 16 (32) | < 30 MB |
+| `ops` | `env`, `gate_ops_tf32_rna`, `gate_fp32_{tf32_truncate,fp32}` | every `gate --phase ops` site once (37 sites plus the RoPE / time-freq tables), then only the 12 `fp32/*` sites for the other two Fp32Linear forms (no other ops site depends on the form) | 1 + 25 + 2 x 5 = 36 | 3 + 40 + 2 x 10 | 16 (40) | < 7 GB budget (expected far less) |
+| `blocks` | `env`, `gate_blocks_{tf32_rna,tf32_truncate,fp32}` | `gate --phase blocks` (time chain, both text blocks, embeddings, one fused block at 50,220 tokens) for each form | 1 + 3 x 10 = 31 | 3 + 3 x 20 | 28 (52) | < 30 GB budget (expected far less) |
 
 `bash node-job.sh <job> --budgets` prints the exact table: each step's Torch budget, process counts, budget and
 admission level.
@@ -85,12 +85,21 @@ bounds anything here (`nvidia-smi` reports GB10 memory as `[N/A]`). The jobs app
   one per CUDA process. gate.py's parent is budgeted as host-only and refuses if CUDA ever starts in it. Preflight
   opens no CUDA context.
 - **(b) Non-allocator overhead.** The CUDA context, module images, cuBLAS / cuDNN state and host Python have not been
-  measured for this kit yet. Until they are, the allowance is 6 GiB per CUDA process (2 x an estimated 3 GiB) and
-  4 GiB per host-only process (2 x 1.5 GiB, raised to the 4 GiB minimum), plus 1 GiB for the job script.
-  - Raw CUDA allocation ledger: empty. The fatbins are loaded into torch's primary context with `cuModuleLoadData` and
-    launched with `cuLaunchKernel` on torch tensors; no code path calls `cuMemAlloc` / `cudaMalloc` or a relative.
-    `test_policy.py` scans the sources and fails on any such call without a ledger entry.
-  - step budget = CUDA processes x (Torch + 6) + host processes x 4 + 1.
+  measured for this exact job yet. Until they are, every process the budget counts gets the owner's unmeasured minimum
+  with its margin, 2 x 4 GiB = 8 GiB: per CUDA process, per host-only process (gate.py's parent), and for the job
+  script with its guard, tar and supervisor.
+  - Native allocation ledger: empty. `test_policy.py` lists every call site of `cuMemAlloc*`, `cuMemHostAlloc*`,
+    `cudaMalloc*`, `cuMemCreate*` and the pinned-host / pool / registration entry points in each binary of the job,
+    and fails on any without a ledger entry:
+    - the twin's Python processes: none. `kernels.py` binds exactly 11 driver symbols (context, `cuModuleLoadData`,
+      `cuLaunchKernel` and the like), loads the fatbins into torch's primary context and launches them on torch
+      tensors;
+    - the fatbins: device code only;
+    - PR #5's Zig engine: none. It uses only `Driver`, `Module`, `Function`, `Stream` and `launch` from TensorFold's
+      `cuda` module and borrows every buffer from the pipeline. TensorFold v1.0.7's own call sites (`memory.zig` 61
+      and 175, `carveout.zig` 128 and 130) sit behind `DeviceBuffer`, `HostBuffer` and `Carveout`, which the engine
+      never uses.
+  - step budget = CUDA processes x (Torch + 8) + host processes x 8 + 8.
 - **(c) Host guard.** A step starts only if MemAvailable >= its budget + the 12 GiB floor (`FLOOR_GIB`, never lower).
   Steps run one at a time, so this is the sum of the budgets alive at once. `supervise.py` runs each step in its own
   session as its child subreaper. It samples MemAvailable every 0.1 s and SIGKILLs the whole process tree at once
