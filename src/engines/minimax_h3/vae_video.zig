@@ -137,8 +137,8 @@ pub fn openCheckpoint(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Pac
     var p: Pack = .{ .arena = .init(gpa), .file = undefined, .data_start = 0, .data_len = 0 };
     errdefer p.arena.deinit();
     const a = p.arena.allocator();
-    p.file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    errdefer p.file.close(io);
+    try p.openData(io, path);
+    errdefer p.closeData(io);
     var len_buf: [8]u8 = undefined;
     if (try p.file.readPositionalAll(io, &len_buf, 0) != 8) return error.BadPack;
     const hlen = std.mem.readInt(u64, &len_buf, .little);
