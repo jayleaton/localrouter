@@ -12,8 +12,10 @@
 #      DOCKERFILE (default docker/Dockerfile), LR_ALLOW_DIRTY=1 (a dev build; the receipt records "dirty": true),
 #      SRC (the checkout to build; default this one).
 # The build runs in a builder of its own (buildx docker-container driver) whose container is capped: LR_BUILDER_MEMORY
-# (default 7g, no swap beyond it) and LR_BUILDER_CPUS (a cpuset, default 0-3). A build that needs more is OOM-killed
-# and fails; it cannot push the machine into swap. The receipt records the cap, the builder's actual memory.peak and
+# (default 7g, no swap beyond it) and LR_BUILDER_CPUS (a cpuset, default 0-3, also its CPU quota: as many CPUs as the
+# set names). A build that needs more is OOM-killed and fails; it cannot push the machine into swap.
+# LR_BUILDER_NETWORK=none builds with no network at all (the builder container's and every RUN step's): the Dockerfile
+# must then fetch nothing (a RUN that downloads fails the build). Default: Docker's default network. The receipt records the cap, the builder's actual memory.peak and
 # its OOM kills, and the builder is removed afterwards. Such a builder cannot see the Docker daemon's images, so each
 # entry IMAGE[=PLATFORM] of LR_BASE_IMAGES (already pulled; PLATFORM defaults to this machine's, the one a build stage
 # on $BUILDPLATFORM uses, e.g. "nvcr.io/nvidia/pytorch:26.07-py3") is exported once as an OCI layout of that platform
@@ -49,6 +51,10 @@ mkdir -p "$OUT"
 base=$OUT/localrouter-${commit:0:12}-arm64
 MEM=${LR_BUILDER_MEMORY:-7g}
 CPUS=${LR_BUILDER_CPUS:-0-3}
+NET=${LR_BUILDER_NETWORK:-}
+ncpus=$(python3 -I -c 'import sys
+n = sum(int(b) - int(a) + 1 for a, _, b in (r.partition("-") if "-" in r else (r, "-", r) for r in sys.argv[1].split(",")))
+print(n)' "$CPUS") || die "LR_BUILDER_CPUS $CPUS is not a cpuset such as 0-3 or 0,2,4-7"
 OCI=${LR_OCI_CACHE:-$HOME/.cache/localrouter-oci}
 host_platform=linux/$(docker version -f '{{.Server.Arch}}')
 avail() { df -B1 --output=avail "$1" | tail -1 | tr -d ' '; }
@@ -102,12 +108,13 @@ print(m[0]["digest"])' "$dir/index.json" "$platform") || die "the OCI layout of 
 done
 builder=lr-build-$$
 docker buildx create --name "$builder" --driver docker-container \
-    --driver-opt "memory=$MEM,memory-swap=$MEM,cpuset-cpus=$CPUS" > /dev/null
+    --driver-opt "memory=$MEM,memory-swap=$MEM,cpuset-cpus=$CPUS,cpu-period=100000,cpu-quota=$((ncpus * 100000))${NET:+,network=$NET}" > /dev/null
 docker buildx inspect --bootstrap "$builder" > /dev/null
 cid=$(docker ps -q --no-trunc -f "name=buildx_buildkit_${builder}0")
 cg=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "*$cid*" 2> /dev/null | head -1)
-echo "[build-image] $tag from $commit${BUILD_ARGS:+ ($BUILD_ARGS)}; builder capped at $MEM, cpus $CPUS"
+echo "[build-image] $tag from $commit${BUILD_ARGS:+ ($BUILD_ARGS)}; builder capped at $MEM, cpus $CPUS${NET:+, network $NET}"
 rc=0
+[[ -z $NET ]] || args+=(--network "$NET")
 docker buildx build --builder "$builder" -f "$DOCKERFILE" --platform linux/arm64 "${args[@]}" -t "$tag" --load "$REPO" || rc=$?
 peak=$(cat "$cg/memory.peak" 2> /dev/null || echo null)
 ooms=$(sed -n 's/^oom_kill //p' "$cg/memory.events" 2> /dev/null || echo null)
@@ -124,9 +131,9 @@ disk_peak=$(( start_free - $(cat "$OUT/.disk-min.$$" 2> /dev/null || echo "$star
 oci_sizes=""
 for d in "${dirs[@]}"; do oci_sizes+="$(basename "$d")=$(du -sb "$d" | cut -f1) "; done
 python3 -I - "$base.json" "$commit" "$dirty" "$tag" "$id" "$base.tar.zst" "$sha" "$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)" \
-    "${BUILD_ARGS:-}" "$MEM" "$CPUS" "$peak" "$ooms" "${LR_BASE_IMAGES:-}" "$disk_peak" "$oci_sizes" "$digests" <<'PY'
+    "${BUILD_ARGS:-}" "$MEM" "$CPUS" "${NET:-default}" "$peak" "$ooms" "${LR_BASE_IMAGES:-}" "$disk_peak" "$oci_sizes" "$digests" <<'PY'
 import json, os, sys
-out, commit, dirty, tag, image_id, path, sha, dockerfile, build_args, mem, cpus, peak, ooms, bases, disk_peak, oci, digests = sys.argv[1:]
+out, commit, dirty, tag, image_id, path, sha, dockerfile, build_args, mem, cpus, net, peak, ooms, bases, disk_peak, oci, digests = sys.argv[1:]
 digests = json.loads(digests)
 num = lambda v: None if v == "null" else int(v)
 # image_id is what this build machine's daemon calls the image; a daemon names it by its manifest's or its config's digest
@@ -134,7 +141,7 @@ json.dump({"commit": commit, "dirty": dirty == "true", "tag": tag, "image_id": i
            "manifest_digest": digests["manifest_digest"], "config_digest": digests["config_digest"],
            "file": os.path.basename(path), "file_bytes": os.path.getsize(path), "file_sha256": sha,
            "dockerfile_sha256": dockerfile, "build_args": build_args.split(), "base_images_from_local_store": bases.split(),
-           "builder": {"memory_max": mem, "cpuset": cpus, "memory_peak_bytes": num(peak), "oom_kills": num(ooms)},
+           "builder": {"memory_max": mem, "cpuset": cpus, "network": net, "memory_peak_bytes": num(peak), "oom_kills": num(ooms)},
            "disk": {"peak_free_space_drop_bytes": int(disk_peak), "free_space_drop_includes_other_writers": True, "oci_layout_bytes": {k: int(v) for k, v in (x.split("=") for x in oci.split())}}},
           open(out, "w"), indent=1)
 PY

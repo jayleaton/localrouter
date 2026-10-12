@@ -12,6 +12,7 @@
 #   LR_IMAGE    the image, ideally by digest (docker mode; default localrouter:dev)
 #   LR_NAME     the container name (docker mode; default localrouter)
 #   LR_DOCKER_GPUS  docker run --gpus (docker mode; default all; "none" runs without a GPU, e.g. a test pattern check)
+#   LR_DOCKER_CPUS, LR_DOCKER_MEMORY  docker run --cpus and --memory (with no swap beyond it); unset: no cap
 #   LR_MODELS   the weights directory, mounted read-only at /models (docker mode)
 #               ($LR_HOME/files, when present, is mounted read-only at /etc/localrouter/files: files options name)
 #   LR_CONFIG   the tools.json to serve (default $LR_HOME/tools.json)
@@ -94,8 +95,11 @@ cmd_start() {
         [[ ! -d $LR_HOME/files ]] || files=(-v "$LR_HOME/files:/etc/localrouter/files:ro")
         local gpus=(--gpus "${LR_DOCKER_GPUS:-all}")
         [[ ${LR_DOCKER_GPUS:-all} != none ]] || gpus=()
+        local caps=()
+        [[ -z ${LR_DOCKER_CPUS:-} ]] || caps+=(--cpus "$LR_DOCKER_CPUS")
+        [[ -z ${LR_DOCKER_MEMORY:-} ]] || caps+=(--memory "$LR_DOCKER_MEMORY" --memory-swap "$LR_DOCKER_MEMORY")
         # --init: the daemon is not PID 1, so a process orphaned by a killed worker (its ffmpeg) is reaped, not left a zombie
-        docker run -d --init --name "$LR_NAME" "${gpus[@]}" --restart no -p "$publish:$LR_PORT:8190" \
+        docker run -d --init --name "$LR_NAME" "${gpus[@]}" "${caps[@]}" --restart no -p "$publish:$LR_PORT:8190" \
             -v "$LR_MODELS:/models:ro" -v "$LR_HOME/data:/data" -v "$LR_CONFIG:/etc/localrouter/tools.json:ro" "${files[@]}" \
             "$LR_IMAGE" serve --host all --config /etc/localrouter/tools.json --data /data > /dev/null
     else
