@@ -1,0 +1,642 @@
+{
+ "kitten": {
+  "repo": "KittenML/kitten-tts-2",
+  "revision": "f2eee74f4467855ad58fe16f1fb7b7df473263fd",
+  "dir": "kitten-tts-2",
+  "license": "Stellon Labs Community License (LICENSE.md); speaker/ is MIT (speaker/LICENSE)",
+  "common": [
+   "LICENSE.md",
+   "README.md",
+   "config.json",
+   "lm/added_tokens.json",
+   "lm/config.json",
+   "lm/generation_config.json",
+   "lm/merges.txt",
+   "lm/special_tokens_map.json",
+   "lm/tokenizer.json",
+   "lm/tokenizer_config.json",
+   "lm/vocab.json",
+   "speaker/LICENSE",
+   "speaker/model.safetensors",
+   "voices/03_radio_dj_smooth_male.npz",
+   "voices/03_radio_dj_smooth_male.wav",
+   "voices/06_elderly_professor_wise_male.npz",
+   "voices/06_elderly_professor_wise_male.wav",
+   "voices/11_stern_military_officer_female.npz",
+   "voices/11_stern_military_officer_female.wav",
+   "voices/17_dramatic_stage_actor_male.npz",
+   "voices/17_dramatic_stage_actor_male.wav",
+   "voices/18_warm_storyteller_cozy_female.npz",
+   "voices/18_warm_storyteller_cozy_female.wav",
+   "voices/21_warm_grandfather_male.npz",
+   "voices/21_warm_grandfather_male.wav",
+   "voices/22_elderly_grandmother_soft_female.npz",
+   "voices/22_elderly_grandmother_soft_female.wav",
+   "voices/24_gentle_librarian_male.npz",
+   "voices/24_gentle_librarian_male.wav",
+   "voices/29_soothing_nurse_female.npz",
+   "voices/29_soothing_nurse_female.wav",
+   "voices/42_distinguished_elderly_diplomat_male.npz",
+   "voices/42_distinguished_elderly_diplomat_male.wav",
+   "voices/43_hushed_museum_guide_female.npz",
+   "voices/43_hushed_museum_guide_female.wav",
+   "voices/46_grizzled_war_veteran_gravelly_male.npz",
+   "voices/46_grizzled_war_veteran_gravelly_male.wav",
+   "voices/48_gentle_yoga_instructor_female.npz",
+   "voices/48_gentle_yoga_instructor_female.wav",
+   "voices/54_dreamy_poet_soft_male.npz",
+   "voices/54_dreamy_poet_soft_male.wav",
+   "voices/55_somber_historian_female.npz",
+   "voices/55_somber_historian_female.wav",
+   "voices/63_rumbling_blues_musician_male.npz",
+   "voices/63_rumbling_blues_musician_male.wav",
+   "voices/73_hushed_museum_guide_male.npz",
+   "voices/73_hushed_museum_guide_male.wav",
+   "voices/76_weathered_radio_journalist_female.npz",
+   "voices/76_weathered_radio_journalist_female.wav",
+   "voices/79_hushed_conspirator_female.npz",
+   "voices/79_hushed_conspirator_female.wav",
+   "voices/80_regal_narrator_female.npz",
+   "voices/80_regal_narrator_female.wav",
+   "voices/ar_arabic.npz",
+   "voices/ar_arabic.wav",
+   "voices/controlled_fury_older_male.npz",
+   "voices/controlled_fury_older_male.wav",
+   "voices/controlled_fury_young_female.npz",
+   "voices/controlled_fury_young_female.wav",
+   "voices/de_german.npz",
+   "voices/de_german.wav",
+   "voices/es_spanish.npz",
+   "voices/es_spanish.wav",
+   "voices/exhausted_mechanic_male.npz",
+   "voices/exhausted_mechanic_male.wav",
+   "voices/fr_french.npz",
+   "voices/fr_french.wav",
+   "voices/grieving_young_male.npz",
+   "voices/grieving_young_male.wav",
+   "voices/hi_hindi.npz",
+   "voices/hi_hindi.wav",
+   "voices/hushed_young_female.npz",
+   "voices/hushed_young_female.wav",
+   "voices/it_italian.npz",
+   "voices/it_italian.wav",
+   "voices/joyful_irish_female.npz",
+   "voices/joyful_irish_female.wav",
+   "voices/kitten_v08_voice_2_female.npz",
+   "voices/kitten_v08_voice_2_female.wav",
+   "voices/kitten_v08_voice_2_male.npz",
+   "voices/kitten_v08_voice_2_male.wav",
+   "voices/kitten_v08_voice_3_female.npz",
+   "voices/kitten_v08_voice_3_female.wav",
+   "voices/kitten_v08_voice_3_male.npz",
+   "voices/kitten_v08_voice_3_male.wav",
+   "voices/kitten_v08_voice_4_female.npz",
+   "voices/kitten_v08_voice_4_female.wav",
+   "voices/kitten_v08_voice_4_male.npz",
+   "voices/kitten_v08_voice_4_male.wav",
+   "voices/kitten_v08_voice_5_female.npz",
+   "voices/kitten_v08_voice_5_female.wav",
+   "voices/kitten_v08_voice_5_male.npz",
+   "voices/kitten_v08_voice_5_male.wav",
+   "voices/playful_professional_female.npz",
+   "voices/playful_professional_female.wav",
+   "voices/playful_smooth_young_male.npz",
+   "voices/playful_smooth_young_male.wav",
+   "voices/pt_portuguese.npz",
+   "voices/pt_portuguese.wav",
+   "voices/ru_russian.npz",
+   "voices/ru_russian.wav",
+   "voices/southern_elderly_female.npz",
+   "voices/southern_elderly_female.wav",
+   "voices/tender_older_male.npz",
+   "voices/tender_older_male.wav",
+   "voices/voices.json",
+   "voices/zh_chinese.npz",
+   "voices/zh_chinese.wav"
+  ],
+  "lm": {
+   "packed": [
+    "lm/model-ternary.safetensors"
+   ],
+   "full": [
+    "lm/model.safetensors"
+   ],
+   "emb4": [
+    "lm/model-tl2-emb4.safetensors"
+   ]
+  },
+  "decoders": {
+   "default": [],
+   "student_w4": [
+    "decoders/student_w4.pt"
+   ]
+  }
+ },
+ "s3gen": {
+  "repo": "ResembleAI/chatterbox-turbo",
+  "revision": "749d1c1a46eb10492095d68fbcf55691ccf137cd",
+  "dir": "chatterbox-turbo",
+  "file": "s3gen_meanflow.safetensors",
+  "extra": [
+   "README.md"
+  ],
+  "license": "MIT (model card)"
+ },
+ "runtime": {
+  "kittenml": "0.9.4",
+  "kittenml_wheel_sha256": "74b723552b707f3bc9f96fa204019a13b67b97265c41146033630c6b5a43388c",
+  "python": "3.12",
+  "torch": "2.11.0",
+  "torchaudio": "2.11.0"
+ },
+ "files": {
+  "kitten": {
+   "LICENSE.md": [
+    12478,
+    "f2429d9172b1e192102ab07552d7ca86c981f13598cbe3b51cc1fbd94604e1a3"
+   ],
+   "README.md": [
+    6563,
+    "ea6544e812300ebe75a4e2fd84cef0eac9d0cbf5b8681128e8e49d468f6e0f77"
+   ],
+   "config.json": [
+    2196,
+    "19dfbdd98697acefe35c8cfb2e36c1416f06ede378797b2ee9413c9c4b42fb21"
+   ],
+   "cpp/default/decoder.pt": [
+    534310697,
+    "c67c1a700358695c780c64417328b74f4d6a71f7363df7cdbbcda6133d6096ae"
+   ],
+   "cpp/default/voices.json": [
+    39235846,
+    "a2fbe5106d939f59b964e7780951dc402f89aceddd113b82e0539a5a2928c1ff"
+   ],
+   "cpp/model-tq2_1.gguf": [
+    1029076832,
+    "84f0a8b9986fbc01fbe6d4777703304d1cecc7b99e8c6fd2c607e0661e804d4c"
+   ],
+   "cpp/student_w4/decoder.pt": [
+    312339253,
+    "47ea803ad46a87f876c1b3b02f05e93dad15e4d2b58eafeb34884f52cdec0268"
+   ],
+   "cpp/student_w4/voices.json": [
+    16739255,
+    "2cd23287a80ff2ec558a5c4b90e65a2755ecd675bf72a40459afb16e3c0bd573"
+   ],
+   "cpp/student_w8/decoder.pt": [
+    312339253,
+    "b5839b2c0aa12e907727383a9443dcc3bbe6912f0a4fd24a076ee9bad4457e5f"
+   ],
+   "cpp/student_w8/voices.json": [
+    13531964,
+    "0a520b8e86830f8d4371db66f416a8ad491c14d6f2b1a1d4a41f704a4a7ab787"
+   ],
+   "decoders/student_w4.pt": [
+    38817934,
+    "7e585c64b6e0d220c155b0a8ff2d3c1446e1c7b2c59800c38a11dc5aaf270560"
+   ],
+   "lm/added_tokens.json": [
+    157239,
+    "f757d3b2e5381b23765a7177bb76afd6f44f3ac8e9eb585fc39333e4769001f3"
+   ],
+   "lm/config.json": [
+    1359,
+    "91378d01ae13755f130e3b714abfe57e8a48d15a88fc0d3a1414f30af76d3f2b"
+   ],
+   "lm/generation_config.json": [
+    214,
+    "d3e057bbca66b92f33a8bdc6a1301014e0e4ab69b3b3fd2e442d9fe0c69f3431"
+   ],
+   "lm/merges.txt": [
+    1671853,
+    "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+   ],
+   "lm/model-ternary.safetensors": [
+    954467780,
+    "8dd6cc318c16cbb177dd44d92521955d3abaa84a8910aae9ffb312c5ae920054"
+   ],
+   "lm/model-tl2-emb4.safetensors": [
+    492114467,
+    "2c64fa7e14782308cee386a4ab97934f4848e24afe2e4b5f8857283f09dcc8cf"
+   ],
+   "lm/model.safetensors": [
+    3469120704,
+    "5283cfe80ef17f6311d0d550fb96066bf02a98ec35c6c0aa41aafdc78d2beaa6"
+   ],
+   "lm/special_tokens_map.json": [
+    450,
+    "a67cddf2259d77b5021cfa9a5608e60779f19c4828567b2ae46604f23fc0c569"
+   ],
+   "lm/tokenizer.json": [
+    12649770,
+    "99644fcf19a9aff57b247b4e56fffe878c65d9c230d21a46caf9acf8f54d31d7"
+   ],
+   "lm/tokenizer_config.json": [
+    1166768,
+    "ce07c343b7bb1d9b822475beb46e39b3883706bfb5bbc3d080142ccd321beea3"
+   ],
+   "lm/vocab.json": [
+    2776833,
+    "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+   ],
+   "speaker/LICENSE": [
+    1061,
+    "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba"
+   ],
+   "speaker/model.safetensors": [
+    17418240,
+    "c435292860671aa96e94bd19fcea055241c8ef05548e1e441a659b2bfd79fad5"
+   ],
+   "voices/03_radio_dj_smooth_male.npz": [
+    3692,
+    "da3772dbee7b41748d142fffada9cf64237018f5cc4993c2094a39214f7a51e9"
+   ],
+   "voices/03_radio_dj_smooth_male.wav": [
+    531116,
+    "b697a2a9e0bd35fcf7e9d6a5fa11b2f9373be3ebd763cc46db441fe67ec41b9c"
+   ],
+   "voices/06_elderly_professor_wise_male.npz": [
+    3688,
+    "069ca100db5ccd472422dd29df6bf7328208db8bc744bd46d3c90961ab27dcc4"
+   ],
+   "voices/06_elderly_professor_wise_male.wav": [
+    529964,
+    "e38e5ca2c40e0d4d5e7b59d00334dc447f4809e09718f49b642ea706f740071d"
+   ],
+   "voices/11_stern_military_officer_female.npz": [
+    3692,
+    "9eea57c36ad15efb154fa5bdcd15504e943a14fee90bb86085386b33a996d183"
+   ],
+   "voices/11_stern_military_officer_female.wav": [
+    531116,
+    "ccb58b54dd3ad454fa5e85be9773659373681e124b0eb30b9d46633568918620"
+   ],
+   "voices/17_dramatic_stage_actor_male.npz": [
+    3692,
+    "fc1e441a8b6b940a328c6207b415d1e89b94ba64cc119531b00d93231d3055a2"
+   ],
+   "voices/17_dramatic_stage_actor_male.wav": [
+    531116,
+    "21eaf5823db802197df93107d586d6aeaedd5dd2b536c51ffb5b2f37c6a09689"
+   ],
+   "voices/18_warm_storyteller_cozy_female.npz": [
+    3692,
+    "4e660e6e8d4e31af50a3e241b410b84027271c3b91516f23c968f9e51067405a"
+   ],
+   "voices/18_warm_storyteller_cozy_female.wav": [
+    531116,
+    "32dc6c7067b8abaee14a1c6710dbd65765d9d7ea64eb5e33ce6be4372986f0ca"
+   ],
+   "voices/21_warm_grandfather_male.npz": [
+    3688,
+    "e9392a3ccb2e0b2c1c60abaa52bf95dc275724b5c8d6b579568be4f8ebee4439"
+   ],
+   "voices/21_warm_grandfather_male.wav": [
+    529964,
+    "1ca52bc6f1ab55ec4c3d492321753ee76b342402e77420e780722390c0cc8428"
+   ],
+   "voices/22_elderly_grandmother_soft_female.npz": [
+    3692,
+    "8e492a34d2d1329d524e3255929049eaeb62ba9d2605ce9e6147e004c8044dcc"
+   ],
+   "voices/22_elderly_grandmother_soft_female.wav": [
+    531116,
+    "3e1856dfe08e5e599e1f5e0639c7afc8ebd0fc1972fa53700d4b7eb0b11ffdbb"
+   ],
+   "voices/24_gentle_librarian_male.npz": [
+    3692,
+    "1a14d4925350564b594190adb4611127a10f5a7194f4bd63cd0b659c9571494d"
+   ],
+   "voices/24_gentle_librarian_male.wav": [
+    531116,
+    "1de81cc87e7ff5af2ba7792729a02936ae3eb3d0543a2231bf3c5882a5ab9a39"
+   ],
+   "voices/29_soothing_nurse_female.npz": [
+    3688,
+    "a929b252a2ee515bf86c1902bedf82cc497f3daf4d23359c257157d320a00f0f"
+   ],
+   "voices/29_soothing_nurse_female.wav": [
+    529964,
+    "a640d4678a16f7785720ca4d5fa6401e4b7f259a9cd173ff838ce4202731c627"
+   ],
+   "voices/42_distinguished_elderly_diplomat_male.npz": [
+    3688,
+    "8ec517dc22c04a2281fd08f03b7e5883bd69ef2d9513f8875470e4fd77c0c786"
+   ],
+   "voices/42_distinguished_elderly_diplomat_male.wav": [
+    529964,
+    "c1b8bfcaffb0ce30eb1543179f286d7e6e959d86a0318849bf215ea1f9b0f84d"
+   ],
+   "voices/43_hushed_museum_guide_female.npz": [
+    3692,
+    "9e7bc2dea4cc2995c6422b57f4a5dcbf3a94f222598ebcb33c7c4d2300361009"
+   ],
+   "voices/43_hushed_museum_guide_female.wav": [
+    531116,
+    "451fc5dad347c4645b7581f4efc9bc3d2a7014e327a2db42d8bc6a3d84071c21"
+   ],
+   "voices/46_grizzled_war_veteran_gravelly_male.npz": [
+    3688,
+    "6ed50bea1b19b13a9ee6ec638d7c294f51cdb4bb7c9135c00c409e9b071e4fd0"
+   ],
+   "voices/46_grizzled_war_veteran_gravelly_male.wav": [
+    529964,
+    "978307fa34aa85b9160ad66852d5f240c46089a9cda864529e7e52a6dc2f771d"
+   ],
+   "voices/48_gentle_yoga_instructor_female.npz": [
+    3692,
+    "ed0d5ea2473addece1e26458985e3a028c29eb4332f7c9bcf6eae4082e531262"
+   ],
+   "voices/48_gentle_yoga_instructor_female.wav": [
+    531116,
+    "e07840cf43dbce4c0b0bcafa758a96a5850ee05faae22f2fe00971b2167950a3"
+   ],
+   "voices/54_dreamy_poet_soft_male.npz": [
+    3692,
+    "fbc8ec0653f35dd3df3f0d795dfa5616fb234e56f1ae93d020340a956eaf983b"
+   ],
+   "voices/54_dreamy_poet_soft_male.wav": [
+    531116,
+    "23680e1368cc7d126b2822c0a31c966ebe9c26327fc3d68e633b0c1390b48f40"
+   ],
+   "voices/55_somber_historian_female.npz": [
+    3692,
+    "69e546eceb6add67418b948e381dc36d4054be99d7fd651b7c1f988e6b428690"
+   ],
+   "voices/55_somber_historian_female.wav": [
+    531116,
+    "dcc9f4d7c82d7dc1ee26300581c539469df498bf7dae9922f2b707a3cf98755e"
+   ],
+   "voices/63_rumbling_blues_musician_male.npz": [
+    3692,
+    "bb149fe55bc2d6df4d49048f330d6d11b78c5d12e26b16294c89efcdd5d32e36"
+   ],
+   "voices/63_rumbling_blues_musician_male.wav": [
+    531116,
+    "dbefe6af9c76f7350b1c1f2851114b78c2094c49761ed6b20ed17968291f5df4"
+   ],
+   "voices/73_hushed_museum_guide_male.npz": [
+    3692,
+    "9f407ed77f0908ff86384ca23d524353a6c8f7587cbeeb6d340415c59a80572a"
+   ],
+   "voices/73_hushed_museum_guide_male.wav": [
+    531116,
+    "4164c58d5df6df371bb16f1cd1ba9cd35e10ba7231505a8e8b4036f9f3182d7a"
+   ],
+   "voices/76_weathered_radio_journalist_female.npz": [
+    3692,
+    "d67671fe7df438716d010f3be5a05eb15c8ec16de6ad477b981cc3fb6d7814a5"
+   ],
+   "voices/76_weathered_radio_journalist_female.wav": [
+    531116,
+    "22a8612400f759036ac0361a65a3c382173d26400dbdbcd1ba77e64a0776df38"
+   ],
+   "voices/79_hushed_conspirator_female.npz": [
+    3692,
+    "4c32b6ce2ee89d7d93d04ed26585aa5817442475e692c7147b913bd5d95ecdc0"
+   ],
+   "voices/79_hushed_conspirator_female.wav": [
+    531116,
+    "ccaab0b6cc37bf11b84ed3675b395ec691334f812ed960824f3e8c594886ea6c"
+   ],
+   "voices/80_regal_narrator_female.npz": [
+    3692,
+    "155bc7fd3dc76db618075b7e35bd6d1a6d019d68d384ad2b73b2c34143099ae8"
+   ],
+   "voices/80_regal_narrator_female.wav": [
+    531116,
+    "bdc5f332bcd91121c7c3ce94a45b72450a450c1052002673d1cc9f395aedcac9"
+   ],
+   "voices/ar_arabic.npz": [
+    3532,
+    "fc5a44c283f1dd63ffbc18118fc90b027789dadc478dfdc18950d07d1679de2e"
+   ],
+   "voices/ar_arabic.wav": [
+    455118,
+    "9d83311f7573e22af511f68a8794bda9e000fb3c43f2bcba5bde5b0ec2966447"
+   ],
+   "voices/controlled_fury_older_male.npz": [
+    3816,
+    "d50f3f98696c3c21a919ab38408b6d468620d89bf2e13b467dac1cf4bd59b3ca"
+   ],
+   "voices/controlled_fury_older_male.wav": [
+    591054,
+    "6988ac18519726eb60796cb719c5a1135e5bc34bd4b2249a6f6f753940546ad2"
+   ],
+   "voices/controlled_fury_young_female.npz": [
+    3532,
+    "418fec8cf41104c8448cb3cfd81ad79afddfbfced5620acb1120fc1f10824f26"
+   ],
+   "voices/controlled_fury_young_female.wav": [
+    454542,
+    "c82929687b0ebf0ba80facce4dc31ba5ac3d937da628be17e39885a1eb42ecbc"
+   ],
+   "voices/de_german.npz": [
+    3532,
+    "b2b05b8e755c945fb0eff5dec5d06dfc9fb2682e9faad9bd33e04634f9ab37d4"
+   ],
+   "voices/de_german.wav": [
+    455118,
+    "07540ffc64986777e50c1d9ff123978c77363ee9f20f07a628fa2a36d90b2093"
+   ],
+   "voices/es_spanish.npz": [
+    3548,
+    "08a25005490964a370f5c97b9fee6146f0ef985f2ebd7b5b08616dce9ce08e0b"
+   ],
+   "voices/es_spanish.wav": [
+    462030,
+    "d5636cdc48612db21700a411ecbd3d24dd11370906c5e914cabd202451d7d06c"
+   ],
+   "voices/exhausted_mechanic_male.npz": [
+    3956,
+    "226b4909a4c4af843f52d9459e56a77ac751439c82e6b1515254eb56452fa401"
+   ],
+   "voices/exhausted_mechanic_male.wav": [
+    658446,
+    "6c0703c6c03cf2f60d66aaf7162f2c766e13716f87bf17954079dcd84e117d3c"
+   ],
+   "voices/fr_french.npz": [
+    3548,
+    "fa959f45986afb783a47a6fff50225e19dc6e12083c6e6abcda45c07363e4e2f"
+   ],
+   "voices/fr_french.wav": [
+    462030,
+    "746ced265aebbfb375767531e9edaf488f5f7e9831d45fe0c7fec779b6d5512c"
+   ],
+   "voices/grieving_young_male.npz": [
+    3884,
+    "6b9f22cfad98065da758f27664e21a155e0d3c5a3ceabba07ca63fd13df592bf"
+   ],
+   "voices/grieving_young_male.wav": [
+    623886,
+    "7ea5d618b55c1a9cd9e0a5b52be794c067d811c23fd002664decd28926e3a03d"
+   ],
+   "voices/hi_hindi.npz": [
+    3580,
+    "e3502d046a83c2cbc92030164c0ceb88e62ccdb05cd2306087a24520cfdd517a"
+   ],
+   "voices/hi_hindi.wav": [
+    478158,
+    "b88c83ba7ad130dab669db7bc2f06bd2e0a6dd21457904f92ed01d88eceecb73"
+   ],
+   "voices/hushed_young_female.npz": [
+    4380,
+    "3845397b49fd80530667cad7700b5707da93d4fb177885fdfc5fbe26a5d50cf8"
+   ],
+   "voices/hushed_young_female.wav": [
+    862350,
+    "30d6b27692b2bf45192e3ccb45406c6d4e6fb040144632779e40d87a1b4dfe44"
+   ],
+   "voices/it_italian.npz": [
+    3532,
+    "86900c89eb5ba64ececa089f392e2fe2dd533150e126d54a0e4dfefffc9cbe87"
+   ],
+   "voices/it_italian.wav": [
+    455118,
+    "87e8de95015d79e513ae7782b195915050cb1d9e83100672539de52e8f993fb4"
+   ],
+   "voices/joyful_irish_female.npz": [
+    3392,
+    "f74e652200aed14f7c94378ac2b12804d5d2f25e9db09ec021f2a6a9644962c0"
+   ],
+   "voices/joyful_irish_female.wav": [
+    387150,
+    "c33d69ea04633aec81004f1eaa593fd5e2efca35ebe4f6133a915b0e5859347e"
+   ],
+   "voices/kitten_v08_voice_2_female.npz": [
+    3808,
+    "aa9db4baf49fe0a159724f79d112d78b95047db3d797b6ba4d17c68119003eec"
+   ],
+   "voices/kitten_v08_voice_2_female.wav": [
+    587036,
+    "cd87018a8c2046a01b4b60f46981d1695a11ac5430733d1a45fc3e071e819e98"
+   ],
+   "voices/kitten_v08_voice_2_male.npz": [
+    3696,
+    "8e7df50efef79cc9679fdd59c8094a9932ecf53ceef077b632836445b9adbf52"
+   ],
+   "voices/kitten_v08_voice_2_male.wav": [
+    532844,
+    "e950331d5788b42a69695f031ae96ec041ccbae1a1354374104d3d4c039661f1"
+   ],
+   "voices/kitten_v08_voice_3_female.npz": [
+    3592,
+    "1644d038c5de111ad0d1098f91918eb88064998f25c5674903cfcb660580a62c"
+   ],
+   "voices/kitten_v08_voice_3_female.wav": [
+    483068,
+    "de9f4b750650219f97ce39fcec0f060d540e756ec2d37ad55b64be45d311d3f8"
+   ],
+   "voices/kitten_v08_voice_3_male.npz": [
+    3580,
+    "ecb8089534b84bbed17cdb888dfeac879f354a6ad8a6041b9528c8f915345570"
+   ],
+   "voices/kitten_v08_voice_3_male.wav": [
+    477452,
+    "659b6b7000c74f2a2132bc1d7aca72cdd767ad3eab3865c5af1ea8e4d1e086c1"
+   ],
+   "voices/kitten_v08_voice_4_female.npz": [
+    3596,
+    "5cfaa87ec6a0059e461e83c61e0ba88636afb4eb17160cf9fb0d5ed19efbfc10"
+   ],
+   "voices/kitten_v08_voice_4_female.wav": [
+    486092,
+    "1ff68b1309fabe3c464a6228e848cf793a38b1e7797bda67faedfc595a36bae6"
+   ],
+   "voices/kitten_v08_voice_4_male.npz": [
+    3768,
+    "d77cc1848293a8aae0057a156aa39c034b62876b7cc619c36162891eba2e26ac"
+   ],
+   "voices/kitten_v08_voice_4_male.wav": [
+    568220,
+    "872a1179583b8ea9ec040acbb66a7dfbb16de0574d263f0b73b1e31b0257e059"
+   ],
+   "voices/kitten_v08_voice_5_female.npz": [
+    3692,
+    "10fe2937b11a37cfaeb36fa6c7884a737dbe50b42c3bfd9907ba62135ca8165c"
+   ],
+   "voices/kitten_v08_voice_5_female.wav": [
+    531836,
+    "200750b1506328c02296c7345600f0a10b82046c82ecaf3c855887d54869fd91"
+   ],
+   "voices/kitten_v08_voice_5_male.npz": [
+    3736,
+    "1d48cb37eef54048e04531f021e1ce562c88dc59d7ad9a0ce31824c0b570ca16"
+   ],
+   "voices/kitten_v08_voice_5_male.wav": [
+    551804,
+    "e40db26e40a1cd974165f16df815a4c1ad644c637113ae6472850089ff5e3a3c"
+   ],
+   "voices/playful_professional_female.npz": [
+    3672,
+    "007cd13c7164ee816f09f20802700494b103cdbfe59df6f7ea5eac9cb2e40505"
+   ],
+   "voices/playful_professional_female.wav": [
+    521934,
+    "ab8272440760aab0d0f8f69a30354b79e1804dcd0480a8471ec5ae044ddce89b"
+   ],
+   "voices/playful_smooth_young_male.npz": [
+    3604,
+    "c380f944a6407a7c92e78181e0779e19c14e1c3083b0731de5df01ab9b539239"
+   ],
+   "voices/playful_smooth_young_male.wav": [
+    489102,
+    "c19d73a91fa132a9b502bc4ffbb0ed331045907a18c3bdd781fda003099ee68b"
+   ],
+   "voices/pt_portuguese.npz": [
+    3532,
+    "eacf9c72238e63eb9f64c5dcde465de8fc16a605a6df069ba3b3e10c428338ec"
+   ],
+   "voices/pt_portuguese.wav": [
+    455118,
+    "63f1b9e513b2bf3b1df9419d68a150347ea768176205449b20cffb0d740ac4f1"
+   ],
+   "voices/ru_russian.npz": [
+    3532,
+    "1303a75952015e0accfca8c6f76233610cdcd0d1943244662dfe6b77878cef2d"
+   ],
+   "voices/ru_russian.wav": [
+    455118,
+    "a7ce899d85323ca4b51eec343cc2058ebcbf8eac838d65680019661add124d3c"
+   ],
+   "voices/southern_elderly_female.npz": [
+    4240,
+    "dde8bd24fd1c15d85e66fc026df7ba6fe1087fdbb58c06b7793059405342f981"
+   ],
+   "voices/southern_elderly_female.wav": [
+    794958,
+    "0bbc8a0b9350c07b59703ce88e917104c6ad1515ff40debbcf8ea94fde545dcc"
+   ],
+   "voices/tender_older_male.npz": [
+    4168,
+    "7ada88acc7928108f9365972eccd9f9a60235e3b88f0ace3597e370ef27c1ec4"
+   ],
+   "voices/tender_older_male.wav": [
+    760398,
+    "edee2cbf61af6f64d48047cdcf9c003f893fe4943fce1dc98e7841b406f6756b"
+   ],
+   "voices/voices.json": [
+    18117,
+    "dc09cf430769bc470cc990feac674325cb341ba7afa1225f38b16648535d99e6"
+   ],
+   "voices/zh_chinese.npz": [
+    3580,
+    "4a12244d60989f16f01e2373b7954655a4750edc145acb8c3672a8926039d3da"
+   ],
+   "voices/zh_chinese.wav": [
+    478158,
+    "15660b287cf56bcdcbb2f84c6f98bc03e8cf7751ac692277730c092709c1a53e"
+   ]
+  },
+  "s3gen": {
+   "s3gen_meanflow.safetensors": [
+    1064875036,
+    "d65cb687a2ed581ee6cc297e919ffefa63386944f42364ae13b78a594945514f"
+   ],
+   "README.md": [
+    9544,
+    "d007d8c2ed2093530d95eee9d623f8977c321f6f361c19dafa07c000375808d7"
+   ]
+  }
+ }
+}
