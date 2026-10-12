@@ -1,10 +1,11 @@
 """The D2 (Kandinsky-6 video VAE) jobs as an operator spec for the shared staging sealer
 (tools/kandinsky6/staging/seal.py), which hard-links the artifacts into each node's kit, seals them in SHA256SUMS and
-jobs.json, and runs them under run-node.py (immutable image ID, --memory/--memory-swap, read-only root and kit, models at
-/models, K6_OUTPUT, window deadlines, memory / GPU / disk watch).
+jobs.json, and runs them under run-node.py (immutable image ID, --memory/--memory-swap as host accounting only, read-only
+root and kit, models at /models, K6_OUTPUT, window deadlines, memory / GPU / disk watch, admission by process budget).
 
   python -I operator_spec.py --kit DIR --node-images FILE --assets progress.json > spec.json
-  python -I operator_spec.py --self-test                   the window budget at its boundaries, no kit
+  python -I operator_spec.py --self-test                   the window budget at its boundaries and the memory
+                                                           declarations, no kit
 
 Per job: the node's own image ID from FILE (`docker image inspect` on each node: the same repo digest has a different
 local ID per node), the command inside the container (the kit is mounted at /ws/kit), budgets that the runner enforces.
@@ -12,7 +13,7 @@ The oracle jobs run the pinned native stack from this component's own checked bu
 each node and mounted read-only at /opt/k6-oracle-d2: its identity (manifest, requirements, versions) is pinned below,
 must match the kit's pybundle/, and is what the runner admits (layout python/bin/python3.13 + site-packages).
 
-Every job runs under the D2 memory policy gb10-unified-d2-v1 (D2-EVIDENCE.md): on each node its attribution probe
+Every job runs under the D2 memory policy gb10-unified-d2-v2 (D2-EVIDENCE.md): on each node its attribution probe
 first, then that node's payload, admitted only with the probe's PASS from the same window (per-node gate). dgx01:
 d2-probe-torch, d2-oracle-short (the oracle's sealed segments); dgx02: d2-probe-native, d2-engine. The full-length
 d2-oracle is not emitted: the approved window is N = 95 with d2-oracle-short only.
@@ -28,7 +29,7 @@ from pathlib import Path
 
 GIB = 1024**3
 MIB = 1024**2
-POLICY = "gb10-unified-d2-v1"
+POLICY = "gb10-unified-d2-v2"
 SEGMENTS = ["env-probe", "s_dec", "f_dec", "s_enc", "n_enc", "n_dec"]
 WORKSPACE = "~/k6-d2-qual"
 # the original D2 bundle, as the runner admits it (kind d2-pybundle): node path, identity, layout, container mount
@@ -114,6 +115,43 @@ ENGINE_OUTPUT_BYTES = 1 * GIB
 BUDGET_JOBS = {"dgx01": [("d2-probe-torch", 600, 256 * MIB), ("d2-oracle-short", 2100, 4 * GIB)],
                "dgx02": [("d2-probe-native", 600, 256 * MIB), ("d2-engine", ENGINE_JOB_TIMEOUT_S, ENGINE_OUTPUT_BYTES)]}
 
+# --- Memory (D2-EVIDENCE.md, "Accounting and admission"; owner's GB10 policy (a)-(d), rulings G1-G7) ----------------
+# A process's budget is its allocator cap (Torch: the native per-process fraction; native: the k6v-qual ledger) plus the
+# unmeasured non-allocator overhead (CUDA context, modules, library workspaces, driver): 4 GiB, doubled while unmeasured.
+# The runner admits a launch only if MemAvailable >= the budgets of every job still resident on the node + one floor,
+# and kills the container when MemAvailable crosses the floor. The container's --memory/--memory-swap limit is host
+# (CPU) accounting only: GB10's cgroup does not contain GPU allocations.
+HOST_FLOOR_BYTES = 12 * GIB
+UNMEASURED_OVERHEAD_BYTES = 2 * 4 * GIB
+CONTAINER_MEMORY_BYTES = 48 * GIB
+# per job: allocator cap, the runner's resident limit
+MEMORY = {"d2-probe-torch": (38 * GIB, 46 * GIB), "d2-oracle-short": (38 * GIB, 48 * GIB),
+          "d2-probe-native": (24 * GIB, 32 * GIB), "d2-engine": (24 * GIB, 40 * GIB)}
+POLICY_TERMS = {
+    "a": "Torch: caching-allocator cap per process via set_per_process_memory_fraction, read back equal to the value "
+         "set and <= allocator_cap_bytes, rechecked every sample. Native: every device buffer reserved in the k6v-qual "
+         "ledger (cap allocator_cap_bytes) before it is allocated.",
+    "b": "unmeasured_overhead_bytes (2 x 4 GiB) per process for context, modules, library workspaces and driver "
+         "allocations; process_budget_bytes = allocator_cap_bytes + unmeasured_overhead_bytes <= max_resident_bytes. "
+         "Replacing it by a measured overhead with >= 2x margin needs a later seal.",
+    "c": "host MemAvailable floor host_memavailable_floor_bytes, sampled <= 0.5 s, container killed when crossed; "
+         "each launch admitted only if MemAvailable >= the sum of every resident job's process_budget_bytes + one floor "
+         "(unknown residency counts as resident).",
+    "d": "sticky STOP_ALL on a global or foreign memcg OOM, an earlyoom or systemd-oomd kill, an NVRM Xid or an "
+         "unverified cleanup (the D1 classifier). container_memory_bytes is host accounting, never a GPU bound.",
+}
+
+
+def memory_fields(job_id: str) -> dict:
+    """The job's memory declaration; refuses a budget its resident limit cannot hold."""
+    cap, resident = MEMORY[job_id]
+    budget = cap + UNMEASURED_OVERHEAD_BYTES
+    assert budget <= resident, f"{job_id}: process budget {budget} exceeds max_resident_bytes {resident}"
+    assert HOST_FLOOR_BYTES >= 12 * GIB, f"host floor {HOST_FLOOR_BYTES} is below 12 GiB"
+    return {"memory_policy": POLICY, "allocator_cap_bytes": cap, "unmeasured_overhead_bytes": UNMEASURED_OVERHEAD_BYTES,
+            "process_budget_bytes": budget, "container_memory_bytes": CONTAINER_MEMORY_BYTES,
+            "host_memavailable_floor_bytes": HOST_FLOOR_BYTES, "max_resident_bytes": resident}
+
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -191,7 +229,8 @@ def window_budget(node: str, jobs: list) -> dict:
 
 def self_test() -> None:
     """The window budget at its boundaries: every chain sums exactly to its end, the runner's own admission and stop
-    rules hold at L - 1 and refuse at L, and each reservation fits up to the node's slack and fails 1 s past it."""
+    rules hold at L - 1 and refuse at L, and each reservation fits up to the node's slack and fails 1 s past it. The
+    memory declarations: budgets inside their resident limits, refused at 1 byte past and at the v1 values."""
     import sys
     me = sys.modules[__name__]
 
@@ -265,6 +304,35 @@ def self_test() -> None:
         except AssertionError:
             got = False
         check(got == want, f"dgx02: engine timeout + {extra} s")
+
+    # memory (owner rulings G1-G3, G6): every job's process budget fits its resident limit, the floor is 12 GiB, and the
+    # v1 declarations (floor 10 GiB, Torch probe resident 32 GiB under the payload's 38 GiB cap) are refused
+    def declared(**bump):
+        keep = {k: getattr(me, k) for k in bump}
+        try:
+            for k, v in bump.items():
+                setattr(me, k, v)
+            return [memory_fields(j) for j in MEMORY]
+        except AssertionError:
+            return None
+        finally:
+            for k, v in keep.items():
+                setattr(me, k, v)
+
+    check(set(MEMORY) == {i for node in BUDGET_JOBS.values() for i, _, _ in node}, "memory: one declaration per job")
+    now = declared()
+    check(now is not None, "memory: the declarations are accepted")
+    for f in now:
+        check(f["memory_policy"] == "gb10-unified-d2-v2" and f["host_memavailable_floor_bytes"] == 12 * GIB, "memory: v2, floor")
+        check(f["process_budget_bytes"] == f["allocator_cap_bytes"] + 8 * GIB <= f["max_resident_bytes"], "memory: budget")
+        check(f["container_memory_bytes"] == 48 * GIB, "memory: container accounting")
+    caps = {j: memory_fields(j)["allocator_cap_bytes"] for j in MEMORY}
+    check(caps["d2-probe-torch"] == caps["d2-oracle-short"] and caps["d2-probe-native"] == caps["d2-engine"],
+          "memory: each probe runs its payload's cap")
+    check(declared(HOST_FLOOR_BYTES=10 * GIB) is None, "memory: the v1 floor is refused")
+    check(declared(MEMORY={**MEMORY, "d2-probe-torch": (38 * GIB, 32 * GIB)}) is None, "memory: the v1 probe resident is refused")
+    check(declared(UNMEASURED_OVERHEAD_BYTES=8 * GIB + 1) is None, "memory: a budget 1 byte past the probe resident is refused")
+    check(set(POLICY_TERMS) == {"a", "b", "c", "d"}, "memory: terms (a)-(d)")
     print(json.dumps({"self_test": "passed", "checks": checked, "nodes": report}))
 
 
@@ -292,11 +360,10 @@ def main() -> None:
     common = {"workspace": WORKSPACE, "container_workspace": "/ws", "artifacts": arts, "asset_paths": ASSETS,
               "node_image_receipt": {"source": str(a.node_images), "sha256": sha256(a.node_images)}}
 
-    def policy(cap, gate=None, segments=None):
+    def policy(job_id, gate=None, segments=None):
         # the runner's unified accounting under the D2-only policy: max(max(memory.current, memory.peak) + helpers
-        # + 4 GiB, MemAvailable drop + 4 GiB) <= max_resident_bytes, host floor 10 GiB, --memory/--memory-swap 48g
-        p = {"memory_policy": POLICY, "allocator_cap_bytes": cap, "container_memory_bytes": 48 * GIB,
-             "host_memavailable_floor_bytes": 10 * GIB}
+        # + 4 GiB, MemAvailable drop + 4 GiB) <= max_resident_bytes; budgets, floor and admission per memory_fields()
+        p = memory_fields(job_id)
         if gate:
             p["requires_probe_pass"] = gate   # this node's probe, this window (hash-bound by the runner)
         if segments:
@@ -308,9 +375,9 @@ def main() -> None:
         return {"id": job_id, "node": node, "image_id": images[node], **common,
                 "command": ["/bin/bash", "/ws/kit/tools/run-probe.sh", kind], "environment": env,
                 **({"shared_oracle": ORACLE} if oracle else {}),
-                **policy(38 * GIB if oracle else 24 * GIB), "timeout_seconds": 600,
-                # 16 GiB probe allocation + context + interpreter, accounted
-                "max_resident_bytes": 32 * GIB, "max_disk_bytes": 1_000_000_000, "output_budget_bytes": 256 * MIB}
+                # 16 GiB probe allocation + context + interpreter, accounted; the Torch probe runs the payload's cap
+                **policy(job_id), "timeout_seconds": 600,
+                "max_disk_bytes": 1_000_000_000, "output_budget_bytes": 256 * MIB}
 
     oracle = {"id": "d2-oracle-short", "node": "dgx01", "image_id": images["dgx01"], **common,
               "command": ["/bin/bash", "/ws/kit/tools/run-oracle.sh"],
@@ -318,15 +385,15 @@ def main() -> None:
                               "ORACLE_MANIFEST_SHA256": ORACLE["manifest_sha256"], "JOB_BUDGET_S": "1980",
                               "TIMEOUT_ENV_PROBE": "240", "TIMEOUT_N_DEC": "900",
                               **{f"TIMEOUT_{c}": "240" for c in ("S_DEC", "F_DEC", "S_ENC", "N_ENC")}},
-              "shared_oracle": ORACLE, **policy(38 * GIB, "d2-probe-torch", SEGMENTS), "timeout_seconds": 2100,
-              # = the container cap: the n_dec Torch peak is unmeasured (estimate 20-30 GiB) + host + helpers + 4 GiB
-              "max_resident_bytes": 48 * GIB, "max_disk_bytes": 12_000_000_000, "output_budget_bytes": 4 * GIB}
+              "shared_oracle": ORACLE, **policy("d2-oracle-short", "d2-probe-torch", SEGMENTS),
+              # resident 48 GiB: the n_dec Torch peak is unmeasured (estimate 20-30 GiB) + host + helpers + 4 GiB
+              "timeout_seconds": 2100, "max_disk_bytes": 12_000_000_000, "output_budget_bytes": 4 * GIB}
     engine = {"id": "d2-engine", "node": "dgx02", "image_id": images["dgx02"], **common,
               "command": ["/bin/bash", "/ws/kit/tools/run-engine.sh"],
               "environment": {"VAE": "/models/vae", "TIMEOUT": str(ENGINE_TIMEOUT_S)},
-              **policy(24 * GIB, "d2-probe-native"), "timeout_seconds": ENGINE_JOB_TIMEOUT_S,
-              # ledger peak 15.55 GB (n_dec case buffer + weights image), ~3 GiB host, helpers, 4 GiB
-              "max_resident_bytes": 40 * GIB, "max_disk_bytes": 8_000_000_000, "output_budget_bytes": ENGINE_OUTPUT_BYTES}
+              **policy("d2-engine", "d2-probe-native"), "timeout_seconds": ENGINE_JOB_TIMEOUT_S,
+              # resident 40 GiB: ledger peak 15.55 GB (n_dec case buffer + weights image), ~3 GiB host, helpers, 4 GiB
+              "max_disk_bytes": 8_000_000_000, "output_budget_bytes": ENGINE_OUTPUT_BYTES}
     jobs = [probe("d2-probe-torch", "dgx01", "torch", True), oracle,
             probe("d2-probe-native", "dgx02", "native", False), engine]
     budget = {}
@@ -339,8 +406,8 @@ def main() -> None:
             fields = budget[node]["jobs"][job["id"]]
             job["latest_start_seconds_from_open"] = fields["latest_start_seconds_from_open"]
             job["finish_margin_seconds"] = fields["finish_margin_seconds"]
-    spec = {"schema": 1, "component": "d2-video-vae", "memory_policy": POLICY, "gate": "per-node", "window_minutes": 95,
-            "jobs": jobs, "window_budget": budget}
+    spec = {"schema": 1, "component": "d2-video-vae", "memory_policy": POLICY, "memory_policy_terms": POLICY_TERMS,
+            "gate": "per-node", "window_minutes": 95, "jobs": jobs, "window_budget": budget}
     print(json.dumps(spec, indent=1))
 
 

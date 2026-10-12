@@ -1,10 +1,11 @@
-//! k6v-qual's native allocation evidence under the D2 memory policy `gb10-unified-d2-v1` (tools/spark/k6-video-vae/
+//! k6v-qual's native allocation evidence under the D2 memory policy `gb10-unified-d2-v2` (tools/spark/k6-video-vae/
 //! D2-EVIDENCE.md): a ledger of the live device buffers, capped at 24 GiB, and the run-bound files the shared staging
 //! runner reads, in its allocator-evidence format (allocator-ready.json, allocator-metrics.jsonl, allocator-terminal.json;
 //! the launcher writes allocator-producer-exit.json after it reaped the process, `k6v-qual --record-exit`).
 //!
-//! The ledger is allocation evidence, not a process bound: the CUDA context, driver allocations, loaded modules and every
-//! host buffer are outside it and fall under the container's accounting. Every device allocation goes through
+//! The ledger is allocation evidence, not a process bound: the CUDA context, driver allocations and loaded modules are
+//! outside it and are the job's declared unmeasured overhead (process budget = cap + overhead, admitted by the runner
+//! against host MemAvailable); the container's memory limit is host accounting, not a GPU bound. Every device allocation goes through
 //! `Ledger.reserve` first, which refuses one that would pass the cap before anything is allocated. Buffers are allocated
 //! and freed on one thread; the sampler thread only reads the ledger.
 //!
@@ -13,7 +14,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-pub const policy = "gb10-unified-d2-v1";
+pub const policy = "gb10-unified-d2-v2";
 pub const cap_bytes: u64 = 24 << 30;
 /// The runner's raw-sample budget per producer.
 pub const metrics_budget: u64 = 16 << 20;
@@ -179,7 +180,7 @@ pub const Producer = struct {
         try self.sample();
         var w: std.Io.Writer.Allocating = .init(self.a);
         try self.env.id.write(&w.writer);
-        try w.writer.print(", \"status\": \"passed\", \"runtime\": \"{s}\", \"engine_sha256\": \"{s}\", \"allocator_backend\": \"explicit\", \"allocator_cap_bytes\": {d}, \"mem_get_info_total_bytes\": {d}, \"sample_period_ms\": {d}, \"process_start_monotonic_seconds\": {d}, \"monotonic_seconds\": {d}, \"limitation\": \"Live DeviceBuffer ledger only; the CUDA context, driver allocations, modules and host memory are outside it and fall under the container accounting.\"}}\n", .{ runtime, engine_sha256, self.ledger.cap, self.total, self.period_ms, start_s, monotonic() });
+        try w.writer.print(", \"status\": \"passed\", \"runtime\": \"{s}\", \"engine_sha256\": \"{s}\", \"allocator_backend\": \"explicit\", \"allocator_cap_bytes\": {d}, \"mem_get_info_total_bytes\": {d}, \"sample_period_ms\": {d}, \"process_start_monotonic_seconds\": {d}, \"monotonic_seconds\": {d}, \"limitation\": \"Live DeviceBuffer ledger only; the CUDA context, driver allocations and modules are outside it, the declared unmeasured overhead.\"}}\n", .{ runtime, engine_sha256, self.ledger.cap, self.total, self.period_ms, start_s, monotonic() });
         try receipt(self.env.out, "allocator-ready.json", w.written());
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }

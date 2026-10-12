@@ -13,7 +13,7 @@
 //! data (sha ""), so the kit can be smoke-tested on any host. Exit 0 when every case ran.
 //!
 //! Every device buffer goes through evidence.zig's ledger (24 GiB of live buffers: an allocation past it is refused before
-//! it is made). Under the runner's D2 memory policy (K6_MEMORY_POLICY=gb10-unified-d2-v1) the process also writes the
+//! it is made). Under the runner's D2 memory policy (K6_MEMORY_POLICY=gb10-unified-d2-v2) the process also writes the
 //! run-bound allocator evidence: ready receipt, a sample each second (cuMemGetInfo and the ledger), terminal receipt.
 
 const std = @import("std");

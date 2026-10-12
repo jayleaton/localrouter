@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The D2 attribution probe job on a DGX Spark (GB10), under the shared staging runner's D2 memory policy
-# (gb10-unified-d2-v1; contract and PASS / FAIL rules in D2-EVIDENCE.md): the gate a node's D2 payload needs.
+# (gb10-unified-d2-v2; contract and PASS / FAIL rules in D2-EVIDENCE.md): the gate a node's D2 payload needs.
 #   run-probe.sh torch    dgx01, d2-probe-torch: the original D2 bundle's interpreter (/opt/k6-oracle-d2) runs
 #                         d2-allocator-guard.py --probe (torch.empty(X, uint8).fill_(1), synchronize)
 #   run-probe.sh native   dgx02, d2-probe-native: k6v-qual --probe (cuMemAlloc through the 24 GiB ledger, cuMemsetD8,
@@ -18,7 +18,7 @@ KIT=${KIT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 TOOLS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OUT=${K6_OUTPUT:?K6_OUTPUT must name the output directory}
 KIND=${1:?usage: run-probe.sh torch|native}
-[[ ${K6_MEMORY_POLICY:-} == gb10-unified-d2-v1 ]] || { echo "[d2-probe] needs the runner's D2 memory policy" >&2; exit 2; }
+[[ ${K6_MEMORY_POLICY:-} == gb10-unified-d2-v2 ]] || { echo "[d2-probe] needs the runner's D2 memory policy" >&2; exit 2; }
 mkdir -p $OUT/logs
 VARS=(K6_MEMORY_POLICY=$K6_MEMORY_POLICY K6_MEMORY_NONCE=${K6_MEMORY_NONCE:?} K6_JOB_ID=${K6_JOB_ID:?} K6_OUTPUT=$OUT
       K6_ALLOCATOR_RECEIPT=${K6_ALLOCATOR_RECEIPT:?} K6_ALLOCATOR_LOG=${K6_ALLOCATOR_LOG:?}

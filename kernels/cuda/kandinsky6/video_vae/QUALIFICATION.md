@@ -20,12 +20,12 @@ this component's original pybundle (copied unchanged to each node, mounted read-
 the pinned versions, before it runs. The engine never consumes oracle output: the posterior is checked with the kit's
 own `eps`, which the oracle also applies through the native ops.
 
-GB10 reports no GPU memory counter, so the jobs run under the D2 memory policy `gb10-unified-d2-v1`
+GB10 reports no GPU memory counter, so the jobs run under the D2 memory policy `gb10-unified-d2-v2`
 (`tools/spark/k6-video-vae/D2-EVIDENCE.md`). On each node an attribution probe (`run-probe.sh`) runs first, and its
 PASS gates that node's payload. The oracle is a sealed sequence of guarded processes, each with its own evidence:
 `env-probe`, then one per case. Each runs under a 38 GiB Torch allocator cap. In the engine, every device buffer goes
-through a 24 GiB ledger. These caps are allocation evidence: memory outside them is bounded by the container
-accounting.
+through a 24 GiB ledger. These caps are allocation evidence: the context, modules and driver allocations outside them are a
+declared overhead in each job's process budget, which the runner admits against host MemAvailable.
 
 ## Cases
 

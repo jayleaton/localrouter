@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-POLICY = "gb10-unified-d2-v1"
+POLICY = "gb10-unified-d2-v2"
 GIB, MIB = 1024**3, 1024**2
 TORCH_CAP, NATIVE_CAP = 38 * GIB, 24 * GIB
 SEGMENTS = ["env-probe", "s_dec", "f_dec", "s_enc", "n_enc", "n_dec"]

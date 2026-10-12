@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The D2 oracle job on a DGX Spark (GB10, aarch64, sm_121), inside the arm64 NGC PyTorch image, offline, under the shared
-# staging runner's D2 memory policy (gb10-unified-d2-v1; contract in D2-EVIDENCE.md). It runs the pinned native stack
+# staging runner's D2 memory policy (gb10-unified-d2-v2; contract in D2-EVIDENCE.md). It runs the pinned native stack
 # from the original D2 bundle (pybundle.sh: CPython 3.13, torch 2.14.1+cu130, diffusers 0.40.0, NumPy 2.5.3), mounted
 # read-only at /opt/k6-oracle-d2, never the image's Python or torch.
 # The job is a sealed sequence of segments, each a fresh process under d2-allocator-guard.py (its entry point: the
@@ -34,7 +34,7 @@ OR=/opt/k6-oracle-d2
 [[ ${ORACLE_ROOT:-} == "$OR" ]] || { echo "[d2-oracle] ORACLE_ROOT must be $OR" >&2; exit 2; }
 [[ ${ORACLE_MANIFEST_SHA256:-} == ead020cbc102a5cb10fdbef43f85dfa63aa14585d1835ce0b7f3bc686eac6d1d ]] \
     || { echo "[d2-oracle] ORACLE_MANIFEST_SHA256 is not the original D2 bundle's" >&2; exit 2; }
-[[ ${K6_MEMORY_POLICY:-} == gb10-unified-d2-v1 ]] || { echo "[d2-oracle] needs the runner's D2 memory policy" >&2; exit 2; }
+[[ ${K6_MEMORY_POLICY:-} == gb10-unified-d2-v2 ]] || { echo "[d2-oracle] needs the runner's D2 memory policy" >&2; exit 2; }
 PY=$OR/python/bin/python3.13
 GUARD=$TOOLS/d2-allocator-guard.py
 mkdir -p $OUT/logs

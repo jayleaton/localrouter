@@ -1,4 +1,4 @@
-# D2 memory evidence on GB10: policy `gb10-unified-d2-v1`
+# D2 memory evidence on GB10: policy `gb10-unified-d2-v2`
 
 What the D2 (Kandinsky-6 video VAE) producers write, and what the shared staging runner's D2-only readers must check.
 D2 owns the producers (`d2-allocator-guard.py`, `k6v-qual`, `run-probe.sh`, `run-oracle.sh`, `run-engine.sh`). The
@@ -12,21 +12,38 @@ holds too. Any job, node, oracle or variable not listed here is refused.
 ## 1. Accounting and admission
 
 `accounted = max(max(memory.current, memory.peak) + helper RSS + 4 GiB, (baseline MemAvailable - MemAvailable) + 4 GiB)`
-is sampled every 0.5 s and must stay `<= max_resident_bytes`. Also: host MemAvailable floor 10 GiB, `--memory 48g
---memory-swap 48g` (no swap), and the node guard. The probe shows whether D2's measured allocations are charged to
+is sampled every 0.5 s and must stay `<= max_resident_bytes`. Also: host MemAvailable floor 12 GiB, and the node guard.
+`--memory 48g --memory-swap 48g` (no swap) is host (CPU) accounting only: on GB10 the cgroup does not contain GPU
+allocations, so it is never a GPU bound. The probe shows whether D2's measured allocations are charged to
 the cgroup. That is evidence for those allocations only, not a promise about later ones. So the host-drop term,
 the floor and the guard stay in force for the whole job.
 
-| Job id | Node | Oracle | Producer | Needs | Timeout | max_resident | Disk / output |
-|---|---|---|---|---|---|---|---|
-| `d2-probe-torch` | dgx01 | d2-pybundle `ead020cb…` (NumPy 2.5.3) | Torch probe | nothing | 600 s | 32 GiB | 1 GB / 256 MiB |
-| `d2-oracle-short` | dgx01 | the same | 6 Torch segments | this window's PASS of `d2-probe-torch` | 2100 s | 48 GiB | 12 GB / 4 GiB |
-| `d2-probe-native` | dgx02 | none | native probe | nothing | 600 s | 32 GiB | 1 GB / 256 MiB |
-| `d2-engine` | dgx02 | none | native ledger | this window's PASS of `d2-probe-native` | 1140 s (engine `TIMEOUT` 1020 s) | 40 GiB | 8 GB / 1 GiB |
+The owner's GB10 policy, as D2 meets it:
+
+- (a) Torch: the native per-process fraction caps the caching allocator at `allocator_cap_bytes`, read back equal to
+  the value set and rechecked every sample. Native: every device buffer is reserved in k6v-qual's ledger (cap
+  `allocator_cap_bytes`) before it is allocated.
+- (b) The CUDA context, modules, library workspaces and driver allocations are not measured. Each process declares them
+  as `unmeasured_overhead_bytes` = 8 GiB (4 GiB, doubled while unmeasured).
+  `process_budget_bytes = allocator_cap_bytes + unmeasured_overhead_bytes <= max_resident_bytes`, and
+  `operator_spec.py` refuses a job whose budget does not fit.
+- (c) The runner admits a launch only if host MemAvailable >= the `process_budget_bytes` of every job still resident
+  on the node (unknown residency counts as resident) + one floor, rechecked before each launch. The container is killed
+  when MemAvailable crosses the floor.
+- (d) A global or foreign memcg OOM, an earlyoom or systemd-oomd kill, an NVRM Xid or an unverified cleanup is a sticky
+  STOP_ALL (the runner's D1 classifier). Evidence under `gb10-unified-d2-v1` is refused.
+
+| Job id | Node | Oracle | Producer | Needs | Timeout | Cap / budget | max_resident | Disk / output |
+|---|---|---|---|---|---|---|---|---|
+| `d2-probe-torch` | dgx01 | d2-pybundle `ead020cb…` (NumPy 2.5.3) | Torch probe | nothing | 600 s | 38 / 46 GiB | 46 GiB | 1 GB / 256 MiB |
+| `d2-oracle-short` | dgx01 | the same | 6 Torch segments | this window's PASS of `d2-probe-torch` | 2100 s | 38 / 46 GiB | 48 GiB | 12 GB / 4 GiB |
+| `d2-probe-native` | dgx02 | none | native probe | nothing | 600 s | 24 / 32 GiB | 32 GiB | 1 GB / 256 MiB |
+| `d2-engine` | dgx02 | none | native ledger | this window's PASS of `d2-probe-native` | 1140 s (engine `TIMEOUT` 1020 s) | 24 / 32 GiB | 40 GiB | 8 GB / 1 GiB |
 
 `d2-oracle`, the full-length oracle, is in the approved admission table. It is not scheduled: the window is N = 95
 with `d2-oracle-short` only. `operator_spec.py` writes the four jobs above. Each carries `memory_policy`,
-`allocator_cap_bytes`, `container_memory_bytes`, `host_memavailable_floor_bytes`, and where it applies
+`allocator_cap_bytes`, `unmeasured_overhead_bytes`, `process_budget_bytes`, `container_memory_bytes` (host accounting),
+`host_memavailable_floor_bytes`, `max_resident_bytes`, and where it applies
 `requires_probe_pass` (the gate) and `segments` (the sealed order). Each also carries the window fields `latest_start_seconds_from_open` and
 `finish_margin_seconds` (section 7).
 
@@ -36,7 +53,7 @@ Every D2 process runs under `env -i` with exactly these variables. The guard ref
 
 | Variable | Probes and engine | Oracle segments |
 |---|---|---|
-| `K6_MEMORY_POLICY` | `gb10-unified-d2-v1` | same |
+| `K6_MEMORY_POLICY` | `gb10-unified-d2-v2` | same |
 | `K6_MEMORY_NONCE` | fresh 32 lowercase hex: the producer's nonce | the job's nonce |
 | `K6_JOB_ID`, `K6_OUTPUT` | job id; absolute output directory | same |
 | `K6_ALLOCATOR_RECEIPT`, `K6_ALLOCATOR_LOG` | `$K6_OUTPUT/allocator-ready.json`, `$K6_OUTPUT/allocator-metrics.jsonl` | not used |
@@ -51,7 +68,7 @@ backend:native,throw_on_cudamalloc_oom:True`. Native processes also get `PATH`, 
 ## 3. Producer files (one producer = one process)
 
 Prefix `allocator-` for the probes and the engine, `allocator-<segment>-` for an oracle segment. Every line and
-receipt starts with the identity `{"schema": 1, "policy": "gb10-unified-d2-v1", "nonce", "job_id", "pid"}`. Oracle
+receipt starts with the identity `{"schema": 1, "policy": "gb10-unified-d2-v2", "nonce", "job_id", "pid"}`. Oracle
 segments add `"job_nonce"`, `"segment"` and `"segment_index"` (0..5). Times are `CLOCK_MONOTONIC` seconds, the
 runner's own clock: containers share the host's, with no time namespace.
 
@@ -110,8 +127,8 @@ reaped record. The launcher ends the sequence at the first segment that fails, t
 
 Limits:
 
-- The fraction caps Torch's caching allocator only. The CUDA context, library workspaces and host memory fall under
-  the container accounting.
+- The fraction caps Torch's caching allocator only. The CUDA context, library workspaces and driver allocations are
+  the declared unmeasured overhead (section 1, (b)).
 - The tile planner reads `mem_get_info` free, which the cap does not change. A Torch peak above 38 GiB fails the case
   with an OOM; the planner never re-plans.
 
@@ -181,7 +198,7 @@ The verdict is `{"verdict": "PASS"|"FAIL", "mode", "errors", "failed", "checks":
 
 - A node's payload is admitted only with that node's own probe PASS from the same window, bound by hash to the
   probe's sealed receipt.
-- The other node may still finish its own work.
+- The other node may still finish its own work, unless the D1 classifier's sticky STOP_ALL fires (section 1, (d)).
 - Any FAIL means no D2 qualification result for that window.
 
 **What counts as FAIL.** Missing, stale or otherwise failed evidence (probe or payload) is a sticky FAIL for that node

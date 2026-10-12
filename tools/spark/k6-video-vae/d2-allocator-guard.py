@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The D2 Torch allocator guard (policy gb10-unified-d2-v1; contract in D2-EVIDENCE.md): the entry point of every
+"""The D2 Torch allocator guard (policy gb10-unified-d2-v2; contract in D2-EVIDENCE.md): the entry point of every
 Torch process of the D2 oracle jobs, run by the original bundle's interpreter under run-oracle.sh / run-probe.sh's
 `env -i` whitelist.
 
@@ -16,8 +16,9 @@ the sampler within 2 s and writes its terminal receipt; a sample that fails ends
 cannot finish as a qualified case without evidence. Files: allocator-<SEG>-{ready.json, metrics.jsonl, terminal.json,
 producer-exit.json} under K6_OUTPUT, each bound to the segment's own nonce from K6_SEGMENT_NONCES.
 
-The cap limits Torch's caching allocator only: the CUDA context, cuDNN / cuBLAS workspaces and host memory fall under
-the container accounting, and the upstream tile planner's mem_get_info is not changed by it (a Torch peak above the cap
+The cap limits Torch's caching allocator only: the CUDA context, cuDNN / cuBLAS workspaces and the driver's allocations
+are the job's declared unmeasured overhead (its process budget = cap + overhead, admitted by the runner against host
+MemAvailable; the container's memory limit is host accounting, not a GPU bound), and the upstream tile planner's mem_get_info is not changed by it (a Torch peak above the cap
 fails the case with an OOM, it never re-plans).
 """
 import time
@@ -36,7 +37,7 @@ import runpy  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
 
-POLICY = "gb10-unified-d2-v1"
+POLICY = "gb10-unified-d2-v2"
 CAP = 38 * 1024**3
 ALLOC_CONFIG = "backend:native,throw_on_cudamalloc_oom:True"
 ROOT = Path("/opt/k6-oracle-d2")   # the original D2 bundle, mounted read-only
@@ -228,7 +229,7 @@ class Producer:
                            "torch_version": self.torch.torch.__version__, "sample_period_s": self.period,
                            "process_start_monotonic_seconds": T_START, "monotonic_seconds": time.monotonic(), **extra,
                            "limitation": "Native Torch caching allocator only; the CUDA context, library workspaces "
-                                         "and host memory fall under the container accounting."})
+                                         "and driver allocations are the declared unmeasured overhead."})
         except BaseException as error:
             self.write({"status": "failed", "monotonic_seconds": time.monotonic(), "error": repr(error)})
             self.log.close()
