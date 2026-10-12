@@ -33,6 +33,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import block as B
+from . import budget
 from . import kernels as K
 from . import native as N
 
@@ -454,6 +455,7 @@ def main(argv=None) -> int:
         ap.error("--blocks must be >= 1")
 
     torch.cuda.init()
+    cap = budget.apply("test_ops")  # before the first allocation: the step's Torch budget, when a node job set one
     k = K.Kernels(fatbins=a.fatbins)
     u = N.upstream()
     N.pipeline_numerics()
@@ -468,7 +470,7 @@ def main(argv=None) -> int:
         "torch": torch.__version__, "cuda": torch.version.cuda, "python": platform.python_version(),
         "fatbins": k.digests, "upstream": str(u.src), "config": tc, "twin_config": c.__dict__,
         "shape": sh.__dict__, "tokens": sh.tokens(), "valid_text": a.valid, "seed": a.seed,
-        "plan_bytes": plan.bytes(), "fp32_linear": a.fp32_linear,
+        "plan_bytes": plan.bytes(), "fp32_linear": a.fp32_linear, "torch_cap": cap,
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "sdp": {"flash": torch.backends.cuda.flash_sdp_enabled(),
                 "mem_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),

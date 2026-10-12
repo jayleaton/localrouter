@@ -102,6 +102,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import block as B
+from . import budget
 from . import kernels as K
 from . import native as N
 from . import test_ops as T
@@ -1415,9 +1416,10 @@ def worker(a) -> int:
     try:
         check_env()
         torch.cuda.init()
+        cap = budget.apply(f"gate {name}")  # before the first allocation: the step's Torch budget, when set
         num = oracle_numerics()
         if name == "env":
-            write_json(path, environment(a, num))
+            write_json(path, {**environment(a, num), "torch_cap": cap})
             return 0
         site = {s.name: s for s in table(a.phase, a.text_valid)}.get(name)
         if site is None:
@@ -1436,6 +1438,7 @@ def worker(a) -> int:
             rec = run_tables(ctx, site, out) if site.kind == "tables" else run_site(ctx, site, out)
         torch.cuda.synchronize()
         rec["numerics"] = num
+        rec["torch_cap"] = cap
         rec["gated"] = site.gated
         if torch.get_float32_matmul_precision() != "high":
             raise SetupError("the float32 matmul precision changed during the run")
@@ -1452,6 +1455,11 @@ def worker(a) -> int:
 # ---------------------------------------------------------------------------------------------------- the parent
 def spawn(a, name: str, out: Path) -> tuple[int, Path, Path]:
     """One child for `name`, its cuBLAS / cuBLASLt logging set before its interpreter (and CUDA) starts."""
+    try:
+        budget.host_only("gate parent")  # a node job budgets this process as host-only: it never touches CUDA
+    except budget.CapError as e:
+        print(f"SETUP {e}", flush=True)
+        sys.exit(2)
     lt, cb = out / "logs" / f"{safe(name)}.cublaslt.log", out / "logs" / f"{safe(name)}.cublas.log"
     for p in (lt, cb):
         p.unlink(missing_ok=True)
