@@ -21,7 +21,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const h: u32 = @intCast(lat_ref.shape[2]);
     const w: u32 = @intCast(lat_ref.shape[3]);
 
-    var d = try cuda.Driver.open();
+    var d = try qi.memcap.open();
     defer d.close();
     var ctx = try cuda.Context.init(&d, 0);
     defer ctx.deinit();

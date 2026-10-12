@@ -20,6 +20,7 @@ const VaeOps = @import("vae.zig").VaeOps;
 const sampler = @import("sampler.zig");
 const noise = @import("noise.zig");
 const upload_mod = @import("upload.zig");
+const memcap = @import("memcap.zig");
 const smath = @import("smath.zig");
 
 pub const Packs = struct { dit: []const u8, te: []const u8, vae: []const u8 };
@@ -106,7 +107,7 @@ pub const Pipeline = struct {
         p.times = .{};
         p.load = .{};
         var clock = LoadClock{ .io = io, .t0 = std.Io.Clock.awake.now(io), .last = std.Io.Clock.awake.now(io) };
-        p.d = try cuda.Driver.open();
+        p.d = try memcap.open();
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();

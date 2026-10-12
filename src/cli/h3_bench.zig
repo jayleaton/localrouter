@@ -12,6 +12,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const h3 = @import("minimax_h3");
+const qi = @import("qwen_image");
 const mp4 = @import("../media/mp4.zig");
 const memory = @import("../sched/memory.zig");
 const pl = h3.pipeline;
@@ -125,7 +126,7 @@ const Sampler = struct {
 
 /// Device memory in use by every process (cuMemGetInfo), through a context of its own; null without a driver.
 fn gpuUsedMib() ?u64 {
-    var d = cuda.Driver.open() catch return null;
+    var d = qi.memcap.open() catch return null;
     defer d.close();
     var c = cuda.Context.init(&d, 0) catch return null;
     defer c.deinit();

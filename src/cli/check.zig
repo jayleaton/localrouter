@@ -6,6 +6,7 @@
 const std = @import("std");
 const Io = std.Io;
 const cuda = @import("cuda");
+const qi = @import("qwen_image");
 const memory = @import("../sched/memory.zig");
 
 pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -30,7 +31,7 @@ pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
 fn gpu() !u8 {
     std.debug.print("MemAvailable: {d} MiB\n", .{(memory.available() orelse 0) >> 20});
-    var d = cuda.Driver.open() catch |err| {
+    var d = qi.memcap.open() catch |err| {
         std.debug.print("CUDA driver: unavailable ({s})\n", .{@errorName(err)});
         return 1;
     };

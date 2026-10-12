@@ -158,7 +158,7 @@ pub const Pipeline = struct {
         p.te = null;
         p.max = try shapes(limits.width, limits.height, limits.frames);
         p.max_tokens = limits.tokens;
-        p.d = try cuda.Driver.open();
+        p.d = try qi.memcap.open();
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();
