@@ -31,7 +31,6 @@ import json
 import os
 import platform
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -156,7 +155,7 @@ class Smoke:
         t0 = time.monotonic()
         ok = self.wait("unload", lambda: self.tool()[0]["state"] == "unloaded" and not self.workers(), timeout)
         took = round(time.monotonic() - t0, 2)
-        alive = [p for p in pids if os.path.exists(f"/proc/{p}")]
+        alive = [{"pid": p, "state": proc_state(p)} for p in pids if os.path.exists(f"/proc/{p}")]
         self.check(f"{label}: unloaded and worker tree reaped", ok and not alive, seconds=took, worker_pids=pids, alive=alive)
         apps = gpu_apps()
         if apps is None:
@@ -305,7 +304,7 @@ class Smoke:
             w = self.workers()
             if cur.get("phase") == phase and w:
                 hit["pid"] = w[0]
-                os.kill(w[0], signal.SIGKILL)
+                self.run_ctl("kill", str(w[0]), "KILL")  # in docker mode the worker is the image's user's, not ours
                 return True
             return False
 
@@ -364,6 +363,15 @@ class Smoke:
                    None if apps is None else not [x for x in apps if x["pid"] in pids],
                    **({"reason": "no nvidia-smi on this machine"} if apps is None else {"apps": apps}))
         self.receipt["host_mem_available_after_stop_bytes"] = meminfo_available()
+
+
+def proc_state(pid):
+    """The process's state letter (R, S, D, Z for a zombie its parent has not reaped...) and its name."""
+    try:
+        stat = open(f"/proc/{pid}/stat").read()
+        return stat[stat.rindex(")") + 2] + " " + stat[stat.index("(") + 1:stat.rindex(")")]
+    except (OSError, ValueError):
+        return "gone"
 
 
 def meminfo_available():

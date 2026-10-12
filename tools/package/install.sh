@@ -117,7 +117,9 @@ echo "  MemAvailable: $(awk '/MemAvailable/ { printf "%.1f GiB", $2 / 1048576 }'
 
 # ---- 2. the weights
 step "weights: $weights against $manifest"
-python3 -I "$HERE/verify_assets.py" "$manifest" "$weights" --receipt "$LR_HOME/assets-receipt.json" $( ((quick)) && echo --quick) |
+quick_arg=()
+((quick)) && quick_arg=(--quick)
+python3 -I "$HERE/verify_assets.py" "$manifest" "$weights" --receipt "$LR_HOME/assets-receipt.json" "${quick_arg[@]}" |
     grep -v '^ok ' || true
 [[ $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"])' "$LR_HOME/assets-receipt.json") == pass ]] ||
     die "the weights do not match the manifest ($LR_HOME/assets-receipt.json)"

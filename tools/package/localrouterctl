@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # On-demand control of one LocalRouter daemon, as a plain process or as a container:
-#   localrouterctl start | status | generate | unload | release | stop | pids | logs
+#   localrouterctl start | status | generate | unload | release | stop | pids | kill PID SIGNAL | logs
 # The daemon holds no GPU memory while idle. A model loads on its first request and unloads after its idle TTL
 # (0 in the on-demand configs: right after each job), on `unload`, or with the daemon on `stop`. `stop` waits for the
 # daemon and every worker it started to exit before it returns, and fails if any is left.
@@ -11,6 +11,7 @@
 #   LR_BIN      the localrouter executable (binary mode; default: `localrouter` on PATH, else zig-out/bin/localrouter)
 #   LR_IMAGE    the image, ideally by digest (docker mode; default localrouter:dev)
 #   LR_NAME     the container name (docker mode; default localrouter)
+#   LR_DOCKER_GPUS  docker run --gpus (docker mode; default all; "none" runs without a GPU, e.g. a test pattern check)
 #   LR_MODELS   the weights directory, mounted read-only at /models (docker mode)
 #               ($LR_HOME/files, when present, is mounted read-only at /etc/localrouter/files: files options name)
 #   LR_CONFIG   the tools.json to serve (default $LR_HOME/tools.json)
@@ -51,7 +52,10 @@ healthy() { curl -sf -m 2 "$URL/health" > /dev/null 2>&1; }
 
 daemon_pid() {
     if [[ $LR_MODE == docker ]]; then
-        docker inspect -f '{{if .State.Running}}{{.State.Pid}}{{end}}' "$LR_NAME" 2> /dev/null || true
+        # the container runs with --init: its first process is the init (which reaps orphaned processes), and the
+        # daemon is that init's first child (anything reparented to the init later has a higher pid)
+        local init; init=$(docker inspect -f '{{if .State.Running}}{{.State.Pid}}{{end}}' "$LR_NAME" 2> /dev/null || true)
+        [[ -z $init ]] || ps -o pid= --ppid "$init" | sort -n | head -n1 | tr -d ' '
     elif [[ -f $PIDFILE ]]; then
         local pid; pid=$(< "$PIDFILE")
         [[ -d /proc/$pid ]] && echo "$pid" || true
@@ -88,7 +92,10 @@ cmd_start() {
         chmod 777 "$LR_HOME/data"   # the image runs as uid 10001
         local files=()   # options that name a file (install.sh's file_options)
         [[ ! -d $LR_HOME/files ]] || files=(-v "$LR_HOME/files:/etc/localrouter/files:ro")
-        docker run -d --name "$LR_NAME" --gpus all --restart no -p "$publish:$LR_PORT:8190" \
+        local gpus=(--gpus "${LR_DOCKER_GPUS:-all}")
+        [[ ${LR_DOCKER_GPUS:-all} != none ]] || gpus=()
+        # --init: the daemon is not PID 1, so a process orphaned by a killed worker (its ffmpeg) is reaped, not left a zombie
+        docker run -d --init --name "$LR_NAME" "${gpus[@]}" --restart no -p "$publish:$LR_PORT:8190" \
             -v "$LR_MODELS:/models:ro" -v "$LR_HOME/data:/data" -v "$LR_CONFIG:/etc/localrouter/tools.json:ro" "${files[@]}" \
             "$LR_IMAGE" serve --host all --config /etc/localrouter/tools.json --data /data > /dev/null
     else
@@ -176,6 +183,7 @@ cmd_stop() {
         for _ in $(seq 1 $((LR_STOP_S * 10))); do [[ -d /proc/$pid ]] || break; sleep 0.1; done
         if [[ -d /proc/$pid ]]; then
             echo "localrouterctl: the daemon did not exit in $LR_STOP_S s; killing it and its workers" >&2
+            # shellcheck disable=SC2086 # $pids is a list of pids
             kill -KILL -- "-$pid" $pids 2> /dev/null || true
         fi
     fi
@@ -194,13 +202,26 @@ cmd_stop() {
 
 cmd_pids() { tree "$(daemon_pid)"; }
 
+# kill PID SIGNAL: signals one of the daemon's processes (a host pid from `pids`), e.g. a fault injection. In docker
+# mode the processes belong to the image's user, so the signal is sent inside the container, to that pid there.
+cmd_kill() {
+    local pid=${1:?pid} sig=${2:?signal}
+    tree "$(daemon_pid)" | grep -qx "$pid" || die "$pid is not one of the daemon's processes"
+    if [[ $LR_MODE == docker ]]; then
+        local inner; inner=$(awk '/^NSpid:/ { print $NF }' "/proc/$pid/status")
+        docker exec -u 0 "$LR_NAME" sh -c "kill -s $sig $inner"
+    else
+        kill -s "$sig" "$pid"
+    fi
+}
+
 cmd_logs() {
     if [[ $LR_MODE == docker ]]; then docker logs "$LR_NAME" 2>&1; else cat "$LR_HOME/daemon.log" 2> /dev/null || true; fi
     for f in "$LR_HOME"/data/logs/*.log; do [[ -f $f ]] && { echo "== $f"; tail -n 50 "$f"; }; done
 }
 
 case ${1:-} in
-    start | status | generate | unload | release | stop | pids | logs) c=$1; shift; "cmd_$c" "$@" ;;
+    start | status | generate | unload | release | stop | pids | kill | logs) c=$1; shift; "cmd_$c" "$@" ;;
     url) echo "$URL" ;;
     *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

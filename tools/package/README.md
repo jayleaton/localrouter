@@ -10,7 +10,8 @@ that leaves a JSON receipt. The daemon holds no GPU memory while idle. The model
 | `build-image.sh` | Builds the arm64 image from a clean commit (`docker/Dockerfile`, every engine compiled in; the model is chosen by config) and exports it as `localrouter-<commit>-arm64.tar.zst` with a receipt: commit, image id, SHA-256. It refuses to run on an arm64 host: GPU nodes build nothing |
 | `release-batch.sh` | One exact commit, checked out alone: `zig fmt --check` compared with its base by identity (a new finding fails), `zig build`, `zig build test`, then `build-image.sh`; `batch.json` records every step. Run it in the machine's build slot when one is shared |
 | `install.sh` | On the node: checks GPU, Docker and disk; checks the weights against the model's pinned manifest; checks the image file against its receipt and loads it; writes `tools.json` with the one model and `env` for `localrouterctl`. `--start` starts the daemon, `--smoke` runs the lifecycle smoke. `--uninstall` removes the image and the state, and keeps the weights |
-| `localrouterctl` | `start`, `status`, `generate MODEL PROMPT -o out.mp4`, `unload MODEL`, `release`, `stop`, `pids`, `logs`, in docker or binary mode (`LR_MODE`). `stop` returns only once the daemon and every worker and ffmpeg it started have exited |
+| `localrouterctl` | `start`, `status`, `generate MODEL PROMPT -o out.mp4`, `unload MODEL`, `release`, `stop`, `pids`, `logs`, `kill PID SIGNAL`, in docker or binary mode (`LR_MODE`). `stop` returns only once the daemon and every worker and ffmpeg it started have exited. In docker mode the container runs with `--init`, so a process orphaned by a killed worker is reaped instead of left a zombie; `LR_DOCKER_GPUS` (default `all`, `none` for no GPU) is its `--gpus`. `kill` signals one of the daemon's own processes, as root inside the container when they run there as its user |
+| `kit.sh` | The install kit for one model, in one directory to copy to the node: these scripts, the profile, its asset manifest, the image file and receipt, the options file, `kit.json` (the packaging commit, the image's source commit and digests, every input's SHA-256, the install command) and `SHA256SUMS`. It checks the image against its receipt and reads its digests first, and refuses uncommitted packaging changes |
 | `image_digests.py` | An image file's manifest and config digests, read and hashed from the archive itself. A Docker daemon names a loaded image by one or the other (containerd image store: the manifest; classic store: the config), so `install.sh` accepts either and the build receipt records both |
 | `verify_assets.py` | A weight directory against a manifest: every listed file's size and SHA-256 (`lfs_sha256`), or git blob hash (`git_blob_sha1`) for small files kept in git |
 | `lifecycle_smoke.py` | The lifecycle on the running package, written as a receipt (below) |
@@ -37,7 +38,9 @@ does not fit. The receipt records each layout's size and the largest drop in fre
 docker pull --platform linux/arm64 nvidia/cuda:13.0.1-base-ubuntu24.04   # the runtime base, once
 LR_BASE_IMAGES="nvcr.io/nvidia/pytorch:26.07-py3 nvidia/cuda:13.0.1-base-ubuntu24.04=linux/arm64" \
   bash tools/package/release-batch.sh <commit>
-# copy localrouter-<commit>-arm64.tar.zst and .json to the node; the weights are already there
+bash tools/package/kit.sh --image localrouter-<commit>-arm64.tar.zst --profile tools/package/profiles/kandinsky6-pro-distill.json \
+  --options qualified-options.json kit/
+# copy kit/ to the node (the weights are already there): cd kit && sha256sum -c SHA256SUMS
 
 # the node
 TOOL_OPTIONS='{"fp32_linear": "<mode>", "clip_linear": "<mode>", "qwen_rope_freq": "<mode>", "qwen_inv_freq": "<file>",
@@ -84,7 +87,7 @@ It starts the daemon through `localrouterctl`, and checks, in order:
 Each check is `pass`, `fail` or `skipped`, with the reason. GPU checks are skipped, not passed, without `nvidia-smi`
 (`gpu_verified: false`). A profile with `provisional` fields yields `provisional`, never `pass`. Exit status: 0 pass,
 1 fail, 2 provisional. `profiles/testpattern.json` (with `profiles/testpattern.tools.json`) runs the whole sequence
-on any machine without a GPU, in binary mode:
+on any machine without a GPU, in binary mode (or in docker mode, with `LR_MODE=docker LR_DOCKER_GPUS=none`):
 
 ```bash
 zig build
