@@ -4,8 +4,10 @@
 #   bash tools/package/kit.sh --image FILE.tar.zst --profile PROFILE.json [--manifest FILE] [--options FILE.json] OUT_DIR
 # OUT_DIR gets tools/package (these scripts and the one profile), the profile's asset manifest at the path the profile
 # names (--manifest supplies it when it is not in this checkout), the image file and its build receipt, the options
-# file when given (a JSON object for TOOL_OPTIONS, e.g. a GPU qualification's chosen values), kit.json (the packaging
-# commit, the image's source commit and digests, every input's SHA-256, the install command) and SHA256SUMS.
+# file when given (a JSON object for TOOL_OPTIONS, e.g. a GPU qualification's chosen values), fingerprint.json
+# (build_fingerprint.py on the image's source commit and the image: its build inputs, packages and licence
+# conditions), kit.json (the packaging commit, the image's source commit and digests, every input's SHA-256, the
+# fingerprint's conditions, the install command) and SHA256SUMS.
 # It checks the image file against its receipt and reads its manifest and config digests from the archive first.
 # It refuses a packaging checkout with uncommitted changes (kit.json names a commit) unless LR_ALLOW_DIRTY=1.
 # On the node:  cd OUT_DIR && sha256sum -c SHA256SUMS && (follow kit.json's "install")
@@ -18,7 +20,7 @@ image="" profile="" manifest="" options="" out=""
 while (($#)); do
     case $1 in
         --image) image=$2; shift ;; --profile) profile=$2; shift ;; --manifest) manifest=$2; shift ;;
-        --options) options=$2; shift ;; -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --options) options=$2; shift ;; -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) die "unknown argument $1" ;; *) out=$1 ;;
     esac
     shift
@@ -46,6 +48,10 @@ want=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["file_
 got=$(sha256sum "$image" | cut -d' ' -f1)
 [[ $got == "$want" ]] || die "the image file's SHA-256 is $got, its receipt says $want"
 digests=$(python3 -I "$HERE/image_digests.py" "$image") || die "the image file is not a readable image archive"
+source=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$receipt")
+git -C "$REPO" cat-file -e "$source^{commit}" 2> /dev/null || die "the image's source commit $source is not in this repository: fetch it"
+fingerprint=$(cd "$REPO" && python3 -I "$HERE/build_fingerprint.py" "$source" --image "$image" --manifest "$manifest") ||
+    die "could not fingerprint the image's source commit $source"
 
 mkdir -p "$out/tools/package/profiles" "$out/$(dirname "$rel")"
 out=$(cd "$out" && pwd)
@@ -54,6 +60,7 @@ cp "$profile" "$out/tools/package/profiles/"
 cp "$manifest" "$out/$rel"
 cp "$image" "$receipt" "$out/"
 [[ -z $options ]] || cp "$options" "$out/options.json"
+printf '%s\n' "$fingerprint" > "$out/fingerprint.json"
 python3 -I - "$out" "$(git -C "$REPO" rev-parse HEAD)" "$dirty" "$receipt" "$digests" "$(basename "$profile")" "$rel" \
     "$(basename "$image")" "${options:+options.json}" <<'PY'
 import hashlib, json, os, sys
@@ -67,6 +74,8 @@ json.dump({"packaging_commit": commit, "packaging_dirty": dirty == "true",
            "profile": {"file": "tools/package/profiles/" + profile, "sha256": sha("tools/package/profiles/" + profile)},
            "asset_manifest": {"file": manifest, "sha256": sha(manifest)},
            "options": {"file": options, "sha256": sha(options)} if options else None,
+           "fingerprint": {"file": "fingerprint.json", "sha256": sha("fingerprint.json"),
+                           "conditions": json.load(open(os.path.join(out, "fingerprint.json")))["conditions"]},
            "install": "TOOL_OPTIONS=%s bash tools/package/install.sh --profile tools/package/profiles/%s --weights <weights dir> --image %s --smoke"
                       % (opts, profile, image)},
           open(os.path.join(out, "kit.json"), "w"), indent=1)
