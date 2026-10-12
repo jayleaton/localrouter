@@ -251,7 +251,7 @@ python3 -I d2_evidence.py probe DIR --kind torch|native
 boundaries.
 
 **Reference.** All values are whole seconds from T0, the grant's `opened_at`. The window ends at T0 + 5700, the grant's
-`expires_at`. The runner (`run-node-d2-v2.py`) applies the two fields as follows.
+`expires_at`. The runner (`run-node-d2-v3.py`) applies the two fields as follows.
 
 | Field | Runner rule | Semantics |
 |---|---|---|
@@ -268,8 +268,10 @@ rounded down. Every chain also reserves 1 s for strict admission.
 **Itemized reservations, from T0:**
 
 - operator handover: 300 s;
-- input copy: 2 x hops x bytes / 25 MB/s;
-- setup verification: 2 x the devbox's measured cold time, receipt `457d14de`.
+- input copy: 2 x hops x bytes / the hop rate;
+- setup verification: 2 x the larger of a warm DEV run of the setup (timing `89bc74c8`) and the cold devbox composition
+  of its operations (receipt `457d14de`): 57 s on dgx01 (28.215 / 27.948 s, both checkpoint files included), 3 s on
+  dgx02 (1.151 / 0.982 s).
 
 That sum must fit under the setup deadline.
 
@@ -284,9 +286,10 @@ That sum must fit under the setup deadline.
 **After job 2:**
 
 - the 80 s post-payload bound;
-- the output export: 2 x hops x both jobs' output caps / 25 MB/s;
+- the output export: 2 x hops x both jobs' output caps / the hop rate;
 - the export's hash verification: 2 x (hops + 1) x the caps / the devbox's 559 MB/s;
-- cleanup: 120 s;
+- cleanup: 120 s, on dgx02 including the removal of everything created under its dgx01 relay prefixes (kit input and
+  output export), verified before the saved-cleanup receipt;
 - marker removal: 60 s.
 
 That chain ends exactly at the node's hard end:
@@ -294,29 +297,43 @@ That chain ends exactly at the node's hard end:
 - dgx01 at T0 + 5100 (N - 10 min);
 - dgx02 at T0 + 2940, which includes the both-hop export via dgx01, the verified saved copy, cleanup and marker removal.
 
-**The 2x factor.** The 25 MB/s rate is the owner's cap. It is assumed, not measured, and so is node hashing, which is
-why both are doubled.
+**The hop rate and the 2x factor.** The hop rate is 19,787,536 B/s: the slower of the two copies measured on the
+owner-approved DEV -> dgx01 pre-stage (receipt `c671ed82`; the 240-file kit, the bundle ran at 24,782,206 B/s), under
+the owner's 25 MB/s cap. It is a sizing reference, not a guarantee: the dgx01 -> dgx02 hop and both export directions
+are unmeasured, and so is node hashing, which is why every transfer and hash term is doubled.
 
 **Inputs.**
 
-- dgx02's checkpoint is owner-verified present at `~/k6-staging-1018d582/models/vae/`. It is rehashed in the window,
-  not copied.
-- dgx02's kit takes both hops in the window, reserved at 64 MiB.
-- dgx01's checkpoint is reserved as a one-hop copy. Its bundle and kit are pre-staged under their own receipt.
+- Both nodes' checkpoints are owner-verified present at `~/k6-staging-1018d582/models/vae/`. Setup rehashes both files
+  on each node in the window (inside setup verification); nothing is copied.
+- dgx01's bundle was pre-staged under receipt `c671ed82` and is not copied in the window. That receipt's kit
+  (manifest `982d7b6e`) is the earlier pack: a pre-staged pack is readback-verified for its own manifest only, and every
+  kit this producer emits is a new pack. So dgx01's kit takes its one hop in the window: the 64 MiB bound is reserved
+  (7 s); the checked final dgx01 pack, 39,235,709 B, needs 4 s. A pre-stage of the new pack instead would need its own
+  owner grant and receipt; none is assumed here.
+- dgx02's kit takes both hops in the window. The setup admits a pack of at most 64 MiB, so that bound is reserved
+  (14 s); the checked final dgx02 pack, 39,233,516 B, needs 8 s.
+- Each reservation is recomputed whenever the bound changes.
 
 | Node | Job | timeout | output cap | L | F | payload end |
 |---|---|---|---|---|---|---|
-| dgx01 | `d2-probe-torch` | 600 | 256 MiB | 1512 | 3528 | 2112 |
-| dgx01 | `d2-oracle-short` | 2100 | 4 GiB | 2341 | 1199 | 4441 |
-| dgx02 | `d2-probe-native` | 600 | 256 MiB | 502 | 4538 | 1102 |
-| dgx02 | `d2-engine` | 1140 | 1 GiB | 1310 | 3190 | 2450 |
+| dgx01 | `d2-probe-torch` | 600 | 256 MiB | 1416 | 3624 | 2016 |
+| dgx01 | `d2-oracle-short` | 2100 | 4 GiB | 2245 | 1295 | 4345 |
+| dgx02 | `d2-probe-native` | 600 | 256 MiB | 445 | 4595 | 1045 |
+| dgx02 | `d2-engine` | 1140 | 1 GiB | 1253 | 3247 | 2393 |
 
 **Setup.**
 
 | Node | Setup deadline | Reserved | Slack |
 |---|---|---|---|
-| dgx01 | 1363 | 427 | 936 |
-| dgx02 | 374 | 313 | 61 |
+| dgx01 | 1267 | 364 (300 handover + 7 kit input + 57 verification) | 903 |
+| dgx02 | 317 | 317 (300 handover + 14 kit input + 3 verification) | 0 |
+
+dgx02 has zero planning slack: its reservations end exactly at its setup deadline, T0 + 317. That is a planning bound,
+not a measured fit. Setup done at T0 + 317, plus 2 s of runner checks and the 125 s pre-payload bound, reaches
+`docker create` at T0 + 444, strictly before L = 445, which the runner requires. One more second on any reservation
+does not fit, and the self-test checks this boundary. After job 2: dgx01 80 + 462 export + 33 hash + 120 + 60 = 755 s to T0 + 5100; dgx02 80 + 272 export +
+15 hash + 120 + 60 = 547 s to T0 + 2940.
 
 **dgx02's shorter payload.** Every case and record is kept. The engine's own `TIMEOUT` is 1020 s inside a 1140 s job.
 The output cap is 1 GiB. The engine's records hold at most 843,015,168 B of raw blobs plus about 69 KB of `ops.jsonl`,

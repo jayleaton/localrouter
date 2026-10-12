@@ -40,12 +40,11 @@ ORACLE = {"kind": "d2-pybundle", "root": "~/k6-d2-oracle-ead020cbc102/pybundle",
           "versions": {"python": "3.13.16", "torch": "2.14.1+cu130", "torchvision": "0.29.1+cu130",
                        "diffusers": "0.40.0", "numpy": "2.5.3", "accelerate": "1.15.0", "safetensors": "0.8.0"}}
 ASSETS = ["vae/config.json", "vae/diffusion_pytorch_model.safetensors"]
-VAE_BYTES = 718 + 985_943_868
 ARTIFACT_DIRS = ["bin", "fatbin", "tools", "inputs", "upstream"]
 ARTIFACT_FILES = ["build.json", "MANIFEST.sha256"]
 
 # --- Window budget (D2-EVIDENCE.md, "Window budget"): the owner's SHORT95 rulings as integer seconds from T0 -----------
-# T0 is the grant's opened_at; the window ends at T0 + 5700 (expires_at). The runner (run-node-d2-v2.py) reads two
+# T0 is the grant's opened_at; the window ends at T0 + 5700 (expires_at). The runner (run-node-d2-v3.py) reads two
 # sealed integers per job:
 #   latest_start_seconds_from_open L: the job is admitted only while now < T0 + L, checked at plan time and again right
 #     after `docker create` (strictly less: a container created at T0 + L is refused). The runner also caps every job
@@ -56,9 +55,9 @@ ARTIFACT_FILES = ["build.json", "MANIFEST.sha256"]
 # is reserved below in whole seconds, reservations rounded up and deadlines down; a node that misses any deadline fails
 # closed (setup abort before job 1; the runner refuses job 2), never extends.
 WINDOW_S = 95 * 60
-RUNNER_NO_NEW_WORK_S = 1200         # run-node-d2-v2.py: launch cutoff expires - 1200
-RUNNER_STOP_RESERVE_S = 690         # run-node-d2-v2.py: stop <= expires - 690
-RUNNER_MARGIN_PAD_S = 60            # run-node-d2-v2.py: stop <= expires - finish_margin - 60
+RUNNER_NO_NEW_WORK_S = 1200         # run-node-d2-v3.py: launch cutoff expires - 1200
+RUNNER_STOP_RESERVE_S = 690         # run-node-d2-v3.py: stop <= expires - 690
+RUNNER_MARGIN_PAD_S = 60            # run-node-d2-v3.py: stop <= expires - finish_margin - 60
 # Owner: dgx01's export, cleanup and release by T0 + N - 10 min; nothing on dgx02 after T0 + 2940, its both-hop export,
 # verified saved copy, cleanup and marker removal included. Setup ceilings: setup done by T0 + 2310 / T0 + 840.
 NODE_END_S = {"dgx01": WINDOW_S - 600, "dgx02": 2940}
@@ -67,17 +66,29 @@ SETUP_CEILING_S = {"dgx01": 2310, "dgx02": 840}
 # `docker create` (30 s each) and the 5 s PID poll; after it `docker rm` (60 s) and two 10 s waits.
 RUNNER_PRE_S = 4 * 30 + 5
 RUNNER_POST_S = 60 + 2 * 10
-# Unmeasured on any node, so every duration derived from them is doubled: the per-hop LAN throughput (the owner's cap,
-# assumed reached, not proven) and node hashing (the devbox's measured cold rate below).
+# Every duration derived from a rate not measured for that exact step is doubled: the per-hop LAN throughput and node
+# hashing (the devbox's measured cold rate below).
 UNMEASURED_MARGIN = 2
-HOP_BYTES_PER_S = 25_000_000
+# The per-hop rate: the slower of the two copies measured on the owner-approved DEV -> dgx01 pre-stage (receipt c671ed82:
+# the 240-file kit at 19,787,536 B/s; the bundle ran at 24,782,206 B/s), under the owner's 25 MB/s cap. A sizing
+# reference only: the 01 -> 02 hop and both export directions are unmeasured, so the 2x margin above still applies.
+HOP_BYTES_PER_S = 19_787_536
 HASH_BYTES_PER_S = 559_000_000      # devbox, cold page cache: the 22,810-file bundle hashed at 559.08 MB/s (receipt 457d14de)
-KIT_PACK_RESERVED_BYTES = 64 * MIB  # the sealed 237-file packs are 39,179,224 / 39,177,032 B; room for the operator refresh
-# Measured on the devbox, cold (receipt 457d14de, worst of two trials), doubled for the node: the setup verification of
-# what each node holds in the window and the runner's own checks before each payload (sealed-file hashes, plan, kit and
-# checkpoint hashes; on dgx01 the bundle walk and its full hash).
-SETUP_MEASURED_S = {"dgx01": 2 * (10.261 + 1.181 + 0.090) + 0.810, "dgx02": 2 * 0.094 + 0.810}  # before and after promotion
-RUNNER_CHECKS_MEASURED_S = {"dgx01": 11.108, "dgx02": 0.965}
+# The setup admits an operator pack of at most 64 MiB, so that bound is reserved; the checked final packs are
+# 39,235,709 B (dgx01, 4 s at this rate, doubled) and 39,233,516 B (dgx02, 8 s, both hops), and the reservation is
+# recomputed whenever the bound changes.
+KIT_PACK_RESERVED_BYTES = 64 * MIB
+# Setup verification of what each node holds in the window (the operator's setup-d2-v2: kit and, on dgx01, bundle
+# inventories before and after promotion, both checkpoint files, the oracle admission per job, disk walks), the larger of
+# two DEV measurements, doubled for the node: a warm run of the setup itself (timing 89bc74c8) and the cold devbox
+# composition of the same operations, worst trial per item (receipt 457d14de):
+#   dgx01  2 x 0.090 kit + 2 x (10.261 + 1.181) bundle hash and walk + 0.810 checkpoints + 2 x 1.963 oracle admission
+#          + 2 x 0.074 disk walk = 27.948 s;  dgx02  2 x 0.094 kit + 0.788 checkpoints + 2 x 0.003 disk walk = 0.982 s
+SETUP_MEASURED_S = {"dgx01": max(28.215, 2 * 0.090 + 2 * (10.261 + 1.181) + 0.810 + 2 * 1.963 + 2 * 0.074),
+                    "dgx02": max(1.151, 2 * 0.094 + 0.788 + 2 * 0.003)}
+# The runner's own checks before each payload (sealed-file hashes, plan, kit and checkpoint hashes; on dgx01 the bundle
+# walk and its full hash), cold, worst job of two trials (receipt 457d14de); run-node-d2-v3 performs the same I/O.
+RUNNER_CHECKS_MEASURED_S = {"dgx01": 11.148, "dgx02": 0.965}
 # Allocations, not measurements: the operator's handover from T0 to setup start, the node's cleanup after the saved
 # copy is verified, and the marker removal. Each is enforced only by the deadlines that follow it.
 HANDOVER_S = 300
@@ -85,10 +96,11 @@ STRICT_S = 1                        # the runner admits strictly before L
 CLEANUP_S = 120
 MARKER_S = 60
 # Per node: the bytes copied in the window before setup, the hops they take, and the hops the outputs take home.
-# dgx01's bundle and kit are pre-staged under their own receipt (excluded by the owner's policy); its checkpoint is
-# copied in the window unless pre-staged (no evidence either way). dgx02's checkpoint is owner-verified present and is
-# rehashed, not copied; its kit takes both hops (devbox -> dgx01 -> dgx02) in the window, as do its outputs back.
-INPUT = {"dgx01": (VAE_BYTES, 1), "dgx02": (KIT_PACK_RESERVED_BYTES, 2)}
+# dgx01's bundle is pre-staged under its own receipt (c671ed82, excluded by the owner's policy) and its checkpoint is
+# owner-verified present; that receipt's kit is the earlier pack, and every kit this producer emits is a new pack, so
+# dgx01's kit takes its one hop in the window. Both nodes' checkpoints are rehashed in setup, never copied.
+# dgx02's kit takes both hops (devbox -> dgx01 -> dgx02) in the window, as do its outputs back.
+INPUT = {"dgx01": (KIT_PACK_RESERVED_BYTES, 1), "dgx02": (KIT_PACK_RESERVED_BYTES, 2)}
 EXPORT_HOPS = {"dgx01": 1, "dgx02": 2}
 # dgx02's shorter payload, every case and record kept: the job and the engine's own timeout (run-engine.sh TIMEOUT;
 # the 120 s between them covers preflight, the kit hash, the 10 s kill grace and the reaped record), and an output cap
@@ -166,6 +178,7 @@ def window_budget(node: str, jobs: list) -> dict:
         },
         "setup_reservations": head, "between_jobs": between, "after_payload": tail,
         "export_bytes_reserved": out_bytes, "export_hops": hops, "input_bytes_reserved": in_bytes, "input_hops": in_hops,
+        "transfer_reference_bytes_per_second": HOP_BYTES_PER_S,
     }
     assert budget["setup_slack"] >= 0, f"{node}: setup reservations {budget['setup_reserved']} s exceed the setup deadline {setup_deadline} s"
     assert l2 <= WINDOW_S - RUNNER_NO_NEW_WORK_S, f"{node}: the runner's no-new-work cutoff would bind before job 2's own deadline"
@@ -220,7 +233,7 @@ def self_test() -> None:
         check(b["setup_deadline"] + RUNNER_PRE_S + STRICT_S + b["readiness"]["before"]["runner_checks"] == l1, f"{node}: readiness chain")
         check(b["setup_reserved"] + b["setup_slack"] == b["setup_deadline"] <= b["setup_ceiling"], f"{node}: setup chain")
         check(b["setup_slack"] >= 0, f"{node}: slack")
-        # the runner's rules (run-node-d2-v2.py) with these fields, T0 = 0, expires = WINDOW_S
+        # the runner's rules (run-node-d2-v3.py) with these fields, T0 = 0, expires = WINDOW_S
         for j, t in ((j1, t1), (j2, t2)):
             L, F = j["latest_start_seconds_from_open"], j["finish_margin_seconds"]
             cutoff = min(WINDOW_S - RUNNER_NO_NEW_WORK_S, L)
