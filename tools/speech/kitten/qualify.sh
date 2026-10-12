@@ -31,7 +31,7 @@ step() { # name seconds command...
 }
 
 {
-  git -C "$here" rev-parse HEAD
+  git -C "$here" rev-parse HEAD 2>/dev/null || cat "$here/../../../COMMIT" # a kit carries the commit in COMMIT
   uname -a
   "$py" -I -c 'import torch, kittenml; print("torch", torch.__version__, "cuda", torch.version.cuda, "kittenml", kittenml.__version__); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")'
   nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv 2>&1 || true
