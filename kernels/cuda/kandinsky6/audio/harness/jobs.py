@@ -10,10 +10,13 @@ synthetic weights with --weights synthetic (fallback smoke test). Inputs are see
   jobs.py A|B --fatbin audio.fatbin --native-src UPSTREAM --models MODELS --out OUT [--site-packages DIR]
   jobs.py A|B --dry-run-cpu --weights synthetic --native-src UPSTREAM --out OUT   (tiny, CPU, native paths only)
 
---probe (job A only) adds a diagnostic stage after job A's cases, in the same process: the native ops whose order is
-not yet reproduced (decoder Cin 2048 K 3 convs, scaled SiLU, the strided SDPA, vocoder dilation-1 convs) run again
-under torch.profiler with their inputs, intermediates and outputs dumped under OUT/probe/; cuDNN, cuBLAS and cuBLASLt
-API logs for the whole process go to OUT/probe/logs/. The probe records kernel choices only; it is never qualification.
+--probe adds a diagnostic stage after the job's cases, in the same process. Job A: the native ops whose order is not
+yet reproduced (decoder Cin 2048 K 3 convs, scaled SiLU, the strided SDPA, vocoder dilation-1 convs) run again under
+torch.profiler with their inputs, intermediates and outputs dumped under OUT/probe/. Both jobs: the native decoder
+(A) or vocoder (B) chain runs once more with a marker around every leaf module (allocator requested bytes, cuDNN log
+offset, wall clock, profiler range), and every shared library mapped into the process is recorded with its sha256.
+cuDNN, cuBLAS and cuBLASLt API logs for the whole process go to OUT/probe/logs/. The probe records what the native
+libraries did; it is never qualification.
 """
 
 import os
@@ -46,6 +49,7 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import platform  # noqa: E402
+import re  # noqa: E402
 import resource  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
@@ -862,6 +866,174 @@ def probe_summary(R):
     return res
 
 
+def leaf_geometry(m):
+    """A leaf module's type, its plain attributes (kernel size, stride, padding, dilation, groups, ratio, ...) and the
+    shapes of its own parameters and buffers."""
+    g = {"type": type(m).__name__}
+    for k, v in vars(m).items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, (bool, int, float, str)):
+            g[k] = v
+        elif isinstance(v, tuple) and all(isinstance(e, (bool, int, float, str)) for e in v):
+            g[k] = list(v)
+    g["parameters"] = {n: list(t.shape) for n, t in m.named_parameters(recurse=False)}
+    g["buffers"] = {n: list(t.shape) for n, t in m.named_buffers(recurse=False)}
+    return g
+
+
+def probe_chain(R, label, root, run):
+    """run() once under torch.profiler with a marker around every call of every leaf module of root, so each cuDNN
+    execute, cuBLASLt matmul and kernel maps to one layer. Per call: name, geometry, input / output shapes, and at
+    both ends, after a device sync, the wall clock, the cuDNN API log's size and the caching allocator's cumulative
+    requested bytes and allocation count. A library's workspace is what a conv's window requests beyond its output;
+    the allocator's own trace gives each allocation's size in order (alloc_sizes), and its sum is checked against
+    the requested-byte delta so the trace's size semantics are evidence, not assumed. Kernels fall in record_function
+    ranges named probe.<label>.<module>. Written to OUT/probe/chain-<label>.json."""
+    from torch.profiler import record_function
+    log, cuda = os.environ.get("CUDNN_LOGDEST_DBG"), R.dev.type == "cuda"
+    leaves = [(n, m) for n, m in root.named_modules() if n and next(m.children(), None) is None]
+    geometry = {n: leaf_geometry(m) for n, m in leaves}
+    calls, open_ = [], []
+
+    def mark():
+        R.sync()
+        st = torch.cuda.memory_stats(R.dev) if cuda else {}
+        return {"wall": time.time(), "cudnn_log_bytes": os.path.getsize(log) if log and os.path.exists(log) else None,
+                "requested_bytes": st.get("requested_bytes.all.allocated"),
+                "allocations": st.get("allocation.all.allocated")}
+
+    def pre(name):
+        start = mark()
+        rf = record_function(f"probe.{label}.{name}")
+        rf.__enter__()
+        open_.append((rf, start))
+
+    def post(name, inp, out):
+        end = mark()
+        rf, start = open_.pop()
+        rf.__exit__(None, None, None)
+        o = out if torch.is_tensor(out) else None
+        rec = {"name": name, "geometry": geometry[name],
+               "inputs": [{"shape": list(t.shape), "stride": list(t.stride())} for t in inp if torch.is_tensor(t)],
+               "output": None if o is None else {"shape": list(o.shape), "stride": list(o.stride()),
+                                                  "bytes": o.numel() * o.element_size()},
+               "start": start, "end": end}
+        if start["requested_bytes"] is not None:
+            rec["requested_bytes"] = end["requested_bytes"] - start["requested_bytes"]
+            rec["allocations"] = end["allocations"] - start["allocations"]
+        calls.append(rec)
+
+    hooks = []
+    for n, m in leaves:
+        hooks.append(m.register_forward_pre_hook(lambda mod, inp, n=n: pre(n)))
+        hooks.append(m.register_forward_hook(lambda mod, inp, out, n=n: post(n, inp, out)))
+    base = trace = trace_error = None
+    recording = False
+    if cuda:  # the allocator trace is optional evidence: a failure is recorded, the per-call counters still stand
+        R.sync()
+        base = torch.cuda.memory_stats(R.dev).get("allocation.all.allocated")
+        try:
+            torch.cuda.memory._record_memory_history(enabled="all", context="alloc", stacks="python",
+                                                     max_entries=1 << 20, clear_history=True)
+            recording = True
+        except Exception as e:
+            trace_error = f"enable: {type(e).__name__}: {e}"[:300]
+    try:
+        out, prof = profiled(R, f"chain.{label}", run)
+        if recording:
+            try:
+                trace = [e for e in torch.cuda.memory._snapshot(R.dev)["device_traces"][R.dev.index or 0]
+                         if e["action"] == "alloc"]
+            except Exception as e:
+                trace_error = f"snapshot: {type(e).__name__}: {e}"[:300]
+    finally:
+        if recording:
+            torch.cuda.memory._record_memory_history(enabled=None)
+        for h in hooks:
+            h.remove()
+    trace_ok = None
+    if trace is not None:
+        trace_ok = True
+        for c in calls:
+            sizes = [e["size"] for e in trace[c["start"]["allocations"] - base:c["end"]["allocations"] - base]]
+            c["alloc_sizes"] = sizes
+            c["alloc_sizes_sum_equals_requested"] = (len(sizes) == c["allocations"]
+                                                     and sum(sizes) == c["requested_bytes"])
+            trace_ok = trace_ok and c["alloc_sizes_sum_equals_requested"]
+    path = os.path.join(R.a.out, "probe", f"chain-{label}.json")
+    with open(path, "w") as f:
+        json.dump({"label": label, "leaves": len(leaves), "allocation_base": base, "alloc_trace_error": trace_error,
+                   "alloc_trace_entries": None if trace is None else len(trace), "calls": calls}, f, indent=0)
+    return out, {"profile": prof, "leaves": len(leaves), "calls": len(calls), "file": os.path.relpath(path, R.a.out),
+                 "alloc_trace_sums_match_requested_bytes": trace_ok, "alloc_trace_error": trace_error,
+                 "convs": sum(c["geometry"]["type"] in ("Conv1d", "ConvTranspose1d", "MPConv1D") for c in calls)}
+
+
+def probe_decoder_chain(R):
+    """case_decoder_chain's native decode (same latent rows) under probe_chain; its mel sha must equal that case's."""
+    rows = R.randn((1, R.S["dec_T"], 40), "dec-rows")
+    z = native.latent_unscale(rows, SCALING_FACTOR, MEAN_VALUE)
+    mel, rec = probe_chain(R, "decoder", R.vae.decoder, lambda: plain(R.decode(z)))
+    rec["native"] = R.H(mel=mel)
+    main = main_result(R, f"decoder_chain/T{R.S['dec_T']}")
+    rec["native_sha_equals_case_chain"] = main is not None and main["native"]["mel"] == rec["native"]["mel"]
+    return rec
+
+
+def probe_vocoder_chain(R):
+    """case_vocoder_chain's native forward (same mel) under probe_chain; its pcm sha must equal that case's."""
+    mel = R.randn(R.S["mel"], "voc-mel", 2.0) - 5.0
+    pcm, rec = probe_chain(R, "vocoder", R.voc, lambda: plain(R.voc(mel)))
+    rec["native"] = R.H(pcm=pcm)
+    main = main_result(R, f"vocoder_chain/mel{list(R.S['mel'])}")
+    rec["native_sha_equals_case_chain"] = main is not None and main["native"]["pcm"] == rec["native"]["pcm"]
+    return rec
+
+
+GPU_LIBRARY = re.compile(r"cudnn|cublas|cufft|cudart|nvrtc|nvJitLink|libcuda\.|libnvidia|torch_cuda|c10_cuda|cupti"
+                         r"|/nvidia/")
+
+
+def probe_libraries(R):
+    """Every shared library mapped into this process now (after every probed op ran), from /proc/self/maps: path,
+    mapped device and inode, and the file's size, inode and sha256 as read through that path. Files are only read and
+    hashed, never disassembled. Written to OUT/probe/libraries.json; the GPU-related ones are repeated in the result."""
+    mapped = {}
+    with open("/proc/self/maps") as f:
+        for line in f:
+            parts = line.split(None, 5)
+            if len(parts) < 6 or not parts[5].startswith("/"):
+                continue
+            path = parts[5].strip()
+            deleted = path.endswith(" (deleted)")
+            path = path[:-len(" (deleted)")] if deleted else path
+            if re.search(r"\.so(\.[0-9A-Za-z_]+)*$", os.path.basename(path)):
+                mapped.setdefault(path, {"path": path, "mapped_dev": parts[3], "mapped_inode": int(parts[4]),
+                                         "deleted": deleted})
+    libs, t = [], time.monotonic()
+    for path, rec in sorted(mapped.items()):
+        try:
+            st, h = os.stat(path), hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 24), b""):
+                    h.update(chunk)
+            rec.update(size=st.st_size, inode=st.st_ino, sha256=h.hexdigest(),
+                       same_inode_as_mapped=st.st_ino == rec["mapped_inode"])
+        except OSError as e:
+            rec["error"] = f"{type(e).__name__}: {e}"[:300]
+        libs.append(rec)
+    path = os.path.join(R.a.out, "probe", "libraries.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    env = {k: os.environ.get(k) for k in ("LD_LIBRARY_PATH", "LD_PRELOAD", "CUDA_HOME", "CUDA_MODULE_LOADING")}
+    with open(path, "w") as f:
+        json.dump({"libraries": libs, "environment": env}, f, indent=1)
+    gpu = [{k: r.get(k) for k in ("path", "size", "sha256", "same_inode_as_mapped", "deleted", "error")}
+           for r in libs if GPU_LIBRARY.search(r["path"])]
+    return {"mapped_libraries": len(libs), "hash_seconds": round(time.monotonic() - t, 3), "environment": env,
+            "gpu_libraries": gpu, "file": os.path.relpath(path, R.a.out)}
+
+
 def probe_a(R):
     S = R.S
     for path, tmul, gname in PROBE_DECODER:
@@ -872,6 +1044,15 @@ def probe_a(R):
     if R.case("probe/vocoder_load", case_vocoder_load, R) is not None:
         for name, tkey in PROBE_VOCODER:
             R.case(f"probe/vocoder_conv/{name}", probe_vocoder_conv, R, name, tkey)
+    R.case("probe/chain/decoder", probe_decoder_chain, R)
+    R.case("probe/libraries", probe_libraries, R)
+    R.case("probe/summary", probe_summary, R)
+
+
+def probe_b(R):
+    if R.voc is not None:
+        R.case("probe/chain/vocoder", probe_vocoder_chain, R)
+    R.case("probe/libraries", probe_libraries, R)
     R.case("probe/summary", probe_summary, R)
 
 
@@ -1140,6 +1321,8 @@ def job_b(R):
     R.case(f"vocoder_chain/mel{list(S['mel'])}", case_vocoder_chain, R)
     for kind, cin, cout, kk, stride in S["wn"]:
         R.case(f"weight_norm_fold/{kind}", case_weight_norm, R, kind, cin, cout, kk, stride)
+    if R.a.probe:
+        probe_b(R)
 
 
 # ======================================================================================================= driver
@@ -1178,7 +1361,7 @@ def main(argv=None):
     p.add_argument("--norm-eps", type=float, default=None, help="override the eps given to the candidate normalize")
     p.add_argument("--backend", choices=("auto", "cuda-python", "ctypes"), default="auto")
     p.add_argument("--dry-run-cpu", action="store_true", help="tiny shapes on CPU, native paths only, no launches")
-    p.add_argument("--probe", action="store_true", help="job A: diagnostic probe stage (see above)")
+    p.add_argument("--probe", action="store_true", help="diagnostic probe stage after the job's cases (see above)")
     a = p.parse_args(argv)
     R = Run(a)
     code = 0
@@ -1186,8 +1369,6 @@ def main(argv=None):
         set_numerics()
         if a.dry_run_cpu and a.weights == "real":
             raise Fatal("--dry-run-cpu uses tiny shapes: pass --weights synthetic")
-        if a.probe and a.job != "A":
-            raise Fatal("--probe is a job A stage")
         if a.probe and "PROBE_LOGS" not in globals():
             raise Fatal("--probe needs --out OUT as two arguments")
         if a.probe and (any(os.environ.get(k) != v for k, v in PROBE_LOG_ENV.items())
