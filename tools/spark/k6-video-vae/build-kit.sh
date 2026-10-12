@@ -11,7 +11,9 @@
 #                         and must be a release >= the component's minimum_zig_version, or the build refuses with
 #                         the kit unchanged (build-kit-fixture.py runs these cases on this script)
 #   MANIFEST.sha256       every kit file except pybundle/ (pinned by pybundle/MANIFEST.sha256, listed here) and vae/;
-#                         its own sha256 is the kit's identity
+#                         its own sha256 is the kit's identity. upstream/.git and every __pycache__ outside pybundle/
+#                         are removed first (oracle.py pins the upstream files it loads by sha256), so the staged tree
+#                         holds no file outside the two manifests (operator_spec.py stage_tree refuses one)
 #   $KIT.operator-spec.json (beside the kit) the D2 jobs for the shared staging sealer (tools/kandinsky6/staging/seal.py): per-node
 #                         immutable image IDs (NODE_IMAGES, the nodes' `docker image inspect` receipt), artifacts with
 #                         sha256, the vae assets, budgets; the oracle jobs name the original pybundle/ (pinned there,
@@ -22,6 +24,7 @@
 # FATBIN_FROM=DIR (a new KIT, bin/ rebuilt) takes fatbin/ from an earlier kit instead of nvcc, when the kernel sources are
 # unchanged since that kit's head: its fatbins are checked against its MANIFEST.sha256 and its nvcc version is kept.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1   # no __pycache__ in the kit or the repo
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 KIT=${KIT:?KIT=DIR}
 VV=$REPO/src/engines/kandinsky6/video_vae
@@ -87,8 +90,13 @@ cat > $KIT/build.json <<EOF
  "target": "aarch64-linux-gnu", "gencode": ["sm_121a", "sm_120a"]}
 EOF
 cd $KIT
-find bin fatbin tools inputs upstream build.json pybundle.json pybundle/MANIFEST.sha256 -type f -not -path '*/.git/*' \
-    -not -name '*.pyc' | LC_ALL=C sort | xargs -d '\n' sha256sum > MANIFEST.sha256
+chmod -R u+w upstream
+rm -rf upstream/.git
+find bin fatbin tools inputs upstream -depth -name __pycache__ -type d -exec rm -rf {} +
+find bin fatbin tools inputs upstream build.json pybundle.json pybundle/MANIFEST.sha256 -type f | LC_ALL=C sort \
+    | xargs -d '\n' sha256sum > MANIFEST.sha256
+rm -f $KIT.operator-spec.json   # a refused spec leaves none, never a truncated one
 python3 -I $REPO/tools/spark/k6-video-vae/operator_spec.py --kit $KIT --node-images $NODE_IMAGES \
-    --assets $ASSETS_PROGRESS > $KIT.operator-spec.json
+    --assets $ASSETS_PROGRESS > $KIT.operator-spec.json.part || { rm -f $KIT.operator-spec.json.part; exit 1; }
+mv $KIT.operator-spec.json.part $KIT.operator-spec.json
 echo "{\"kit\": \"$KIT\", \"manifest_sha256\": \"$(sha256sum MANIFEST.sha256 | cut -d' ' -f1)\", \"files\": $(wc -l < MANIFEST.sha256), \"operator_spec\": \"$KIT.operator-spec.json\", \"operator_spec_sha256\": \"$(sha256sum $KIT.operator-spec.json | cut -d' ' -f1)\"}"
