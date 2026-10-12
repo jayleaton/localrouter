@@ -69,6 +69,9 @@ pub const View = struct {
 };
 
 /// The transformer config of the selected checkpoint (Pro-distill, `PiFlowDiffusionTransformer3D` with n_grid 10).
+/// The K tile of the native (cuBLASLt) kernel of the patch embedding on SM121; see `Config.patchKFirst`.
+pub const native_patch_k_tile = 32;
+
 pub const Config = struct {
     model_dim: u32 = 4096,
     model_dim_a: u32 = 2048,
@@ -101,6 +104,12 @@ pub const Config = struct {
     /// The patch embedding's input features: patch (1, 2, 2) of `visualIn` channels.
     pub fn patchIn(c: Config) u32 {
         return 4 * c.visualIn();
+    }
+    /// The patch embedding GEMM's k_first (launch.Kernels.gemm): K mod the native kernel's K tile. Captured on SM121
+    /// (D1 window, T0 1791816926): cuBLASLt algo 23, tile 256x128, stages 32x3 (K tile 32) for [50,220, 132] x
+    /// [4096, 132]^T, so 132 mod 32 = 4 elements are reduced first. Every other DiT GEMM has K % 16 == 0 and needs none.
+    pub fn patchKFirst(c: Config) u32 {
+        return c.patchIn() % native_patch_k_tile;
     }
     pub fn heads(c: Config) u32 {
         return c.model_dim / c.head_dim;
@@ -295,6 +304,7 @@ test "preset token counts" {
 test "config derivations" {
     const c = Config.distill;
     try testing.expectEqual(@as(u32, 132), c.patchIn());
+    try testing.expectEqual(@as(u32, 4), c.patchKFirst());
     try testing.expectEqual(@as(u32, 32), c.heads());
     try testing.expectEqual(@as(u32, 16), c.headsA());
     try testing.expectEqual(@as(u32, 16), c.dxVisual());

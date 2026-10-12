@@ -61,7 +61,8 @@ precision and SDPA flags, environment variables, fatbin and upstream digests); D
 DIR/receipt-<phase>.json {env, tables, sites[], blocks{}, first_divergence, ok};
 DIR/fixtures/<site>/<tensor>.{bin,json} for every input and native output of at most 4 Mi elements (raw
 little-endian bytes, json header with dtype, shape and sha256) so Zig / twin runs can replay them offline; larger
-tensors are recorded by sha256 only (the input tables excepted).
+tensors are recorded by sha256 only (the input tables and the fp32/* operands excepted: 134 Mi bf16 weight values,
+268 MB a run, so the GEMV's reduction order can be replayed offline).
 
 Resources (estimates, checked against --max-gib before a child starts and against free device memory in the child;
 GB10 memory is unified, hashing copies 256 MiB at a time; torch.cuda.max_memory_allocated is recorded a site):
@@ -293,11 +294,14 @@ def cdiv(a: int, b: int) -> int:
     return -(-a // b)
 
 
-def gemm_math(x2, w, m: int, n: int, epi: str, chunk: int | None = None) -> dict:
+def gemm_math(x2, w, m: int, n: int, epi: str, chunk: int | None = None, k_first: int = 0) -> dict:
     rows = min(m, chunk) if chunk else m
-    return {"kernel": "k6_gemm_bf16", "epilogue": epi, "vec": K.Kernels.gemm_vec(x2, w), "m": m, "n": n,
-            "k": int(w.shape[1]), "grid": [cdiv(n, 128), cdiv(rows, 128)], "block": 256, "row_chunk": chunk,
-            "math": "mma.sync bf16, fp32 accumulation, K ascending in 32-wide tiles, no split-K, one rounding"}
+    order = (f"k < {k_first} first (zero-padded tile), then {k_first} + 32 j" if 0 < k_first < int(w.shape[1])
+             else "K ascending")
+    return {"kernel": "k6_gemm_bf16", "epilogue": epi, "vec": K.Kernels.gemm_vec(x2, w, k_first), "m": m, "n": n,
+            "k": int(w.shape[1]), "k_first": k_first, "grid": [cdiv(n, 128), cdiv(rows, 128)], "block": 256,
+            "row_chunk": chunk,
+            "math": f"mma.sync bf16, fp32 accumulation, {order} in 32-wide tiles, no split-K, one rounding"}
 
 
 def gemv_math(math_: str, m: int, n: int, k: int, silu: bool, out: str) -> dict:
@@ -351,12 +355,13 @@ def visual_embeddings_site(c: B.Config, sh: B.Shape, wb: int) -> Site:
         def twin():
             out = torch.empty(Nt, D, dtype=BF, device=DEV)
             ctx.k.patchify(x.reshape(-1, C), prow, sh, C)
-            ctx.k.gemm(prow, ve.in_layer.weight, ve.in_layer.bias.view(1, -1), out, K.EPI_BIAS)
+            ctx.k.gemm(prow, ve.in_layer.weight, ve.in_layer.bias.view(1, -1), out, K.EPI_BIAS, c.patch_k_first())
             return out
 
         return Case({"x_video": x, "weight": ve.in_layer.weight, "bias": ve.in_layer.bias},
                     lambda: ve(x).reshape(Nt, D), twin,
-                    {"patchify": "k6_patchify f32", **gemm_math(prow, ve.in_layer.weight, Nt, D, "bias")},
+                    {"patchify": "k6_patchify f32",
+                     **gemm_math(prow, ve.in_layer.weight, Nt, D, "bias", k_first=c.patch_k_first())},
                     f"VisualEmbeddings({C}, {D}, (1, 2, 2)) on {list(x_shape)} fp32")
 
     return Site("linear/visual_embeddings", "linear",
@@ -1362,7 +1367,10 @@ def run_site(ctx: Ctx, site: Site, out: Path) -> dict:
         rec.update(compare(nat, tw))
         rec["sha_native"] = tensor_record(nat, out, site.name, "native")["sha256"]
         rec["sha_twin"] = tensor_record(tw, out, site.name, "twin")["sha256"]
-    rec["inputs"] = {n: tensor_record(t, out, site.name, f"input.{n}") for n, t in case.inputs.items()}
+    # fp32/* operands whatever their size: the modulation weights (up to 37.7 Mi bf16) are what an offline replay
+    # needs to pin the native GEMV's FP32 reduction order against the fp32 output fixture
+    rec["inputs"] = {n: tensor_record(t, out, site.name, f"input.{n}", force=site.kind == "fp32")
+                     for n, t in case.inputs.items()}
     if site.kind == "block":
         h = hashlib.sha256()
         for n, _d, _s in B.manifest(ctx.c):

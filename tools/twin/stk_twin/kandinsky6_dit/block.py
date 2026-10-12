@@ -24,6 +24,10 @@ Hook = Callable[[str, torch.Tensor], None]
 
 
 # ------------------------------------------------------------------------------------------------------- layout.zig
+# layout.native_patch_k_tile: the K tile of the native patch-embedding kernel on SM121 (Config.patch_k_first)
+NATIVE_PATCH_K_TILE = 32
+
+
 @dataclass(frozen=True)
 class Config:
     """layout.Config: the transformer config of the Pro-distill checkpoint (defaults); fewer blocks or smaller widths
@@ -54,6 +58,11 @@ class Config:
 
     def patch_in(self) -> int:
         return 4 * self.visual_in()
+
+    def patch_k_first(self) -> int:
+        """layout.Config.patchKFirst: K mod the native patch-embedding kernel's K tile (cuBLASLt algo 23, 256x128,
+        stages 32x3 on SM121), the elements its CUTLASS 2.x iterators reduce first."""
+        return self.patch_in() % NATIVE_PATCH_K_TILE
 
     def heads(self) -> int:
         return self.model_dim // self.head_dim
@@ -185,6 +194,7 @@ def manifest(c: Config) -> list[tuple[str, str, tuple]]:
 class Linear(NamedTuple):
     w: torch.Tensor  # bf16 [out, in]
     b: Optional[torch.Tensor]  # bf16 [1, out]
+    k_first: int = 0  # kernels.gemm's K order: the native kernel's partial K tile, 0 for none
 
 
 class Attn(NamedTuple):
@@ -320,7 +330,7 @@ def bind_weights(c: Config, weights: dict) -> Weights:
                            b.emb(f"{p}_text_embeddings", md, c.in_text_dim),
                            b.emb(f"{p}_pooled_text_embeddings", T, c.in_text_dim2),
                            [bind_text_block(c, weights, p, i) for i in range(c.num_text_blocks)])
-    return Weights(b.lin("visual_embeddings.in_layer", D, c.patch_in()),
+    return Weights(b.lin("visual_embeddings.in_layer", D, c.patch_in())._replace(k_first=c.patch_k_first()),
                    b.t("visual_token_type_embeddings.weight", c.token_types, D),
                    b.lin("out_layer.modulation.out_layer", 2 * D, T),
                    b.lin("out_layer.out_layer", 4 * c.out_visual_dim, D),
@@ -491,7 +501,7 @@ class Dit:
             self.hook(name, out)
 
     def linear(self, l: Linear, x: torch.Tensor, out: torch.Tensor) -> None:
-        self.k.gemm(x, l.w, l.b, out, K.EPI_BIAS)
+        self.k.gemm(x, l.w, l.b, out, K.EPI_BIAS, l.k_first)
 
     def modulation(self, l: Linear, tm: torch.Tensor, out: torch.Tensor) -> None:
         """bf16(silu(float(tm)) . float(W)^T + float(b)) into out [1, n]."""

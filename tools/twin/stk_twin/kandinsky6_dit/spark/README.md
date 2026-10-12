@@ -241,3 +241,11 @@ Each results directory holds:
 From `after.sh`: `$WORK/results/after-$T0/after.json` and `after.txt`.
 
 Do not send the extracted kit (`$WORK/kit-<sha12>`); it is read-only and identical to the tarball.
+
+Kit immutability. The extracted kit is read-only for every process of the job: file modes (a-w) for a non-root job,
+and for a root job (dgx02's transient system scopes, where modes bind nothing) a read-only bind mount in the job's own
+private mount namespace, which the job enters by re-executing itself once as the same pid. The namespace and the
+mount end with the job's last process (stop, kill or exit); the host's mount table never holds them, so cleanup is
+unchanged. Before any step a real write probe must fail; `verify_kit` checks every file against the kit's MANIFEST
+(and that MANIFEST against the tarball's) before and after each step, and a step that leaves the kit changed is void.
+`test_policy.py` KitImmutability exercises both under a DEV fake root (user + pid namespace) with tampering controls.

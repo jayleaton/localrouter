@@ -12,8 +12,12 @@
 #
 # Hard contract (each a check; the job refuses to start, or a step refuses to start, otherwise):
 #   kit     sha256(KIT) == KIT_SHA before anything is extracted; extracted once into $WORK/kit-<sha12>, then chmod -R a-w
-#           and never modified; every run re-checks every file against the kit's MANIFEST.txt (and that MANIFEST
-#           against the tarball's) before each step. Python runs with the kit as its read-only cwd, no bytecode written.
+#           and never modified. File modes bind a non-root job only, so a root job (transient system scopes) runs in
+#           its own private mount namespace with the kit bind-mounted read-only (EROFS for every process of the job,
+#           root included; the mount ends with the job). Either way a real write probe (create a file in the kit, open
+#           its MANIFEST.txt for writing) must fail before any step. Every run re-checks every file against the kit's
+#           MANIFEST.txt (and that MANIFEST against the tarball's) before and after each step; a step that leaves the
+#           kit changed fails the job. Python runs with the kit as its read-only cwd, no bytecode written.
 #   time    STOP_NEW = DEADLINE - 20 min: no step starts at or after it, and none starts unless its max minutes end by
 #           CLEANUP = DEADLINE - 10 min (a step's timeout is also capped at CLEANUP). At CLEANUP the guard terminates our
 #           step's process group (KILL 10 s later); at DEADLINE it KILLs the group and stops this script.
@@ -125,6 +129,41 @@ if [[ -n ${DEADLINE:-} ]]; then
     STOP_NEW=$(( DEADLINE - STOP_NEW_S ))
     CLEANUP_AT=$(( DEADLINE - CLEANUP_S ))
 fi
+
+# ---- kit immutability (begin)
+# a-w file modes make the extracted kit immutable for a non-root job only. A root job re-executes itself once, as
+# the same pid, in a private mount namespace (private_mounts) and bind-mounts the kit read-only there (freeze_kit):
+# every write, create or chmod under it then fails with EROFS for this job's processes, root included. Teardown: the
+# namespace (unshare --propagation private, so nothing reaches the host's mount table) lives exactly as long as a
+# process of the job holds it, and the bind mount exists only inside it, so when the last process of the scope exits
+# or is killed the kernel releases both; nothing is unmounted by hand and nothing is left on the host. freeze_kit
+# refuses unless the namespace really is this job's own and a real write probe fails. A non-root owner can still
+# chmod its own files, so verify_kit runs before and after every step: a kit changed by a step voids that step.
+private_mounts() {   # "$@": this script's arguments
+    (( EUID == 0 )) && [[ -z ${K6_PRIVATE_MOUNTS:-} ]] || return 0
+    command -v unshare > /dev/null || die "root job: unshare (util-linux) is required for the read-only kit"
+    K6_PRIVATE_MOUNTS=1 exec unshare --mount --propagation private -- bash "$0" "$@"
+}
+kit_writable() {     # 0 (and a reason) if anything can write into kit $1
+    local d=$1 probe=$1/.k6-write-probe.$$
+    if ( : > "$probe" ) 2> /dev/null; then rm -f "$probe"; echo "a file can be created in $d"; return 0; fi
+    if ( : >> "$d/MANIFEST.txt" ) 2> /dev/null; then echo "$d/MANIFEST.txt opens for writing"; return 0; fi
+    return 1
+}
+freeze_kit() {       # make kit $1 read-only for every process of this job, or print why not and fail
+    local d=$1 own host
+    if (( EUID == 0 )); then
+        own=$(readlink /proc/self/ns/mnt 2> /dev/null) host=$(readlink /proc/1/ns/mnt 2> /dev/null)
+        if ! [[ -n ${K6_PRIVATE_MOUNTS:-} && -n $own && -n $host && $own != "$host" ]]; then
+            echo "root job outside its own mount namespace (self ${own:-unreadable}, pid 1 ${host:-unreadable})"
+            return 1
+        fi
+        mount --bind -o ro "$d" "$d" || { echo "read-only bind mount of $d failed"; return 1; }
+    fi
+    ! kit_writable "$d"
+}
+# ---- kit immutability (end)
+(( PREFLIGHT_ONLY == 0 )) && [[ $OPT != --budgets ]] && private_mounts "$@"
 
 # ---- environment: offline, loopback-only, caches under $WORK, oracle settings refused if preset
 ENV_BAD=""
@@ -675,7 +714,7 @@ print("\t".join(["BAD" if bad else "ok", f"{ma / 1073741824:.1f}" if isinstance(
 # one step: refuse unless it fits in time, disk and memory (budget + floor); run it under supervise.py
 run_step() {
     local name=$1 max=$2 outgb=$3 torch=$4 cuda=$5 host=$6 fatal=$7 S=$R/$1 now used free avail tos rc t0 status dua
-    local budget dub cgk h verdict mavail gap ncaps why mins
+    local budget dub cgk h verdict mavail gap ncaps why mins kit_ok
     budget=$(budget_gib "$torch" "$cuda" "$host")
     now=$(date +%s)
     used=$(du_bytes); free=$(df_bytes); avail=$(avail_kib)
@@ -721,7 +760,10 @@ run_step() {
     echo "$rc" > "$S/exit_code"
     IFS=$'\t' read -r verdict mavail gap ncaps why < <(cd / && "$PY" -I -c "$POLICY_PY" "$S" "$torch" "$cuda" "$rc" "$MAX_GAP_S" 2>> "$R/job.log")
     dua=$(( $(du_bytes) / 1000000000 ))
-    if [[ $verdict != ok ]]; then status="policy unverified: ${why:-no policy record}"
+    kit_ok=1
+    verify_kit "$KD" >> "$R/job.log" 2>&1 || kit_ok=0    # the kit after the step, too: a changed kit voids it
+    if (( kit_ok == 0 )); then status="kit modified during the step: result void"
+    elif [[ $verdict != ok ]]; then status="policy unverified: ${why:-no policy record}"
     elif [[ -f $R/.killed.$name ]]; then status="killed by guard: $(cat "$R/.killed.$name")"
     elif [[ $why != - ]]; then status="killed by supervisor: $why"
     elif (( rc == 0 )); then status=ok
@@ -731,7 +773,7 @@ run_step() {
     mins=$(awk -v s="$(( $(date +%s) - t0 ))" 'BEGIN {printf "%.1f", s / 60}')
     record "$name" "$status" "$rc" "$mins" "$max" "$torch" "$budget" "${mavail:--}" "${gap:--}" "${ncaps:--}" "$dub" "$dua"
     log "$name: $status (rc $rc, $mins min, min MemAvailable ${mavail:--} GiB, max sample gap ${gap:--} s, $ncaps Torch cap record(s), WORK $dub -> $dua GB)"
-    [[ $verdict == ok ]] || return 1
+    [[ $verdict == ok ]] && (( kit_ok )) || return 1
     [[ $status == ok ]] && return 0
     (( fatal == 0 && rc == 1 )) && [[ $why == - ]] && return 0   # a test that ran and failed: its receipt stands
     return 1
@@ -759,9 +801,13 @@ else
     fi
     mv -T "$PART" "$KD" || { rm -rf "$PART"; RESULT="cannot place $KD"; log "$RESULT"; exit 1; }
     chmod -R a-w "$KD" || { RESULT="chmod -R a-w $KD failed: not started"; log "$RESULT"; exit 1; }
-    log "kit: extracted to $KD (read-only)"
+    log "kit: extracted to $KD"
 fi
-[[ ! -w $KD/MANIFEST.txt ]] || { RESULT="$KD is writable: not started"; log "$RESULT"; exit 1; }
+if ! why=$(freeze_kit "$KD"); then
+    RESULT="kit $KD is not read-only for this job: ${why:-?}: not started"; log "$RESULT"; exit 1
+fi
+if (( EUID == 0 )); then log "kit: $KD read-only for this job (read-only bind mount, private mount namespace)"
+else log "kit: $KD read-only for this job (a-w file modes, uid $EUID)"; fi
 [[ -f $SUP ]] || { RESULT="the kit has no spark/supervise.py: not started"; log "$RESULT"; exit 1; }
 
 timeout 30 nvidia-smi -q > "$R/nvidia-smi-q.txt" 2>&1   # NVML only: no CUDA context outside a supervised step

@@ -395,6 +395,162 @@ def call_sites(root, files):
     return found
 
 
+KIT_HARNESS = r"""
+die() { echo "die: $*"; exit 9; }
+%s
+mode=$1 KD=$2
+case $mode in
+  modes-only)   # the field failure (dgx02, T0 1791816926): root, a-w modes, no private namespace
+    chmod -R a-w "$KD"
+    [[ ! -w $KD/MANIFEST.txt ]] && echo "OLD-CHECK: pass" || echo "OLD-CHECK: writable"
+    why=$(kit_writable "$KD") && echo "PROBE: $why"
+    why=$(freeze_kit "$KD") && echo FROZEN || echo "REFUSED: $why" ;;
+  job | spoofed | mount-fails | user)
+    [[ $mode == mount-fails ]] && mount() { return 32; }
+    [[ $mode == spoofed ]] && export K6_PRIVATE_MOUNTS=1    # claims a namespace it never entered
+    [[ $mode == user ]] || private_mounts "$@"
+    why=$(freeze_kit "$KD") && echo FROZEN || { echo "REFUSED: $why"; exit 3; }
+    for t in 'echo x >> "$0/MANIFEST.txt"' 'touch "$0/new"' 'chmod u+w "$0/MANIFEST.txt"' 'rm -f "$0/a.py"' \
+             'mv "$0/a.py" "$0/b.py"' 'ln -s x "$0/l"'; do
+      if bash -c "$t" "$KD" 2> /dev/null; then echo "TAMPER-WROTE: $t"; else echo "TAMPER-REFUSED: $t"; fi
+    done ;;
+esac
+"""
+
+
+class KitImmutability(unittest.TestCase):
+    """The extracted kit is immutable for every process of the job, root included (dgx02 runs jobs as root, where
+    a-w file modes bind nothing). Root cases run in their own pid namespace, so pid 1 stands for the node's init, and
+    their own mount namespace, so nothing touches the host's mounts: as real root when the suite runs as root, else as
+    uid 0 of a user namespace (hosts that restrict unprivileged user namespaces need the real-root form)."""
+
+    def section(self):
+        m = re.search(r"^# ---- kit immutability \(begin\)\n(.*?)^# ---- kit immutability \(end\)$",
+                      NODE_JOB.read_text(), re.S | re.M)
+        if not m:
+            raise AssertionError(f"kit immutability section not found in {NODE_JOB}")
+        return m.group(1)
+
+    def run_case(self, mode, root=True):
+        with tempfile.TemporaryDirectory() as d:
+            kd = Path(d) / "kit-0123456789ab"
+            kd.mkdir()
+            (kd / "MANIFEST.txt").write_text("# kit\n")
+            (kd / "a.py").write_text("print(1)\n")
+            if mode == "user":
+                subprocess.run(["chmod", "-R", "a-w", str(kd)], check=True)
+            before = {f.name: f.read_bytes() for f in kd.iterdir()}
+            harness = Path(d) / "harness.sh"
+            harness.write_text(KIT_HARNESS % self.section())
+            argv = ["bash", str(harness), mode, str(kd)]
+            if root:    # pid 1 is the outer shell (bash -c with a second command never execs its first)
+                fake = [] if os.geteuid() == 0 else ["--user", "--map-root-user"]
+                argv = ["unshare", *fake, "--pid", "--fork", "--mount-proc", "bash", "-c",
+                        'bash "$@"; exit $?', "-", str(harness), mode, str(kd)]
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin"})
+            after = {f.name: f.read_bytes() for f in kd.iterdir()}
+            mounted = str(kd) in Path("/proc/self/mountinfo").read_text()
+            subprocess.run(["chmod", "-R", "u+w", d], check=True)
+            return r, before, after, mounted
+
+    def assert_tamper_refused(self, r, before, after, owner_chmod=False):
+        """Every write, create, remove, rename and link is refused; chmod too, except that a non-root owner may still
+        change its own files' modes (that needs a deliberate second write, and verify_kit runs before and after every
+        step)."""
+        wrote = [line for line in r.stdout.splitlines() if line.startswith("TAMPER-WROTE")]
+        chmod = ['TAMPER-WROTE: chmod u+w "$0/MANIFEST.txt"'] if owner_chmod else []
+        self.assertEqual(wrote, chmod, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("TAMPER-REFUSED"), 6 - len(wrote))
+        self.assertEqual(after, before)                     # byte for byte, no file added or removed
+
+    def test_modes_alone_bind_nothing_for_root(self):
+        r, before, after, _ = self.run_case("modes-only")
+        self.assertIn("OLD-CHECK: writable", r.stdout, r.stderr)    # the old check refused every root job ...
+        self.assertIn("PROBE: a file can be created in", r.stdout)  # ... because root really can write the kit
+        self.assertIn("REFUSED: root job outside its own mount namespace", r.stdout)
+
+    def test_root_job_kit_is_read_only_bind_mount_in_own_namespace(self):
+        r, before, after, mounted = self.run_case("job")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("FROZEN", r.stdout)
+        self.assert_tamper_refused(r, before, after)
+        self.assertFalse(mounted)                           # the read-only mount ended with the job's namespace
+
+    def test_root_refuses_without_a_real_private_namespace(self):
+        for mode, why in (("spoofed", "REFUSED: root job outside its own mount namespace"),
+                          ("mount-fails", "REFUSED: read-only bind mount of")):
+            with self.subTest(mode=mode):
+                r, before, after, _ = self.run_case(mode)
+                self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+                self.assertIn(why, r.stdout)
+                self.assertNotIn("FROZEN", r.stdout)
+
+    def test_non_root_job_kit_is_read_only_by_modes(self):
+        r, before, after, _ = self.run_case("user", root=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assert_tamper_refused(r, before, after, owner_chmod=True)
+
+    def test_job_freezes_kit_and_reverifies_it_after_each_step(self):
+        text = NODE_JOB.read_text()
+        self.assertIn('(( PREFLIGHT_ONLY == 0 )) && [[ $OPT != --budgets ]] && private_mounts "$@"', text)
+        self.assertIn('if ! why=$(freeze_kit "$KD"); then\n    RESULT="kit $KD is not read-only for this job', text)
+        self.assertNotIn("[[ ! -w $KD/MANIFEST.txt ]]", text)
+        run_step = text[text.index("run_step() {"):text.index("\n}\n", text.index("run_step() {"))]
+        before, after = run_step.index("verify_kit"), run_step.rindex("verify_kit")
+        self.assertLess(before, run_step.index('wait "$CUR_PID"'))
+        self.assertGreater(after, run_step.index('wait "$CUR_PID"'))
+        self.assertIn("[[ $verdict == ok ]] && (( kit_ok )) || return 1", run_step)
+
+
+class KitVerifiedAfterEachStep(unittest.TestCase):
+    """The post-step MANIFEST check (node-job.sh verify_kit) catches whatever a step could still do to the kit: the
+    owner's chmod then a write (non-root), a new file, a removed file, an edited MANIFEST; the untouched kit passes."""
+
+    def verify_kit(self):
+        m = re.search(r"^verify_kit\(\) \{\n.*?^\}$", NODE_JOB.read_text(), re.S | re.M)
+        self.assertIsNotNone(m, f"verify_kit not found in {NODE_JOB}")
+        return m.group(0)
+
+    def run_case(self, tamper):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"
+            (src / "pkg").mkdir(parents=True)
+            (src / "pkg" / "a.py").write_text("print(1)\n")
+            (src / "b.txt").write_text("b\n")
+            sums = subprocess.run("find . -type f | sort | xargs sha256sum", shell=True, cwd=src, check=True,
+                                  capture_output=True, text=True).stdout
+            (src / "MANIFEST.txt").write_text("# kit\n" + sums)
+            kit = Path(d) / "kit.tar.gz"
+            subprocess.run(["tar", "-czf", str(kit), "-C", str(src), "."], check=True)
+            kd = Path(d) / "kit-0123456789ab"
+            kd.mkdir()
+            subprocess.run(["tar", "-xzf", str(kit), "-C", str(kd)], check=True)
+            subprocess.run(["chmod", "-R", "a-w", str(kd)], check=True)
+            script = f"KIT={kit}\n{self.verify_kit()}\n{tamper}\nverify_kit {kd}\n"
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                               env={"PATH": "/usr/bin:/bin"}, cwd=d)
+            subprocess.run(["chmod", "-R", "u+w", d], check=True)
+            return r
+
+    def test_untouched_kit_verifies(self):
+        r = self.run_case(":")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_any_change_after_a_step_fails(self):
+        kd = "kit-0123456789ab"
+        cases = {
+            "owner chmod then edit": f"chmod u+w {kd}/pkg/a.py {kd}/pkg && echo x >> {kd}/pkg/a.py",
+            "new file": f"chmod u+w {kd}/pkg && : > {kd}/pkg/new.py",
+            "removed file": f"chmod u+w {kd} && rm -f {kd}/b.txt",
+            "edited MANIFEST": f"chmod u+w {kd} {kd}/MANIFEST.txt && echo '# x' >> {kd}/MANIFEST.txt",
+        }
+        for name, tamper in cases.items():
+            with self.subTest(name):
+                r = self.run_case(tamper)
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("kit:", r.stdout)
+
+
 class RawAllocationLedger(unittest.TestCase):
     """(b): every native allocation call site of every binary of the job, against the (empty) ledger."""
 
