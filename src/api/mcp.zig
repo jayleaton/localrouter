@@ -7,6 +7,9 @@
 //!   generate_image   waits for the image(s); returns them inline (PNG) and as URLs on this server; `images` makes it an edit
 //!   generate_video   queues a clip and waits up to `wait_s` (default 600): the MP4's URL when done, else the job id;
 //!                    `image` makes it image to video
+//!   transcribe_audio waits up to `wait_s` for the transcript of an audio file (base64, data URL or URL): its text and
+//!                    JSON (language, segments, words), else the job id; get_job returns the transcript once done
+//!   synthesize_speech waits for spoken text; returns the audio inline (WAV) and as a URL
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
@@ -20,6 +23,8 @@ const jobs = @import("../sched/jobs.zig");
 const sched = @import("../sched/scheduler.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
+const speech = @import("speech.zig");
+const audio = @import("../media/audio.zig");
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -64,9 +69,10 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
 }
 
 const instructions =
-    \\Generative models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
+    \\Generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
     \\then answers in seconds; it unloads by itself when idle. Send one request at a time. Images come back inline and as
-    \\URLs; videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job).
+    \\URLs; videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
+    \\JSON; speech as WAV inline and a URL.
 ;
 
 // ---------------------------------------------------------------- tools/call
@@ -91,6 +97,10 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
         generateImage(app, a, host, args, &out)
     else if (eql(name, "generate_video"))
         generateVideo(app, a, host, args, &out)
+    else if (eql(name, "transcribe_audio"))
+        transcribeAudio(app, a, host, args, &out)
+    else if (eql(name, "synthesize_speech"))
+        synthesizeSpeech(app, a, host, args, &out)
     else if (eql(name, "get_job"))
         getJob(app, a, host, args, &out)
     else if (eql(name, "cancel_job"))
@@ -121,14 +131,16 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, max_audio_s: ?u64 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        const info = engine.audioInfo(c);
+        inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
     }
-    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{}) });
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{ .emit_null_optional_fields = false }) });
     return true;
 }
 
@@ -166,6 +178,35 @@ fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
+}
+
+fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { audio: []const u8, model: ?[]const u8 = null, language: []const u8 = "", prompt: []const u8 = "", temperature: f32 = 0, timestamps: request.Timestamps = .none, seed: ?u64 = null, wait_s: u32 = 600 };
+    const b = try parseArgs(Args, a, args, out);
+    var msg: []const u8 = "";
+    const upload = inputs.resolve(app.io, app.gpa, a, b.audio, app.policy(host), &msg) catch return fail(a, out, "{s}", .{msg});
+    if (upload.len > inputs.max_bytes) return fail(a, out, "the audio file is larger than 32 MB", .{});
+    var why: routes.Refusal = .{};
+    const j = speech.startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed }, upload, &why) orelse return fail(a, out, "{s}", .{why.message});
+    try waitFor(app, j, b.wait_s);
+    return report(app, a, host, j, out);
+}
+
+fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true };
+    const b = try parseArgs(Args, a, args, out);
+    const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
+    var why: routes.Refusal = .{};
+    const j = speech.startSpeech(app, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed }, &why) orelse return fail(a, out, "{s}", .{why.message});
+    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (b.inline_audio) {
+        const bytes = speech.encodeSpeech(app, a, j, format, &why) orelse return fail(a, out, "{s}", .{why.message});
+        const enc = std.base64.standard.Encoder;
+        try out.append(a, .{ .type = "audio", .data = enc.encode(try a.alloc(u8, enc.calcSize(bytes.len)), bytes), .mimeType = format.contentType() });
+    }
+    try summary(app, a, host, j, out);
+    return true;
 }
 
 fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -221,7 +262,14 @@ fn finished(app: *App, j: *jobs.Job) bool {
 }
 
 /// A finished job's summary (true), a failed one's reason (false), or a running one's progress (true: not an error).
+/// A completed transcription leads with its text, then the transcript as JSON.
 fn report(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out: *std.ArrayList(Content)) ToolError!bool {
+    if (j.kind() == .transcription and finished(app, j) and j.status == .completed) {
+        var why: routes.Refusal = .{};
+        const t = speech.readTranscript(app, a, j, &why) orelse return fail(a, out, "{s}", .{why.message});
+        try out.append(a, .{ .type = "text", .text = t.get("text").?.string });
+        try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, Value{ .object = t }, .{}) });
+    }
     try summary(app, a, host, j, out);
     return j.status != .failed;
 }
@@ -247,8 +295,7 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, obj, .{ .emit_null_optional_fields = false }) });
     for (urls, 0..) |u, i| {
         const f = j.files[i];
-        const mime = if (std.mem.endsWith(u8, f, ".png")) "image/png" else if (std.mem.endsWith(u8, f, ".mp4")) "video/mp4" else "application/octet-stream";
-        try out.append(a, .{ .type = "resource_link", .uri = u, .name = f, .mimeType = mime });
+        try out.append(a, .{ .type = "resource_link", .uri = u, .name = f, .mimeType = routes.contentType(f) });
     }
 }
 
@@ -286,7 +333,7 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image or video), capabilities (text_to_image, image_edit, text_to_video, image_to_video), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech or transcription), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{}}
     } },
     .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits for the result (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
@@ -314,6 +361,27 @@ const tool_list = [_]Tool{
     \\"negative_prompt":{"type":"string"},
     \\"image":{"type":"string","description":"First frame (image to video): a base64 string, data URL or http(s) URL of a PNG, JPEG or WebP up to 32 MB. Needs a model whose capabilities (list_models) include image_to_video."},
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}}}
+    } },
+    .{ .name = "transcribe_audio", .title = "Transcribe audio", .description = "Speech to text in the spoken language (no translation). Waits up to wait_s for the transcript and returns its text, then JSON with language, duration and segments (and words when timestamps is word); a longer job returns its id for get_job. Audio up to 32 MB and 30 minutes: WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["audio"],"properties":{
+    \\"audio":{"type":"string","description":"The audio file as a base64 string, a data URL or an http(s) URL."},
+    \\"model":{"type":"string","description":"A transcription model id from list_models; default: the one whose default_for lists speech_to_text."},
+    \\"language":{"type":"string","description":"ISO-639-1 code of the spoken language (en, de, ja...); omit to detect it."},
+    \\"prompt":{"type":"string","description":"Text that guides spelling and style (names, terms, the previous passage)."},
+    \\"timestamps":{"type":"string","enum":["none","segment","word"],"default":"none"},
+    \\"temperature":{"type":"number","minimum":0,"maximum":1,"default":0},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (get_job returns the transcript; cancel_job stops it)."}}}
+    } },
+    .{ .name = "synthesize_speech", .title = "Synthesize speech", .description = "Text to speech. Waits for the audio and returns it inline (WAV unless format says otherwise) and as a URL on this server. Voices are listed per model in list_models.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["input"],"properties":{
+    \\"input":{"type":"string","description":"The text to speak, up to 4096 characters."},
+    \\"model":{"type":"string","description":"A speech model id from list_models; default: the one whose default_for lists text_to_speech."},
+    \\"voice":{"type":"string","description":"A voice id from the model's voices in list_models; omit for its default."},
+    \\"speed":{"type":"number","minimum":0.25,"maximum":4,"default":1,"description":"Within the model's own speed range (list_models speed); a model without a speed control takes only 1."},
+    \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
+    \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
+    \\"seed":{"type":"integer","minimum":0},
+    \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}}}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
     \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0}}}

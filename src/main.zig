@@ -74,4 +74,6 @@ test {
     _ = @import("cli/check.zig");
     _ = @import("cli/mcp_stdio.zig");
     _ = @import("api/inputs.zig");
+    _ = @import("api/speech.zig");
+    _ = @import("media/audio.zig");
 }

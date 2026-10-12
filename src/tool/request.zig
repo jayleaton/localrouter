@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const Kind = enum { image, video };
+pub const Kind = enum { image, video, speech, transcription };
 
 /// What a model can do; a request needs exactly one (`Request.capability`).
 pub const Capability = enum {
@@ -10,11 +10,15 @@ pub const Capability = enum {
     image_edit,
     text_to_video,
     image_to_video,
+    text_to_speech,
+    speech_to_text,
 
     pub fn kind(c: Capability) Kind {
         return switch (c) {
             .text_to_image, .image_edit => .image,
             .text_to_video, .image_to_video => .video,
+            .text_to_speech => .speech,
+            .speech_to_text => .transcription,
         };
     }
 };
@@ -47,10 +51,47 @@ pub const Video = struct {
     first_frame: ?[]const u8 = null, // file name in the job directory (image to video)
 };
 
-/// The wire form is std.json's union shape: {"image": {...}} or {"video": {...}}.
+/// Text to speech. The tool writes `speech.wav`: mono 16-bit PCM at the model's own rate; the API encodes other formats.
+pub const Speech = struct {
+    input: []const u8,
+    voice: []const u8 = "", // "": the tool's default voice (the daemon fills in its `default_voice` when it has one)
+    speed: f32 = 1,
+    preset: []const u8 = "", // a model-native style the tool lists in its `presets` option; "": none
+    seed: u64 = 0,
+};
+
+pub const Timestamps = enum { none, segment, word };
+
+/// Speech to text. `audio` names `audio.wav` in the job directory, written by the daemon as 16 kHz mono 16-bit PCM
+/// whatever was uploaded (`media/audio.zig`). The tool writes `transcript.json` (`Transcript`).
+pub const Transcription = struct {
+    audio: []const u8,
+    duration_ms: u64 = 0, // of `audio`, measured by the daemon
+    language: []const u8 = "", // ISO-639-1; "": detect
+    prompt: []const u8 = "", // text that conditions the decoder (spellings, previous context)
+    temperature: f32 = 0,
+    timestamps: Timestamps = .none,
+    seed: u64 = 0,
+};
+
+/// What a speech_to_text tool writes: the text, the language it heard, and segments (words when asked for).
+pub const Transcript = struct {
+    text: []const u8,
+    language: []const u8 = "",
+    duration: f64 = 0,
+    segments: []const Segment = &.{},
+    words: ?[]const Word = null,
+
+    pub const Segment = struct { id: u32 = 0, start: f64, end: f64, text: []const u8 };
+    pub const Word = struct { word: []const u8, start: f64, end: f64 };
+};
+
+/// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}} or {"transcription": {...}}.
 pub const Request = union(Kind) {
     image: Image,
     video: Video,
+    speech: Speech,
+    transcription: Transcription,
 
     pub fn kind(r: Request) Kind {
         return std.meta.activeTag(r);
@@ -61,6 +102,8 @@ pub const Request = union(Kind) {
         return switch (r) {
             .image => |v| if (v.references.len > 0) .image_edit else .text_to_image,
             .video => |v| if (v.first_frame != null) .image_to_video else .text_to_video,
+            .speech => .text_to_speech,
+            .transcription => .speech_to_text,
         };
     }
 
@@ -80,6 +123,11 @@ pub const Limits = struct {
     max_steps: u32 = 200,
     max_prompt: usize = 16 * 1024,
     max_references: usize = 5,
+    max_speech_input: usize = 4096, // characters, as OpenAI's speech API
+    min_speed: f32 = 0.25,
+    max_speed: f32 = 4,
+    max_audio_ms: u64 = 30 * 60 * 1000, // one transcription's audio
+    max_transcription_prompt: usize = 4096,
 };
 
 pub const Invalid = error{Invalid};
@@ -97,7 +145,36 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (v.seconds == 0 or v.seconds > l.max_seconds) return fail(why, "seconds must be 1 to 20");
             if (v.fps == 0 or v.fps > l.max_fps) return fail(why, "fps must be 1 to 30");
         },
+        .speech => |v| {
+            if (std.mem.trim(u8, v.input, " \t\r\n").len == 0) return fail(why, "input is required");
+            if (!std.unicode.utf8ValidateSlice(v.input)) return fail(why, "input must be UTF-8 text");
+            if ((std.unicode.utf8CountCodepoints(v.input) catch v.input.len) > l.max_speech_input) return fail(why, "input must be at most 4096 characters");
+            if (!(v.speed >= l.min_speed and v.speed <= l.max_speed)) return fail(why, "speed must be 0.25 to 4");
+            if (v.voice.len > 64 or !token(v.voice)) return fail(why, "voice must be a voice id (letters, digits, '-', '_' and '.')");
+            if (v.preset.len > 32 or !token(v.preset)) return fail(why, "preset must be a preset id (letters, digits, '-', '_' and '.')");
+        },
+        .transcription => |v| {
+            if (v.audio.len == 0 or !token(v.audio)) return fail(why, "audio must name a file in the job directory");
+            if (v.duration_ms > l.max_audio_ms) return fail(why, "the audio is longer than 30 minutes");
+            if (!language(v.language)) return fail(why, "language must be an ISO-639-1 code such as en or de");
+            if (v.prompt.len > l.max_transcription_prompt or !std.unicode.utf8ValidateSlice(v.prompt)) return fail(why, "prompt must be UTF-8 text of at most 4096 bytes");
+            if (!(v.temperature >= 0 and v.temperature <= 1)) return fail(why, "temperature must be 0 to 1");
+        },
     }
+}
+
+/// Letters, digits, '-', '_' and '.' (no path separators): voice ids and job file names.
+fn token(s: []const u8) bool {
+    for (s) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.')) return false;
+    return !std.mem.eql(u8, s, ".") and !std.mem.eql(u8, s, "..");
+}
+
+/// "" (detect) or a two- or three-letter lowercase code.
+fn language(s: []const u8) bool {
+    if (s.len == 0) return true;
+    if (s.len < 2 or s.len > 3) return false;
+    for (s) |c| if (!std.ascii.isLower(c)) return false;
+    return true;
 }
 
 fn common(prompt: []const u8, w: u32, h: u32, steps: u32, l: Limits, why: *[]const u8) Invalid!void {
@@ -135,4 +212,44 @@ test "validate and wire shape" {
     try std.testing.expectEqual(@as(u32, 1360), back.value.image.width);
     try std.testing.expectEqual([2]u32{ 1360, 768 }, parseSize("1360x768").?);
     try std.testing.expect(parseSize("1360") == null);
+}
+
+test "speech and transcription requests: capabilities, limits and wire shape" {
+    var why: []const u8 = "";
+    const say: Request = .{ .speech = .{ .input = "Hello there.", .voice = "expr-voice-2-m", .speed = 1.5, .seed = 3 } };
+    try validate(say, .{}, &why);
+    try std.testing.expectEqual(Capability.text_to_speech, say.capability());
+    try std.testing.expectEqual(Kind.speech, say.capability().kind());
+    try std.testing.expectEqual(@as(u64, 3), say.seed());
+    const bad = [_]struct { r: Request, msg: []const u8 }{
+        .{ .r = .{ .speech = .{ .input = " \n" } }, .msg = "input is required" },
+        .{ .r = .{ .speech = .{ .input = "hi", .speed = 5 } }, .msg = "speed must be 0.25 to 4" },
+        .{ .r = .{ .speech = .{ .input = "hi", .speed = std.math.nan(f32) } }, .msg = "speed must be 0.25 to 4" },
+        .{ .r = .{ .speech = .{ .input = "hi", .voice = "../x" } }, .msg = "voice must be a voice id (letters, digits, '-', '_' and '.')" },
+        .{ .r = .{ .speech = .{ .input = "\xff\xfe" } }, .msg = "input must be UTF-8 text" },
+        .{ .r = .{ .transcription = .{ .audio = "../audio.wav" } }, .msg = "audio must name a file in the job directory" },
+        .{ .r = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = 31 * 60 * 1000 } }, .msg = "the audio is longer than 30 minutes" },
+        .{ .r = .{ .transcription = .{ .audio = "audio.wav", .language = "English" } }, .msg = "language must be an ISO-639-1 code such as en or de" },
+        .{ .r = .{ .transcription = .{ .audio = "audio.wav", .temperature = -1 } }, .msg = "temperature must be 0 to 1" },
+    };
+    for (bad) |b| {
+        try std.testing.expectError(error.Invalid, validate(b.r, .{}, &why));
+        try std.testing.expectEqualStrings(b.msg, why);
+    }
+    const long: [4097]u8 = @splat('a');
+    try std.testing.expectError(error.Invalid, validate(.{ .speech = .{ .input = &long } }, .{}, &why));
+    var runes: [8192]u8 = undefined; // 4096 two-byte characters: within the limit
+    for (0..4096) |i| runes[i * 2 ..][0..2].* = "\u{e9}".*;
+    try validate(.{ .speech = .{ .input = &runes } }, .{}, &why);
+
+    const hear: Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = 1500, .language = "de", .timestamps = .word } };
+    try validate(hear, .{}, &why);
+    try std.testing.expectEqual(Capability.speech_to_text, hear.capability());
+    const text = try std.json.Stringify.valueAlloc(std.testing.allocator, hear, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "{\"transcription\":{\"audio\":\"audio.wav\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"timestamps\":\"word\"") != null);
+    const back = try std.json.parseFromSlice(Request, std.testing.allocator, text, .{});
+    defer back.deinit();
+    try std.testing.expectEqualStrings("de", back.value.transcription.language);
 }

@@ -79,6 +79,15 @@ pub fn bytes(req: *Request, content_type: []const u8, data: []const u8) !void {
     try req.respond(data, .{ .extra_headers = &.{.{ .name = "content-type", .value = content_type }} });
 }
 
+/// `bytes` with more headers (at most 7).
+pub fn bytesWith(req: *Request, content_type: []const u8, data: []const u8, extra: []const http.Header) !void {
+    var all: [8]http.Header = undefined;
+    all[0] = .{ .name = "content-type", .value = content_type };
+    const n = @min(extra.len, all.len - 1);
+    @memcpy(all[1..][0..n], extra[0..n]);
+    try req.respond(data, .{ .extra_headers = all[0 .. n + 1] });
+}
+
 /// The path without its query string.
 pub fn path(req: *const Request) []const u8 {
     const t = req.head.target;

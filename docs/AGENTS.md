@@ -23,6 +23,8 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 | `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, and whether each is loaded |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `generate_video` | `prompt`, `size`, `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
+| `transcribe_audio` | `audio` (base64, data URL or URL), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
+| `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`: the audio inline (WAV by default) and as a URL |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
 | `release_models` | unloads every model now |
@@ -38,8 +40,10 @@ agents is `skill/localrouter/SKILL.md`. The HTTP API below is the same jobs with
 curl -s $BASE/models | jq '.data[] | {id, kind, running}'
 ```
 
-`kind` is `image` or `video`. `running: true` means it is loaded now. `capabilities` lists what the model can do:
-`text_to_image`, `image_edit`, `text_to_video`, `image_to_video`. `default_for` lists the capabilities the model serves
+`kind` is `image`, `video`, `speech` or `transcription`. `running: true` means it is loaded now. `capabilities` lists
+what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`,
+`speech_to_text`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take) and
+`max_input_chars`; transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
 Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
 refused with a 400 naming the model and the capability; a model of the other kind is a 400 and an unknown one a 404,
@@ -99,9 +103,47 @@ Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (true by default). Poll 
 Image to video: add `input_reference`, a file in a multipart body (`-F input_reference=@frame.png`, with the other
 fields as form fields) or a base64 string, data URL or URL in a JSON body. The model must list `image_to_video`.
 
+## Speech (OpenAI Audio API)
+
+```bash
+curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
+  -d '{"input": "Hello from the GPU box.", "voice": "<a voice from /models>"}' -o hello.wav
+```
+
+| Field | Notes |
+| --- | --- |
+| `input` | up to 4096 characters (or the model's `max_input_chars`) |
+| `voice` | one of the model's `voices`; omit for its `default_voice` |
+| `speed` | 0.25 to 4 within the model's `speed` range; a model without a speed control takes only 1 |
+| `response_format` | `wav` (default), `pcm` (16-bit little-endian, mono; rate in the `x-sample-rate` header), `flac`, `mp3`, `opus`, `aac` |
+| `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
+
+`instructions` and `stream_format: "sse"` are refused (400): the models take no style prompt and the audio comes back
+whole. Anything a model cannot do is refused before it loads, never approximated.
+
+## Transcriptions (OpenAI Audio API)
+
+```bash
+curl -s -m 900 $BASE/audio/transcriptions -F file=@meeting.m4a -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=segment' | jq -r .text
+```
+
+| Field | Notes |
+| --- | --- |
+| `file` | WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC; up to 32 MB and 30 minutes (or the model's `max_audio_s`). A JSON body may send it as base64, a data URL or a URL |
+| `language` | ISO-639-1 (`en`, `de`, `ja`...); omit to detect it |
+| `prompt` | text that guides spelling and style |
+| `response_format` | `json` (default: `text`, `usage`), `text`, `verbose_json` (`language`, `duration`, `segments`), `srt`, `vtt` |
+| `timestamp_granularities[]` | `segment` and/or `word`, with `verbose_json`; `word` only for models that support it (else 400) |
+| `temperature` | 0 to 1 |
+
+The text stays in the spoken language: there is no `/v1/audio/translations` (404) and `stream=true` is refused. The
+request waits for the transcript; for long files over MCP use `transcribe_audio` with `wait_s` and `get_job`, which
+also lets you `cancel_job` it.
+
 ## Input URLs
 
-A URL in `image`, `images` or `input_reference` (HTTP) or `images` / `image` (MCP) is fetched by the daemon, so by default
+A URL in `image`, `images`, `input_reference` or `file` (HTTP) or `images` / `image` / `audio` (MCP) is fetched by the daemon, so by default
 it may only name public hosts. The host is resolved by the daemon, and the request is refused with a 400 (a tool error
 over MCP) if any address it resolves to is loopback, in RFC 1918 space (10/8, 172.16/12, 192.168/16), link-local
 (169.254/16, which includes cloud metadata at 169.254.169.254; fe80::/10), carrier-grade NAT (100.64/10, where tailnet
@@ -151,7 +193,7 @@ Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
 
 | Status | Meaning | Do |
 | --- | --- | --- |
-| 400 | Invalid request (size, n, prompt, input images, a capability the model lacks, a model of the other kind, a size or step count the model does not take) | Fix the request |
+| 400 | Invalid request (size, n, prompt, input images or audio, a capability the model lacks, a model of another kind, a size, step count, voice, speed, preset or audio length the model does not take) | Fix the request |
 | 404 | Unknown model (the message lists the models that can do it) or route | Re-check `GET /models` |
 | 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority) | Retry later; don't loop |
 | 503 `server_error` | The tool failed to load or its worker died; the message has the log tail | Report it |

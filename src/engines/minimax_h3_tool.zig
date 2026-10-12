@@ -24,7 +24,7 @@ const default_resident_mb = 40_000;
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image => 0,
+        .image, .speech, .transcription => 0,
         // the frames and the waveform on the host, plus ffmpeg's own buffers
         .video => |v| blk: {
             const sh = P.shapes(v.width, v.height, v.seconds * fps) catch break :blk 0;
@@ -64,7 +64,7 @@ const MiniMaxH3 = struct {
         const t: *MiniMaxH3 = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .video => |x| x,
-            .image => return engine.Refused.Refused,
+            .image, .speech, .transcription => return engine.Refused.Refused,
         };
         if (v.first_frame != null or v.fps != fps) return engine.Refused.Refused; // image to video is not ported
         const p = t.p orelse return error.NotLoaded;

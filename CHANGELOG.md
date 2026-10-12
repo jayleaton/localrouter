@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Speech: two new kinds, `speech` (`text_to_speech`) and `transcription` (`speech_to_text`), behind OpenAI's
+  `POST /v1/audio/speech` (wav, pcm, flac, mp3, opus, aac) and `POST /v1/audio/transcriptions` (json, text,
+  verbose_json, srt, vtt; segment and word timestamps), and the MCP tools `synthesize_speech` and `transcribe_audio`.
+  Uploads are decoded by the daemon to 16 kHz mono WAV with ffmpeg, bounded (fixed demuxer list, local files only,
+  deadline, 32 MB and 30 minutes, one decode at a time), so adapters never decode and jobs are priced by duration.
+  Per-tool `voices`, `default_voice`, `presets`, speed range, `max_input_chars` and `max_audio_s` are checked before a
+  tool loads and listed in `/v1/models`. Translation, streaming and speech `instructions` are refused, not
+  approximated. The testpattern engine serves both kinds for tests (`testpattern-speech`, `testpattern-transcription`).
+
 - Qwen-Image 2.1 Turbo (`qwen_image_turbo`, installed as `qwen-image-2.1-turbo`): the official Turbo checkpoint on
   the same native Zig engine, with its own 8-step schedule (the checkpoint's `sample_sigmas`, shift 1, CFG 1). On GB10
   its sigmas, context, latents and pixels equal the twin's; the bf16 twin's cosine gate against diffusers fails at

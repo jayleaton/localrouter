@@ -21,10 +21,10 @@ pub const ToolConfig = struct {
     idle_ttl_s: u32 = 120, // 0: unload right after each job
     priority: i32 = 0, // higher is kept longer: memory pressure unloads lower priorities first (then least recently used)
     keep_loaded: bool = false, // load at start if it fits, skip the idle TTL, reload when memory frees; still evictable
-    capabilities: []const Capability = &.{}, // empty: the engine's (a `cmd` tool: plain text to image / video)
+    capabilities: []const Capability = &.{}, // empty: the engine's (a `cmd` tool: its kind's plain one, e.g. speech_to_text)
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
-    options: ?std.json.Value = null, // engine-specific, passed through to the worker
+    options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
 };
 
 pub const Config = struct {
@@ -53,6 +53,8 @@ pub const Defaults = struct {
     image_edit: ?[]const u8 = null,
     text_to_video: ?[]const u8 = null,
     image_to_video: ?[]const u8 = null,
+    text_to_speech: ?[]const u8 = null,
+    speech_to_text: ?[]const u8 = null,
 
     pub fn get(d: Defaults, cap: Capability) ?[]const u8 {
         return switch (cap) {
@@ -65,6 +67,8 @@ pub const Defaults = struct {
 pub const default_tools = [_]ToolConfig{
     .{ .id = "testpattern", .kind = .image, .name = "Test pattern (self-test)", .engine = "testpattern", .idle_ttl_s = 30 },
     .{ .id = "testpattern-video", .kind = .video, .name = "Test pattern video (self-test)", .engine = "testpattern", .idle_ttl_s = 30 },
+    .{ .id = "testpattern-speech", .kind = .speech, .name = "Test tone speech (self-test)", .engine = "testpattern", .idle_ttl_s = 30 },
+    .{ .id = "testpattern-transcription", .kind = .transcription, .name = "Test transcription (self-test)", .engine = "testpattern", .idle_ttl_s = 30 },
 };
 
 /// Parses a JSON config; the result lives in `arena`.
@@ -97,7 +101,14 @@ test "defaults name a model per capability; unknown capabilities are rejected" {
     try std.testing.expectEqualStrings("turbo", c.defaults.get(.text_to_image).?);
     try std.testing.expectEqualStrings("v", c.defaults.get(.image_to_video).?);
     try std.testing.expect(c.defaults.get(.image_edit) == null);
-    try std.testing.expectError(error.UnknownField, parse(arena.allocator(), "{\"defaults\": {\"text_to_speech\": \"x\"}}"));
+    try std.testing.expectError(error.UnknownField, parse(arena.allocator(), "{\"defaults\": {\"text_to_music\": \"x\"}}"));
+    const s = try parse(arena.allocator(),
+        \\{"defaults": {"text_to_speech": "kitten", "speech_to_text": "whisper"}, "tools": [
+        \\  {"id": "whisper", "kind": "transcription", "cmd": ["python3", "worker.py"], "resident_bytes": 4000000000}]}
+    );
+    try std.testing.expectEqualStrings("whisper", s.defaults.get(.speech_to_text).?);
+    try std.testing.expectEqualStrings("kitten", s.defaults.get(.text_to_speech).?);
+    try std.testing.expectEqual(Kind.transcription, s.tool("whisper").?.kind);
 }
 
 test "the default host is loopback; host accepts the keywords" {
