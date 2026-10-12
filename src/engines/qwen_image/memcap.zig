@@ -14,6 +14,7 @@
 //! are outside, in the declared non-allocator overhead.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const abi = cuda.abi;
 
@@ -34,11 +35,20 @@ pub const Counters = struct {
     refused: u64 = 0,
     driver_failed: u64 = 0,
     unknown_frees: u64 = 0,
+    rollback_failed: u64 = 0,
     drivers: u64 = 0,
+    /// Set once memory the driver handed out could neither be recorded nor given back: its bytes stay counted (they
+    /// are still resident) and every later allocation is refused.
+    failed_closed: bool = false,
 };
 
 const Kind = enum(u8) { device, host };
 const Entry = struct { len: u64, kind: Kind };
+/// Which driver call made an allocation, so a rollback gives it back the matching way.
+const Origin = enum { device_alloc, host_alloc, host_register };
+
+/// Tests only: makes recording an allocation fail (compiled out of every non-test build).
+var fail_track_for_test = false;
 
 var lock_flag: std.atomic.Value(bool) = .init(false);
 var caps: Caps = .{};
@@ -152,6 +162,7 @@ pub fn configure(c: Caps, receipt: ?[*:0]const u8) void {
 pub fn resetForTest() void {
     lock();
     counters = .{};
+    fail_track_for_test = false;
     live.clearAndFree(std.heap.page_allocator);
     real_alloc = null;
     real_free = null;
@@ -164,6 +175,7 @@ pub fn resetForTest() void {
 
 /// Reserves `n` bytes of `kind` if every cap allows it (lock held).
 fn reserve(kind: Kind, n: u64) bool {
+    if (counters.failed_closed) return false;
     const dev = counters.device + if (kind == .device) n else 0;
     const host = counters.host + if (kind == .host) n else 0;
     if (dev > caps.device or host > caps.host or dev + host > caps.total or dev < counters.device or host < counters.host) return false;
@@ -192,8 +204,17 @@ fn begin(kind: Kind, n: usize) bool {
     return ok;
 }
 
-/// After the driver call: record the allocation at `addr`, or roll the reservation back if the driver failed.
-fn finish(kind: Kind, n: usize, res: abi.Result, addr: u64) abi.Result {
+fn track(addr: u64, e: Entry) !void {
+    if (builtin.is_test and fail_track_for_test) return error.OutOfMemory;
+    try live.put(std.heap.page_allocator, addr, e);
+}
+
+/// After the driver call: record the allocation at `addr`, or roll the reservation back if the driver failed. If it
+/// cannot be recorded, it is given back the way it was made (free, free-host or unregister) and refused; the
+/// reservation is released only once that give-back succeeded. A give-back that fails leaves the bytes counted (they
+/// are still resident, but no longer findable) and fails closed: every later allocation is refused.
+fn finish(origin: Origin, n: usize, res: abi.Result, addr: u64) abi.Result {
+    const kind: Kind = if (origin == .device_alloc) .device else .host;
     lock();
     defer unlock();
     if (res != abi.success) {
@@ -201,14 +222,19 @@ fn finish(kind: Kind, n: usize, res: abi.Result, addr: u64) abi.Result {
         counters.driver_failed += 1;
         return res;
     }
-    live.put(std.heap.page_allocator, addr, .{ .len = n, .kind = kind }) catch {
-        // no host memory to remember it: hand it back and refuse
-        release(kind, n);
+    track(addr, .{ .len = n, .kind = kind }) catch {
         counters.refused += 1;
-        _ = switch (kind) {
-            .device => real_free.?(addr),
-            .host => real_free_host.?(@ptrFromInt(addr)),
+        const undo = switch (origin) {
+            .device_alloc => real_free.?(addr),
+            .host_alloc => real_free_host.?(@ptrFromInt(addr)),
+            .host_register => real_unregister.?(@ptrFromInt(addr)),
         };
+        if (undo == abi.success) {
+            release(kind, n);
+        } else {
+            counters.rollback_failed += 1;
+            counters.failed_closed = true;
+        }
         return out_of_memory;
     };
     counters.allocations += 1;
@@ -226,19 +252,19 @@ fn forget(addr: u64) void {
 fn capAlloc(p: *abi.DevicePtr, n: usize) callconv(.c) abi.Result {
     if (!begin(.device, n)) return out_of_memory;
     const res = real_alloc.?(p, n);
-    return finish(.device, n, res, if (res == abi.success) p.* else 0);
+    return finish(.device_alloc, n, res, if (res == abi.success) p.* else 0);
 }
 
 fn capHostAlloc(p: *?*anyopaque, n: usize, flags: c_uint) callconv(.c) abi.Result {
     if (!begin(.host, n)) return out_of_memory;
     const res = real_host_alloc.?(p, n, flags);
-    return finish(.host, n, res, if (res == abi.success) @intFromPtr(p.*) else 0);
+    return finish(.host_alloc, n, res, if (res == abi.success) @intFromPtr(p.*) else 0);
 }
 
 fn capRegister(p: ?*anyopaque, n: usize, flags: c_uint) callconv(.c) abi.Result {
     if (!begin(.host, n)) return out_of_memory;
     const res = real_register.?(p, n, flags);
-    return finish(.host, n, res, @intFromPtr(p));
+    return finish(.host_register, n, res, @intFromPtr(p));
 }
 
 fn capFree(p: abi.DevicePtr) callconv(.c) abi.Result {
@@ -285,9 +311,10 @@ pub fn writeReceipt() void {
     var buf: [1024]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{{\"schema\": \"localrouter-memcap-v1\", \"caps\": {{\"device\": {d}, \"host\": {d}, \"total\": {d}}}, " ++
         "\"current\": {{\"device\": {d}, \"host\": {d}}}, \"peak\": {{\"device\": {d}, \"host\": {d}, \"total\": {d}}}, " ++
-        "\"allocations\": {d}, \"frees\": {d}, \"refused\": {d}, \"driver_failed\": {d}, \"unknown_frees\": {d}, \"drivers\": {d}}}\n", .{
-        c.device,      c.host,  c.total,   n.device,        n.host,          n.peak_device, n.peak_host, n.peak_total,
-        n.allocations, n.frees, n.refused, n.driver_failed, n.unknown_frees, n.drivers,
+        "\"allocations\": {d}, \"frees\": {d}, \"refused\": {d}, \"driver_failed\": {d}, \"unknown_frees\": {d}, " ++
+        "\"rollback_failed\": {d}, \"failed_closed\": {}, \"drivers\": {d}}}\n", .{
+        c.device,      c.host,  c.total,   n.device,        n.host,          n.peak_device,     n.peak_host,     n.peak_total,
+        n.allocations, n.frees, n.refused, n.driver_failed, n.unknown_frees, n.rollback_failed, n.failed_closed, n.drivers,
     }) catch return;
     const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
     if (fd < 0) return;
@@ -303,6 +330,10 @@ const Fake = struct {
     var next: u64 = 0x1000;
     var calls: u32 = 0;
     var fail_next = false;
+    var fail_undo = false; // free / free-host / unregister report failure
+    var frees: u32 = 0;
+    var free_hosts: u32 = 0;
+    var unregisters: u32 = 0;
     var host_mem: [4][64]u8 align(16) = undefined;
     var host_i: usize = 0;
 
@@ -317,7 +348,8 @@ const Fake = struct {
         return abi.success;
     }
     fn free(_: abi.DevicePtr) callconv(.c) abi.Result {
-        return abi.success;
+        frees += 1;
+        return if (fail_undo) 999 else abi.success;
     }
     fn hostAlloc(p: *?*anyopaque, _: usize, _: c_uint) callconv(.c) abi.Result {
         calls += 1;
@@ -326,14 +358,16 @@ const Fake = struct {
         return abi.success;
     }
     fn freeHost(_: ?*anyopaque) callconv(.c) abi.Result {
-        return abi.success;
+        free_hosts += 1;
+        return if (fail_undo) 999 else abi.success;
     }
     fn register(_: ?*anyopaque, _: usize, _: c_uint) callconv(.c) abi.Result {
         calls += 1;
         return abi.success;
     }
     fn unregister(_: ?*anyopaque) callconv(.c) abi.Result {
-        return abi.success;
+        unregisters += 1;
+        return if (fail_undo) 999 else abi.success;
     }
     fn errName(_: abi.Result, s: *?[*:0]const u8) callconv(.c) abi.Result {
         s.* = "CUDA_ERROR_FAKE";
@@ -362,6 +396,10 @@ fn freshDriver(c: Caps) cuda.Driver {
     resetForTest();
     configure(c, null);
     Fake.calls = 0;
+    Fake.fail_undo = false;
+    Fake.frees = 0;
+    Fake.free_hosts = 0;
+    Fake.unregisters = 0;
     var d = Fake.driver();
     install(&d);
     return d;
@@ -491,4 +529,81 @@ test "the receipt: caps as read back, current, peak and counts; rewritten after 
     try std.testing.expectEqual(@as(u64, 600), r.value.peak.total);
     try std.testing.expectEqual(@as(u64, 1), r.value.allocations);
     try std.testing.expectEqual(@as(u64, 1), r.value.refused);
+}
+
+test "tracking fails, the give-back succeeds: the matching call returns it, the reservation is released, nothing latches" {
+    var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1100 });
+    fail_track_for_test = true;
+    var p: abi.DevicePtr = 0;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 600));
+    var hp: ?*anyopaque = null;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemHostAlloc(&hp, 40, 0));
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemHostRegister_v2(@ptrCast(&buf), 30, 0));
+    try std.testing.expectEqual(@as(u32, 1), Fake.frees); // device memory given back with free
+    try std.testing.expectEqual(@as(u32, 1), Fake.free_hosts); // cuMemHostAlloc memory with free-host
+    try std.testing.expectEqual(@as(u32, 1), Fake.unregisters); // registered memory with unregister, never free-host
+    var s = snapshot();
+    try std.testing.expectEqual(@as(u64, 0), s.device);
+    try std.testing.expectEqual(@as(u64, 0), s.host);
+    try std.testing.expectEqual(@as(u64, 3), s.refused);
+    try std.testing.expect(!s.failed_closed);
+    fail_track_for_test = false;
+    var a = try cuda.DeviceBuffer.alloc(&d, 1000); // the cap is whole again
+    a.free();
+    s = snapshot();
+    try std.testing.expectEqual(@as(u64, 0), s.device);
+}
+
+test "tracking fails and the give-back fails: the bytes stay counted and no further allocation is permitted" {
+    var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1100 });
+    fail_track_for_test = true;
+    Fake.fail_undo = true;
+    var p: abi.DevicePtr = 0;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 600));
+    fail_track_for_test = false;
+    Fake.fail_undo = false;
+    var s = snapshot();
+    try std.testing.expectEqual(@as(u64, 600), s.device); // still resident, still counted
+    try std.testing.expectEqual(@as(u64, 1), s.rollback_failed);
+    try std.testing.expect(s.failed_closed);
+    const before = Fake.calls;
+    // even far under every cap, nothing more reaches the driver
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 1));
+    var hp: ?*anyopaque = null;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemHostAlloc(&hp, 1, 0));
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemHostRegister_v2(@ptrCast(&buf), 1, 0));
+    try std.testing.expectEqual(before, Fake.calls);
+    s = snapshot();
+    try std.testing.expectEqual(@as(u64, 600), s.device);
+    try std.testing.expectEqual(@as(u64, 4), s.refused);
+}
+
+test "a registered range whose give-back fails latches too, and the receipt says so" {
+    const path = "/tmp/localrouter-memcap-rollback-test.json";
+    var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1100 });
+    configure(.{ .device = 1000, .host = 100, .total = 1100 }, path);
+    defer configure(.{}, null);
+    fail_track_for_test = true;
+    Fake.fail_undo = true;
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemHostRegister_v2(@ptrCast(&buf), 30, 0));
+    fail_track_for_test = false;
+    Fake.fail_undo = false;
+    try std.testing.expectEqual(@as(u32, 1), Fake.unregisters);
+    try std.testing.expectEqual(@as(u32, 0), Fake.free_hosts);
+    var p: abi.DevicePtr = 0;
+    try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 1)); // refused, and writes the receipt
+    const io = std.testing.io;
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(text);
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const R = struct { current: struct { device: u64, host: u64 }, rollback_failed: u64, failed_closed: bool, refused: u64 };
+    const r = try std.json.parseFromSlice(R, std.testing.allocator, text, .{ .ignore_unknown_fields = true });
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u64, 30), r.value.current.host);
+    try std.testing.expectEqual(@as(u64, 1), r.value.rollback_failed);
+    try std.testing.expect(r.value.failed_closed);
+    try std.testing.expectEqual(@as(u64, 2), r.value.refused);
 }
