@@ -48,7 +48,6 @@ the model lacks.
 | --- | --- | --- |
 | `device` | `auto` | `cuda` or `cpu` |
 | `threads` | torch's | CPU threads |
-| `deterministic` | true | `torch.use_deterministic_algorithms`, and `CUBLAS_WORKSPACE_CONFIG` |
 | `lm_weights` | `packed` | `packed` (ternary, 954 MB, bit-identical to bf16) or `full` (bf16, 3.47 GB); `emb4` needs `allow_lossy` |
 | `decoder` | `default` | `student_w4` needs `allow_lossy` |
 | `normalize` | `auto` | English normalizer: on, except for the language voices |
@@ -99,7 +98,23 @@ Results:
 | --- | --- | --- |
 | DEV: AMD Ryzen 7 6800U, CPU, torch 2.11.0+cpu, 8 threads | F1 | **pass**, 13 of 13 checks bitwise equal: normalized text and prompt ids, prefill logits (158,241 fp32), flow mel, vocoder waveform; tokens and chunk samples; float32 waveform (sha256 `2be41205…`), PCM16 (`c20521fa…`), cold = warm |
 | DEV, through the daemon (`/v1/audio/speech` wav and pcm, MCP `synthesize_speech`) | F1 | the same PCM16 bytes (`c20521fa…`) on every path |
-| GB10 (dgx02), CUDA | F1 to F5 | pending: `tools/speech/kitten/qualify.sh` in an owner-granted window. Until it passes, CUDA is not qualified |
+| GB10 (dgx02), CUDA, worker with `torch.use_deterministic_algorithms(True)` (36cd15a) | F1 to F5 | **fail**, 9 of 37 checks: op `hift_wav`; full `F1`, `F3`, `F4` and `F1-warm`, each `.f32` and `.wav_pcm16`. Equal: every other op (text, prompts, prefill logits, flow mel), every chained check (tokens, chunk samples), and full `F2` and `F5` |
+| GB10 (dgx02), CUDA, worker with the reference's torch settings | F1 to F5 | pending: `tools/speech/kitten/qualify.sh` in an owner-granted window. Until it passes, CUDA is not qualified |
+
+Why the first GB10 run failed, measured in one process per setting on dgx02 (torch 2.11.0+cu130): with torch's
+defaults the reference reproduces itself exactly from process to process (HiFT at six token lengths and the whole of
+F1). With `torch.use_deterministic_algorithms(True)` or `torch.backends.cudnn.deterministic = True` the flow mel is
+unchanged, and the first HiFT module whose output differs is its first ConvTranspose1d upsample (`ups.0`); from there
+the waveform differs, at every length tested but one. `CUBLAS_WORKSPACE_CONFIG` alone changes nothing. That the
+deterministic setting selects a different cuDNN algorithm for that layer is an inference: the diagnostic recorded
+module outputs, not kernel names. The worker therefore runs with the
+reference's settings: it has no `deterministic` option, refuses one in the config, and refuses to load if torch is in
+deterministic or cuDNN benchmark mode.
+
+`tools/speech/kitten/qualify.sh ROOT VENV OUT` runs it on a target: unit tests, every pinned file's sha256, the gate,
+then the bench, each under a time limit. `OUT/status.json` records each step's exit code and `"qualified"`, which is
+true only when all four pass. A bench that times out or misses any measurement fails, so partial numbers are never
+reported as a result. Memory is sampled every 0.5 s into `memory.log`; the sampler stops before `SHA256SUMS` is taken.
 
 A GPU run is a separate baseline from a CPU run: the gate compares worker and reference on the same device, threads
 and seed, never across devices.

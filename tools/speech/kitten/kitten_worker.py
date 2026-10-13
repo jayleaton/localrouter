@@ -51,7 +51,7 @@ class Options:
         o = tool.get("options") or {}
         # The daemon reads some keys of the same object itself (the advertised `voices`, for one), so keys this worker
         # does not know are logged rather than refused.
-        known = {"device", "threads", "deterministic", "lm_weights", "decoder", "allow_lossy", "max_input_chars",
+        known = {"device", "threads", "lm_weights", "decoder", "allow_lossy", "max_input_chars",
                  "default_voice", "voices", "presets", "min_speed", "max_speed", "default_preset", "normalize",
                  "warm_voices", "verify", "keep_float"}
         unknown = sorted(set(o) - known)
@@ -65,7 +65,12 @@ class Options:
         self.root = tool.get("weights") or o.get("assets") or ""
         self.device = o.get("device", "auto")
         self.threads = int(o.get("threads", 0))
-        self.deterministic = bool(o.get("deterministic", True))
+        if "deterministic" in o:
+            # torch's deterministic algorithms change the output of HiFT's first ConvTranspose1d upsample (ups.0) on
+            # CUDA (GB10, torch 2.11, measured; presumably another cuDNN algorithm): the audio would no longer be the
+            # reference's. The reference's own defaults reproduce exactly from process to process, so the worker uses
+            # them and offers no switch.
+            raise ValueError("the deterministic option was removed: the worker runs with the reference's torch settings")
         self.lm_weights = o.get("lm_weights", "packed")
         self.decoder = o.get("decoder", "default")
         self.allow_lossy = bool(o.get("allow_lossy", False))
@@ -161,8 +166,6 @@ class KittenEngine:
         verify_assets(opts.root, pins, opts.verify, opts.lm_weights, opts.decoder)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        if opts.deterministic:
-            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         import torch
         import kittenml
         if kittenml.__version__ != pins["runtime"]["kittenml"]:
@@ -183,9 +186,12 @@ class KittenEngine:
         vocoder.hf_hub_download = pinned_s3gen
         if opts.threads > 0:
             torch.set_num_threads(opts.threads)
-        if opts.deterministic:
-            torch.use_deterministic_algorithms(True)
-            torch.backends.cudnn.benchmark = False
+        # The reference (kittenml's KittenTTS2 with torch's defaults) is what the audio must equal bit for bit; settings
+        # that pick other kernels are refused rather than silently changing the output.
+        if (torch.are_deterministic_algorithms_enabled() or torch.backends.cudnn.deterministic
+                or torch.backends.cudnn.benchmark):
+            raise RuntimeError("torch is set to deterministic algorithms or cuDNN deterministic/benchmark mode; the "
+                               "reference runs with these off")
         device = opts.device
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -261,8 +267,11 @@ class KittenEngine:
             with open(os.path.join(out_dir, "speech.chunks.json"), "w") as f:
                 json.dump(record, f)
         ms = int((time.monotonic() - start) * 1000)
+        cuda = ""
+        if self.torch.cuda.is_available() and self.torch.cuda.is_initialized():
+            cuda = f", cuda peak reserved {self.torch.cuda.max_memory_reserved() >> 20} MiB"
         log(f"speech {len(wav) / SAMPLE_RATE:.2f} s in {ms} ms, {len(record)} chunk(s), voice {s.voice}, "
-            f"peak resident {resident_bytes() >> 20} MiB")
+            f"resident {resident_bytes() >> 20} MiB{cuda}")
         return {"ok": True, "files": [OUTPUT], "seed": s.seed, "ms": ms}
 
 

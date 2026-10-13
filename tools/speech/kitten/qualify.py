@@ -17,6 +17,7 @@ package defaults. It checks three things, all for bitwise equality:
            request must match too.
 bench drives the worker over the protocol and measures cold load, time to the first chunk, total time, the real-time
 factor, peak memory, cancellation (SIGKILL of the worker's group, as the daemon does) and whether memory comes back.
+It exits 0 only when every measurement was taken; report.json says what is missing otherwise.
 """
 
 import argparse
@@ -349,55 +350,91 @@ def mem_available():
 
 
 def bench(args):
+    """The measurements; exit 0 only when every one was taken (a failed or partial bench is not a measured result)."""
     import torch
+    import wave
     os.makedirs(args.out, exist_ok=True)
     tool = tool_config(args.root, args.device, args.threads, keep_float=False)
-    result = {"device": args.device, "threads": args.threads, "env": environment(torch)}
-    before = mem_available()
-    w = Worker(tool, os.path.join(args.out, "worker.log"))
-    t = time.monotonic()
-    w.send({"op": "load"})
-    loaded = w.reply()
-    result["cold_load_s"] = time.monotonic() - t
-    result["process_start_to_ready_s"] = time.monotonic() - w.t0
-    result["resident_reported"] = loaded.get("resident")
-    result["rss_after_load"] = w.peak_rss()
-    result["mem_available_drop_after_load"] = before - mem_available()
-    runs = []
-    for label, speech in (("first", BENCH), ("warm1", BENCH), ("warm2", BENCH), ("long", BENCH_LONG)):
-        r = w.generate(os.path.join(args.out, label), dict(speech))
-        import wave
-        with wave.open(os.path.join(args.out, label, "speech.wav")) as wf:
-            audio_s = wf.getnframes() / wf.getframerate()
-        runs.append({"run": label, "ok": r.get("ok"), "audio_s": audio_s, "wall_s": r["wall_s"],
-                     "first_chunk_s": r["first_chunk_s"], "chunks": r["chunks"], "rtf": r["wall_s"] / audio_s,
-                     "peak_rss": w.peak_rss()})
-    result["runs"] = runs
-    result["exit_code"] = w.exit()
-    # Cancellation: start a long request, kill the group once the first chunk is out (as the daemon's abort does).
-    settled = mem_available()
-    w = Worker(tool, os.path.join(args.out, "worker-cancel.log"))
-    w.send({"op": "load"})
-    w.reply()
-    loaded_avail = mem_available()
-    d = os.path.join(args.out, "cancel")
-    os.makedirs(d, exist_ok=True)
-    w.send({"op": "generate", "id": "cancel", "dir": d, "request": {"speech": dict(BENCH_LONG)}})
-    w.reply.__func__  # noqa: B018 (documentation: the reply loop below stops at the first progress line)
-    while "progress" not in json.loads(w.p.stdout.readline()):
-        pass
-    t = time.monotonic()
-    w.kill()
-    result["cancel"] = {"kill_to_reaped_s": time.monotonic() - t, "mem_available_loaded": loaded_avail,
-                        "mem_available_before_load": settled}
-    time.sleep(3)
-    result["cancel"]["mem_available_after_kill"] = mem_available()
-    result["cancel"]["reclaimed_bytes"] = result["cancel"]["mem_available_after_kill"] - loaded_avail
-    result["cancel"]["files_left"] = sorted(os.listdir(d))
-    with open(os.path.join(args.out, "report.json"), "w") as f:
-        json.dump(result, f, indent=1)
-    print(json.dumps(result, indent=1))
-    return 0
+    result = {"device": args.device, "threads": args.threads, "env": environment(torch), "missing": []}
+    missing = result["missing"]
+
+    def save():
+        result["complete"] = not missing
+        with open(os.path.join(args.out, "report.json"), "w") as f:
+            json.dump(result, f, indent=1)
+
+    try:
+        before = mem_available()
+        w = Worker(tool, os.path.join(args.out, "worker.log"))
+        t = time.monotonic()
+        w.send({"op": "load"})
+        loaded = w.reply()
+        if not loaded.get("ok"):
+            missing.append(f"load: {loaded}")
+            return 1
+        result["cold_load_s"] = time.monotonic() - t
+        result["process_start_to_ready_s"] = time.monotonic() - w.t0
+        result["resident_reported"] = loaded.get("resident")
+        result["rss_after_load"] = w.peak_rss()
+        result["mem_available_drop_after_load"] = before - mem_available()
+        runs = result["runs"] = []
+        for label, speech in (("first", BENCH), ("warm1", BENCH), ("warm2", BENCH), ("long", BENCH_LONG)):
+            r = w.generate(os.path.join(args.out, label), dict(speech))
+            run = {"run": label, "ok": r.get("ok"), "wall_s": r["wall_s"], "first_chunk_s": r["first_chunk_s"],
+                   "chunks": r["chunks"], "peak_rss": w.peak_rss()}
+            if r.get("ok"):
+                with wave.open(os.path.join(args.out, label, "speech.wav")) as wf:
+                    run["audio_s"] = wf.getnframes() / wf.getframerate()
+                run["rtf"] = r["wall_s"] / run["audio_s"] if run["audio_s"] else None
+            if not r.get("ok") or not run.get("audio_s") or run["first_chunk_s"] is None:
+                missing.append(f"run {label}: {r}")
+            runs.append(run)
+        result["exit_code"] = w.exit()
+        import re
+        with open(os.path.join(args.out, "worker.log")) as f:
+            peaks = [int(m) for m in re.findall(r"cuda peak reserved (\d+) MiB", f.read())]
+        result["cuda_peak_reserved_mib"] = max(peaks) if peaks else None
+        if args.device == "cuda" and not peaks:
+            missing.append("cuda peak memory not reported")
+        if result["exit_code"] != 0:
+            missing.append(f"worker exit {result['exit_code']}")
+        # Cancellation: a long request, the worker's group killed once its first chunk is out (as the daemon aborts).
+        settled = mem_available()
+        w = Worker(tool, os.path.join(args.out, "worker-cancel.log"))
+        w.send({"op": "load"})
+        if not w.reply().get("ok"):
+            missing.append("cancel: load failed")
+            return 1
+        loaded_avail = mem_available()
+        d = os.path.join(args.out, "cancel")
+        os.makedirs(d, exist_ok=True)
+        w.send({"op": "generate", "id": "cancel", "dir": d, "request": {"speech": dict(BENCH_LONG)}})
+        while True:
+            line = w.p.stdout.readline()
+            if not line:
+                missing.append("cancel: worker exited before its first chunk")
+                return 1
+            o = json.loads(line)
+            if "progress" in o:
+                break
+            if "ok" in o:
+                missing.append(f"cancel: finished before it could be cancelled: {o}")
+                return 1
+        t = time.monotonic()
+        w.kill()
+        result["cancel"] = {"kill_to_reaped_s": time.monotonic() - t, "mem_available_loaded": loaded_avail,
+                            "mem_available_before_load": settled}
+        time.sleep(3)
+        result["cancel"]["mem_available_after_kill"] = mem_available()
+        result["cancel"]["reclaimed_bytes"] = result["cancel"]["mem_available_after_kill"] - loaded_avail
+        result["cancel"]["files_left"] = sorted(os.listdir(d))
+        return 1 if missing else 0
+    except Exception as e:  # a crash is recorded, never silently a partial "result"
+        missing.append(f"{type(e).__name__}: {e}")
+        return 1
+    finally:
+        save()
+        print(json.dumps(result, indent=1))
 
 
 def main():

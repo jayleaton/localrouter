@@ -136,6 +136,8 @@ class OptionsTest(unittest.TestCase):
                          "student_w4")
         with self.assertRaises(ValueError):
             kw.Options({"options": {"verify": "maybe", **one}})
+        with self.assertRaisesRegex(ValueError, "deterministic"):
+            kw.Options({"options": {"deterministic": True, **one}})  # changes HiFT's output on CUDA
         with self.assertRaisesRegex(ValueError, "speed"):
             kw.Options({"options": {}})  # the daemon's default range, 0.25 to 4, would advertise a control it lacks
 
