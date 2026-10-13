@@ -65,6 +65,23 @@ pub fn parseWav(bytes: []const u8) ?Wav {
     return null;
 }
 
+/// For a RIFF/WAVE file whose data chunk claims more bytes than the file holds (a cut-short upload): the bytes claimed
+/// and present. Null for anything else, a size of 0 or 0xFFFFFFFF included (a streamed WAV of unknown length).
+pub fn cutShort(bytes: []const u8) ?[2]u64 {
+    if (bytes.len < 12 or !std.mem.eql(u8, bytes[0..4], "RIFF") or !std.mem.eql(u8, bytes[8..12], "WAVE")) return null;
+    var at: usize = 12;
+    while (at + 8 <= bytes.len) {
+        const size: usize = std.mem.readInt(u32, bytes[at + 4 ..][0..4], .little);
+        const body = at + 8;
+        const data = std.mem.eql(u8, bytes[at..][0..4], "data");
+        if (data and (size == 0 or size == 0xFFFF_FFFF)) return null;
+        if (size > bytes.len - body) return if (data) .{ size, bytes.len - body } else null;
+        if (data) return null;
+        at = body + size + (size & 1);
+    }
+    return null;
+}
+
 /// A 44-byte header for `data_len` bytes of 16-bit PCM.
 pub fn header(rate: u32, channels: u16, data_len: u32) [44]u8 {
     var h: [44]u8 = undefined;
@@ -103,6 +120,10 @@ pub const Normalized = struct { wav: []const u8, ms: u64 };
 /// Refusals (empty, undecodable, too long, no audio) set `why` and return `error.Invalid`.
 pub fn normalize(io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator, tmp_dir: []const u8, upload: []const u8, l: Limits, why: *[]const u8) (Invalid || error{ OutOfMemory, DecoderFailed })!Normalized {
     if (upload.len == 0) return fail(why, "the audio file is empty");
+    if (cutShort(upload)) |c| {
+        why.* = std.fmt.allocPrint(a, "the WAV file is cut short: its data chunk claims {d} bytes but {d} are present", .{ c[0], c[1] }) catch "the WAV file is cut short";
+        return error.Invalid;
+    }
     const max_bytes = l.max_ms * input_rate * 2 / 1000;
     if (parseWav(upload)) |w| if (w.pcm and w.rate == input_rate and w.channels == 1 and w.bits == 16) {
         const pcm = w.data[0 .. w.data.len & ~@as(usize, 1)];
@@ -241,6 +262,13 @@ test "WAV round trip, chunk walking and truncation" {
     try list.appendSlice(a, w[36..]);
     try std.testing.expectEqualSlices(u8, &pcm, parseWav(list.items).?.data);
     try std.testing.expect(parseWav(w[0 .. w.len - 1]) == null); // the data chunk claims more than is there
+    try std.testing.expectEqual([2]u64{ 8, 7 }, cutShort(w[0 .. w.len - 1]).?);
+    try std.testing.expect(cutShort(w) == null);
+    const streamed = try a.dupe(u8, w);
+    defer a.free(streamed);
+    std.mem.writeInt(u32, streamed[40..44], 0xFFFF_FFFF, .little); // unknown length: decoded, not refused
+    try std.testing.expect(cutShort(streamed) == null);
+    try std.testing.expect(cutShort("\x89PNG\r\n\x1a\n....") == null);
     try std.testing.expect(parseWav("RIFF\x00\x00\x00\x00WAVE") == null);
     try std.testing.expect(parseWav("\x89PNG\r\n\x1a\n....") == null);
     try std.testing.expectEqual(@as(u64, 0), p.ms());
@@ -278,6 +306,7 @@ test "normalize: an exact WAV is copied, others decode through ffmpeg, refusals 
         .{ .data = exact, .l = .{ .max_ms = 500 }, .msg = "the audio is longer than this model takes" },
         .{ .data = try wav(a, 48_000, 2, stereo), .l = .{ .max_ms = 500 }, .msg = "the audio is longer than this model takes" },
         .{ .data = try wav(a, 16_000, 1, ""), .msg = "the audio has no samples" },
+        .{ .data = exact[0 .. exact.len - 2], .msg = "the WAV file is cut short: its data chunk claims 32000 bytes but 31998 are present" },
     };
     for (refusals) |r| {
         try std.testing.expectError(error.Invalid, normalize(io, gpa, a, tmp, r.data, r.l, &why));

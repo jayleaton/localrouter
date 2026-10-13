@@ -1,0 +1,323 @@
+{
+  "schema": 1,
+  "ffmpeg": "ffmpeg version n9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "note": "fixture sha256 values depend on the ffmpeg build (resampler/encoders); source sha256 values are the pins fetch.py enforces",
+  "sources": {
+    "librispeech_parquet": {
+      "url": "https://huggingface.co/datasets/hf-internal-testing/librispeech_asr_dummy/resolve/5be91486e11a2d616f4ec5db8d3fd248585ac07a/clean/validation-00000-of-00001.parquet",
+      "sha256": "4e69a06fa5edc90921e5e7e39a7084881f8b3ed9c805c574f4f39c6fde27c603",
+      "bytes": 9192059,
+      "commit": "5be91486e11a2d616f4ec5db8d3fd248585ac07a",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_de_de_tar": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/audio/test.tar.gz",
+      "sha256": "819343c9eb6243ef830c85dd11ea548daddae2063988b3d9d09ecd52140bea7f",
+      "bytes": 4194304,
+      "range": "bytes=0-4194303",
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_de_de_tsv": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/test.tsv",
+      "sha256": "82fab72c58a347345675c238f2492bb997105a4ab45d69e2a2b34ed29082fa97",
+      "bytes": 559542,
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_fr_fr_tar": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/fr_fr/audio/test.tar.gz",
+      "sha256": "bba52dc993c30a8f6743de3cbbb2e39f4d5e2cf7558a5e6f707d9ee12ce11f88",
+      "bytes": 4194304,
+      "range": "bytes=0-4194303",
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_fr_fr_tsv": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/fr_fr/test.tsv",
+      "sha256": "5d06d338b242e00786fcf12c4c92008b9f399d5a5c872c91dca90572e7869c0d",
+      "bytes": 456972,
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_es_419_tar": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/audio/test.tar.gz",
+      "sha256": "c9462abfa84e89983234aef20591a35fcf5edf16845b64a441dcac9db1b87c95",
+      "bytes": 4194304,
+      "range": "bytes=0-4194303",
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_es_419_tsv": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/test.tsv",
+      "sha256": "d107a93a4f54a18ac25cd470bb4cdadce14fb075b0c1d1542258e274d209ec09",
+      "bytes": 599882,
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_ja_jp_tar": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/ja_jp/audio/test.tar.gz",
+      "sha256": "8d7db0d3ec590ac2f407b7fca0379cd5384682df17b2007a77495d9e7ec00cbe",
+      "bytes": 4194304,
+      "range": "bytes=0-4194303",
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_ja_jp_tsv": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/ja_jp/test.tsv",
+      "sha256": "5dd9643511437414681ad3f23508596c621cdf78978724a09f1f06fefe9d300b",
+      "bytes": 361174,
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_cmn_hans_cn_tar": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/cmn_hans_cn/audio/test.tar.gz",
+      "sha256": "03b964bba16b7f36d425b74f0ea052704ee3d8817e8c2a3d412de952384e581b",
+      "bytes": 4194304,
+      "range": "bytes=0-4194303",
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    },
+    "fleurs_cmn_hans_cn_tsv": {
+      "url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/cmn_hans_cn/test.tsv",
+      "sha256": "5734461648f816181d7dab5fc79204b18c4b9bc2cd5138225b25c72d18385d21",
+      "bytes": 491487,
+      "commit": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "CC-BY-4.0"
+    }
+  },
+  "fixtures": {
+    "en_librispeech_1272-128104-0000": {
+      "file": "en_librispeech_1272-128104-0000.wav",
+      "sha256": "799f78ed4beb4de7ceae3a809262d4ce242394342ccd1d58cef7d49dbc2def46",
+      "size_bytes": 187404,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg convert 1272-128104-0000.flac"
+    },
+    "en_librispeech_1272-128104-0001": {
+      "file": "en_librispeech_1272-128104-0001.wav",
+      "sha256": "473b1bb573e8f7cdcd639c6e318036236190107b66bfe6892286121a92d464c1",
+      "size_bytes": 154124,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg convert 1272-128104-0001.flac"
+    },
+    "en_librispeech_1272-135031-0001": {
+      "file": "en_librispeech_1272-135031-0001.wav",
+      "sha256": "f7b291643bbd4c319830bf6cb12bcc8511c8b52af2842cc7d33bde571aa3e1d6",
+      "size_bytes": 356204,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg convert 1272-135031-0001.flac"
+    },
+    "en_librispeech_1272-141231-0000": {
+      "file": "en_librispeech_1272-141231-0000.wav",
+      "sha256": "7c205d4d1e9446847b15425be3180b139455ed18cc221461127e69792813bcac",
+      "size_bytes": 148844,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg convert 1272-141231-0000.flac"
+    },
+    "long_en_librispeech_60s": {
+      "file": "long_en_librispeech_60s.wav",
+      "sha256": "d4f4d9e2f19b201eabb7fbd5daf60b2ee8bf3c18f19084d2ce0912a1736e091f",
+      "size_bytes": 1946284,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg concat of 10 utterances (speaker 1272), reference = texts joined with spaces"
+    },
+    "long_en_librispeech_270s": {
+      "file": "long_en_librispeech_270s.wav",
+      "sha256": "eec2d5687d47aedb5038195bd854118c4aa8e40afbe4a7ea702e69e44a7fce9e",
+      "size_bytes": 8962762,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg concat of 40 utterances (speaker 1272), reference = texts joined with spaces"
+    },
+    "de_fleurs_01": {
+      "file": "de_fleurs_01.wav",
+      "sha256": "cc46d12f9faf44a694e709c8bcf04028e686e6b4c1deefe3ac6dbd821a970630",
+      "size_bytes": 574124,
+      "sources": [
+        "fleurs_de_de_tar",
+        "fleurs_de_de_tsv"
+      ],
+      "recipe": "member test/10004059102127011984.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "de_fleurs_02": {
+      "file": "de_fleurs_02.wav",
+      "sha256": "97d77a9d323b903dcc10c608521fa07fb78766d4b65d016ba620caae442dece9",
+      "size_bytes": 357164,
+      "sources": [
+        "fleurs_de_de_tar",
+        "fleurs_de_de_tsv"
+      ],
+      "recipe": "member test/10009182821551087671.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "fr_fleurs_01": {
+      "file": "fr_fleurs_01.wav",
+      "sha256": "f76c0a92ca39d2533aa105ac5794b08f004e15a3ff5ba32f4ba4995f45cd22fd",
+      "size_bytes": 326444,
+      "sources": [
+        "fleurs_fr_fr_tar",
+        "fleurs_fr_fr_tsv"
+      ],
+      "recipe": "member test/10043298898524273336.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "fr_fleurs_02": {
+      "file": "fr_fleurs_02.wav",
+      "sha256": "96eaa990ca9b4a8fb0ed3420a395cfd6cc7714c434246d1ed05412d77cfe72c2",
+      "size_bytes": 748844,
+      "sources": [
+        "fleurs_fr_fr_tar",
+        "fleurs_fr_fr_tsv"
+      ],
+      "recipe": "member test/10097171356371990207.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "es_fleurs_01": {
+      "file": "es_fleurs_01.wav",
+      "sha256": "95df54f13e862069293afca618669316d194c1b4c6601eb808b501c86292b527",
+      "size_bytes": 410924,
+      "sources": [
+        "fleurs_es_419_tar",
+        "fleurs_es_419_tsv"
+      ],
+      "recipe": "member test/1001146817223348054.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "es_fleurs_02": {
+      "file": "es_fleurs_02.wav",
+      "sha256": "5ef951507d91ab3af0f4f7b346aa0a098feb98461dde2510b2fccacbe5a49405",
+      "size_bytes": 683564,
+      "sources": [
+        "fleurs_es_419_tar",
+        "fleurs_es_419_tsv"
+      ],
+      "recipe": "member test/10050510856477907332.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "ja_fleurs_01": {
+      "file": "ja_fleurs_01.wav",
+      "sha256": "a4975b9fe15f9340f06e0acdf3b0cc810f522700bdec1b267f85d901987fa29a",
+      "size_bytes": 334124,
+      "sources": [
+        "fleurs_ja_jp_tar",
+        "fleurs_ja_jp_tsv"
+      ],
+      "recipe": "member test/10020345318418093976.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "ja_fleurs_02": {
+      "file": "ja_fleurs_02.wav",
+      "sha256": "2d6ca8ff29055d2f885e3e3ea4c99fd7fbd28ebdd405e6dee6f6fd1f1258ed46",
+      "size_bytes": 455084,
+      "sources": [
+        "fleurs_ja_jp_tar",
+        "fleurs_ja_jp_tsv"
+      ],
+      "recipe": "member test/10086073819084529371.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "zh_fleurs_01": {
+      "file": "zh_fleurs_01.wav",
+      "sha256": "407400c0a228817cfe9cc95feffe48261e005aaaea828412d6bcbb36915d8f7b",
+      "size_bytes": 332204,
+      "sources": [
+        "fleurs_cmn_hans_cn_tar",
+        "fleurs_cmn_hans_cn_tsv"
+      ],
+      "recipe": "member test/10026684690566417990.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "zh_fleurs_02": {
+      "file": "zh_fleurs_02.wav",
+      "sha256": "d15ddc6cf1c0eaac6277cd7c57d061d06c71fb2e1ecdfb68fea9484a6eb35db8",
+      "size_bytes": 265004,
+      "sources": [
+        "fleurs_cmn_hans_cn_tar",
+        "fleurs_cmn_hans_cn_tsv"
+      ],
+      "recipe": "member test/10040380210557600780.wav of the tar.gz prefix, ffmpeg convert"
+    },
+    "silence_10s": {
+      "file": "silence_10s.wav",
+      "sha256": "ee7bea4232762775f8fce9b3e27e4d3948c8ac6a45a87ca769f703d6eed0b448",
+      "size_bytes": 320044,
+      "sources": [],
+      "recipe": "ffmpeg lavfi anullsrc, 10 s"
+    },
+    "noise_10s": {
+      "file": "noise_10s.wav",
+      "sha256": "f801aab2ee1b90839ca2e63ff816ba834cac7ec1db8b1d2a0d1114d9c825beef",
+      "size_bytes": 320044,
+      "sources": [],
+      "recipe": "ffmpeg lavfi anoisesrc white, amplitude 0.1, seed 42, 10 s"
+    },
+    "speech_in_pink_noise_10db": {
+      "file": "speech_in_pink_noise_10db.wav",
+      "sha256": "653888b84aed30d6a0d0c146b1c039e0001d5409d4c44ce246b75a251036bfcc",
+      "size_bytes": 187404,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "1272-128104-0000 + ffmpeg anoisesrc pink seed 7 scaled to 10.0 dB SNR (rms based), amix normalize=0"
+    },
+    "en_44k1_stereo_mp3": {
+      "file": "en_44k1_stereo.mp3",
+      "sha256": "f0468ea40eecb3ae9906dc6456f047a877ec437698e47b9ce4c734e556cdf65e",
+      "size_bytes": 94895,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg re-encode of 1272-128104-0000.flac: 44.1 kHz stereo MP3 128k (libmp3lame)"
+    },
+    "en_48k_stereo_opus_ogg": {
+      "file": "en_48k_stereo_opus.ogg",
+      "sha256": "231653994e35acca1fbd6e852bab70dcfd83519950a464f6933d5269d6686c6a",
+      "size_bytes": 49354,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg re-encode of 1272-128104-0000.flac: 48 kHz stereo Opus in Ogg, 64k (libopus)"
+    },
+    "en_44k1_stereo_flac": {
+      "file": "en_44k1_stereo.flac",
+      "sha256": "8bcabd248aa96c53d24ce489a7218e48a4eba035624e7c179996c300edea60e2",
+      "size_bytes": 175938,
+      "sources": [
+        "librispeech_parquet"
+      ],
+      "recipe": "ffmpeg re-encode of 1272-128104-0000.flac: 44.1 kHz stereo FLAC"
+    },
+    "malformed_truncated_wav": {
+      "file": "malformed_truncated.wav",
+      "sha256": "a4134e418b5c52fcf394492ed64b5fee7d9913042b00e597fc0a1d48e43f45f6",
+      "size_bytes": 93724,
+      "sources": [],
+      "recipe": "valid WAV cut to half its data; the header still claims the full length"
+    },
+    "malformed_random_wav": {
+      "file": "malformed_random.wav",
+      "sha256": "9aad15f782db792f84e6d937cde4b4f791cca63f7681bcc844a2b1abf1595065",
+      "size_bytes": 8192,
+      "sources": [],
+      "recipe": "8192 random bytes (random.Random(20260101).randbytes) named .wav"
+    },
+    "malformed_empty_wav": {
+      "file": "malformed_empty.wav",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0,
+      "sources": [],
+      "recipe": "zero-byte file named .wav"
+    },
+    "malformed_notaudio_png": {
+      "file": "malformed_notaudio.png",
+      "sha256": "bc9854f99dbe38c18f0ae3d55ad8fc7583c03b645fdc7be1ee68524a2888871e",
+      "size_bytes": 463,
+      "sources": [],
+      "recipe": "valid 16x16 PNG, not audio"
+    }
+  }
+}

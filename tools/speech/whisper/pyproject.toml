@@ -1,0 +1,34 @@
+[project]
+name = "localrouter-speech-whisper"
+version = "0.1.0"
+description = "Whisper large-v3-turbo speech-to-text worker for LocalRouter's cmd adapter"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.13.0",
+    "transformers==5.19.0",
+    "numpy==2.5.4",
+]
+
+[tool.uv]
+package = false
+# One lockfile: x86_64 Linux (DEV, CPU wheels) and aarch64 Linux (GB10 / DGX Spark, CUDA 13.0 wheels).
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "platform_machine == 'x86_64'" },
+    { index = "pytorch-cu130", marker = "platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

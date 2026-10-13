@@ -137,7 +137,10 @@ curl -s -m 900 $BASE/audio/transcriptions -F file=@meeting.m4a -F response_forma
 | `timestamp_granularities[]` | `segment` and/or `word`, with `verbose_json`; `word` only for models that support it (else 400) |
 | `temperature` | 0 to 1 |
 
-The text stays in the spoken language: there is no `/v1/audio/translations` (404) and `stream=true` is refused. The
+The text stays in the spoken language: there is no `/v1/audio/translations` (404) and `stream=true` is refused. A
+model may drop what it heard where no voice is detected (the Whisper tool does: silence or noise alone returns empty
+text, not a guess), and a WAV file cut short (its data chunk claims more bytes than were sent) is refused with a 400
+rather than half transcribed. The
 request waits for the transcript; for long files over MCP use `transcribe_audio` with `wait_s` and `get_job`, which
 also lets you `cancel_job` it.
 

@@ -221,6 +221,7 @@ test "speech to text: uploads decode to 16 kHz mono, response formats, limits an
     try expectStatus(try transcribe(&d, a, &.{}, null), .bad_request, &.{"file is required"});
     try expectStatus(try transcribe(&d, a, &.{}, ""), .bad_request, &.{"the audio file is empty"});
     try expectStatus(try transcribe(&d, a, &.{}, "\x89PNG\r\n\x1a\nnot audio"), .bad_request, &.{"the audio could not be decoded"});
+    try expectStatus(try transcribe(&d, a, &.{}, exact[0 .. exact.len - 2]), .bad_request, &.{"the WAV file is cut short: its data chunk claims 48000 bytes but 47998 are present"});
     try expectStatus(try transcribe(&d, a, &.{.{ .name = "model", .value = "short-ears" }}, exact), .bad_request, &.{"the audio is longer than this model takes"});
     try expectStatus(try transcribe(&d, a, &.{.{ .name = "model", .value = "tone" }}, exact), .bad_request, &.{"model 'tone' is a speech model, not transcription"});
     try expectStatus(try d.call(a, .POST, "/v1/audio/translations", "{}"), .not_found, &.{"translation is not offered"});
