@@ -1,6 +1,6 @@
-//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits and /v1/videos (with a model gateway's
-//! `kind`, `running` and `machine` extras), output files, /v1/tools for residency, and /mcp (`mcp.zig`, the same
-//! jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
+//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos and /v1/audio (`speech.zig`)
+//! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/tools for residency, and /mcp
+//! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
 
 const std = @import("std");
@@ -13,6 +13,7 @@ const Config = @import("../config.zig").Config;
 const mcp = @import("mcp.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
+const speech = @import("speech.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -22,6 +23,7 @@ pub const App = struct {
     table: *jobs.Table,
     jobs_dir: []const u8,
     self_addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) }, // where this daemon listens, for fetching its own output URLs
+    decode_mutex: Io.Mutex = .init, // audio uploads decode one at a time (`speech.startTranscription`)
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -44,6 +46,9 @@ pub fn handle(app: *App, req: *h.Request) !void {
     if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, ctype, true);
     if (m == .POST and eql(p, "/v1/videos")) return videoCreate(app, req, a, host, ctype);
     if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..]);
+    if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a);
+    if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype);
+    if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
@@ -57,12 +62,14 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, max_audio_s: ?u64 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i) };
+        const info = engine.audioInfo(c);
+        inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
 }
@@ -133,6 +140,8 @@ fn article(k: request.Kind) []const u8 {
     return switch (k) {
         .image => "an image",
         .video => "a video",
+        .speech => "a speech",
+        .transcription => "a transcription",
     };
 }
 
@@ -372,6 +381,13 @@ fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !
 
 // ---------------------------------------------------------------- files
 
+/// The content type of an output file, by its extension.
+pub fn contentType(name: []const u8) []const u8 {
+    const types = [_][2][]const u8{ .{ ".png", "image/png" }, .{ ".mp4", "video/mp4" }, .{ ".wav", "audio/wav" }, .{ ".json", "application/json" }, .{ ".txt", "text/plain; charset=utf-8" } };
+    for (types) |t| if (std.mem.endsWith(u8, name, t[0])) return t[1];
+    return "application/octet-stream";
+}
+
 /// GET /v1/files/{job}/{name}: an output file (`response_format: url`).
 fn file(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8) !void {
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return h.fail(req, a, 404, "invalid_request_error", "no such file");
@@ -380,8 +396,7 @@ fn file(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8) !voi
     for (j.files) |f| {
         if (!eql(f, name)) continue;
         const data = try Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(1 << 31));
-        const ct = if (std.mem.endsWith(u8, f, ".png")) "image/png" else if (std.mem.endsWith(u8, f, ".mp4")) "video/mp4" else "application/octet-stream";
-        return h.bytes(req, ct, data);
+        return h.bytes(req, contentType(f), data);
     }
     return h.fail(req, a, 404, "invalid_request_error", "no such file");
 }

@@ -367,6 +367,8 @@ fn placeholder(kind: @import("../tool/request.zig").Kind) @import("../tool/reque
     return switch (kind) {
         .image => .{ .image = .{ .prompt = "" } },
         .video => .{ .video = .{ .prompt = "" } },
+        .speech => .{ .speech = .{ .input = "" } },
+        .transcription => .{ .transcription = .{ .audio = "" } },
     };
 }
 

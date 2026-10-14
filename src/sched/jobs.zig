@@ -65,7 +65,12 @@ pub const Table = struct {
         const a = j.arena.allocator();
         var rnd: [8]u8 = undefined;
         io.random(&rnd);
-        const prefix = if (req.kind() == .video) "video" else "img";
+        const prefix = switch (req.kind()) {
+            .image => "img",
+            .video => "video",
+            .speech => "speech",
+            .transcription => "transcription",
+        };
         j.id = try std.fmt.allocPrint(a, "{s}_{x}", .{ prefix, std.mem.readInt(u64, &rnd, .little) });
         j.request = try dupeRequest(a, req);
         j.dir = try std.fs.path.join(a, &.{ jobs_dir, j.id });
@@ -129,5 +134,33 @@ pub fn dupeRequest(a: std.mem.Allocator, req: Request) !Request {
             if (v.first_frame) |f| c.first_frame = try a.dupe(u8, f);
             return .{ .video = c };
         },
+        .speech => |v| {
+            var c = v;
+            c.input = try a.dupe(u8, v.input);
+            c.voice = try a.dupe(u8, v.voice);
+            c.preset = try a.dupe(u8, v.preset);
+            return .{ .speech = c };
+        },
+        .transcription => |v| {
+            var c = v;
+            c.audio = try a.dupe(u8, v.audio);
+            c.language = try a.dupe(u8, v.language);
+            c.prompt = try a.dupe(u8, v.prompt);
+            return .{ .transcription = c };
+        },
     }
+}
+
+test "a job owns a deep copy of its request" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var input = "hello".*;
+    var lang = "en".*;
+    const say = try dupeRequest(arena.allocator(), .{ .speech = .{ .input = &input, .voice = "v1" } });
+    const hear = try dupeRequest(arena.allocator(), .{ .transcription = .{ .audio = "audio.wav", .language = &lang, .prompt = "Zig" } });
+    input[0] = 'j';
+    lang[0] = 'd';
+    try std.testing.expectEqualStrings("hello", say.speech.input);
+    try std.testing.expectEqualStrings("en", hear.transcription.language);
+    try std.testing.expectEqualStrings("Zig", hear.transcription.prompt);
 }

@@ -26,7 +26,7 @@ adding a model, or a new kind of model, does not touch the orchestration.
 
 | Piece | Where | Does |
 | --- | --- | --- |
-| API | `src/api/routes.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`; output files; `/v1/tools` for operators |
+| API | `src/api/routes.zig`, `src/api/speech.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`; output files; `/v1/tools` for operators |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
 | Scheduler | `src/sched/scheduler.zig` | one executor thread: admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
@@ -47,14 +47,16 @@ let a video job take the whole machine when it needs it.
 
 ## Requests and capabilities
 
-A request has a kind (`image`, `video`) and needs one capability:
+A request has a kind (`image`, `video`, `speech`, `transcription`) and needs one capability:
 
-| Capability | Request |
-| --- | --- |
-| `text_to_image` | prompt |
-| `image_edit` | prompt + 1 to 5 input images |
-| `text_to_video` | prompt |
-| `image_to_video` | prompt + 1 input image |
+| Capability | Kind | Request |
+| --- | --- | --- |
+| `text_to_image` | image | prompt |
+| `image_edit` | image | prompt + 1 to 5 input images |
+| `text_to_video` | video | prompt |
+| `image_to_video` | video | prompt + 1 input image |
+| `text_to_speech` | speech | text (+ voice, speed, preset) |
+| `speech_to_text` | transcription | one audio file (+ language, prompt, timestamps) |
 
 A tool's capabilities come from its engine (or from its config). A request names a model, or gets the config's default
 for its capability (`defaults`, checked at start), else the first one of its kind that has it; a model that lacks it,
@@ -101,7 +103,38 @@ Input images arrive as files in the job directory (the request's `references` / 
 there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
 
-### A new kind of model (speech, text, …)
+### Speech tools
+
+Speech and transcription tools use the same worker protocol; the request is `{"speech": {...}}` or
+`{"transcription": {...}}`, and the worker writes one file into the job directory. The daemon owns everything around
+the model: input decoding, response encodings, and the limits checked before a tool loads.
+
+```
+{"op":"generate","id":"speech_…","dir":"…","request":{"speech":{"input":"Hello.","voice":"Rosie","speed":1,"preset":"","seed":7}}}
+  -> {"ok":true,"files":["speech.wav"],"seed":7,"ms":420}      speech.wav: RIFF PCM 16-bit mono at the model's rate
+{"op":"generate","id":"transcription_…","dir":"…","request":{"transcription":{"audio":"audio.wav","duration_ms":5860,
+   "language":"","prompt":"","temperature":0,"timestamps":"segment","seed":7}}}
+  -> {"ok":true,"files":["transcript.json"],"seed":7,"ms":900}
+     transcript.json: {"text","language","duration","segments":[{"id","start","end","text",…}],"words":[{"word","start","end"}]}
+```
+
+- `audio.wav` is always 16 kHz mono 16-bit PCM: the daemon decodes every upload (WAV, MP3, FLAC, OGG/Opus, M4A/MP4,
+  WebM, AAC) with ffmpeg, one at a time, under a deadline, with demuxers from a fixed list and local files only, and
+  caps it at the tool's `max_audio_s` (at most 30 minutes). Its length is in `duration_ms`, so `needs` can price it.
+  An adapter does no decoding.
+- `speech.wav` is the only text to speech output. `/v1/audio/speech` returns it as `wav` or raw `pcm` (with
+  `x-sample-rate`, `x-channels` and `x-sample-format: s16le` headers), or encodes `flac`, `mp3`, `opus` or `aac`.
+- Fields a segment or word carries beyond the ones above (`avg_logprob`, `no_speech_prob`, …) are passed through
+  to `verbose_json`.
+- Refuse a request the model cannot honour with `{"ok":false,"type":"invalid_request_error",…}` (a 400); never
+  change it quietly. Better: declare the limits in the tool's `options` so the daemon refuses before loading:
+  `voices` and `default_voice` (an empty voice becomes the default before the worker sees it), `presets` (the
+  model-native styles `preset` may name; none: every preset is refused), `min_speed` / `max_speed` (1 and 1 for a
+  model without a speed control), `max_input_chars` (at most 4096) and, for transcription, `max_audio_s`. `/v1/models`
+  and `list_models` show them.
+- Not offered by the API, and refused with a reason: translation, streamed responses, speech `instructions`.
+
+### A new kind of model (text, …)
 
 1. Add the kind to `request.Kind` and its request struct to `Request` (validated in `request.validate`).
 2. Add its capabilities to `request.Capability`.

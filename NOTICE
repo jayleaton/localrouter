@@ -28,4 +28,10 @@ Qwen-Image 2.1 weights: Qwen Research License (research/evaluation only).
   https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE
 MiniMax H3 weights: MiniMax H3 Community License Agreement (territorial and downstream use restrictions).
   https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+Kitten TTS 2 weights (KittenML / Stellon Labs), used by the optional speech tool in tools/speech/kitten/ and downloaded
+  by its fetch.sh, not distributed with LocalRouter: Stellon Labs Community License. "This Stellon Labs Model is
+  licensed under the Stellon Labs Community License, Copyright © Stellon Labs Inc. All Rights Reserved." Powered by
+  Stellon Labs. Commercial use requires registration and ends above USD 1,000,000 revenue or funding; see
+  docs/dev/KITTEN-TTS2.md. https://huggingface.co/KittenML/kitten-tts-2/blob/f2eee74f4467855ad58fe16f1fb7b7df473263fd/LICENSE.md
+  Its decoder uses ResembleAI chatterbox-turbo's s3gen weights (MIT) and the kittenml package (Apache License 2.0).
 These weight licences are separate from LocalRouter's software licence; installing locally does not waive them.

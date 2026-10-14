@@ -1,0 +1,4 @@
+# The Kitten TTS 2 worker's Python environment; the locks beside it pin every package by hash.
+kittenml==0.9.4
+torch==2.11.0
+torchaudio==2.11.0
