@@ -311,7 +311,6 @@ const Clock = struct {
     }
 };
 
-/// The `scheduler` of a pack's manifest, null when it has none.
 /// What `create` opens before any weight moves: plain file reads, no CUDA.
 const Opened = struct {
     dit: Pack,
@@ -338,6 +337,7 @@ fn openInputs(gpa: std.mem.Allocator, io: std.Io, packs: Packs) anyerror!Opened 
     return .{ .dit = dit, .te = te, .vae = vae, .prompt = prompt };
 }
 
+/// The `scheduler` of a pack's manifest, null when it has none.
 fn schedulerConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?sampler.Config {
     const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(16 << 20));
     const M = struct { scheduler: ?sampler.Config = null };
