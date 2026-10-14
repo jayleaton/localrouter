@@ -45,8 +45,12 @@ pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *Request) anyerror!
                 // server reads to end of stream for the body and asserts before keeping the connection alive.
                 if (req.head.method.requestHasBody() and req.head.transfer_encoding == .none and req.head.content_length == null)
                     req.head.content_length = 0;
+                // Reading the body invalidates the head's strings, so keep a copy of the target to report a failure.
+                var target_buf: [256]u8 = undefined;
+                const target = target_buf[0..@min(req.head.target.len, target_buf.len)];
+                @memcpy(target, req.head.target[0..target.len]);
                 handle(ctx, &req) catch |err| {
-                    std.log.warn("{s} {s}: {s}", .{ @tagName(req.head.method), req.head.target, @errorName(err) });
+                    std.log.warn("{s} {s}: {s}", .{ @tagName(req.head.method), target, @errorName(err) });
                     return;
                 };
             }
@@ -123,4 +127,21 @@ test "a bodiless POST keeps the connection serving" {
     Server(Ctx, Ctx.handle).requests(&server, &ctx);
     try std.testing.expectEqual(@as(usize, 3), ctx.n);
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, out.buffered(), "HTTP/1.1 200 OK"));
+}
+
+test "a handler failing after reading the body is logged without a crash" {
+    const Ctx = struct {
+        fn handle(_: *@This(), req: *Request) anyerror!void {
+            const b = try body(req, std.testing.allocator); // invalidates req.head's strings
+            std.testing.allocator.free(b);
+            return error.ClientGone;
+        }
+    };
+    var in: Io.Reader = .fixed("POST /v1/images/generations HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\n\r\n{}");
+    var out_buf: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buf);
+    var server = http.Server.init(&in, &out);
+    var ctx: Ctx = .{};
+    Server(Ctx, Ctx.handle).requests(&server, &ctx);
+    try std.testing.expectEqual(@as(usize, 0), out.buffered().len);
 }
