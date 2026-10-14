@@ -259,6 +259,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         sh.latent_t,   sh.lh,      sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
         load_ms,       p.weights_bytes, w_dit, w_te,   w_aud,    w_vid,
     });
+    try w.print("\"load_phases_ms\": {s}, ", .{try std.json.Stringify.valueAlloc(a, p.load, .{})}); // where load_ms went
     try w.writeAll("\"first_ms\": ");
     try writeTimes(w, runs[0].t);
     try w.writeAll(", \"warm_ms\": ");

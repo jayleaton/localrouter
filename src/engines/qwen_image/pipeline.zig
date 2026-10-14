@@ -36,6 +36,7 @@ pub const Times = struct { encode: f64 = 0, prefix: f64 = 0, sample: f64 = 0, de
 pub const LoadTimes = struct {
     context: f64 = 0, // driver, context, stream
     kernels: f64 = 0, // fatbins and Triton cubins
+    open: f64 = 0, // what the pack headers and the tokenizer still needed after the kernels (they are read alongside them)
     dit: f64 = 0,
     te: f64 = 0,
     vae: f64 = 0, // and the scratch buffers
@@ -48,18 +49,22 @@ pub const LoadTimes = struct {
 
 pub const max_tokens = 1024; // the template's tokens a prompt may take
 
-/// Milliseconds between `create`'s phases.
-const LoadClock = struct {
+/// Milliseconds between `create`'s phases (H3's `create` reports with it too).
+pub const LoadClock = struct {
     io: std.Io,
     t0: std.Io.Timestamp,
     last: std.Io.Timestamp,
 
-    fn lap(c: *LoadClock) f64 {
+    pub fn start(io: std.Io) LoadClock {
+        const t = std.Io.Clock.awake.now(io);
+        return .{ .io = io, .t0 = t, .last = t };
+    }
+    pub fn lap(c: *LoadClock) f64 {
         const t = std.Io.Clock.awake.now(c.io);
         defer c.last = t;
         return @as(f64, @floatFromInt(c.last.durationTo(t).nanoseconds)) * 1e-6;
     }
-    fn total(c: *const LoadClock) f64 {
+    pub fn total(c: *const LoadClock) f64 {
         return @as(f64, @floatFromInt(c.t0.durationTo(std.Io.Clock.awake.now(c.io)).nanoseconds)) * 1e-6;
     }
 };
@@ -106,7 +111,17 @@ pub const Pipeline = struct {
         p.max_w = max_side / 16;
         p.times = .{};
         p.load = .{};
-        var clock = LoadClock{ .io = io, .t0 = std.Io.Clock.awake.now(io), .last = std.Io.Clock.awake.now(io) };
+        var clock = LoadClock.start(io);
+        // the pack headers and the tokenizer are plain file reads: they run alongside the driver, the context and the
+        // module loads (which do not touch them), and are collected after the kernels
+        var opening = io.async(openInputs, .{ gpa, io, packs });
+        var opened_taken = false;
+        errdefer if (!opened_taken) {
+            if (opening.await(io)) |o_| {
+                var o = o_;
+                o.close(io);
+            } else |_| {}
+        };
         p.d = try memcap.open();
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
@@ -136,13 +151,18 @@ pub const Pipeline = struct {
         errdefer p.tri.unload();
         p.load.kernels = clock.lap();
 
-        p.dit_pack = try Pack.open(gpa, io, packs.dit);
+        const opened = try opening.await(io);
+        opened_taken = true;
+        p.dit_pack = opened.dit;
         errdefer p.dit_pack.close(io);
-        if (tri[2] == null and !std.mem.eql(u8, p.dit_pack.precision, "nvfp4")) return error.NoSwigluCubin; // FP8's MLP
-        p.te_pack = try Pack.open(gpa, io, packs.te);
+        p.te_pack = opened.te;
         errdefer p.te_pack.close(io);
-        p.vae_pack = try Pack.open(gpa, io, packs.vae);
+        p.vae_pack = opened.vae;
         errdefer p.vae_pack.close(io);
+        p.prompt = opened.prompt;
+        errdefer p.prompt.deinit();
+        p.load.open = clock.lap();
+        if (tri[2] == null and !std.mem.eql(u8, p.dit_pack.precision, "nvfp4")) return error.NoSwigluCubin; // FP8's MLP
         p.sched = try schedulerConfig(p.arena.allocator(), io, packs.dit) orelse
             try schedulerConfig(p.arena.allocator(), io, packs.te) orelse return error.NoSchedulerConfig;
 
@@ -152,8 +172,6 @@ pub const Pipeline = struct {
         errdefer p.w.deinit();
         try p.s.synchronize();
         p.load.dit = clock.lap();
-        p.prompt = try te_mod.Prompt.load(gpa, io, packs.te);
-        errdefer p.prompt.deinit();
         const inv = try te_mod.invFreq(p.arena.allocator(), kernels.te_inv_freq);
         p.te = try te_mod.TextEncoder.init(gpa, &p.d, &p.tk, &p.ops, p.s, &p.te_pack, &up, inv, max_tokens);
         errdefer p.te.deinit();
@@ -294,6 +312,32 @@ const Clock = struct {
 };
 
 /// The `scheduler` of a pack's manifest, null when it has none.
+/// What `create` opens before any weight moves: plain file reads, no CUDA.
+const Opened = struct {
+    dit: Pack,
+    te: Pack,
+    vae: Pack,
+    prompt: te_mod.Prompt,
+
+    fn close(o: *Opened, io: std.Io) void {
+        o.prompt.deinit();
+        o.vae.close(io);
+        o.te.close(io);
+        o.dit.close(io);
+    }
+};
+
+fn openInputs(gpa: std.mem.Allocator, io: std.Io, packs: Packs) anyerror!Opened { // an explicit set: `io.async` reads the return type
+    var dit = try Pack.open(gpa, io, packs.dit);
+    errdefer dit.close(io);
+    var te = try Pack.open(gpa, io, packs.te);
+    errdefer te.close(io);
+    var vae = try Pack.open(gpa, io, packs.vae);
+    errdefer vae.close(io);
+    const prompt = try te_mod.Prompt.load(gpa, io, packs.te);
+    return .{ .dit = dit, .te = te, .vae = vae, .prompt = prompt };
+}
+
 fn schedulerConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?sampler.Config {
     const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(16 << 20));
     const M = struct { scheduler: ?sampler.Config = null };

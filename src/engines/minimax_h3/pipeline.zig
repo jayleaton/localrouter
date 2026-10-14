@@ -33,6 +33,28 @@ pub const Io = dit_mod.Io;
 
 pub const Paths = struct { pack: []const u8, te: []const u8, vae_audio: []const u8, vae_video: []const u8 };
 
+/// What `create` opens before any weight moves: plain file reads, no CUDA.
+const Opened = struct {
+    pack: qi.pack.Pack,
+    te_pack: qi.pack.Pack,
+    tok: tok_mod.Tokenizer,
+
+    fn close(o: *Opened, io: std.Io) void {
+        o.tok.deinit();
+        o.te_pack.close(io);
+        o.pack.close(io);
+    }
+};
+
+fn openInputs(gpa: std.mem.Allocator, io: std.Io, paths: Paths) anyerror!Opened { // an explicit set: `io.async` reads the return type
+    var pack = try qi.pack.Pack.open(gpa, io, paths.pack);
+    errdefer pack.close(io);
+    var te_pack = try qi.pack.Pack.openFile(gpa, io, paths.te);
+    errdefer te_pack.close(io);
+    const tok = try tok_mod.Tokenizer.load(gpa, io, paths.pack);
+    return .{ .pack = pack, .te_pack = te_pack, .tok = tok };
+}
+
 /// The largest request this pipeline serves (width and height in pixels, multiples of 32; frames before alignment).
 pub const Limits = struct { width: u32 = 768, height: u32 = 448, frames: u32 = 56, tokens: u32 = 512 };
 
@@ -46,6 +68,23 @@ pub const Options = struct {
 /// Wall times of the last `generate`, in milliseconds (the stream synchronized at each boundary): the tokens, encoder (and
 /// its reload when unloaded), bf16 hand-off and the DiT's text refiner; the steps; the audio VAE; the video VAE.
 pub const Times = struct { encode: f64 = 0, sample: f64 = 0, audio: f64 = 0, video: f64 = 0 };
+
+/// Where `create`'s time went, in milliseconds, as Qwen's `LoadTimes`: each component ends with its store draining the
+/// stream, so a phase holds its copies. `te` is 0 with `unload_te` (each request's encode then holds the reload).
+pub const LoadTimes = struct {
+    context: f64 = 0, // driver, context, stream
+    kernels: f64 = 0, // every module
+    open: f64 = 0, // what the headers and the tokenizer still needed after the kernels (they are read alongside them)
+    dit: f64 = 0, // and its buffers
+    te: f64 = 0,
+    vae_audio: f64 = 0,
+    vae_video: f64 = 0, // and the scratch buffers
+    total: f64 = 0,
+    gib: f64 = 0, // weights copied to the device
+    read: f64 = 0, // in pread
+    wait: f64 = 0, // waiting for a free upload chunk (copies behind reads)
+    host: f64 = 0, // host-side layout work into the chunks
+};
 
 pub const Progress = struct {
     ctx: *anyopaque,
@@ -141,6 +180,7 @@ pub const Pipeline = struct {
     /// `latents`, `waveform`, under the twin's names and roles.
     probe: ?Probe = null,
     times: Times = .{},
+    load: LoadTimes = .{},
     /// The last prompt's ids (valid until the next `generate`).
     ids: []u32 = &.{},
     weights_bytes: u64 = 0,
@@ -154,10 +194,22 @@ pub const Pipeline = struct {
         p.opts = opts;
         p.probe = null;
         p.times = .{};
+        p.load = .{};
         p.ids = &.{};
         p.te = null;
         p.max = try shapes(limits.width, limits.height, limits.frames);
         p.max_tokens = limits.tokens;
+        var clock = qi.pipeline.LoadClock.start(io);
+        // the pack and encoder headers and the tokenizer are plain file reads: they run alongside the driver, the
+        // context and the module loads (which do not touch them), and are collected after the kernels
+        var opening = io.async(openInputs, .{ gpa, io, paths });
+        var opened_taken = false;
+        errdefer if (!opened_taken) {
+            if (opening.await(io)) |o_| {
+                var o = o_;
+                o.close(io);
+            } else |_| {}
+        };
         p.d = try qi.memcap.open();
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
@@ -170,6 +222,7 @@ pub const Pipeline = struct {
         p.minor = @intCast(min);
         p.s = try cuda.Stream.init(&p.d, false); // blocking: ordered with the synchronous uploads
         errdefer p.s.deinit();
+        p.load.context = clock.lap();
         p.nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &p.d, p.major, p.minor);
         errdefer p.nv.unload();
         p.ops = try qi.ops_launch.Ops.load(&p.d, qi.kernels.ops, qi.kernels.attention);
@@ -186,13 +239,17 @@ pub const Pipeline = struct {
         errdefer p.a_ops.unload();
         p.v_ops = try vae_video.Ops.load(&p.d, kernels.gemm_f16, kernels.vae_video);
         errdefer p.v_ops.unload();
+        p.load.kernels = clock.lap();
 
-        p.pack = try qi.pack.Pack.open(gpa, io, paths.pack);
+        const opened = try opening.await(io);
+        opened_taken = true;
+        p.pack = opened.pack;
         errdefer p.pack.close(io);
-        p.te_pack = try qi.pack.Pack.openFile(gpa, io, paths.te);
+        p.te_pack = opened.te_pack;
         errdefer p.te_pack.close(io);
-        p.tok = try tok_mod.Tokenizer.load(gpa, io, paths.pack);
+        p.tok = opened.tok;
         errdefer p.tok.deinit();
+        p.load.open = clock.lap();
 
         var up = try qi.upload.Uploader.init(&p.d, io, p.s); // one loader on the stream for every component
         defer up.deinit();
@@ -202,14 +259,17 @@ pub const Pipeline = struct {
         const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = &p.nv, .major = p.major, .minor = p.minor };
         p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens);
         errdefer p.dit.deinit();
+        p.load.dit = clock.lap();
         if (!opts.unload_te) try p.loadTeWith(&up);
         errdefer if (p.te) |*t| t.deinit();
+        p.load.te = clock.lap();
         {
             var ap = try qi.pack.Pack.openFile(gpa, io, paths.vae_audio);
             defer ap.close(io);
             p.aud = try vae_audio.Decoder.init(gpa, io, &p.d, &p.a_ops, &p.hops, p.s, &ap, &up, p.max.audio_t);
         }
         errdefer p.aud.deinit();
+        p.load.vae_audio = clock.lap();
         p.vid = try vae_video.Decoder.init(gpa, io, &p.d, &p.v_ops, p.s, paths.vae_video, &up);
         errdefer p.vid.deinit();
 
@@ -222,6 +282,12 @@ pub const Pipeline = struct {
             made += 1;
         }
         try p.s.synchronize();
+        p.load.vae_video = clock.lap();
+        p.load.total = clock.total();
+        p.load.gib = @as(f64, @floatFromInt(up.stats.bytes)) / (1 << 30);
+        p.load.read = @as(f64, @floatFromInt(up.stats.read_ns)) * 1e-6;
+        p.load.wait = @as(f64, @floatFromInt(up.stats.wait_ns)) * 1e-6;
+        p.load.host = @as(f64, @floatFromInt(up.stats.host_ns)) * 1e-6;
         p.weights_bytes = p.w.store.bytes + p.aud.store.bytes + p.vid.weightBytes() + (if (p.te) |*t| t.store.bytes else 0);
         return p;
     }
