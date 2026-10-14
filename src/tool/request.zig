@@ -121,6 +121,20 @@ pub fn parseSize(s: []const u8) ?[2]u32 {
     return .{ w, h };
 }
 
+/// The size of a request: the one it names ("WIDTHxHEIGHT"), else the model's default (`engine.Entry.default_size`),
+/// else the API's. Null when the named size is malformed.
+pub fn resolveSize(named: ?[]const u8, model_default: ?[2]u32, api_default: [2]u32) ?[2]u32 {
+    if (named) |s| return parseSize(s);
+    return model_default orelse api_default;
+}
+
+test "a request's size: as named, else the model's default, else the API's" {
+    try std.testing.expectEqual([2]u32{ 640, 480 }, resolveSize("640x480", .{ 832, 480 }, .{ 1344, 768 }).?);
+    try std.testing.expectEqual([2]u32{ 832, 480 }, resolveSize(null, .{ 832, 480 }, .{ 1344, 768 }).?);
+    try std.testing.expectEqual([2]u32{ 1344, 768 }, resolveSize(null, null, .{ 1344, 768 }).?);
+    try std.testing.expect(resolveSize("832", .{ 832, 480 }, .{ 1344, 768 }) == null);
+}
+
 test "validate and wire shape" {
     var why: []const u8 = "";
     const ok: Request = .{ .image = .{ .prompt = "a fox", .width = 1360, .height = 768 } };

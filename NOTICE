@@ -19,7 +19,8 @@ SageAttention (https://github.com/thu-ml/SageAttention), Copyright 2024 by the S
 Qwen2.5 tokenizer files (tools/twin/stk_twin/h3/tokenizer/), from the Qwen team, Apache License 2.0.
 
 Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
-by the installer from their publishers and remain under their own licenses.
+by the installer from their publishers and remain under their own licenses. Kandinsky-6 Pro distilled (Kandinsky Lab)
+is read from the publisher's snapshot as downloaded and likewise remains under its own license.
 
 ComfyUI (https://github.com/comfyanonymous/ComfyUI) is used, optionally and only at development time, as the reference
 implementation for MiniMax H3 in the comparison tests; it is not part of LocalRouter.
@@ -28,4 +29,6 @@ Qwen-Image 2.1 weights: Qwen Research License (research/evaluation only).
   https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE
 MiniMax H3 weights: MiniMax H3 Community License Agreement (territorial and downstream use restrictions).
   https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+Kandinsky-6.0 Pro distilled weights: the model card lists the MIT License.
+  https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers
 These weight licences are separate from LocalRouter's software licence; installing locally does not waive them.

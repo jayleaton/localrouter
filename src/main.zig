@@ -69,6 +69,7 @@ test {
     _ = @import("engine/engine.zig");
     _ = @import("engines/testpattern.zig");
     _ = @import("engines/qwen_image_tool.zig");
+    _ = @import("engines/kandinsky6_tool.zig");
     _ = @import("serve.zig");
     _ = @import("cli/gen.zig");
     _ = @import("cli/check.zig");

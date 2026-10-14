@@ -243,7 +243,14 @@ pub fn enqueue(app: *App, tool: usize, r: request.Request, files: []const inputs
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' cannot do {s} (its capabilities: {s}); pick a model that lists {s} in list_models", .{ cfg.id, @tagName(r.capability()), capabilityNames(&why.buf, cfg), @tagName(r.capability()) }) catch "the model lacks a capability this request needs";
         return null;
     }
-    request.validate(r, .{}, &why.message) catch return null;
+    request.validate(r, .{}, &why.message) catch {
+        // a model with one supported size names it, even for a size the generic limits refuse (0x0, 4000x480)
+        if (engine.defaultSize(cfg) != null) {
+            var w0: Io.Writer = .fixed(why.buf[0..384]);
+            if (!engine.check(cfg, &r, &w0) and w0.end > 0) why.message = w0.buffered();
+        }
+        return null;
+    };
     var w: Io.Writer = .fixed(why.buf[0..384]);
     if (!engine.check(cfg, &r, &w)) {
         why.message = if (w.end > 0) w.buffered() else "the model cannot serve this request";
@@ -301,7 +308,7 @@ const VideoBody = struct {
     model: ?[]const u8 = null,
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
-    size: []const u8 = "1344x768",
+    size: ?[]const u8 = null, // absent: the model's default size (engine.defaultSize), else 1344x768
     seconds: []const u8 = "5", // OpenAI sends seconds as a string
     fps: u32 = 24,
     seed: ?u64 = null,
@@ -317,10 +324,10 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     var raws: std.ArrayList([]const u8) = .empty;
     const b = parseBody(VideoBody, app, a, host, text, ctype, &.{"input_reference"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
-    const wh = request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
+    const wh = request.resolveSize(b.size, engine.defaultSize(app.scheduler.slots[tool].tool.config()), .{ 1344, 768 }) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files)) orelse return;
     try videoObject(app, req, a, j);
