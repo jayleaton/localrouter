@@ -57,6 +57,8 @@ const MiniMaxH3 = struct {
         };
         const opts: P.Options = .{ .unload_te = engine.optionInt(t.cfg, "unload_te", 0) != 0 };
         t.p = try P.Pipeline.create(t.env.gpa, t.env.io, paths, limits, opts);
+        // where the load went (the worker's log), as Qwen's: context, kernels, each component, read / wait / host time
+        std.log.info("load ms: {s}", .{try std.json.Stringify.valueAlloc(a, t.p.?.load, .{})});
         return engine.optionInt(t.cfg, "resident_mb", default_resident_mb) << 20;
     }
 

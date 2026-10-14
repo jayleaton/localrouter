@@ -26,7 +26,15 @@ pub fn fp8Order(codes: []const u8, n: usize, k: usize, npad: usize, out: []u8) v
 /// 64-row blocks [b0, b1) of `fp8Order`'s output into `out` ((b1 - b0) * 64 * k bytes): blocks are independent, so
 /// the loader fills them in parallel, straight into its upload chunks.
 pub fn fp8OrderBlocks(codes: []const u8, n: usize, k: usize, b0: usize, b1: usize, out: []u8) void {
-    std.debug.assert(codes.len == n * k and out.len == (b1 - b0) * 64 * k and k % 64 == 0);
+    std.debug.assert(codes.len == n * k);
+    fp8OrderRows(codes, 0, n, k, b0, b1, out);
+}
+
+/// `fp8OrderBlocks` from only the rows it reads: `rows` holds codes rows [row0, row0 + rows.len / k), row0 <= 64 * b0,
+/// covering every row below n of blocks [b0, b1). The loader reorders a slice while it reads the next.
+pub fn fp8OrderRows(rows: []const u8, row0: usize, n: usize, k: usize, b0: usize, b1: usize, out: []u8) void {
+    std.debug.assert(out.len == (b1 - b0) * 64 * k and k % 64 == 0 and row0 <= b0 * 64 and rows.len % k == 0);
+    std.debug.assert(row0 + rows.len / k >= @min(n, b1 * 64));
     const kin = comptime kinTable();
     const kg = k / 64;
     var i: usize = 0;
@@ -34,7 +42,7 @@ pub fn fp8OrderBlocks(codes: []const u8, n: usize, k: usize, b0: usize, b1: usiz
         const row = nb * 64 + a * 8 + lane / 4;
         const col0 = g * 64 + h * 32;
         for (kin[lane]) |kk| {
-            out[i] = if (row < n) codes[row * k + col0 + kk] else 0;
+            out[i] = if (row < n) rows[(row - row0) * k + col0 + kk] else 0;
             i += 1;
         }
     };
@@ -76,5 +84,20 @@ test "fp8 order by blocks, in any split, is the whole order" {
     const blk = 64 * k;
     fp8OrderBlocks(&codes, n, k, 0, 1, parts[0..blk]);
     fp8OrderBlocks(&codes, n, k, 1, 3, parts[blk..]);
+    try std.testing.expectEqualSlices(u8, &whole, &parts);
+}
+
+test "fp8 order from row slices (the streamed load) is the whole order" {
+    const n = 150; // the last slice ends inside a block and pads to npad
+    const k = 128;
+    const npad = 256;
+    var codes: [n * k]u8 = undefined;
+    for (&codes, 0..) |*c, j| c.* = @truncate(j *% 2654435761 >> 7);
+    var whole: [npad * k]u8 = undefined;
+    fp8Order(&codes, n, k, npad, &whole);
+    var parts: [npad * k]u8 = undefined;
+    const blk = 64 * k;
+    fp8OrderRows(codes[0 .. 64 * k], 0, n, k, 0, 1, parts[0..blk]); // a slice of one block
+    fp8OrderRows(codes[64 * k ..], 64, n, k, 1, 4, parts[blk..]); // the rest: 86 rows, then zero blocks
     try std.testing.expectEqualSlices(u8, &whole, &parts);
 }

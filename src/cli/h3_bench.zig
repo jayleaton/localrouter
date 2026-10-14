@@ -12,6 +12,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const h3 = @import("minimax_h3");
+const qi = @import("qwen_image");
 const mp4 = @import("../media/mp4.zig");
 const memory = @import("../sched/memory.zig");
 const pl = h3.pipeline;
@@ -125,7 +126,7 @@ const Sampler = struct {
 
 /// Device memory in use by every process (cuMemGetInfo), through a context of its own; null without a driver.
 fn gpuUsedMib() ?u64 {
-    var d = cuda.Driver.open() catch return null;
+    var d = qi.memcap.open() catch return null;
     defer d.close();
     var c = cuda.Context.init(&d, 0) catch return null;
     defer c.deinit();
@@ -258,6 +259,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         sh.latent_t,   sh.lh,      sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
         load_ms,       p.weights_bytes, w_dit, w_te,   w_aud,    w_vid,
     });
+    try w.print("\"load_phases_ms\": {s}, ", .{try std.json.Stringify.valueAlloc(a, p.load, .{})}); // where load_ms went
     try w.writeAll("\"first_ms\": ");
     try writeTimes(w, runs[0].t);
     try w.writeAll(", \"warm_ms\": ");

@@ -67,6 +67,7 @@ test {
     _ = @import("media/png.zig");
     _ = @import("media/mp4.zig");
     _ = @import("engine/engine.zig");
+    _ = @import("engine/memcap_coverage.zig");
     _ = @import("engines/testpattern.zig");
     _ = @import("engines/qwen_image_tool.zig");
     _ = @import("serve.zig");
