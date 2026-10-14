@@ -29,10 +29,15 @@ pub const Kernel = enum(u8) {
     conv_narrow,
     conv_wide_s,
     conv_narrow_s,
+    conv_wide_k2,
+    conv_narrow_k2,
+    conv_order,
     gn_partial,
     gn_finalize,
     gn_apply,
+    gn_welford,
     softmax_rows,
+    sdpa_memeff,
     transpose,
     latent_in,
     rgb8_in,
@@ -46,7 +51,7 @@ pub const Image = enum { conv, ops };
 
 pub fn image(k: Kernel) Image {
     return switch (k) {
-        .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s => .conv,
+        .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s, .conv_wide_k2, .conv_narrow_k2, .conv_order => .conv,
         else => .ops,
     };
 }
@@ -96,12 +101,63 @@ pub const ConvArgs = extern struct {
     k: i32,
     bias_mode: i32,
     out_f32: i32,
+    /// The K sequence (conv.cu): 0 tap-major; T: channel tiles of T outer, taps inner (`Launcher.conv` sets it).
+    ctile: i32 = 0,
+    /// The _k2 kernels' slices: 0 alternate by channel tile, 1 by chunk (`Launcher.conv` sets it).
+    split_by: i32 = 0,
+    /// Which channels share a chunk (conv.cu): 0 sixteen consecutive; 1 quad32 (`Launcher.conv` sets it).
+    kslot: i32 = 0,
+};
+
+/// k6v_conv_order (conv.cu): one fixture convolution under a candidate summation schedule (diagnostic).
+pub const ConvOrderArgs = extern struct {
+    x: u64,
+    w: u64,
+    y: u64,
+    m0: i64,
+    mcount: i64,
+    ti: i32,
+    hi: i32,
+    wi: i32,
+    ci: i32,
+    tu: i32,
+    hu: i32,
+    wu: i32,
+    up_t: i32,
+    up_hw: i32,
+    kt: i32,
+    kh: i32,
+    kw: i32,
+    pt: i32,
+    ph: i32,
+    pw: i32,
+    to: i32,
+    ho: i32,
+    wo: i32,
+    co: i32,
+    order: i32,
+    ctile: i32,
+    mma_k: i32,
+    split: i32,
+    split_mode: i32,
+    split_len: i32,
+    split_join: i32,
+    perm: i32 = 0,
+    pad_: i32 = 0,
+    /// order 2: [spec_chunks][16] element ids (tap * ci + c, -1 zero) and optional [spec_chunks] chain ids.
+    spec: u64 = 0,
+    spec_slice: u64 = 0,
+    spec_chunks: i32 = 0,
+    pad2_: i32 = 0,
 };
 
 pub const GnArgs = extern struct { x: u64, partial: u64, stats: u64, positions: i64, c: i32, groups: i32, pass: i32, eps: f32 };
 pub const GnApplyArgs = extern struct { x: u64, y: u64, gamma: u64, beta: u64, stats: u64, positions: i64, c: i32, groups: i32, silu: i32 };
+pub const GnWelfordArgs = extern struct { x: u64, stats: u64, positions: i64, c: i32, groups: i32, eps: f32, variant: i32 };
 pub const SoftmaxArgs = extern struct { s: u64, p: u64, lds: i64, ldp: i64, row0: i32, spf: i32, cols: i32, scale: f32 };
 pub const TransposeArgs = extern struct { x: u64, y: u64, n: i64, ldn: i64, c: i32 };
+/// k6v_sdpa_memeff (ops.cu): the mid-block attention core as the reference's mem-efficient SDPA kernel runs it.
+pub const SdpaArgs = extern struct { q: u64, k: u64, vt: u64, mask: u64 = 0, acc: u64, o: u64, ldn: i64, ldm: i64 = 0, n: i32, c: i32, spf: i32, variant: i32, scale: f32, pad_: i32 = 0 };
 /// The dtype of the latent `decode` reads (k6v_latent_in): fp32 from the Pro-distill PiFlow sampler (its rollout
 /// promotes the bf16 DiT state to fp32), bf16 from a caller that keeps the DiT dtype. Both are packed [T][h][w][16].
 pub const LatentDtype = enum { f32, bf16 };
@@ -138,8 +194,10 @@ pub const CopyArgs = extern struct {
 
 comptime {
     // The C layouts (x86-64 / aarch64 LP64): any drift from conv.cu / ops.cu breaks every launch.
-    std.debug.assert(@sizeOf(ConvArgs) == 184 and @offsetOf(ConvArgs, "ti") == 80 and @offsetOf(ConvArgs, "out_f32") == 176);
+    std.debug.assert(@sizeOf(ConvArgs) == 192 and @offsetOf(ConvArgs, "ti") == 80 and @offsetOf(ConvArgs, "out_f32") == 176);
+    std.debug.assert(@offsetOf(ConvArgs, "ctile") == 180 and @offsetOf(ConvArgs, "split_by") == 184 and @offsetOf(ConvArgs, "kslot") == 188 and @sizeOf(ConvOrderArgs) == 176);
     std.debug.assert(@sizeOf(GnArgs) == 48 and @sizeOf(GnApplyArgs) == 64 and @sizeOf(SoftmaxArgs) == 48);
+    std.debug.assert(@sizeOf(GnWelfordArgs) == 40 and @sizeOf(SdpaArgs) == 88);
     std.debug.assert(@sizeOf(TransposeArgs) == 40 and @sizeOf(LatentInArgs) == 32 and @sizeOf(Rgb8InArgs) == 24);
     std.debug.assert(@sizeOf(PosteriorArgs) == 56 and @sizeOf(BlendArgs) == 56 and @sizeOf(CopyArgs) == 80);
 }
@@ -149,10 +207,15 @@ pub const Call = union(Kernel) {
     conv_narrow: ConvArgs,
     conv_wide_s: ConvArgs,
     conv_narrow_s: ConvArgs,
+    conv_wide_k2: ConvArgs,
+    conv_narrow_k2: ConvArgs,
+    conv_order: ConvOrderArgs,
     gn_partial: GnArgs,
     gn_finalize: GnArgs,
     gn_apply: GnApplyArgs,
+    gn_welford: GnWelfordArgs,
     softmax_rows: SoftmaxArgs,
+    sdpa_memeff: SdpaArgs,
     transpose: TransposeArgs,
     latent_in: LatentInArgs,
     rgb8_in: Rgb8InArgs,
@@ -175,9 +238,41 @@ pub const Launcher = struct {
     /// Optional observer of named intermediate values (qualification only; QUALIFICATION.md names them). Null in
     /// production: the graphs then build no names and call nothing.
     probe: ?Probe = null,
+    /// How `groupNorm` computes its statistics (every GroupNorm the graphs run). Default: this component's two passes.
+    gn: GnPolicy = .two_pass,
+    /// Convolution K orders by exact shape (`qualified.conv` in the decode); a convolution no rule names keeps the
+    /// tap-major order.
+    conv: []const ConvRule = &.{},
+    /// The mid-block attention's q / k / v projections' bias (`qualified.attn_qkv_bias` in the decode). Default fused. The reference
+    /// projects the group norm's transposed (non-contiguous) output, for which at::linear runs matmul and then
+    /// output.add_(bias): `.conv`, two roundings. to_out (a contiguous input) keeps the fused epilogue.
+    attn_qkv_bias: BiasMode = .linear,
+    /// The mid-block attention's core (`qualified.attn_sdpa` in the decode): null, this component's math path (S, softmax rows,
+    /// P V over all keys); a variant, the reference's mem-efficient SDPA kernel (ops.cu k6v_sdpa_memeff, `SdpaVariant`).
+    attn_sdpa: ?SdpaVariant = null,
 
     pub fn run(self: Launcher, l: Launch) !void {
-        return self.func(self.ctx, l);
+        if (self.conv.len == 0) return self.func(self.ctx, l);
+        var c = l;
+        switch (c.call) {
+            .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s => |*a| if (ruleFor(self.conv, a.*)) |r| {
+                a.ctile = @intCast(r.ctile);
+                a.split_by = @backingInt(r.split_by);
+                a.kslot = @backingInt(r.kslot);
+                if (r.split == 2) {
+                    // the same arguments and grid on the two-slice kernel; the scalar gather has none
+                    const args = a.*;
+                    const tag = std.meta.activeTag(c.call);
+                    c.call = switch (tag) {
+                        .conv_wide => .{ .conv_wide_k2 = args },
+                        .conv_narrow => .{ .conv_narrow_k2 = args },
+                        else => return error.InvalidShape,
+                    };
+                }
+            },
+            else => {},
+        }
+        return self.func(self.ctx, c);
     }
 
     /// Reports `v` (fp16) under the checkpoint `fmt` / `args` once the launches before it are queued; `tokens`: a
@@ -188,6 +283,114 @@ pub const Launcher = struct {
         try p.func(p.ctx, try std.fmt.bufPrint(&buf, fmt, args), v, tokens);
     }
 };
+
+/// The decode's production arithmetic: the policies the SM121 qualification proved bit-exact against the reference
+/// (kernels/cuda/kandinsky6/video_vae/QUALIFICATION.md, "Qualified policies"; each was a candidate exact on every
+/// fixture of its op, then the whole decode bit-equal in trace v7). `apply` sets them on a launcher; the decode always
+/// runs them. The `Launcher` field defaults stay the component's own orders, for the fixtures and the encoder.
+pub const qualified = struct {
+    /// The tile plan the qualification ran (the reference's recorded free memory): its tiles are the shapes `conv` names.
+    pub const free_bytes: u64 = 2_301_403_136;
+    /// torch's fp16 group_norm (RowwiseMomentsCUDAKernel's Welford), every contraction nvcc applies.
+    pub const gn: GnPolicy = .{ .torch_welford = WelfordVariant.all };
+    /// q / k / v: at::linear on a non-contiguous input, matmul then add_ (two roundings); to_out stays fused.
+    pub const attn_qkv_bias: BiasMode = .conv;
+    /// torch's mem-efficient SDPA kernel: m16n8k8 GEMMs, the middle combine fused, the last fma(a, O, b * A) (524).
+    pub const attn_sdpa: SdpaVariant = .{ .fma_mid = true, .last = 1, .k8 = true };
+    /// cuDNN's K order for each decoder convolution of the qualified plan (the convolution fixture, every shape).
+    pub const conv = [_]ConvRule{
+        .{ .ci = 16, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 32, .wo = 29, .ctile = 16 },
+        .{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 32, .wo = 29, .ctile = 64, .split = 2 },
+        .{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 64, .wo = 58, .up_hw = 2, .ctile = 64, .split = 2 },
+        .{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 64, .wo = 58, .ctile = 64, .split = 2 },
+        .{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 9, .ho = 128, .wo = 116, .up_t = 2, .up_hw = 2, .ctile = 64 },
+        .{ .ci = 512, .co = 256, .kt = 3, .kh = 3, .kw = 3, .to = 9, .ho = 128, .wo = 116, .ctile = 64 },
+        .{ .ci = 512, .co = 256, .kt = 1, .kh = 1, .kw = 1, .to = 9, .ho = 128, .wo = 116, .ctile = 16 },
+        .{ .ci = 256, .co = 256, .kt = 3, .kh = 3, .kw = 3, .to = 9, .ho = 128, .wo = 116, .ctile = 64 },
+        .{ .ci = 256, .co = 256, .kt = 3, .kh = 3, .kw = 3, .to = 17, .ho = 256, .wo = 232, .up_t = 2, .up_hw = 2, .ctile = 64 },
+        .{ .ci = 256, .co = 128, .kt = 3, .kh = 3, .kw = 3, .to = 17, .ho = 256, .wo = 232, .ctile = 64 },
+        .{ .ci = 256, .co = 128, .kt = 1, .kh = 1, .kw = 1, .to = 17, .ho = 256, .wo = 232, .ctile = 16 },
+        .{ .ci = 128, .co = 128, .kt = 3, .kh = 3, .kw = 3, .to = 17, .ho = 256, .wo = 232, .ctile = 64 },
+        .{ .ci = 128, .co = 3, .kt = 3, .kh = 3, .kw = 3, .to = 17, .ho = 256, .wo = 232, .ctile = 128, .kslot = .quad32 },
+    };
+
+    pub fn apply(l: *Launcher) void {
+        l.gn = gn;
+        l.conv = &qualified.conv;
+        l.attn_qkv_bias = attn_qkv_bias;
+        l.attn_sdpa = attn_sdpa;
+    }
+};
+
+test "the qualified policies: valid, distinct shapes, SDPA variant 524" {
+    for (qualified.conv, 0..) |r, i| {
+        try std.testing.expect(r.valid());
+        for (qualified.conv[0..i]) |prev| {
+            var same = prev;
+            same.ctile = r.ctile;
+            same.split = r.split;
+            same.split_by = r.split_by;
+            same.kslot = r.kslot;
+            try std.testing.expect(!std.meta.eql(same, r)); // one rule a shape
+        }
+    }
+    try std.testing.expectEqual(@as(u16, 524), @as(u16, @bitCast(qualified.attn_sdpa)));
+    try std.testing.expect(qualified.attn_sdpa.valid());
+    var l: Launcher = .{ .ctx = undefined, .func = undefined };
+    qualified.apply(&l);
+    try std.testing.expectEqual(@as(usize, 13), l.conv.len);
+    try std.testing.expectEqual(BiasMode.conv, l.attn_qkv_bias);
+}
+
+/// One convolution shape's K order (`qualified.conv`): a convolution matches when every field but `ctile` and `split`
+/// equals its launch's (input channels, output channels, kernel, output dims, nearest upsample factors). `ctile` is the
+/// channel tile of the K sequence (conv.cu): a multiple of 16 dividing ci, or 0 for the tap-major order. `split` 2 runs
+/// the _k2 kernel: the channel tiles alternate between two fp32 slices joined before the epilogue (cudnn's grid-z split
+/// K), which needs ctile a multiple of 32 and at least two tiles. `kslot` quad32 regroups the channels of each
+/// 32-channel block of a tap into its two chunks by alternate 4-channel quads (the decoder conv_out's cudnn kernel), which
+/// needs 32-channel blocks (ctile, or ci for the tap-major order, a multiple of 32) and one slice.
+pub const ConvRule = struct {
+    ci: u32,
+    co: u32,
+    kt: u32,
+    kh: u32,
+    kw: u32,
+    to: u32,
+    ho: u32,
+    wo: u32,
+    up_t: u32 = 1,
+    up_hw: u32 = 1,
+    ctile: u32,
+    split: u32 = 1,
+    split_by: SplitBy = .tile,
+    kslot: KSlot = .natural,
+
+    pub const SplitBy = enum(i32) { tile = 0, chunk = 1 };
+    pub const KSlot = enum(i32) { natural = 0, quad32 = 1 };
+
+    pub fn valid(r: ConvRule) bool {
+        if (r.ci == 0 or !(r.ctile == 0 or (r.ctile % 16 == 0 and r.ci % r.ctile == 0))) return false;
+        if (r.kslot == .quad32 and (r.split != 1 or (if (r.ctile == 0) r.ci else r.ctile) % 32 != 0)) return false;
+        return switch (r.split) {
+            1 => r.split_by == .tile,
+            2 => switch (r.split_by) {
+                .tile => r.ctile != 0 and r.ctile % 32 == 0 and r.ci / r.ctile >= 2,
+                .chunk => true,
+            },
+            else => false,
+        };
+    }
+};
+
+/// The first rule matching `a`'s shape, if any.
+pub fn ruleFor(rules: []const ConvRule, a: ConvArgs) ?ConvRule {
+    const key = [10]i64{ a.ci, a.co, a.kt, a.kh, a.kw, a.to, a.ho, a.wo, a.up_t, a.up_hw };
+    for (rules) |r| {
+        const want = [10]i64{ r.ci, r.co, r.kt, r.kh, r.kw, r.to, r.ho, r.wo, r.up_t, r.up_hw };
+        if (std.mem.eql(i64, &key, &want)) return r;
+    }
+    return null;
+}
 
 /// See `Launcher.probe`: called with the checkpoint's name and its fp16 channels-last view, valid until the next
 /// launch is queued.
@@ -311,6 +514,12 @@ fn grid1(n: u64) [3]u32 {
     return .{ @intCast((n + 255) / 256), 1, 1 };
 }
 
+/// k6v_conv_order's launch: one warp a 16-row x 8-column tile, four warps a block.
+pub fn convOrder(a: ConvOrderArgs) Launch {
+    const mtiles: u64 = (@as(u64, @intCast(a.mcount)) + 15) / 16;
+    return .{ .call = .{ .conv_order = a }, .grid = .{ @intCast((mtiles + 3) / 4), @intCast((@as(u64, @intCast(a.co)) + 7) / 8), 1 }, .block = .{ 128, 1, 1 } };
+}
+
 /// Output dims of a convolution of `x` under `s` (upsampled grid, replicate padded, strided).
 pub fn convOut(x: View, w: ConvW, s: ConvSpec) [3]u32 {
     const tu = if (s.up_t == 2) 1 + 2 * (x.t - 1) else x.t;
@@ -394,6 +603,9 @@ pub const Dense = struct {
     n: u32,
     k: u32,
     out_f32: bool = false,
+    /// F.linear's bias: fused into the GEMM's fp32 epilogue (addmm / cuBLASLt EPILOGUE_BIAS), or added to the rounded
+    /// product as a separate op (at::linear on a non-contiguous input: matmul, then output.add_(bias)).
+    bias_mode: BiasMode = .linear,
 };
 
 pub fn dense(d: Dense) Error!Launch {
@@ -434,7 +646,7 @@ pub fn dense(d: Dense) Error!Launch {
         .wo = i32of(d.m),
         .co = i32of(d.n),
         .k = i32of(d.k),
-        .bias_mode = @backingInt(BiasMode.linear),
+        .bias_mode = @backingInt(d.bias_mode),
         .out_f32 = @intFromBool(d.out_f32),
     };
     const narrow = d.n <= 32;
@@ -488,12 +700,15 @@ pub const Work = struct {
     act_elems: u64,
     attn: Attn,
 
-    pub const Attn = struct { q: u64, k: u64, v: u64, vt: u64, o: u64, s: u64, p: u64, tokens: u32 };
+    /// `s`: fp32 scores of the math core's row blocks, or the mem-efficient core's [tokens][c] output accumulator;
+    /// `s_elems` its capacity in floats (the larger of the two uses).
+    pub const Attn = struct { q: u64, k: u64, v: u64, vt: u64, o: u64, s: u64, s_elems: u64, p: u64, tokens: u32 };
 
     /// Carves the blocks' scratch for activations up to `act_elems` (fp16) and attention over up to `tokens` tokens.
     pub fn init(arena: *Arena, act_elems: u64, max_positions: u64, tokens: u32, c_attn: u32) Error!Work {
         const ldn = std.mem.alignForward(u64, tokens, 8);
         const br = @min(attn_rows, tokens);
+        const s_elems: u64 = @max(@as(u64, br) * ldn, @as(u64, tokens) * c_attn);
         const chunks = (max_positions + gn_chunk - 1) / gn_chunk;
         return .{
             .a = try arena.take(act_elems * 2),
@@ -507,7 +722,8 @@ pub const Work = struct {
                 .v = try arena.take(@as(u64, tokens) * c_attn * 2),
                 .vt = try arena.take(@as(u64, c_attn) * ldn * 2),
                 .o = try arena.take(@as(u64, tokens) * c_attn * 2),
-                .s = try arena.take(@as(u64, br) * ldn * 4),
+                .s = try arena.take(s_elems * 4),
+                .s_elems = s_elems,
                 .p = try arena.take(@as(u64, br) * ldn * 2),
                 .tokens = tokens,
             },
@@ -519,18 +735,71 @@ fn fits(work: Work, elems: u64) Error!void {
     if (elems > work.act_elems) return error.BufferTooSmall;
 }
 
-/// nn.GroupNorm(32, C, eps=1e-6) (+ SiLU) of dense x into dense y (y may be x): five launches.
+/// GroupNorm statistics (`Launcher.gn`). The apply step (k6v_gn_apply) is the same for both.
+///   two_pass        this component's order: sum, then centred squares, in fixed 2,048-position chunks (ops.cu), eps 1e-6
+///   torch_welford   torch 2.14.1's fp16 group_norm on CUDA (RowwiseMomentsCUDAKernel<c10::Half, float>: one 512-thread
+///                   block a group, Welford in NCTHW element order, warp-shuffle then block combine) with the eps cast
+///                   to fp16 first, as GroupNormKernelImpl does; the value is k6v_gn_welford's contraction variant
+///                   (`WelfordVariant`), fixed by the GroupNorm fixture. Default off: unqualified until the bit gates pass.
+pub const GnPolicy = union(enum) {
+    two_pass,
+    torch_welford: u32,
+};
+
+/// k6v_gn_welford's `variant` bits: which of torch's `x + y * z` source expressions nvcc fused into one fmaf.
+pub const WelfordVariant = struct {
+    pub const reduce_m2_fma: u32 = 1;
+    pub const combine_mean_fma: u32 = 2;
+    pub const combine_m2_fma: u32 = 4;
+    pub const all: u32 = 7;
+};
+
+/// torch's GroupNormKernelImpl passes `static_cast<scalar_t>(eps)`: for fp16 activations, eps rounded to half first.
+pub fn gnEpsHalf() f32 {
+    const h: f16 = @floatCast(gn_eps);
+    return h;
+}
+
+/// k6v_gn_welford's block: torch's num_threads (kCUDABlockReduceNumThreads 512, or one warp below 512 elements).
+pub fn welfordThreads(positions: u64, c: u32) u32 {
+    return if (positions * (c / gn_groups) < 512) 32 else 512;
+}
+
+/// The statistics launches of `policy` for dense x (c channels, `groups` groups) into stats [groups][2] (mean, rstd).
+pub fn gnStats(l: Launcher, work: Work, x: View, policy: GnPolicy, eps: f32) !void {
+    const p = x.positions();
+    switch (policy) {
+        .two_pass => {
+            const chunks = (p + gn_chunk - 1) / gn_chunk;
+            var a: GnArgs = .{ .x = x.ptr, .partial = work.gn_partial, .stats = work.gn_stats, .positions = @intCast(p), .c = i32of(x.c), .groups = gn_groups, .pass = 0, .eps = eps };
+            for (0..2) |pass| {
+                a.pass = @intCast(pass);
+                try l.run(.{ .call = .{ .gn_partial = a }, .grid = .{ @intCast(chunks), 1, 1 }, .block = .{ 256, 1, 1 } });
+                try l.run(.{ .call = .{ .gn_finalize = a }, .grid = .{ gn_groups, 1, 1 }, .block = .{ 256, 1, 1 } });
+            }
+        },
+        .torch_welford => |variant| {
+            if (variant > WelfordVariant.all) return error.InvalidShape;
+            try l.run(.{ .call = .{ .gn_welford = .{ .x = x.ptr, .stats = work.gn_stats, .positions = @intCast(p), .c = i32of(x.c), .groups = gn_groups, .eps = eps, .variant = @intCast(variant) } }, .grid = .{ gn_groups, 1, 1 }, .block = .{ welfordThreads(p, x.c), 1, 1 } });
+        },
+    }
+}
+
+/// nn.GroupNorm(32, C, eps=1e-6) (+ SiLU) of dense x into dense y (y may be x): the statistics of `l.gn` (with its eps),
+/// then the apply.
 pub fn groupNorm(l: Launcher, work: Work, x: View, n: NormW, silu: bool, y: u64) !void {
+    return groupNormWith(l, work, x, n, silu, y, l.gn, switch (l.gn) {
+        .two_pass => gn_eps,
+        .torch_welford => gnEpsHalf(),
+    });
+}
+
+/// `groupNorm` with the statistics policy and eps given (the GroupNorm fixture runs every candidate through this).
+pub fn groupNormWith(l: Launcher, work: Work, x: View, n: NormW, silu: bool, y: u64, policy: GnPolicy, eps: f32) !void {
     if (!x.contiguous() or x.c != n.c or x.c % 8 != 0 or 256 % (x.c / 8) != 0 or x.c % gn_groups != 0) return error.InvalidShape;
     if (x.ptr % 16 != 0 or y % 16 != 0) return error.Misaligned;
     const p = x.positions();
-    const chunks = (p + gn_chunk - 1) / gn_chunk;
-    var a: GnArgs = .{ .x = x.ptr, .partial = work.gn_partial, .stats = work.gn_stats, .positions = @intCast(p), .c = i32of(x.c), .groups = gn_groups, .pass = 0, .eps = gn_eps };
-    for (0..2) |pass| {
-        a.pass = @intCast(pass);
-        try l.run(.{ .call = .{ .gn_partial = a }, .grid = .{ @intCast(chunks), 1, 1 }, .block = .{ 256, 1, 1 } });
-        try l.run(.{ .call = .{ .gn_finalize = a }, .grid = .{ gn_groups, 1, 1 }, .block = .{ 256, 1, 1 } });
-    }
+    try gnStats(l, work, x, policy, eps);
     try l.run(.{ .call = .{ .gn_apply = .{ .x = x.ptr, .y = y, .gamma = n.gamma, .beta = n.beta, .stats = work.gn_stats, .positions = @intCast(p), .c = i32of(x.c), .groups = gn_groups, .silu = @intFromBool(silu) } }, .grid = grid1(p * x.c / 8), .block = .{ 256, 1, 1 } });
 }
 
@@ -560,6 +829,38 @@ pub fn resnet(l: Launcher, work: Work, x: View, r: ResnetW, y: u64, name: []cons
     return out;
 }
 
+/// k6v_sdpa_memeff's `variant` (ops.cu): which contractions / approximations of the reference build it reproduces.
+pub const SdpaVariant = packed struct(u16) {
+    fma_x: bool = false,
+    fma_exp: bool = false,
+    fma_mid: bool = false,
+    /// 0: (a * O) + (b * A); 1: fma(a, O, b * A); 2: fma(b, A, a * O)
+    last: u2 = 0,
+    /// 0: exp2f; 1: ex2.approx.f32; 2: ex2.approx.ftz.f32
+    exp: u2 = 0,
+    /// 1 / s: 0 div.rn; 1 div.approx.ftz.f32; 2 div.full.f32
+    rcp: u2 = 0,
+    /// both GEMMs as m16n8k8 chains (the source's InstructionShape 16x8x8), else m16n8k16
+    k8: bool = false,
+    _pad: u6 = 0,
+
+    pub fn valid(v: SdpaVariant) bool {
+        return v.last <= 2 and v.exp <= 2 and v.rcp <= 2 and v._pad == 0;
+    }
+};
+
+/// The attention core through k6v_sdpa_memeff: q, k [n][c], vt [c][ldn] (k6v_transpose), the fp32 accumulator acc
+/// [n][c], out o [n][c]; the frame-causal mask of `spf` tokens a frame (mask 0: none given). c a multiple of 128.
+pub fn sdpaMemEff(q: u64, k: u64, vt: u64, acc: u64, o: u64, n: u32, c: u32, ldn: u64, spf: u32, v: SdpaVariant) Error!Launch {
+    if (n == 0 or c == 0 or c % 128 != 0 or spf == 0 or ldn < n or ldn % 8 != 0 or !v.valid()) return error.InvalidShape;
+    if (q % 4 != 0 or k % 4 != 0 or vt % 4 != 0) return error.Misaligned;
+    return .{
+        .call = .{ .sdpa_memeff = .{ .q = q, .k = k, .vt = vt, .acc = acc, .o = o, .ldn = @intCast(ldn), .n = i32of(n), .c = i32of(c), .spf = i32of(spf), .variant = @as(u16, @bitCast(v)), .scale = attnScale(c) } },
+        .grid = .{ (n + 31) / 32, 1, 1 },
+        .block = .{ 128, 1, 1 },
+    };
+}
+
 pub fn attnScale(c: u32) f32 {
     return @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(c))));
 }
@@ -578,10 +879,25 @@ pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64, name: []con
     try l.mark("{s}.group_norm", .{name}, View.dense(work.a, x.t, x.h, x.w, c), true);
     const at = work.attn;
     for ([_]struct { ConvW, u64, []const u8 }{ .{ w.q, at.q, "to_q" }, .{ w.k, at.k, "to_k" }, .{ w.v, at.v, "to_v" } }) |pw| {
-        try l.run(try dense(.{ .a = work.a, .lda = c, .b = pw[0].w, .ldb = pw[0].ldw(), .bias = pw[0].b, .c = pw[1], .ldc = c, .m = n, .n = c, .k = c }));
+        try l.run(try dense(.{ .a = work.a, .lda = c, .b = pw[0].w, .ldb = pw[0].ldw(), .bias = pw[0].b, .c = pw[1], .ldc = c, .m = n, .n = c, .k = c, .bias_mode = l.attn_qkv_bias }));
         try l.mark("{s}.{s}", .{ name, pw[2] }, View.dense(pw[1], x.t, x.h, x.w, c), true);
     }
     try l.run(.{ .call = .{ .transpose = .{ .x = at.v, .y = at.vt, .n = n, .ldn = ldn, .c = i32of(c) } }, .grid = .{ (ldn + 31) / 32, (c + 31) / 32, 1 }, .block = .{ 32, 8, 1 } });
+    if (l.attn_sdpa) |v| {
+        // the scores buffer holds the [n][c] fp32 output accumulator (Work.init sizes it for both uses)
+        if (@as(u64, n) * c > at.s_elems) return error.BufferTooSmall;
+        try l.run(try sdpaMemEff(at.q, at.k, at.vt, at.s, at.o, n, c, ldn, spf, v));
+    } else {
+        try mathCore(l, at, n, c, ldn, spf);
+    }
+    try l.run(try dense(.{ .a = at.o, .lda = c, .b = w.out.w, .ldb = w.out.ldw(), .bias = w.out.b, .res = x.ptr, .c = y, .ldc = c, .m = n, .n = c, .k = c }));
+    const out = View.dense(y, x.t, x.h, x.w, c);
+    try l.mark("{s}", .{name}, out, true); // the module returns (B, N, C): QUALIFICATION.md records it as [N][C]
+    return out;
+}
+
+/// This component's attention core: S rows in blocks of attn_rows, the softmax rows, P V over the visible keys.
+fn mathCore(l: Launcher, at: Work.Attn, n: u32, c: u32, ldn: u32, spf: u32) !void {
     var r0: u32 = 0;
     while (r0 < n) : (r0 += attn_rows) {
         const rows = @min(attn_rows, n - r0);
@@ -590,10 +906,6 @@ pub fn attention(l: Launcher, work: Work, x: View, w: AttnW, y: u64, name: []con
         try l.run(.{ .call = .{ .softmax_rows = .{ .s = at.s, .p = at.p, .lds = ldn, .ldp = ldn, .row0 = i32of(r0), .spf = i32of(spf), .cols = i32of(cols), .scale = attnScale(c) } }, .grid = .{ rows, 1, 1 }, .block = .{ 256, 1, 1 } });
         try l.run(try dense(.{ .a = at.p, .lda = ldn, .b = at.vt, .ldb = ldn, .c = at.o + @as(u64, r0) * c * 2, .ldc = c, .m = rows, .n = c, .k = cols }));
     }
-    try l.run(try dense(.{ .a = at.o, .lda = c, .b = w.out.w, .ldb = w.out.ldw(), .bias = w.out.b, .res = x.ptr, .c = y, .ldc = c, .m = n, .n = c, .k = c }));
-    const out = View.dense(y, x.t, x.h, x.w, c);
-    try l.mark("{s}", .{name}, out, false);
-    return out;
 }
 
 /// HunyuanVideoMidBlock3D: resnet, attention, resnet. x is consumed (its buffer is reused); returns the output view,
@@ -700,9 +1012,147 @@ fn bf16Rne(f: f32) u16 {
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
+test "torch_welford statistics: one launch, a 512-thread block a group (a warp under 512 elements), eps cast to half" {
+    try std.testing.expectEqual(@as(f32, 17.0 / 16777216.0), gnEpsHalf()); // half(1e-6): 17 * 2^-24
+    try std.testing.expectEqual(@as(u32, 512), welfordThreads(4640, 512)); // the mid block's 16 x 4,640 elements a group
+    try std.testing.expectEqual(@as(u32, 32), welfordThreads(15, 512)); // 240 elements
+    var sim: Sim = .{};
+    sim.region(0x1000, 4640 * 512 * 2, "x");
+    sim.region(0x100_0000, gn_groups * 8, "stats");
+    var work: Work = undefined;
+    work.gn_stats = 0x100_0000;
+    const x = View.dense(0x1000, 5, 32, 29, 512);
+    try gnStats(sim.launcher(), work, x, .{ .torch_welford = WelfordVariant.all }, gnEpsHalf());
+    try std.testing.expectEqual(@as(u64, 1), sim.counts[@backingInt(Kernel.gn_welford)]);
+    try std.testing.expectEqual(@as(u64, 0), sim.counts[@backingInt(Kernel.gn_partial)]);
+    try std.testing.expectError(error.InvalidShape, gnStats(sim.launcher(), work, x, .{ .torch_welford = 8 }, gnEpsHalf()));
+}
+
+test "vae_conv rules: the matching convolution gets its channel tile, any other keeps the tap-major order" {
+    const R = struct {
+        var got: i32 = -1;
+        var split_by: i32 = -1;
+        var kernel: Kernel = .copy;
+        fn f(_: *anyopaque, la: Launch) anyerror!void {
+            kernel = std.meta.activeTag(la.call);
+            got = switch (la.call) {
+                .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s, .conv_wide_k2, .conv_narrow_k2 => |a| a.ctile,
+                else => -2,
+            };
+            split_by = switch (la.call) {
+                .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s, .conv_wide_k2, .conv_narrow_k2 => |a| a.split_by,
+                else => -2,
+            };
+        }
+    };
+    var ctx: u8 = 0;
+    const rules = [_]ConvRule{.{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 32, .wo = 29, .ctile = 32 }};
+    const l: Launcher = .{ .ctx = &ctx, .func = R.f, .conv = &rules };
+    const w: ConvW = .{ .w = 0x10000, .b = 0x20000, .co = 512, .ci = 512 };
+    try l.run(try conv(View.dense(0x40000, 5, 32, 29, 512), w, .{}, 0x80000));
+    try std.testing.expectEqual(@as(i32, 32), R.got);
+    try l.run(try conv(View.dense(0x40000, 5, 64, 58, 512), w, .{}, 0x80000));
+    try std.testing.expectEqual(@as(i32, 0), R.got);
+    const plain: Launcher = .{ .ctx = &ctx, .func = R.f };
+    try plain.run(try conv(View.dense(0x40000, 5, 32, 29, 512), w, .{}, 0x80000));
+    try std.testing.expectEqual(@as(i32, 0), R.got);
+    try std.testing.expect(rules[0].valid());
+    try std.testing.expectEqual(Kernel.conv_wide, R.kernel);
+    var bad = rules[0];
+    bad.ctile = 48; // not a divisor of 512
+    try std.testing.expect(!bad.valid());
+    // the mid conv as the reference runs it: channel tiles of 64, two split-K slices (cudnn grid z = 2)
+    const split = [_]ConvRule{.{ .ci = 512, .co = 512, .kt = 3, .kh = 3, .kw = 3, .to = 5, .ho = 32, .wo = 29, .ctile = 64, .split = 2 }};
+    try std.testing.expect(split[0].valid());
+    const ls: Launcher = .{ .ctx = &ctx, .func = R.f, .conv = &split };
+    try ls.run(try conv(View.dense(0x40000, 5, 32, 29, 512), w, .{}, 0x80000));
+    try std.testing.expectEqual(Kernel.conv_wide_k2, R.kernel);
+    try std.testing.expectEqual(@as(i32, 64), R.got);
+    try std.testing.expectEqual(@as(i32, 0), R.split_by);
+    var one_tile = split[0];
+    one_tile.ctile = 512; // a single tile cannot alternate
+    try std.testing.expect(!one_tile.valid());
+    var odd = split[0];
+    odd.ctile = 16; // a 32-wide stage would straddle two tiles
+    try std.testing.expect(!odd.valid());
+    // chunk-alternating accumulators (a register-only kernel's two mma chains): any order, the same _k2 kernel
+    var chunks = split[0];
+    chunks.ctile = 0;
+    chunks.split_by = .chunk;
+    try std.testing.expect(chunks.valid());
+    const chunk_rules = [_]ConvRule{chunks};
+    const lc: Launcher = .{ .ctx = &ctx, .func = R.f, .conv = &chunk_rules };
+    try lc.run(try conv(View.dense(0x40000, 5, 32, 29, 512), w, .{}, 0x80000));
+    try std.testing.expectEqual(Kernel.conv_wide_k2, R.kernel);
+    try std.testing.expectEqual(@as(i32, 1), R.split_by);
+    var lone = chunks;
+    lone.split = 1; // chunk alternation needs two slices
+    try std.testing.expect(!lone.valid());
+    // conv_out's measured order: tap-major, the 32-channel blocks' quads alternating between the two chunks
+    const quad = [_]ConvRule{.{ .ci = 128, .co = 3, .kt = 3, .kh = 3, .kw = 3, .to = 17, .ho = 256, .wo = 232, .ctile = 0, .kslot = .quad32 }};
+    try std.testing.expect(quad[0].valid());
+    const R2 = struct {
+        var kslot: i32 = -1;
+        fn f(_: *anyopaque, la: Launch) anyerror!void {
+            kslot = switch (la.call) {
+                .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s, .conv_wide_k2, .conv_narrow_k2 => |a| a.kslot,
+                else => -2,
+            };
+        }
+    };
+    const lq: Launcher = .{ .ctx = &ctx, .func = R2.f, .conv = &quad };
+    const wq: ConvW = .{ .w = 0x10000, .b = 0x20000, .co = 3, .ci = 128 };
+    try lq.run(try conv(View.dense(0x40000, 17, 256, 232, 128), wq, .{}, 0x80000));
+    try std.testing.expectEqual(@as(i32, 1), R2.kslot);
+    try lq.run(try conv(View.dense(0x40000, 17, 256, 232, 64), .{ .w = 0x10000, .b = 0x20000, .co = 3, .ci = 64 }, .{}, 0x80000));
+    try std.testing.expectEqual(@as(i32, 0), R2.kslot); // another shape: untouched
+    var q16 = quad[0];
+    q16.ctile = 16; // a 32-channel block would straddle two tiles
+    try std.testing.expect(!q16.valid());
+    var q2 = quad[0];
+    q2.split = 2;
+    q2.split_by = .chunk;
+    try std.testing.expect(!q2.valid());
+    try std.testing.expectEqual(@as(u32, 23), convOrder(.{ .x = 0, .w = 0, .y = 0, .m0 = 0, .mcount = 1450, .ti = 5, .hi = 32, .wi = 29, .ci = 512, .tu = 5, .hu = 32, .wu = 29, .up_t = 1, .up_hw = 1, .kt = 3, .kh = 3, .kw = 3, .pt = 2, .ph = 1, .pw = 1, .to = 5, .ho = 32, .wo = 29, .co = 512, .order = 0, .ctile = 32, .mma_k = 16, .split = 1, .split_mode = 0, .split_len = 0, .split_join = 0 }).grid[0]);
+}
+
+test "the mem-efficient attention core: variant bits as ops.cu reads them, shapes it refuses" {
+    // bit 0 fma_x, 1 fma_exp, 2 fma_mid, 3-4 last, 5-6 exp, 7-8 rcp, 9 k8
+    try std.testing.expectEqual(@as(u16, 0b1010_1101), @as(u16, @bitCast(SdpaVariant{ .fma_x = true, .fma_mid = true, .last = 1, .exp = 1, .rcp = 1 })));
+    try std.testing.expectEqual(@as(u16, 0b1_0000_0000), @as(u16, @bitCast(SdpaVariant{ .rcp = 2 })));
+    try std.testing.expectEqual(@as(u16, 0b10_0000_0000), @as(u16, @bitCast(SdpaVariant{ .k8 = true })));
+    try std.testing.expect(!@as(SdpaVariant, @bitCast(@as(u16, 1 << 10))).valid());
+    try std.testing.expect(!(SdpaVariant{ .last = 3 }).valid());
+    try std.testing.expect(!(SdpaVariant{ .exp = 3 }).valid());
+    try std.testing.expect(!(SdpaVariant{ .rcp = 3 }).valid());
+    const la = try sdpaMemEff(0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 4640, 512, 4640, 928, .{ .exp = 2 });
+    try std.testing.expectEqual(@as(u32, 145), la.grid[0]);
+    try std.testing.expectEqual(@as(i32, 64), la.call.sdpa_memeff.variant);
+    try std.testing.expectEqual(attnScale(512), la.call.sdpa_memeff.scale);
+    try std.testing.expectError(error.InvalidShape, sdpaMemEff(0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 4640, 96, 4640, 928, .{}));
+    try std.testing.expectError(error.InvalidShape, sdpaMemEff(0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 4640, 512, 4636, 928, .{}));
+    try std.testing.expectError(error.InvalidShape, sdpaMemEff(0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 4640, 512, 4640, 928, .{ .last = 3 }));
+}
+
+test "a projection's bias mode: fused by default, separate on request (the attention's q / k / v policy)" {
+    const d: Dense = .{ .a = 0x10000, .lda = 512, .b = 0x20000, .ldb = 512, .bias = 0x30000, .c = 0x40000, .ldc = 512, .m = 4640, .n = 512, .k = 512 };
+    const fused = try dense(d);
+    try std.testing.expectEqual(@as(i32, 0), fused.call.conv_wide.bias_mode);
+    var sep = d;
+    sep.bias_mode = .conv;
+    try std.testing.expectEqual(@as(i32, 1), (try dense(sep)).call.conv_wide.bias_mode);
+    const l: Launcher = .{ .ctx = undefined, .func = undefined };
+    try std.testing.expectEqual(BiasMode.linear, l.attn_qkv_bias);
+}
+
 test "parameter blocks match the CUDA structs, symbols and images" {
     try std.testing.expectEqualStrings("k6v_conv_wide", symbol(.conv_wide));
     try std.testing.expectEqualStrings("k6v_gn_apply", symbol(.gn_apply));
+    try std.testing.expectEqualStrings("k6v_gn_welford", symbol(.gn_welford));
+    try std.testing.expectEqualStrings("k6v_conv_order", symbol(.conv_order));
+    try std.testing.expectEqualStrings("k6v_conv_wide_k2", symbol(.conv_wide_k2));
+    try std.testing.expectEqual(Image.conv, image(.conv_narrow_k2));
+    try std.testing.expectEqual(Image.conv, image(.conv_order));
     try std.testing.expectEqual(Image.conv, image(.conv_narrow_s));
     try std.testing.expectEqual(Image.ops, image(.copy));
 }
@@ -832,15 +1282,21 @@ pub const Sim = struct {
         var writes: [3]Range = undefined;
         var nw: usize = 0;
         switch (l.call) {
-            .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s => |a| {
-                const wide = l.call == .conv_wide or l.call == .conv_wide_s;
+            .conv_wide, .conv_narrow, .conv_wide_s, .conv_narrow_s, .conv_wide_k2, .conv_narrow_k2 => |a| {
+                const wide = l.call == .conv_wide or l.call == .conv_wide_s or l.call == .conv_wide_k2;
                 const bm: u64 = 128;
                 const bn: u64 = if (wide) 128 else 32;
                 const m: u64 = @as(u64, @intCast(a.to)) * @as(u64, @intCast(a.ho)) * @as(u64, @intCast(a.wo));
                 if (l.grid[0] != (m + bm - 1) / bm or l.grid[1] != (@as(u64, @intCast(a.co)) + bn - 1) / bn) return error.BadGrid;
                 if (l.block[0] != (if (wide) @as(u32, 256) else 128)) return error.BadBlock;
-                const vec = l.call == .conv_wide or l.call == .conv_narrow;
+                const vec = l.call == .conv_wide or l.call == .conv_narrow or l.call == .conv_wide_k2 or l.call == .conv_narrow_k2;
+                const k2 = l.call == .conv_wide_k2 or l.call == .conv_narrow_k2;
+                if (a.split_by != 0 and (!k2 or a.split_by != 1)) return error.InvalidShape;
+                if (k2 and a.split_by == 0 and (a.ctile <= 0 or @mod(a.ctile, 32) != 0 or @divTrunc(a.ci, a.ctile) < 2)) return error.InvalidShape;
                 if (vec and (@mod(a.ci, 8) != 0 or a.x % 16 != 0)) return error.Misaligned;
+                if (a.ctile < 0 or (a.ctile != 0 and (@mod(a.ctile, 16) != 0 or @mod(a.ci, a.ctile) != 0))) return error.InvalidShape;
+                // quad32: a BK = 32 stage must be one 32-channel block of one tap, in a single-slice kernel
+                if (a.kslot < 0 or a.kslot > 1 or (a.kslot == 1 and (k2 or @mod(if (a.ctile == 0) a.ci else a.ctile, 32) != 0))) return error.InvalidShape;
                 const kp: u64 = std.mem.alignForward(u64, @intCast(a.k), 8);
                 if (a.ldw < kp or @mod(a.ldw, 8) != 0 or a.w % 16 != 0) return error.Misaligned;
                 const xs: u64 = @as(u64, @intCast(a.ti - 1)) * @as(u64, @intCast(a.sxt)) + @as(u64, @intCast(a.hi - 1)) * @as(u64, @intCast(a.sxh)) + @as(u64, @intCast(a.wi - 1)) * @as(u64, @intCast(a.sxw)) + @as(u64, @intCast(a.ci));
@@ -869,6 +1325,35 @@ pub const Sim = struct {
                     self.conv_out_calls += 1;
                 }
             },
+            .conv_order => |a| {
+                const mtiles = (@as(u64, @intCast(a.mcount)) + 15) / 16;
+                if (l.grid[0] != (mtiles + 3) / 4 or l.grid[1] != (@as(u64, @intCast(a.co)) + 7) / 8 or l.block[0] != 128) return error.BadGrid;
+                if (a.order == 0 and (a.ctile <= 0 or @mod(a.ctile, 16) != 0 or @mod(a.ci, a.ctile) != 0)) return error.InvalidShape;
+                if (a.order < 0 or a.order > 2 or (a.order == 2 and (a.spec == 0 or a.spec_chunks <= 0 or a.perm != 0))) return error.InvalidShape;
+                if (a.order == 2) {
+                    reads[nr] = rng(a.spec, @as(u64, @intCast(a.spec_chunks)) * 16 * 4);
+                    nr += 1;
+                    if (a.spec_slice != 0) {
+                        reads[nr] = rng(a.spec_slice, @as(u64, @intCast(a.spec_chunks)) * 4);
+                        nr += 1;
+                    }
+                }
+                if (a.split < 1 or a.split > 16 or !(a.mma_k == 16 or a.mma_k == 8) or a.split_join < 0 or a.split_join > 2) return error.InvalidShape;
+                if (a.split > 1 and a.split_mode == 2 and (a.split_len <= 0 or @mod(a.split_len, a.split) != 0)) return error.InvalidShape;
+                if (a.split_mode < 0 or a.split_mode > 5 or a.perm < 0 or a.perm > 5) return error.InvalidShape;
+                if ((a.split_mode == 4 or a.split_mode == 5) and a.split_len <= 0) return error.InvalidShape;
+                if (a.perm >= 2 and a.perm <= 4 and (a.order != 0 or @mod(a.ctile, 64) != 0)) return error.InvalidShape;
+                if (a.perm == 5 and (a.order != 0 or @mod(a.ctile, 32) != 0)) return error.InvalidShape;
+                const taps: u64 = @intCast(a.kt * a.kh * a.kw);
+                const ci: u64 = @intCast(a.ci);
+                const co: u64 = @intCast(a.co);
+                reads[nr] = rng(a.x, @as(u64, @intCast(a.ti)) * @as(u64, @intCast(a.hi)) * @as(u64, @intCast(a.wi)) * ci * 2);
+                nr += 1;
+                reads[nr] = rng(a.w, co * ci * taps * 2);
+                nr += 1;
+                writes[nw] = rng(a.y, @as(u64, @intCast(a.mcount)) * co * 2);
+                nw += 1;
+            },
             .gn_partial, .gn_finalize => |a| {
                 const p: u64 = @intCast(a.positions);
                 const chunks = (p + gn_chunk - 1) / gn_chunk;
@@ -890,6 +1375,16 @@ pub const Sim = struct {
                     writes[nw] = rng(a.stats, @as(u64, @intCast(a.groups)) * 8);
                     nw += 1;
                 }
+            },
+            .gn_welford => |a| {
+                const c: u64 = @intCast(a.c);
+                const p: u64 = @intCast(a.positions);
+                if (l.grid[0] != @as(u32, @intCast(a.groups)) or a.variant < 0 or a.variant > @as(i32, WelfordVariant.all)) return error.BadGrid;
+                if (l.block[0] != welfordThreads(p, @intCast(a.c))) return error.BadBlock;
+                reads[nr] = rng(a.x, p * c * 2);
+                nr += 1;
+                writes[nw] = rng(a.stats, @as(u64, @intCast(a.groups)) * 8);
+                nw += 1;
             },
             .gn_apply => |a| {
                 const n: u64 = @as(u64, @intCast(a.positions)) * @as(u64, @intCast(a.c));
@@ -914,6 +1409,32 @@ pub const Sim = struct {
                 reads[nr] = rng(a.s, ((rows - 1) * @as(u64, @intCast(a.lds)) + @as(u64, @intCast(a.cols))) * 4);
                 nr += 1;
                 writes[nw] = rng(a.p, rows * @as(u64, @intCast(a.ldp)) * 2);
+                nw += 1;
+            },
+            .sdpa_memeff => |a| {
+                const n: u64 = @intCast(a.n);
+                const c: u64 = @intCast(a.c);
+                if (l.grid[0] != (n + 31) / 32 or l.grid[1] != 1 or l.block[0] != 128) return error.BadGrid;
+                if (a.variant < 0 or a.variant > std.math.maxInt(u16)) return error.InvalidShape;
+                const v: SdpaVariant = @bitCast(@as(u16, @intCast(a.variant)));
+                if (!v.valid() or c % 128 != 0 or a.ldn < a.n or @mod(a.ldn, 8) != 0) return error.InvalidShape;
+                if (l.grid[2] != 1 or l.block[1] != 1 or l.block[2] != 1) return error.BadBlock;
+                if (a.acc % 4 != 0 or a.o % 2 != 0 or a.q % 4 != 0 or a.k % 4 != 0 or a.vt % 4 != 0) return error.Misaligned;
+                if (a.mask == 0 and a.spf <= 0) return error.InvalidShape;
+                reads[nr] = rng(a.q, n * c * 2);
+                nr += 1;
+                reads[nr] = rng(a.k, n * c * 2);
+                nr += 1;
+                reads[nr] = rng(a.vt, c * @as(u64, @intCast(a.ldn)) * 2);
+                nr += 1;
+                if (a.mask != 0) {
+                    if (a.ldm < a.n) return error.InvalidShape;
+                    reads[nr] = rng(a.mask, ((n - 1) * @as(u64, @intCast(a.ldm)) + n) * 2);
+                    nr += 1;
+                }
+                writes[nw] = rng(a.acc, n * c * 4); // read back by the same element's thread only
+                nw += 1;
+                writes[nw] = rng(a.o, n * c * 2);
                 nw += 1;
             },
             .transpose => |a| {

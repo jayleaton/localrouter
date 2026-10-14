@@ -20,8 +20,8 @@
 //! pass.
 //!
 //! Kernels: kernels/cuda/kandinsky6/text/text.cu (RoPE table, RMSNorm, the CLIP ops) and the image engine's te.cu
-//! (stk_embed, stk_rope_half, stk_silu_mul, stk_add), gemm.cu (stk_gemm_bf16) and attention.cu (pattn2), whose
-//! semantics match these ops exactly (README.md lists each). The encoder borrows the driver, stream, weights and
+//! (stk_embed, stk_rope_half, stk_silu_mul, stk_add), gemm.cu (stk_gemm_bf16), plus the pinned source specialization
+//! in text/attention.cu. The encoder borrows the driver, stream, weights and
 //! scratch; it never allocates device memory, synchronizes or loads files.
 
 const std = @import("std");
@@ -52,7 +52,7 @@ pub const Error = cuda.Error || error{ MissingWeight, MissingKernels, InvalidPro
 /// (kandinsky/pipeline/factory.py:162), which permits TF32 without fixing the algorithm SM121 runs. Same values and
 /// meaning as the DiT's `launch.Fp32Linear`: TF32 operands rounded to nearest (away) or truncated, or strict FP32.
 /// None is a default and none is qualified (README.md).
-pub const Fp32Math = enum(i32) { tf32_rna = 0, tf32_truncate = 1, fp32 = 2 };
+pub const Fp32Math = enum(i32) { tf32_rna = 0, tf32_truncate = 1, fp32 = 2, tf32_rn = 3 };
 
 pub const Dtype = enum { bf16, f32 };
 
@@ -66,20 +66,20 @@ pub const Hook = struct {
 
 // ---- kernels ------------------------------------------------------------------------------------------------------
 
-/// The fatbin images: this component's text.cu and the image engine's te.cu, gemm.cu, attention.cu
-/// (`qwen_image.kernels.{te, gemm, attention}`). Empty slices: no kernels; `Kernels.load` refuses them.
+/// Text and reference-matched attention fatbins, plus the image engine's te.cu and gemm.cu.
+/// Empty slices: no kernels; `Kernels.load` refuses them.
 pub const Images = struct {
     text: []const u8,
     qwen_te: []const u8,
     qwen_gemm: []const u8,
-    qwen_attention: []const u8,
+    text_attention: []const u8,
+    clip_linear: []const u8,
 };
 
-/// pattn2_kernel<128, 4, 1, 2, 64, true, 3> (src/engines/qwen_image/ops_launch.zig Ops.attn_symbol).
-const pattn_symbol = "_ZN13stk_attention13pattn2_kernelILi128ELi4ELi1ELi2ELi64ELb1ELi3EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiiiif";
-const pattn_smem: u32 = 32768;
-const pattn_rows: u32 = 64;
-const pattn_threads: u32 = 128;
+// attention.cu statically checks this reference specialization's shared memory and warp count.
+const attention_smem: u32 = 52224;
+const attention_rows: u32 = 64;
+const bias_stride: u32 = std.mem.alignForward(u32, tokens, 8);
 
 fn blocks(n: u64, per: u64) u32 {
     return @intCast((n + per - 1) / per);
@@ -100,6 +100,13 @@ pub const Kernels = struct {
     te_mod: cuda.Module,
     gemm_mod: cuda.Module,
     attn_mod: cuda.Module,
+    clip_mod: cuda.Module,
+    clip_round_fn: cuda.Function,
+    clip_linear_fn: cuda.Function,
+    clip_split_fn: cuda.Function,
+    clip_clear_locks_fn: cuda.Function,
+    clip_attention_fn: cuda.Function,
+    clip_bias_fn: cuda.Function,
     // text.cu
     rope_table_fn: cuda.Function,
     rms_fn: cuda.Function,
@@ -116,10 +123,11 @@ pub const Kernels = struct {
     silu_mul_fn: cuda.Function,
     add_bf16_fn: cuda.Function,
     gemm_fn: cuda.Function,
-    pattn_fn: cuda.Function,
+    attention_fn: cuda.Function,
+    attention_bias_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver, images: Images) Error!Kernels {
-        if (images.text.len == 0 or images.qwen_te.len == 0 or images.qwen_gemm.len == 0 or images.qwen_attention.len == 0)
+        if (images.text.len == 0 or images.qwen_te.len == 0 or images.qwen_gemm.len == 0 or images.text_attention.len == 0 or images.clip_linear.len == 0)
             return error.MissingKernels;
         var k: Kernels = undefined;
         k.d = d;
@@ -129,8 +137,19 @@ pub const Kernels = struct {
         errdefer k.te_mod.unload();
         k.gemm_mod = try cuda.Module.load(d, images.qwen_gemm);
         errdefer k.gemm_mod.unload();
-        k.attn_mod = try cuda.Module.load(d, images.qwen_attention);
+        k.attn_mod = try cuda.Module.load(d, images.text_attention);
         errdefer k.attn_mod.unload();
+        k.clip_attention_fn = try k.attn_mod.function("k6t_clip_attention");
+        k.clip_bias_fn = try k.attn_mod.function("k6t_clip_attention_bias");
+        try k.clip_attention_fn.allowDynamicShared(36352);
+        k.clip_mod = try cuda.Module.load(d, images.clip_linear);
+        errdefer k.clip_mod.unload();
+        k.clip_round_fn = try k.clip_mod.function("k6t_clip_tf32_rn");
+        k.clip_linear_fn = try k.clip_mod.function("k6t_clip_linear");
+        try k.clip_linear_fn.allowDynamicShared(49152);
+        k.clip_split_fn = try k.clip_mod.function("k6t_clip_linear_split");
+        k.clip_clear_locks_fn = try k.clip_mod.function("k6t_clip_clear_locks");
+        try k.clip_split_fn.allowDynamicShared(98304);
         inline for (.{
             .{ "rope_table_fn", "k6t_rope_table" }, .{ "rms_fn", "k6t_rms_norm" },           .{ "clip_embed_fn", "k6t_clip_embed" },
             .{ "ln_fn", "k6t_layer_norm_f32" },     .{ "linear_fn", "k6t_linear_f32" },      .{ "quick_gelu_fn", "k6t_quick_gelu" },
@@ -140,12 +159,14 @@ pub const Kernels = struct {
             .{ "embed_fn", "stk_embed" }, .{ "rope_half_fn", "stk_rope_half" }, .{ "silu_mul_fn", "stk_silu_mul" }, .{ "add_bf16_fn", "stk_add" },
         }) |e| @field(k, e[0]) = try k.te_mod.function(e[1]);
         k.gemm_fn = try k.gemm_mod.function("stk_gemm_bf16");
-        k.pattn_fn = try k.attn_mod.function(pattn_symbol);
-        try k.pattn_fn.allowDynamicShared(pattn_smem);
+        k.attention_fn = try k.attn_mod.function("k6t_qwen_attention");
+        k.attention_bias_fn = try k.attn_mod.function("k6t_attention_bias");
+        try k.attention_fn.allowDynamicShared(attention_smem);
         return k;
     }
 
     pub fn unload(k: *Kernels) void {
+        k.clip_mod.unload();
         k.attn_mod.unload();
         k.gemm_mod.unload();
         k.te_mod.unload();
@@ -172,6 +193,7 @@ pub const Kernels = struct {
 
     /// Qwen2_5_VLRMSNorm over `n` bf16 rows of `d` (row strides ldx, ldy elements), weight bf16 [d].
     pub fn rmsNorm(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, y: u64, n: u32, d: u32, ldx: u64, ldy: u64) Error!void {
+        if (d != dim) return error.Invalid;
         var a: cuda.launch.Args = .{};
         inline for (.{ x, w, y }) |p| a.add(p);
         a.add(i32of(d));
@@ -224,14 +246,20 @@ pub const Kernels = struct {
         try go(k.gemm_fn, s, .{ .x = blocks(n, 128), .y = blocks(m, 128) }, .{ .x = 256 }, 0, &a);
     }
 
-    /// q[n, h, 128], k / v[n, hk, 128] -> out[n, h, 128] bf16; query i sees keys j <= i with j < nkeys (attention.cu
-    /// pattn2, `vis = c < nkeys && c <= pos`), GQA group h / hk, scale `attn_scale`.
-    pub fn attention(k: *const Kernels, s: cuda.Stream, q: u64, kk: u64, v: u64, out: u64, n: u32, h: u32, hk: u32, nkeys: u32) Error!void {
+    pub fn attentionBias(k: *const Kernels, s: cuda.Stream, bias: u64, valid: u32) Error!void {
         var a: cuda.launch.Args = .{};
-        inline for (.{ q, kk, v, out }) |p| a.add(p);
-        inline for (.{ 0, n, h, hk, h / hk, nkeys, 1 }) |x| a.add(i32of(x));
-        a.add(attn_scale);
-        try go(k.pattn_fn, s, .{ .x = blocks(n, pattn_rows), .y = h }, .{ .x = pattn_threads }, pattn_smem, &a);
+        a.add(bias);
+        inline for (.{ tokens, bias_stride, valid }) |x| a.add(i32of(x));
+        try go(k.attention_bias_fn, s, .{ .x = blocks(@as(u64, tokens) * bias_stride, 256) }, .{ .x = 256 }, 0, &a);
+    }
+
+    /// Fixed checkpoint: q[tokens, 28, 128], k/v[tokens, 4, 128], full causal/padding BF16 bias.
+    /// Match the pinned reference's CUTLASS efficient attention, including its online softmax rounding.
+    pub fn attention(k: *const Kernels, s: cuda.Stream, q: u64, kk: u64, v: u64, bias: u64, out: u64) Error!void {
+        var a: cuda.launch.Args = .{};
+        inline for (.{ q, kk, v, bias, out }) |p| a.add(p);
+        inline for (.{ tokens, bias_stride }) |x| a.add(i32of(x));
+        try go(k.attention_fn, s, .{ .x = blocks(tokens, attention_rows), .y = heads }, .{ .x = 32, .y = 8 }, attention_smem, &a);
     }
 
     // CLIP (fp32)
@@ -257,11 +285,51 @@ pub const Kernels = struct {
 
     /// c[m, n] = x[m, kd] . w[n, kd]^T + bias[n] in fp32, `math` the operand form.
     pub fn linearF32(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, bias: u64, c: u64, m: u32, n: u32, kd: u32, math: Fp32Math) Error!void {
+        if (math == .tf32_rn) return error.InvalidPrompt; // this form requires the separate CUTLASS launcher
         var a: cuda.launch.Args = .{};
         inline for (.{ x, w, bias, c }) |p| a.add(p);
         inline for (.{ m, n, kd }) |v| a.add(i32of(v));
         a.add(@backingInt(math));
         try go(k.linear_fn, s, .{ .x = blocks(n, 16), .y = blocks(m, 16) }, .{ .x = 16, .y = 16 }, 0, &a);
+    }
+
+    /// Pinned CLIP high-policy GEMM: RN-even TF32 operands and the captured 64x64x16/6-stage tile.
+    pub fn clipLinear(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, bias: u64, c: u64, tx: u64, tw: u64, locks: u64, m: u32, n: u32, kd: u32) Error!void {
+        if (m != 77 or (n != 768 and n != 3072) or (kd != 768 and kd != 3072)) return error.InvalidPrompt;
+        inline for (.{ .{ x, tx, @as(u64, m) * kd }, .{ w, tw, @as(u64, n) * kd } }) |v| {
+            var a: cuda.launch.Args = .{};
+            a.add(v[0]);
+            a.add(v[1]);
+            a.add(i32of(v[2]));
+            try go(k.clip_round_fn, s, .{ .x = blocks(v[2], 256) }, .{ .x = 256 }, 0, &a);
+        }
+        var a: cuda.launch.Args = .{};
+        inline for (.{ tx, tw, bias, c }) |p| a.add(p);
+        inline for (.{ m, n, kd }) |v| a.add(i32of(v));
+        if (kd == 3072) {
+            var clear: cuda.launch.Args = .{};
+            clear.add(locks);
+            try go(k.clip_clear_locks_fn, s, .{ .x = 1 }, .{ .x = 32 }, 0, &clear);
+            a.add(locks);
+            try go(k.clip_split_fn, s, .{ .x = blocks(m, 64), .y = blocks(n, 64), .z = 2 }, .{ .x = 128 }, 98304, &a);
+        } else {
+            try go(k.clip_linear_fn, s, .{ .x = blocks(m, 64), .y = blocks(n, 64) }, .{ .x = 128 }, 49152, &a);
+        }
+    }
+
+    pub fn clipAttention(k: *const Kernels, s: cuda.Stream, q: u64, key: u64, v: u64, out: u64, bias: u64, valid: u32) Error!void {
+        if (valid < 2 or valid > 77) return error.InvalidPrompt;
+        var a: cuda.launch.Args = .{};
+        a.add(bias);
+        a.add(@as(i32, 77));
+        a.add(@as(i32, 80));
+        a.add(i32of(valid));
+        try go(k.clip_bias_fn, s, .{ .x = blocks(77 * 80, 256) }, .{ .x = 256 }, 0, &a);
+        a = .{};
+        inline for (.{ q, key, v, bias, out }) |p| a.add(p);
+        a.add(@as(i32, 77));
+        a.add(@as(i32, 80));
+        try go(k.clip_attention_fn, s, .{ .x = 2, .y = 12 }, .{ .x = 32, .y = 4 }, 36352, &a);
     }
 
     pub fn quickGelu(k: *const Kernels, s: cuda.Stream, x: u64, y: u64, n: u64) Error!void {
@@ -406,6 +474,7 @@ pub const Plan = struct {
     k: u64,
     v: u64,
     at: u64,
+    bias: u64,
     g: u64, // gate, then silu(gate) * up in place
     u: u64,
     bytes: u64,
@@ -415,9 +484,10 @@ pub const Plan = struct {
         const r: u64 = tokens;
         var p: Plan = undefined;
         inline for (.{
-            .{ "ids", r * 4 },     .{ "inv", 64 * 4 },     .{ "cos", r * 64 * 4 }, .{ "sin", r * 64 * 4 },
-            .{ "h", r * dim * 2 }, .{ "x", r * dim * 2 },  .{ "q", r * dim * 2 },  .{ "k", r * kv * 2 },
-            .{ "v", r * kv * 2 },  .{ "at", r * dim * 2 }, .{ "g", r * ffn * 2 },  .{ "u", r * ffn * 2 },
+            .{ "ids", r * 4 },                .{ "inv", 64 * 4 },     .{ "cos", r * 64 * 4 }, .{ "sin", r * 64 * 4 },
+            .{ "h", r * dim * 2 },            .{ "x", r * dim * 2 },  .{ "q", r * dim * 2 },  .{ "k", r * kv * 2 },
+            .{ "v", r * kv * 2 },             .{ "at", r * dim * 2 }, .{ "g", r * ffn * 2 },  .{ "u", r * ffn * 2 },
+            .{ "bias", r * bias_stride * 2 },
         }) |e| {
             @field(p, e[0]) = at;
             at += std.mem.alignForward(u64, e[1], 256);
@@ -460,7 +530,7 @@ pub const Encoder = struct {
         const s = e.s;
         const off = Plan.init();
         const b = e.base;
-        const P = struct { ids: u64, inv: u64, cos: u64, sin: u64, h: u64, x: u64, q: u64, k: u64, v: u64, at: u64, g: u64, u: u64 };
+        const P = struct { ids: u64, inv: u64, cos: u64, sin: u64, h: u64, x: u64, q: u64, k: u64, v: u64, at: u64, g: u64, u: u64, bias: u64 };
         var p: P = undefined;
         inline for (comptime std.meta.fieldNames(P)) |f| @field(p, f) = b + @field(off, f);
         const L: u32 = tokens;
@@ -471,6 +541,7 @@ pub const Encoder = struct {
         try k.upload(s, p.ids, std.mem.sliceAsBytes(ids)); // i32 on the device: every id < 2^31
         try k.upload(s, p.inv, std.mem.sliceAsBytes(&e.inv_freq));
         try k.ropeTable(s, p.inv, p.cos, p.sin, L, e.rope_freq);
+        try k.attentionBias(s, p.bias, valid);
         try e.after("rotary_emb.cos", p.cos, @as(u64, L) * 64 * 4);
         try e.after("rotary_emb.sin", p.sin, @as(u64, L) * 64 * 4);
         try k.embed(s, e.w.embed, p.ids, p.h, L, dim);
@@ -495,7 +566,7 @@ pub const Encoder = struct {
             try e.after(nm(&nb, i, "self_attn.rope_q"), p.q, n * 2);
             try k.ropeHalf(s, p.k, p.cos, p.sin, L, kv_heads);
             try e.after(nm(&nb, i, "self_attn.rope_k"), p.k, nkv * 2);
-            try k.attention(s, p.q, p.k, p.v, p.at, L, heads, kv_heads, valid);
+            try k.attention(s, p.q, p.k, p.v, p.bias, p.at);
             try e.after(nm(&nb, i, "self_attn.sdpa"), p.at, n * 2);
             try k.gemm(s, p.at, l.o_w, 0, p.x, L, dim, dim);
             try e.after(nm(&nb, i, "self_attn.o_proj"), p.x, n * 2);
@@ -570,10 +641,10 @@ test "bindWeights asks for exactly the manifest's names" {
     try testing.expectError(error.MissingWeight, bindWeights(Empty{}));
 }
 
-test "scratch plan: 256-aligned regions, 123.4 MB" {
+test "scratch plan: 256-aligned regions including full padded attention bias" {
     const p = Plan.init();
-    inline for (.{ "ids", "inv", "cos", "sin", "h", "x", "q", "k", "v", "at", "g", "u" }) |f| try testing.expectEqual(@as(u64, 0), @field(p, f) % 256);
-    try testing.expectEqual(@as(u64, 123_385_344), scratchBytes());
+    inline for (.{ "ids", "inv", "cos", "sin", "h", "x", "q", "k", "v", "at", "g", "u", "bias" }) |f| try testing.expectEqual(@as(u64, 0), @field(p, f) % 256);
+    try testing.expectEqual(@as(u64, 126_060_544), scratchBytes());
     try testing.expectEqual(@as(u64, 1024), @as(u64, rows));
 }
 

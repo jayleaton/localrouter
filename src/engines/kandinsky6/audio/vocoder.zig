@@ -37,6 +37,20 @@ comptime {
     std.debug.assert(hop * 2 == vae.downsample_factor);
 }
 
+/// The vocoder the TF32 convolution contracts are proven for (launch.zig `tf32_contracts`): batch 1, 436 mel frames.
+pub const tf32_frames = 436;
+
+/// Floats of the per-call KSC weight copy a TF32 convolution needs: the largest weight any vocoder convolution has
+/// (stage 0's kernel-11 AMP convolutions, 768 x 768 x 11 = 6,488,064; conv_pre is 1536 x 128 x 7). Sized for every
+/// convolution so that proving another shape never changes the scratch layout.
+pub fn tf32WeightFloats() u64 {
+    var m: u64 = @as(u64, upsample_initial_channel) * num_mels * 7;
+    for (0..upsample_rates.len) |i| for (resblock_kernel_sizes) |k| {
+        m = @max(m, @as(u64, stageChannels(i)) * stageChannels(i) * k);
+    };
+    return m;
+}
+
 /// Stage i's output channels: 1536 / 2^(i+1) (768, 384, 192, 96, 48, 24).
 pub fn stageChannels(i: usize) u32 {
     return upsample_initial_channel >> @intCast(i + 1);
@@ -118,23 +132,32 @@ pub const Vocoder = struct {
 
     /// Resident: the checkpoint's fp32 weights, biases, SnakeBeta parameters and filters. Working (per request), at the
     /// largest stage C*T: the stage input, three AMP-block outputs, two work buffers and the Activation1d's 2x
-    /// intermediate.
+    /// intermediate; for the 1 x 436 vocoder also the TF32 convolutions' KSC weight copy (`conv_w`).
     pub fn memory(v: Vocoder) Memory {
         const p = params();
         return .{
             .resident_bytes = (p.weights + p.biases + p.snake + p.filters) * 4,
-            .working_bytes = (6 * v.maxCt() + 2 * v.maxCt()) * @as(u64, v.batch) * 4,
+            .working_bytes = ((6 * v.maxCt() + 2 * v.maxCt()) * @as(u64, v.batch) + v.tf32Floats()) * 4,
         };
+    }
+
+    /// The `conv_w` region: only the vocoder the TF32 contracts are proven for has one.
+    fn tf32Floats(v: Vocoder) u64 {
+        return if (v.batch == 1 and v.frames == tf32_frames) tf32WeightFloats() else 0;
     }
 
     /// `memory().working_bytes` partitioned (offsets in floats into one contiguous scratch allocation): `stage` is the
     /// stage input (the upsampler's output), `amp` the three AMP-block outputs, `work` two buffers (conv_pre's output,
-    /// each Activation1d's output, each conv's output, the stage average), `up2` the Activation1d's 2x intermediate.
-    pub const Scratch = struct { slot: u64, stage: u64, amp: [3]u64, work: [2]u64, up2: u64, floats: u64 };
+    /// each Activation1d's output, each conv's output, the stage average), `up2` the Activation1d's 2x intermediate (also
+    /// a TF32 convolution's NTC input / output copies and a gathered-GEMM convolution's row chunks: it is dead while a
+    /// convolution runs), `conv_w` the TF32 convolutions' KSC weight copy and a gathered-GEMM phase's B operand
+    /// (`conv_w_floats`, 0 unless batch 1 x 436 frames).
+    pub const Scratch = struct { slot: u64, stage: u64, amp: [3]u64, work: [2]u64, up2: u64, conv_w: u64, conv_w_floats: u64, floats: u64 };
 
     pub fn scratch(v: Vocoder) Scratch {
         const slot = v.maxCt() * v.batch;
-        return .{ .slot = slot, .stage = 0, .amp = .{ slot, 2 * slot, 3 * slot }, .work = .{ 4 * slot, 5 * slot }, .up2 = 6 * slot, .floats = 8 * slot };
+        const cw = v.tf32Floats();
+        return .{ .slot = slot, .stage = 0, .amp = .{ slot, 2 * slot, 3 * slot }, .work = .{ 4 * slot, 5 * slot }, .up2 = 6 * slot, .conv_w = 8 * slot, .conv_w_floats = cw, .floats = 8 * slot + cw };
     }
 
     /// Bytes of the one scratch allocation `vocode` (launch.zig) carves its working tensors from.
@@ -198,6 +221,17 @@ fn bindAct(src: vae.Source, sink: vae.Sink, comptime prefix: []const u8, c: u64)
     return out;
 }
 
+fn bindBlock(src: vae.Source, sink: vae.Sink, comptime prefix: []const u8, ch: u64, kernel: u64) !AmpWeights {
+    var out: AmpWeights = undefined;
+    inline for (0..3) |n| {
+        const shape: [3]u64 = .{ ch, ch, kernel };
+        out.convs1[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs1.{d}", .{ prefix, n }), shape, ch);
+        out.convs2[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs2.{d}", .{ prefix, n }), shape, ch);
+    }
+    inline for (0..6) |m| out.acts[m] = try bindAct(src, sink, std.fmt.comptimePrint("{s}.activations.{d}", .{ prefix, m }), ch);
+    return out;
+}
+
 /// Reads and places every vocoder tensor as stored (`WeightState.checkpoint_effective`: the native loader removes
 /// weight norm before loading plain weights, so nothing is folded or prepared).
 pub fn bindVocoder(src: vae.Source, sink: vae.Sink) !VocoderWeights {
@@ -210,13 +244,9 @@ pub fn bindVocoder(src: vae.Source, sink: vae.Sink) !VocoderWeights {
         out.ups[i] = try bindConv(src, sink, std.fmt.comptimePrint("ups.{d}.0", .{i}), .{ cin, ch, upsample_kernel_sizes[i] }, ch);
         inline for (0..resblock_kernel_sizes.len) |j| {
             const blk = std.fmt.comptimePrint("resblocks.{d}", .{3 * i + j});
-            const b = &out.blocks[3 * i + j];
-            inline for (0..3) |n| {
-                const shape = [3]u64{ ch, ch, resblock_kernel_sizes[j] };
-                b.convs1[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs1.{d}", .{ blk, n }), shape, ch);
-                b.convs2[n] = try bindConv(src, sink, std.fmt.comptimePrint("{s}.convs2.{d}", .{ blk, n }), shape, ch);
-            }
-            inline for (0..6) |m| b.acts[m] = try bindAct(src, sink, std.fmt.comptimePrint("{s}.activations.{d}", .{ blk, m }), ch);
+            // Keep each block's debug temporaries in its own frame. Unrolling all 667 reads here
+            // produced a 22 MiB frame and faulted at function entry on an ordinary process stack.
+            out.blocks[3 * i + j] = try @call(.never_inline, bindBlock, .{ src, sink, blk, ch, resblock_kernel_sizes[j] });
         }
         cin = ch;
     }
@@ -347,7 +377,8 @@ test "vocoder graph: channels, lengths, parameters, memory" {
     try testing.expectEqual(@as(u64, 18 * 6 + 1) * 2 * filter_taps, p.filters);
     // the largest stage C*T: 1536 x 436 = 669696 at conv_pre; every later stage is 768 x 3488 = 2678784 or 5357568
     const m = v.memory();
-    try testing.expectEqual(@as(u64, 8 * 5357568 * 4), m.working_bytes);
+    try testing.expectEqual(@as(u64, (8 * 5357568 + 768 * 768 * 11) * 4), m.working_bytes);
+    try testing.expectEqual(@as(u64, 768 * 768 * 11), tf32WeightFloats());
 }
 
 test "vocoder admission: checkpoint weights as stored, the fold refused, production pending" {
@@ -405,7 +436,9 @@ test "vocoder scratch partitions exactly its working memory" {
         const v = try Vocoder.init(bf[0], bf[1]);
         const s = v.scratch();
         try testing.expectEqual(v.memory().working_bytes, v.scratchBytes());
-        try testing.expectEqual(s.up2 + 2 * s.slot, s.floats);
+        try testing.expectEqual(s.up2 + 2 * s.slot, s.conv_w);
+        try testing.expectEqual(s.conv_w + s.conv_w_floats, s.floats);
+        try testing.expectEqual(@as(u64, if (bf[0] == 1 and bf[1] == tf32_frames) 768 * 768 * 11 else 0), s.conv_w_floats);
         try testing.expectEqual(@as(u64, 24) * bf[1] * hop * bf[0], s.slot); // the last stage: 24 x 512F
     }
 }

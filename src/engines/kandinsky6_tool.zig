@@ -1,5 +1,6 @@
 //! The `kandinsky6` engine: Kandinsky-6 Pro distilled text to video with its coupled audio on LocalRouter's Zig
-//! pipeline (`kandinsky6.pipeline`), one MP4 a request: 864x480, 121 frames at 24 fps (H.264) and the mono 44.1 kHz
+//! pipeline (`kandinsky6.pipeline`), one MP4 a request: 832x480 landscape only (the size a request without one gets;
+//! any other size or orientation is refused before any GPU work), 121 frames at 24 fps (H.264) and the mono 44.1 kHz
 //! track (AAC; the whole 223,232-sample waveform, as upstream's mux writes it). `weights` is the published snapshot
 //! directory (HF kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers, revision 1018d582) as downloaded.
 //!
@@ -27,8 +28,14 @@
 //!                    {"serial_fma": {}} | {"serial_mul_add": {}} | {"strided_tree": N} |
 //!                    {"torch_reduce": {"sm_count": S, "max_threads_per_sm": T}}, whose limits must equal the
 //!                    running device's (refused at load otherwise).
-//!   vae_free_mb      the free-memory figure the video VAE's tile plan uses (upstream derives its tiling from the free
-//!                    memory it sees; the plan decides the bits, so it is configuration, never a probe). Default 8192.
+//!   vae_free_bytes   omit it: the video VAE's tile plan is the qualified one (2301403136 bytes, the free memory the
+//!                    reference run recorded; upstream derives its tiles from the free memory it sees, and these tiles
+//!                    stop 32 columns before the 864-wide generation edge, so the frame is 832x480). Any other figure
+//!                    (here or as vae_free_mb) is refused at load: it would write another size, on tiles the decode
+//!                    was never proven on.
+//!                    The video VAE's arithmetic is not an option either: the decode runs the qualified policies
+//!                    (kernels/cuda/kandinsky6/video_vae/QUALIFICATION.md). The trial fields vae_group_norm, vae_conv,
+//!                    vae_attn_qkv_bias and vae_attn_sdpa are refused.
 //!   resident_mb      the scheduler's estimate of the loaded footprint.
 //! The engine holds the GPU only while loaded: give the tool `idle_ttl_s: 0` to release it after every job.
 
@@ -39,7 +46,7 @@ const k6 = @import("kandinsky6");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check };
+pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .default_size = .{ k6.shapes.out_width, k6.shapes.out_height } };
 
 const S = k6.shapes;
 const P = k6.pipeline;
@@ -51,7 +58,7 @@ const default_resident_mb = 92_000;
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
         .image => 0,
-        // frames and waveform on the host, the WAV, and ffmpeg's own buffers
+        // frames (at most the nominal size) and waveform on the host, the WAV, and ffmpeg's own buffers
         .video => S.sample_frames * S.width * S.height * 3 + S.audio_samples * (4 + 2) + (64 << 20),
     };
     return .{ .resident = engine.optionInt(cfg, "resident_mb", default_resident_mb) << 20, .working = working };
@@ -123,8 +130,9 @@ const Kandinsky6 = struct {
         const p = t.p orelse return error.NotLoaded;
         const start = std.Io.Clock.awake.now(t.env.io);
         const gpa = t.env.gpa;
-        const frame_bytes = @as(usize, S.width) * S.height * 3;
-        const frames = try gpa.alloc(u8, S.sample_frames * frame_bytes);
+        const geo = p.videoGeometry();
+        const frame_bytes: usize = @intCast(geo.frameBytes());
+        const frames = try gpa.alloc(u8, @intCast(geo.rgbBytes()));
         defer gpa.free(frames);
         const wave = try gpa.alloc(f32, S.audio_samples);
         defer gpa.free(wave);
@@ -136,11 +144,11 @@ const Kandinsky6 = struct {
         const wav = try std.fs.path.join(arena, &.{ job.dir, "audio.wav" });
         try mp4.writeWav(t.env.io, wav, wave, S.sample_rate, 1);
         const out = try std.fs.path.join(arena, &.{ job.dir, "video.mp4" });
-        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = S.width, .height = S.height, .fps = S.fps, .wav = wav, .shortest = false });
+        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = geo.width, .height = geo.height, .fps = S.fps, .wav = wav, .shortest = false });
         errdefer w.abort();
-        for (0..S.sample_frames) |f| {
+        for (0..geo.frames) |f| {
             try w.frame(frames[f * frame_bytes ..][0..frame_bytes]);
-            if (f % S.fps == 0) sink.report(.{ .phase = "encode", .step = @intCast(f), .of = S.sample_frames });
+            if (f % S.fps == 0) sink.report(.{ .phase = "encode", .step = @intCast(f), .of = geo.frames });
         }
         try w.finish();
         std.Io.Dir.cwd().deleteFile(t.env.io, wav) catch {};
@@ -176,19 +184,30 @@ fn create(env: engine.Env, cfg: *const ToolConfig) anyerror!engine.Engine {
     return .{ .ptr = t, .vtable = &.{ .load = Kandinsky6.load, .generate = Kandinsky6.generate, .unload = Kandinsky6.unload } };
 }
 
-test "only the native request passes the check" {
+test "only the native request passes the check: 832x480, also when the size is omitted" {
     const cfg: ToolConfig = .{ .id = "kandinsky6-pro-distill", .kind = .video, .engine = "kandinsky6", .weights = "/nonexistent" };
     var buf: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&buf);
-    const ok: Request = .{ .video = .{ .prompt = "waves", .width = 864, .height = 480 } };
+    const ok: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480 } };
     try std.testing.expect(check(&cfg, &ok, &why));
-    const sizes: Request = .{ .video = .{ .prompt = "waves" } }; // the API default 1344x768
-    try std.testing.expect(!check(&cfg, &sizes, &why));
-    const silent: Request = .{ .video = .{ .prompt = "waves", .width = 864, .height = 480, .audio = false } };
+    // a request naming no size gets the model's default (request.resolveSize), which passes
+    const omitted = @import("../tool/request.zig").resolveSize(null, engine.defaultSize(&cfg), .{ 1344, 768 }).?;
+    try std.testing.expectEqual([2]u32{ 832, 480 }, omitted);
+    const dflt: Request = .{ .video = .{ .prompt = "waves", .width = omitted[0], .height = omitted[1] } };
+    try std.testing.expect(check(&cfg, &dflt, &why));
+    // portrait, the generation size, other sizes and the API's generic default are refused before any GPU work
+    for ([_][2]u32{ .{ 480, 832 }, .{ 864, 480 }, .{ 640, 480 }, .{ 0, 0 }, .{ 1344, 768 } }) |wh| {
+        why = .fixed(&buf);
+        const r: Request = .{ .video = .{ .prompt = "waves", .width = wh[0], .height = wh[1] } };
+        try std.testing.expect(!check(&cfg, &r, &why));
+        try std.testing.expect(std.mem.startsWith(u8, why.buffered(), "Kandinsky-6 Pro distilled supports 832x480 landscape only"));
+    }
+    why = .fixed(&buf);
+    const silent: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .audio = false } };
     try std.testing.expect(!check(&cfg, &silent, &why));
-    const steps: Request = .{ .video = .{ .prompt = "waves", .width = 864, .height = 480, .steps = 25 } };
+    const steps: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .steps = 25 } };
     try std.testing.expect(!check(&cfg, &steps, &why));
-    const i2v: Request = .{ .video = .{ .prompt = "waves", .width = 864, .height = 480, .first_frame = "0.png" } };
+    const i2v: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .first_frame = "0.png" } };
     try std.testing.expect(!check(&cfg, &i2v, &why));
 }
 

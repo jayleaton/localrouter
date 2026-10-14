@@ -5,17 +5,18 @@
 //! The one value not derivable from first principles is `get_freqs`: upstream evaluates `torch.exp` on the CPU, which is
 //! SLEEF's vectorized expf on the reference machine (aarch64 NEON there), accurate to 1 ulp but not correctly rounded.
 //! The frequencies therefore come from a frozen table captured from the native reference on the target
-//! (`stk_twin.kandinsky6.capture --stages noise`, `freqs/*`); until that table is committed, `provisional` is true, the
-//! values are this file's correctly rounded `exp`, and the engine reports itself unqualified.
+//! (`stk_twin.kandinsky6.capture --stages rope`, `k6.freqs.*`); rope_freqs.zig records the target, upstream and blob pins.
+//! Freezing those constants does not qualify the full engine: its component and generation gates remain mandatory.
 //! Every other step is exact f32 arithmetic in upstream's order: `outer(arange(max_pos), freq)` is one product per
 //! element (CPU f32), `freq * 0.144` (audio) one product, and the visual `args / scale_factor` divides by a CPU scalar
 //! (multiplication by the f32 reciprocal on CUDA, exact for the scale factors 1 and 2).
 
 const std = @import("std");
 const shapes = @import("shapes.zig");
+const frozen = @import("rope_freqs.zig");
 
 /// True while the frequencies are not the frozen native capture (see the file comment).
-pub const provisional = true;
+pub const provisional = false;
 
 pub const max_period: f32 = 10000.0;
 pub const head_dim: u32 = 128;
@@ -29,14 +30,17 @@ pub const audio_freqs_scaling: f32 = 0.144;
 pub const time_freqs_v: u32 = 4096 / 2;
 pub const time_freqs_a: u32 = 2048 / 2;
 
-/// `get_freqs(dim)`: exp(-ln(max_period) * arange(dim) / dim) in f32 (f32(-ln 10000) times i, divided by dim, exp).
+/// `get_freqs(dim)`: the pinned upstream CPU torch.exp values, preserving its rounding on the target.
 pub fn freqs(out: []f32) void {
-    const c: f32 = @floatCast(-@log(@as(f64, max_period)));
-    const dim: f32 = @floatFromInt(out.len);
-    for (out, 0..) |*o, i| {
-        const fi: f32 = @floatFromInt(i);
-        o.* = @exp((c * fi) / dim);
-    }
+    const bits: []const u32 = switch (out.len) {
+        16 => &frozen.freq_bits_16,
+        24 => &frozen.freq_bits_24,
+        64 => &frozen.freq_bits_64,
+        1024 => &frozen.freq_bits_1024,
+        2048 => &frozen.freq_bits_2048,
+        else => @panic("Kandinsky-6 frequency dimension has no frozen reference"),
+    };
+    for (out, bits) |*o, b| o.* = @bitCast(b);
 }
 
 /// Visual argument rows [T * H * W][64] (t, h, w row-major at patch level): per axis `arange(n)` times that axis'

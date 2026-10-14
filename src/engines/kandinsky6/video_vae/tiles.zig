@@ -10,8 +10,12 @@
 //! There is no temporal feature cache in this VAE: every tile is a whole, independent decoder pass (GroupNorm statistics
 //! over that tile only) and tiles meet through the reference's linear blends. Reusing state across tiles would change bits.
 //!
-//! Where the reference's loops would leave part of the output uncovered (its ranges stop before the edge for some shapes)
-//! or would not run at all (a zero stride), the plan is refused instead of reproducing a short or failed decode.
+//! The reference's spatial loops start full tiles only (range(0, L - tile + 1, stride)): for some shapes and policies the
+//! last tile stops before the latent's edge, and the reference returns its kept boxes concatenated, cropped to the nominal
+//! 8 lh x 8 lw, which is then narrower (or shorter) than nominal. That extent is the decode's output: the grid carries the
+//! nominal and the emitted size apart, and no edge tile is added, shifted or padded. Plans the reference could not run (a
+//! zero stride, an empty range) or that this transcription does not model (a stride beyond its tile, a tile or stride
+//! that is not a whole number of latents) are refused, as are shapes whose sizes overflow.
 
 const std = @import("std");
 
@@ -74,6 +78,22 @@ pub fn optimalTiling(h: u32, w: u32, policy: MemPolicy) Tiling {
 
 pub const Error = error{ InvalidShape, UnsupportedTiling };
 
+/// A decode's frame geometry: frames x height x width of RGB.
+pub const Geometry = struct {
+    frames: u32,
+    height: u32,
+    width: u32,
+
+    pub fn frameBytes(g: Geometry) u64 {
+        return @as(u64, g.height) * g.width * 3;
+    }
+
+    /// uint8 RGB bytes of the whole clip.
+    pub fn rgbBytes(g: Geometry) u64 {
+        return @as(u64, g.frames) * g.frameBytes();
+    }
+};
+
 /// One spatial tile of a decode: latent box and the sample-space crop the reference keeps.
 pub const SpatialTile = struct {
     lat_y: u32,
@@ -100,15 +120,21 @@ pub const SpatialGrid = struct {
     blend_w: u32,
     keep_h: u32, // stride rows kept from a non-last row of tiles
     keep_w: u32,
-    sample_h: u32,
-    sample_w: u32,
+    /// The latent's sample size, 8 lh x 8 lw: what the reference crops its concatenation to.
+    nominal_h: u32,
+    nominal_w: u32,
+    /// The output's size: the kept boxes concatenated ((rows - 1) * stride + tile), cropped to the nominal size. Smaller
+    /// than nominal when the last full tile stops before the latent's edge.
+    emitted_h: u32,
+    emitted_w: u32,
 
     pub fn count(g: SpatialGrid) u32 {
         return g.rows * g.cols;
     }
 
+    /// False only for the reference's direct decoder call (one tile covering the whole latent).
     pub fn tiled(g: SpatialGrid) bool {
-        return g.count() > 1 or g.tile_lh * spatial_ratio != g.sample_h or g.tile_lw * spatial_ratio != g.sample_w;
+        return g.count() > 1 or g.tile_lh * spatial_ratio != g.nominal_h or g.tile_lw * spatial_ratio != g.nominal_w;
     }
 
     pub fn tile(g: SpatialGrid, i: u32, j: u32) SpatialTile {
@@ -134,21 +160,28 @@ fn rangeCount(stop_exclusive: i64, step: i64) u32 {
 
 /// tiled_decode's grid for a latent of lh x lw under tiling `t`, or the direct decoder when it would not tile.
 pub fn spatialGrid(lh: u32, lw: u32, t: Tiling) Error!SpatialGrid {
-    const sh = lh * spatial_ratio;
-    const sw = lw * spatial_ratio;
+    if (lh == 0 or lw == 0) return error.InvalidShape;
+    const sh = std.math.mul(u32, lh, spatial_ratio) catch return error.InvalidShape;
+    const sw = std.math.mul(u32, lw, spatial_ratio) catch return error.InvalidShape;
     const tlh = t.ht / spatial_ratio;
     const tlw = t.wt / spatial_ratio;
-    const direct: SpatialGrid = .{ .rows = 1, .cols = 1, .tile_lh = lh, .tile_lw = lw, .lat_stride_h = lh, .lat_stride_w = lw, .blend_h = 0, .blend_w = 0, .keep_h = sh, .keep_w = sw, .sample_h = sh, .sample_w = sw };
+    const direct: SpatialGrid = .{ .rows = 1, .cols = 1, .tile_lh = lh, .tile_lw = lw, .lat_stride_h = lh, .lat_stride_w = lw, .blend_h = 0, .blend_w = 0, .keep_h = sh, .keep_w = sw, .nominal_h = sh, .nominal_w = sw, .emitted_h = sh, .emitted_w = sw };
     if (!(lw > tlw or lh > tlh)) return direct;
     const slh = t.hs / spatial_ratio;
     const slw = t.ws / spatial_ratio;
     if (slh == 0 or slw == 0 or tlh == 0 or tlw == 0) return error.UnsupportedTiling; // range(.., 0) raises
     if (t.hs > t.ht or t.ws > t.wt) return error.UnsupportedTiling;
+    // A partial latent would make the decoded tile shorter than the reference's keep limits (torch slices clip silently).
+    if (t.ht % spatial_ratio != 0 or t.wt % spatial_ratio != 0 or t.hs % spatial_ratio != 0 or t.ws % spatial_ratio != 0) return error.UnsupportedTiling;
     const rows = rangeCount(@as(i64, lh) - tlh + 1, slh);
     const cols = rangeCount(@as(i64, lw) - tlw + 1, slw);
-    if (rows == 0 or cols == 0) return error.UnsupportedTiling;
+    if (rows == 0 or cols == 0) return error.UnsupportedTiling; // no tile: torch.cat of nothing raises
     const th = tlh * spatial_ratio;
     const tw = tlw * spatial_ratio;
+    // The kept boxes concatenated (each non-last tile keeps its stride, the last its whole tile), then cropped: rows and
+    // cols are at most lh and lw, so the products stay within u64.
+    const cat_h = @as(u64, rows - 1) * t.hs + th;
+    const cat_w = @as(u64, cols - 1) * t.ws + tw;
     const g: SpatialGrid = .{
         .rows = rows,
         .cols = cols,
@@ -160,11 +193,11 @@ pub fn spatialGrid(lh: u32, lw: u32, t: Tiling) Error!SpatialGrid {
         .blend_w = @min(tw, t.wt - t.ws),
         .keep_h = t.hs,
         .keep_w = t.ws,
-        .sample_h = sh,
-        .sample_w = sw,
+        .nominal_h = sh,
+        .nominal_w = sw,
+        .emitted_h = @intCast(@min(cat_h, @as(u64, sh))),
+        .emitted_w = @intCast(@min(cat_w, @as(u64, sw))),
     };
-    // The reference concatenates the kept boxes and crops to the sample size; a shortfall would be a smaller video.
-    if ((rows - 1) * t.hs + @min(th, t.ht) < sh or (cols - 1) * t.ws + @min(tw, t.wt) < sw) return error.UnsupportedTiling;
     return g;
 }
 
@@ -195,6 +228,21 @@ pub const DecodePlan = struct {
 
     pub fn sampleFramesTotal(p: DecodePlan) u32 {
         return sampleFrames(p.latent_frames);
+    }
+
+    /// The decoded clip: every frame (the temporal plan emits all of them), at the grid's emitted size.
+    pub fn emitted(p: DecodePlan) Geometry {
+        return .{ .frames = p.sampleFramesTotal(), .height = p.grid.emitted_h, .width = p.grid.emitted_w };
+    }
+
+    /// The latent's sample geometry, 4 (F - 1) + 1 x 8 lh x 8 lw (what a full-coverage plan emits).
+    pub fn nominal(p: DecodePlan) Geometry {
+        return .{ .frames = p.sampleFramesTotal(), .height = p.grid.nominal_h, .width = p.grid.nominal_w };
+    }
+
+    /// Independent decoder passes (post_quant_conv + decoder): temporal tiles x spatial tiles.
+    pub fn passes(p: DecodePlan) u32 {
+        return p.tileCount() * p.grid.count();
     }
 
     pub fn temporallyTiled(p: DecodePlan) bool {
@@ -234,8 +282,23 @@ pub const DecodePlan = struct {
 /// AutoencoderKLHunyuanVideo.decode(z) for z of `latent_frames` x lh x lw (latent units): which tiles run and how they meet.
 pub fn decodePlan(latent_frames: u32, lh: u32, lw: u32, policy: MemPolicy) Error!DecodePlan {
     if (latent_frames == 0 or lh == 0 or lw == 0) return error.InvalidShape;
+    // Sizes the planner's arithmetic holds: 4 (F - 1) + 1 frames and 8 lh x 8 lw pixels in u32, and its element count
+    // 256 * 17 * (8 lh + 32) * (8 lw + 32) in u64.
+    if (latent_frames > (std.math.maxInt(u32) - 1) / temporal_ratio + 1) return error.InvalidShape;
+    const sh = std.math.mul(u32, lh, spatial_ratio) catch return error.InvalidShape;
+    const sw = std.math.mul(u32, lw, spatial_ratio) catch return error.InvalidShape;
+    _ = std.math.mul(u64, 256 * 17 * (@as(u64, sh) + 32), @as(u64, sw) + 32) catch return error.InvalidShape;
+    // ceil(h * w / (free / 256 / 17 / 8)) in u64, with a margin for its f64 rounding; Python raises on a zero divisor.
+    switch (policy) {
+        .unbounded => {},
+        .free_bytes => |b| {
+            if (b == 0) return error.UnsupportedTiling;
+            const n = std.math.mul(u64, @as(u64, sh) * sw, 256 * 17 * 8) catch return error.InvalidShape;
+            if (n >= 1 << 63) return error.InvalidShape;
+        },
+    }
     // get_dec_optimal_tiling: the encoder-input shape [b, 3, 4 (f - 1) + 1, 8 h, 8 w].
-    const t = optimalTiling(lh * spatial_ratio, lw * spatial_ratio, policy);
+    const t = optimalTiling(sh, sw, policy);
     const lt_min = (t.ft - 1) / temporal_ratio; // tile_latent_min_num_frames
     var p: DecodePlan = .{
         .latent_frames = latent_frames,
@@ -317,6 +380,91 @@ test "memory policy: the native clip tiles spatially when the reference saw litt
     try std.testing.expectEqual(@as(u32, 864), last.out_x + last.keep_w);
 }
 
+/// The reference's temporal plan at F = 31 (`latent_t` 0, 2, .., 26 of five latents, 9 + 12 * 8 + 16 frames): the same
+/// for every spatial policy.
+fn expectReferenceTemporal(p: DecodePlan) !void {
+    try std.testing.expectEqual(@as(u32, 14), p.temporal_tiles);
+    var next: u32 = 0;
+    for (0..p.temporal_tiles) |i| {
+        const t = p.temporal(@intCast(i));
+        try std.testing.expectEqual(TemporalTile{
+            .lat_start = @as(u32, @intCast(i)) * 2,
+            .lat_frames = 5,
+            .frames = 17,
+            .drop = if (i == 0) 0 else 1,
+            .blend = if (i == 0) 0 else 8,
+            .keep = if (i == 0) 9 else if (i == 13) 16 else 8,
+            .out_frame = next,
+        }, t);
+        next += t.keep;
+    }
+    try std.testing.expectEqual(@as(u32, 121), next);
+}
+
+test "reference policy (2,301,403,136 free bytes): 2 x 4 grid stops at latent column 104, 832 wide, 112 passes" {
+    // The immutable reference run's k6.vae.decode: note_free_bytes 2301403136, tile [1, 17, 256, 232], stride
+    // [8, 224, 200], frames [1, 3, 121, 480, 832] (the pinned planner replayed in Python gives the same grid).
+    const p = try decodePlan(31, 60, 108, .{ .free_bytes = 2_301_403_136 });
+    try std.testing.expectEqual(Tiling{ .ft = 17, .ht = 256, .wt = 232, .fs = 8, .hs = 224, .ws = 200 }, p.tiling);
+    const g = p.grid;
+    try std.testing.expectEqual(@as(u32, 2), g.rows);
+    try std.testing.expectEqual(@as(u32, 4), g.cols);
+    try std.testing.expectEqual(@as(u32, 32), g.tile_lh);
+    try std.testing.expectEqual(@as(u32, 29), g.tile_lw);
+    try std.testing.expectEqual(@as(u32, 32), g.blend_h);
+    try std.testing.expectEqual(@as(u32, 32), g.blend_w);
+    const ys = [_]u32{ 0, 28 };
+    const xs = [_]u32{ 0, 25, 50, 75 };
+    const oys = [_]u32{ 0, 224 };
+    const oxs = [_]u32{ 0, 200, 400, 600 };
+    for (0..2) |i| for (0..4) |j| {
+        const t = g.tile(@intCast(i), @intCast(j));
+        try std.testing.expectEqual(SpatialTile{
+            .lat_y = ys[i],
+            .lat_x = xs[j],
+            .keep_h = if (i == 1) 256 else 224,
+            .keep_w = if (j == 3) 232 else 200,
+            .out_y = oys[i],
+            .out_x = oxs[j],
+        }, t);
+    };
+    // the last column reads latents [75, 104): columns 104..107 (pixels 832..863) are never decoded
+    try std.testing.expectEqual(@as(u32, 104), g.tile(1, 3).lat_x + g.tile_lw);
+    try std.testing.expectEqual(Geometry{ .frames = 121, .height = 480, .width = 832 }, p.emitted());
+    try std.testing.expectEqual(Geometry{ .frames = 121, .height = 480, .width = 864 }, p.nominal());
+    try std.testing.expectEqual(@as(u64, 144_967_680), p.emitted().rgbBytes()); // the reference frames blob
+    try std.testing.expectEqual(@as(u32, 112), p.passes());
+    try std.testing.expect(g.tiled());
+    try expectReferenceTemporal(p);
+}
+
+test "8192 MiB policy: 2 x 2 grid covers all 108 latent columns, 864 wide, 56 passes" {
+    const p = try decodePlan(31, 60, 108, .{ .free_bytes = 8192 << 20 });
+    try std.testing.expectEqual(Tiling{ .ft = 17, .ht = 256, .wt = 448, .fs = 8, .hs = 224, .ws = 416 }, p.tiling);
+    try std.testing.expectEqual(@as(u32, 2), p.grid.rows);
+    try std.testing.expectEqual(@as(u32, 2), p.grid.cols);
+    try std.testing.expectEqual(@as(u32, 108), p.grid.tile(1, 1).lat_x + p.grid.tile_lw);
+    try std.testing.expectEqual(Geometry{ .frames = 121, .height = 480, .width = 864 }, p.emitted());
+    try std.testing.expectEqual(p.nominal(), p.emitted());
+    try std.testing.expectEqual(@as(u32, 56), p.passes());
+    try expectReferenceTemporal(p);
+}
+
+test "uneven temporal tail (30 latent frames): the last tile reads 4 latents and emits its 12 frames" {
+    for ([_]MemPolicy{ .unbounded, .{ .free_bytes = 2_301_403_136 } }) |policy| {
+        const p = try decodePlan(30, 60, 108, policy);
+        try std.testing.expectEqual(@as(u32, 14), p.temporal_tiles); // range(0, 30 - 4 + 1, 2)
+        // the drop / blend boundary: the first tile keeps 9 frames whole; the second drops its first decoded frame and
+        // blends its next 8 with the first tile's last 8
+        try std.testing.expectEqual(TemporalTile{ .lat_start = 0, .lat_frames = 5, .frames = 17, .drop = 0, .blend = 0, .keep = 9, .out_frame = 0 }, p.temporal(0));
+        try std.testing.expectEqual(TemporalTile{ .lat_start = 2, .lat_frames = 5, .frames = 17, .drop = 1, .blend = 8, .keep = 8, .out_frame = 9 }, p.temporal(1));
+        // 13 decoded frames, 12 after the drop: t_lim 16 clips to 12, ending the clip at 9 + 12 * 8 + 12 = 117
+        try std.testing.expectEqual(TemporalTile{ .lat_start = 26, .lat_frames = 4, .frames = 13, .drop = 1, .blend = 8, .keep = 12, .out_frame = 105 }, p.temporal(13));
+        try std.testing.expectEqual(@as(u32, 117), p.emitted().frames);
+        try std.testing.expectEqual(@as(u32, 117), sampleFrames(30));
+    }
+}
+
 test "large frames tile spatially by the 2^31 element bound even with unbounded memory" {
     const t = optimalTiling(720, 1280, .unbounded);
     // num_vals = 256 * 17 * 752 * 1312 = 4,293,853,184: N = 2, k = 16/9; a = ceil(sqrt(1.125)) = 2, b = ceil(sqrt(3.56)) = 2
@@ -326,15 +474,52 @@ test "large frames tile spatially by the 2^31 element bound even with unbounded 
     try std.testing.expectEqual(@as(u32, 2), p.grid.cols);
 }
 
-test "short clips decode directly; uncovered and zero-stride plans are refused" {
+test "short clips decode directly; a short concatenation is emitted, never padded or refused" {
     const p = try decodePlan(5, 60, 108, .unbounded);
     try std.testing.expectEqual(@as(u32, 0), p.temporal_tiles);
     try std.testing.expectEqual(@as(u32, 17), p.temporal(0).keep);
-    // 128 x 192 with a tight budget: columns range(0, 15, 6) stop at latent 22 of 24 (176 of 192 columns): refused.
+    try std.testing.expectEqual(Geometry{ .frames = 17, .height = 480, .width = 864 }, p.emitted());
+    // 128 x 192 with a tight budget: tile 64 x 56, stride 32 x 24; columns range(0, 24 - 7 + 1, 3) = 0, 3, .., 15 stop at
+    // latent 22 of 24: the reference returns 5 * 24 + 56 = 176 columns.
     const t = optimalTiling(128, 192, .{ .free_bytes = 17_825_792 * 4 });
-    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(16, 24, t));
+    try std.testing.expectEqual(Tiling{ .ft = 17, .ht = 64, .wt = 56, .fs = 8, .hs = 32, .ws = 24 }, t);
+    const g = try spatialGrid(16, 24, t);
+    try std.testing.expectEqual(@as(u32, 3), g.rows);
+    try std.testing.expectEqual(@as(u32, 6), g.cols);
+    try std.testing.expectEqual(@as(u32, 128), g.emitted_h);
+    try std.testing.expectEqual(@as(u32, 176), g.emitted_w);
+    try std.testing.expectEqual(@as(u32, 192), g.nominal_w);
+    try std.testing.expectEqual(@as(u32, 22), g.tile(2, 5).lat_x + g.tile_lw);
+}
+
+test "zero strides, empty ranges, unmodelled tilings and overflowing shapes are refused" {
+    // optimalTiling's tiles of 32 x 32 under a 32 x 48 clip: stride 0 (range(.., 0) raises)
     const z = optimalTiling(32, 48, .{ .free_bytes = 17_825_792 });
+    try std.testing.expectEqual(@as(u32, 0), z.ws);
     try std.testing.expectError(error.UnsupportedTiling, spatialGrid(4, 6, z));
+    const ref: Tiling = .{ .ft = 17, .ht = 256, .wt = 232, .fs = 8, .hs = 224, .ws = 200 };
+    var bad = ref;
+    bad.hs = 0;
+    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(60, 108, bad));
+    bad = ref;
+    bad.ws = 7; // below one latent: a zero latent stride
+    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(60, 108, bad));
+    bad = ref;
+    bad.ht = 512; // 64 latent rows > 60: range(0, -3, 60) is empty, no tile at all
+    bad.hs = 480;
+    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(60, 108, bad));
+    bad = ref;
+    bad.ws = 240; // stride beyond the tile
+    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(60, 108, bad));
+    bad = ref;
+    bad.wt = 236; // not a whole number of latents
+    try std.testing.expectError(error.UnsupportedTiling, spatialGrid(60, 108, bad));
+    try std.testing.expectError(error.InvalidShape, spatialGrid(0, 108, ref));
+    try std.testing.expectError(error.InvalidShape, spatialGrid(1 << 30, 108, ref));
+    try std.testing.expectError(error.InvalidShape, decodePlan(31, 1 << 29, 108, .unbounded));
+    try std.testing.expectError(error.InvalidShape, decodePlan(1 << 31, 60, 108, .unbounded));
+    try std.testing.expectError(error.InvalidShape, decodePlan(31, 1 << 28, 1 << 28, .unbounded));
+    try std.testing.expectError(error.UnsupportedTiling, decodePlan(31, 60, 108, .{ .free_bytes = 0 }));
 }
 
 test "every temporal plan from 6 to 64 latent frames emits each frame exactly once or is refused" {

@@ -10,5 +10,5 @@
             .hash = "tensorfold-1.0.7-CphTLULywQAUe2LxgT29-AserW8gMmK9C-ltOxIaw1pG",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "launch.zig", "tiles.zig", "encode.zig", "decode.zig", "weights.zig", "qual.zig", "testdata" },
+    .paths = .{ "build.zig", "build.zig.zon", "launch.zig", "tiles.zig", "encode.zig", "decode.zig", "weights.zig", "evidence.zig", "qual.zig", "testdata" },
 }

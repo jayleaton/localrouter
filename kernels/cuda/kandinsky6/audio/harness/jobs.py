@@ -9,6 +9,11 @@ synthetic weights with --weights synthetic (fallback smoke test). Inputs are see
 
   jobs.py A|B --fatbin audio.fatbin --native-src UPSTREAM --models MODELS --out OUT [--site-packages DIR]
   jobs.py A|B --dry-run-cpu --weights synthetic --native-src UPSTREAM --out OUT   (tiny, CPU, native paths only)
+
+--probe (job A only) adds a diagnostic stage after job A's cases, in the same process: the native ops whose order is
+not yet reproduced (decoder Cin 2048 K 3 convs, scaled SiLU, the strided SDPA, vocoder dilation-1 convs) run again
+under torch.profiler with their inputs, intermediates and outputs dumped under OUT/probe/; cuDNN, cuBLAS and cuBLASLt
+API logs for the whole process go to OUT/probe/logs/. The probe records kernel choices only; it is never qualification.
 """
 
 import os
@@ -20,6 +25,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I does not add the script directory
 if "--site-packages" in sys.argv[:-1]:  # the sealed prefix's site dir, explicit (-I drops PYTHONPATH)
     site.addsitedir(sys.argv[sys.argv.index("--site-packages") + 1])
+if "--probe" in sys.argv and "--out" in sys.argv[:-1]:  # library API logs, set before torch loads the libraries
+    PROBE_LOGS = os.path.join(os.path.abspath(sys.argv[sys.argv.index("--out") + 1]), "probe", "logs")
+    PROBE_LOG_ENV = dict(CUDNN_LOGLEVEL_DBG="3", CUDNN_LOGDEST_DBG=os.path.join(PROBE_LOGS, "cudnn.log"),
+                         CUBLAS_LOGINFO_DBG="1", CUBLAS_LOGDEST_DBG=os.path.join(PROBE_LOGS, "cublas.log"),
+                         CUBLASLT_LOG_LEVEL="5", CUBLASLT_LOG_FILE=os.path.join(PROBE_LOGS, "cublaslt.log"))
+    # A wrapper that imports torch before this file (e.g. a same-process guard) exports these itself; main() refuses
+    # any other value.
+    PROBE_START = {"torch_imported_before_jobs_py": "torch" in sys.modules,
+                   "log_env_before_jobs_py": {k: os.environ.get(k) for k in PROBE_LOG_ENV}}
+    os.makedirs(PROBE_LOGS, exist_ok=True)
+    for _k, _v in PROBE_LOG_ENV.items():
+        os.environ.setdefault(_k, _v)
 
 import argparse  # noqa: E402
 import copy  # noqa: E402
@@ -61,7 +78,7 @@ CONV_NODES = [("conv_in", 1), ("mid.block_1.conv1", 1), ("up.1.block.0.nin_short
 FULL = {
     "A": dict(norm_C=(512, 1024, 2048), norm_T=(218, 436), packed=(1, 1, 2048, 3, 218), special=(1, 2048, 218),
               prep=[(2048, 40, 3), (2048, 2048, 3), (1024, 2048, 1), (6144, 2048, 1), (128, 512, 3)],
-              elem=(2048, 436), sdpa=[(218, 2048), (436, 2048)], dec_dim=512, dec_T=218),
+              elem=(2048, 436), sdpa=[(218, 2048), (436, 2048)], dec_dim=512, dec_T=218, pre_T=436, conv_T=2048),
     "B": dict(stage=3, snake_T=4096, aa_T=3488, post_T=4097, conv_T=2048, convt_T=[436, 3488, 13952, 27904, 55808, 111616],
               pre_T=436, conv_post_T=223232, mel=(1, 128, 436), voc_ch=1536,
               wn=[("conv1d", 96, 96, 7, 1), ("conv_transpose1d", 96, 48, 4, 2)]),
@@ -69,7 +86,7 @@ FULL = {
 DRY = {
     "A": dict(norm_C=(8, 16), norm_T=(8,), packed=(1, 1, 16, 3, 8), special=(1, 16, 8),
               prep=[(16, 40, 3), (16, 16, 3), (8, 16, 1), (48, 16, 1), (128, 8, 3)],
-              elem=(16, 8), sdpa=[(8, 16)], dec_dim=8, dec_T=8),
+              elem=(16, 8), sdpa=[(8, 16)], dec_dim=8, dec_T=8, pre_T=6, conv_T=32, voc_ch=64),
     "B": dict(stage=1, snake_T=16, aa_T=16, post_T=9, conv_T=32, convt_T=[4, 32, 128, 256, 512, 1024], pre_T=6,
               conv_post_T=64, mel=(1, 128, 4), voc_ch=64, wn=[("conv1d", 4, 4, 7, 1), ("conv_transpose1d", 4, 2, 4, 2)]),
 }
@@ -700,6 +717,162 @@ def job_a(R):
     if R.k:
         R.best["chosen_from"] = "op-level results of this run"
     R.case(f"decoder_chain/T{S['dec_T']}", case_decoder_chain, R)
+    if R.a.probe:
+        probe_a(R)
+
+
+# ------------------------------------------------------------------------------------------- job A: probe stage
+# (decoder conv, gain) and vocoder convs whose native order is not reproduced offline, each with a passing control.
+PROBE_DECODER = [("mid.block_1.conv1", 1, "default"), ("conv_out", 2, "default"), ("conv_out", 2, "loaded_plus_one"),
+                 ("conv_in", 1, "default")]
+PROBE_VOCODER = [("conv_pre", "pre_T"), ("resblocks.9.convs1.0", "conv_T"), ("resblocks.10.convs1.0", "conv_T"),
+                 ("resblocks.11.convs1.0", "conv_T"), ("resblocks.9.convs1.1", "conv_T")]
+PROBE_BYTES_LIMIT = 1 << 30  # OUT/probe/ (dumps, traces, logs)
+
+
+def profiled(R, label, fn):
+    """fn() once under torch.profiler (CPU + CUDA); its result and the kernels it launched (name, count, device time),
+    the trace under OUT/probe/traces/ (grid, block, registers, shared memory) and the wall-clock span for the logs."""
+    from torch.profiler import ProfilerActivity, profile
+    acts = [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if R.dev.type == "cuda" else [])
+    rec = {"wall_start": time.time()}
+    try:
+        prof = profile(activities=acts)
+        prof.__enter__()
+    except Exception as e:  # no profiler (e.g. CUPTI refused): the op still runs, the record says why
+        rec["profiler_error"] = f"{type(e).__name__}: {e}"[:400]
+        out = fn()
+        R.sync()
+        rec["wall_end"] = time.time()
+        return out, rec
+    try:
+        out = fn()
+        R.sync()
+    finally:
+        prof.__exit__(None, None, None)
+    rec["wall_end"] = time.time()
+    kernels = {}
+    for e in prof.events():
+        if e.device_type == torch.autograd.DeviceType.CUDA:
+            k = kernels.setdefault(e.name, {"name": e.name, "count": 0, "device_us": 0.0})
+            k["count"] += 1
+            k["device_us"] += e.device_time_total if hasattr(e, "device_time_total") else e.cuda_time_total
+    rec["cuda_kernels"] = sorted(kernels.values(), key=lambda k: k["name"])
+    rec["cpu_ops"] = sorted({e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CPU})[:200]
+    path = os.path.join(R.a.out, "probe", "traces", label.replace("/", "_") + ".json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    prof.export_chrome_trace(path)
+    rec["trace"] = os.path.relpath(path, R.a.out)
+    return out, rec
+
+
+def main_result(R, name):
+    for c in R.doc["cases"]:
+        if c["name"] == name and c.get("status") == "ok":
+            return c["result"]
+    return None
+
+
+def probe_decoder_conv(R, path, tmul, gname):
+    """case_conv's input (same seed tag) and native call; the native sha must equal case_conv's of this run."""
+    m = module_at(R.vae.decoder, path)
+    T = tmul * R.S["dec_T"]
+    x = R.randn((1, m.weight.shape[1], T), f"conv-x-{path}")
+    gain = R.vae.decoder.learnable_gain + 1 if gname == "loaded_plus_one" else None
+    y, prof = profiled(R, f"decoder.{path}.{gname}", lambda: m(x) if gain is None else m(x, gain=gain))
+    main = main_result(R, f"conv1d_prepared/{path}")
+    want = main[gname]["native"]["y"]["sha256"] if main else None
+    rec = {"T": T, "gain": gname, "profile": prof, "native": R.H(y=y),
+           "dumps": [R.dump(f"probe/decoder.{path}.{gname}/x", x), R.dump(f"probe/decoder.{path}.{gname}/native_y", y)],
+           "weight": f"prepared_cpu/vae.decoder.{path}.weight (job A dump)"}
+    rec["native_sha_equals_case_conv"] = want is not None and rec["native"]["y"]["sha256"] == want
+    return rec
+
+
+def probe_silu(R):
+    """case_silu's input; the native mp_silu and torch's exp / sigmoid / silu of the same input, and both k6a
+    variants, dumped so the element pattern of the remaining difference can be read offline."""
+    x = R.randn((1,) + R.S["elem"], "silu-x", 4.0, specials=True)
+    y, prof = profiled(R, "scaled_silu", lambda: R.ns.mp_silu(x))
+    parts = {"x": x, "native_y": y, "torch_exp_neg_x": torch.exp(-x), "torch_sigmoid": torch.sigmoid(x),
+             "torch_silu": torch.nn.functional.silu(x)}
+    if R.k:
+        for d in DIVS:
+            parts[f"k6a_div{d}"] = R.k.scaled_silu(x, divisor=SILU_DIV, div=d)
+    main = main_result(R, "scaled_silu")
+    rec = {"profile": prof, "native": R.H(y=y), "dumps": [R.dump(f"probe/scaled_silu/{n}", t) for n, t in parts.items()]}
+    rec["native_sha_equals_case_silu"] = main is not None and main["native"]["y"]["sha256"] == rec["native"]["y"]["sha256"]
+    return rec
+
+
+def probe_sdpa(R, T, D):
+    """case_sdpa's native strided inputs; the native call profiled, then the math backend's steps composed from
+    public ops (q * s, k^T * s, matmul, softmax, matmul with s = sqrt(1 / sqrt(D))) to see whether they reproduce it."""
+    y = R.randn((1, 3 * D, T), f"sdpa-{T}-{D}")
+    q, k, v = (t.permute(0, 1, 3, 2) for t in R.ns.normalize(y.reshape(1, 1, D, 3, T), dim=2).unbind(3))
+    o, prof = profiled(R, f"sdpa.T{T}.D{D}", lambda: native.sdpa(q, k, v))
+    s = math.sqrt(1.0 / math.sqrt(D))
+    qs, kts = q * s, k.transpose(-2, -1) * s
+    scores, sprof = profiled(R, f"sdpa.T{T}.D{D}.scores", lambda: torch.matmul(qs, kts))
+    soft = {"softmax": lambda: torch.softmax(scores, -1)}
+    if hasattr(torch.ops.aten, "_safe_softmax"):
+        soft["_safe_softmax"] = lambda: torch.ops.aten._safe_softmax(scores, -1)
+    rec = {"q_stride": list(q.stride()), "fused_sdp_choice": sdpa_choice(q, k, v), "scale_sqrt": s, "profile": prof,
+           "scores_profile": sprof, "native": R.H(o=o), "compositions": {}}
+    dumps = {"q": q, "k": k, "v": v, "native_o": o, "q_scaled": qs, "kT_scaled": kts, "scores": scores}
+    for name, f in soft.items():
+        p = f()
+        out = torch.matmul(p, v)
+        dumps[f"{name}_probs"], dumps[f"{name}_o"] = p, out
+        rec["compositions"][name] = {"probs": R.H(p=p)["p"], "o_vs_native": brief(compare(out, o))}
+    rec["dumps"] = [R.dump(f"probe/sdpa.T{T}.D{D}/{n}", t) for n, t in dumps.items()]
+    main = main_result(R, f"sdpa_preflight/T{T}/D{D}")
+    rec["native_sha_equals_case_sdpa"] = main is not None and main["native_strided"]["default"]["sha256"] == rec["native"]["o"]["sha256"]
+    return rec
+
+
+def probe_vocoder_conv(R, name, tkey):
+    """job B's case_conv_module input (same seed tag) and native call, with the stored weight and bias dumped; job B
+    is not run, so the native sha is compared offline with the job B windows' record of the same case."""
+    m = module_at(R.voc, name)
+    x = R.randn((1, m.in_channels, R.S[tkey]), f"conv-x-{name}")
+    y, prof = profiled(R, f"vocoder.{name}", lambda: m(x))
+    t = {"x": x, "weight": m.weight, "native_y": y, **({} if m.bias is None else {"bias": m.bias})}
+    return {"geometry": dict(cin=m.in_channels, cout=m.out_channels, K=m.kernel_size[0], pad=m.padding[0],
+                             dil=m.dilation[0], T=R.S[tkey], bias=m.bias is not None),
+            "profile": prof, "inputs": R.H(x=x, w=m.weight), "native": R.H(y=y),
+            "dumps": [R.dump(f"probe/vocoder.{name}/{n}", v) for n, v in t.items()]}
+
+
+def probe_summary(R):
+    root = os.path.join(R.a.out, "probe")
+    sizes = {}
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            sizes[os.path.relpath(os.path.join(d, f), R.a.out)] = os.path.getsize(os.path.join(d, f))
+    dump_bytes = sum(os.path.getsize(os.path.join(R.a.out, r["file"])) for r in R.doc["dumps"]
+                     if r["name"].startswith("probe/"))
+    total = sum(sizes.values()) + dump_bytes
+    logs = {n: sizes.get(os.path.join("probe", "logs", n), 0) for n in ("cudnn.log", "cublas.log", "cublaslt.log")}
+    res = {"probe_bytes": total, "limit_bytes": PROBE_BYTES_LIMIT, "logs": logs,
+           "log_env": PROBE_LOG_ENV, **PROBE_START,
+           "files": sizes}
+    if total > PROBE_BYTES_LIMIT:
+        raise Fatal(f"probe output {total} B exceeds {PROBE_BYTES_LIMIT} B")
+    return res
+
+
+def probe_a(R):
+    S = R.S
+    for path, tmul, gname in PROBE_DECODER:
+        R.case(f"probe/decoder_conv/{path}/{gname}", probe_decoder_conv, R, path, tmul, gname)
+    R.case("probe/scaled_silu", probe_silu, R)
+    T, D = S["sdpa"][0]
+    R.case(f"probe/sdpa/T{T}/D{D}", probe_sdpa, R, T, D)
+    if R.case("probe/vocoder_load", case_vocoder_load, R) is not None:
+        for name, tkey in PROBE_VOCODER:
+            R.case(f"probe/vocoder_conv/{name}", probe_vocoder_conv, R, name, tkey)
+    R.case("probe/summary", probe_summary, R)
 
 
 # ================================================================================================ job B: vocoder
@@ -1005,6 +1178,7 @@ def main(argv=None):
     p.add_argument("--norm-eps", type=float, default=None, help="override the eps given to the candidate normalize")
     p.add_argument("--backend", choices=("auto", "cuda-python", "ctypes"), default="auto")
     p.add_argument("--dry-run-cpu", action="store_true", help="tiny shapes on CPU, native paths only, no launches")
+    p.add_argument("--probe", action="store_true", help="job A: diagnostic probe stage (see above)")
     a = p.parse_args(argv)
     R = Run(a)
     code = 0
@@ -1012,6 +1186,14 @@ def main(argv=None):
         set_numerics()
         if a.dry_run_cpu and a.weights == "real":
             raise Fatal("--dry-run-cpu uses tiny shapes: pass --weights synthetic")
+        if a.probe and a.job != "A":
+            raise Fatal("--probe is a job A stage")
+        if a.probe and "PROBE_LOGS" not in globals():
+            raise Fatal("--probe needs --out OUT as two arguments")
+        if a.probe and (any(os.environ.get(k) != v for k, v in PROBE_LOG_ENV.items())
+                        or PROBE_START["torch_imported_before_jobs_py"]
+                        and PROBE_START["log_env_before_jobs_py"] != PROBE_LOG_ENV):
+            raise Fatal(f"--probe: the library log environment must be {PROBE_LOG_ENV} before torch is imported")
         if a.weights == "real" and not a.models:
             raise Fatal("--models is required for --weights real")
         try:

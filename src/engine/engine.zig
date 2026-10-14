@@ -55,7 +55,15 @@ pub const Entry = struct {
     /// Refuses a request this model cannot serve (a step count its schedule lacks, a size past its buffers) before it
     /// is queued or loaded, writing why to `why`. Pure and cheap, like `needs`. Null: whatever `request.validate` passes.
     check: ?*const fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool = null,
+    /// The [width, height] a request that names no size gets (a model with one supported size). Null: the API's default.
+    default_size: ?[2]u32 = null,
 };
+
+/// The tool's default request size (see `Entry.default_size`), or null for the API's.
+pub fn defaultSize(cfg: *const ToolConfig) ?[2]u32 {
+    const e = find(cfg.engine) orelse return null;
+    return e.default_size;
+}
 
 pub const entries = [_]Entry{
     @import("../engines/testpattern.zig").entry,

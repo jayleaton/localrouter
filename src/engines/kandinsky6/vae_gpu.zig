@@ -48,7 +48,9 @@ pub const Gpu = struct {
     }
 };
 
-/// The decode plan at the native geometry under `free_bytes` (see the tool's `vae_free_mb`).
+/// The decode plan at the native geometry under `free_bytes` (the tool's exact `vae_free_bytes`, or `vae_free_mb`). Its
+/// `emitted` geometry is the decoded frame size, which can be narrower than the latent's nominal 8x when the plan's tiles
+/// stop before the edge.
 pub fn plan(latent_frames: u32, lh: u32, lw: u32, free_bytes: u64) !tiles.DecodePlan {
     return tiles.decodePlan(latent_frames, lh, lw, .{ .free_bytes = free_bytes });
 }

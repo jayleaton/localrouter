@@ -73,6 +73,8 @@ pub const entry: engine.Entry = .{
     .needs = needs,     // fn (cfg, request) Needs: resident + working bytes, pure and cheap (no I/O)
     .create = create,   // fn (env, cfg) Engine: allocate the engine; nothing heavy yet
     .check = check,     // optional fn (cfg, request, why) bool: refuse what the model cannot serve, before it loads
+    .default_size = .{ 832, 480 }, // optional: the size a request naming none gets (a model with one supported size;
+                                   // its `check` then also names that size for sizes the generic validation refuses)
 };
 ```
 
@@ -126,3 +128,11 @@ loads only when all are qualified on the target, and a diagnostic run (the check
 `localrouter check k6-components` (one stage, from the reference's own inputs where it has them) and `k6-e2e` (the
 whole pipeline) record the pipeline's ops in the reference capture's format (`kandinsky6/rec.zig`), for
 `stk_twin.kandinsky6.compare`.
+
+The one scoped vendor exception that was pending (NVIDIA cuDNN and cuBLASLt for the Kandinsky-6 audio path) is
+withdrawn: our own kernels reproduce every audio operator bit for bit on the target
+(`kernels/cuda/kandinsky6/audio/QUALIFICATION.md`). `src/engine/vendor/` remains as the mechanism such an exception
+would use, with no library locked: it copies each library from a locked path into a sealed memfd and hashes it, checks
+the mapped objects against exact identities around every vendor call, validates the daemon's CUDA driver, and builds
+every plan at load. A future exception must pass the same bit gates, and its contract stays `vendor_pinned_pending` and
+refused for production until it does.

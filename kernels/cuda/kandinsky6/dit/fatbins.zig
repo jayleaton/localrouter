@@ -15,3 +15,5 @@ fn Blob(comptime name: []const u8) type {
 pub const gemm: []const u8 = if (with_kernels) &Blob("k6_dit_fatbin_gemm").bytes else &.{};
 pub const attention: []const u8 = if (with_kernels) &Blob("k6_dit_fatbin_attention").bytes else &.{};
 pub const ops: []const u8 = if (with_kernels) &Blob("k6_dit_fatbin_ops").bytes else &.{};
+
+pub const flash: []const u8 = if (with_kernels) &Blob("k6_dit_fatbin_flash").bytes else &.{};

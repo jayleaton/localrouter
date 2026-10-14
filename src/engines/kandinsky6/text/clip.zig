@@ -121,6 +121,10 @@ pub const Plan = struct {
     at: u64,
     o: u64,
     f: u64,
+    tx: u64,
+    tw: u64,
+    bias: u64,
+    locks: u64,
     bytes: u64,
 
     pub fn init() Plan {
@@ -128,8 +132,9 @@ pub const Plan = struct {
         var at: u64 = 0;
         var p: Plan = undefined;
         inline for (.{
-            .{ "ids", r * 4 },     .{ "h", r * dim * 4 },  .{ "x", r * dim * 4 }, .{ "q", r * dim * 4 }, .{ "k", r * dim * 4 },
-            .{ "v", r * dim * 4 }, .{ "at", r * dim * 4 }, .{ "o", r * dim * 4 }, .{ "f", r * ffn * 4 },
+            .{ "ids", r * 4 },                  .{ "h", r * dim * 4 },   .{ "x", r * dim * 4 },       .{ "q", r * dim * 4 }, .{ "k", r * dim * 4 },
+            .{ "v", r * dim * 4 },              .{ "at", r * dim * 4 },  .{ "o", r * dim * 4 },       .{ "f", r * ffn * 4 }, .{ "tx", r * ffn * 4 },
+            .{ "tw", @as(u64, ffn) * dim * 4 }, .{ "bias", r * 80 * 4 }, .{ "locks", @as(u64, 256) },
         }) |e| {
             @field(p, e[0]) = at;
             at += std.mem.alignForward(u64, e[1], 256);
@@ -153,6 +158,15 @@ pub const Encoder = struct {
     /// The form of every fp32 Linear (q/k/v/out_proj, fc1, fc2). Required, no default.
     linear: Fp32Math,
     hook: ?Hook = null,
+
+    fn linearCall(e: *const Encoder, x: u64, w: u64, b: u64, out: u64, n: u32, kd: u32) Error!void {
+        const p = Plan.init();
+        if (e.linear == .tf32_rn) {
+            try e.k.clipLinear(e.s, x, w, b, out, e.base + p.tx, e.base + p.tw, e.base + p.locks, tokens, n, kd);
+        } else {
+            try e.k.linearF32(e.s, x, w, b, out, tokens, n, kd, e.linear);
+        }
+    }
 
     fn after(e: *const Encoder, name: []const u8, ptr: u64, bytes: u64) Error!void {
         if (e.hook) |h| h.after(h.ctx, name, ptr, bytes) catch return error.CudaFailed;
@@ -183,25 +197,25 @@ pub const Encoder = struct {
             }.f;
             try k.layerNorm(s, p.h, l.ln1_w, l.ln1_b, p.x, L, dim, dim, dim, eps);
             try e.after(nm(&nb, i, "layer_norm1"), p.x, n * 4);
-            try k.linearF32(s, p.x, l.q_w, l.q_b, p.q, L, dim, dim, e.linear);
+            try e.linearCall(p.x, l.q_w, l.q_b, p.q, dim, dim);
             try e.after(nm(&nb, i, "self_attn.q_proj"), p.q, n * 4);
-            try k.linearF32(s, p.x, l.k_w, l.k_b, p.k, L, dim, dim, e.linear);
+            try e.linearCall(p.x, l.k_w, l.k_b, p.k, dim, dim);
             try e.after(nm(&nb, i, "self_attn.k_proj"), p.k, n * 4);
-            try k.linearF32(s, p.x, l.v_w, l.v_b, p.v, L, dim, dim, e.linear);
+            try e.linearCall(p.x, l.v_w, l.v_b, p.v, dim, dim);
             try e.after(nm(&nb, i, "self_attn.v_proj"), p.v, n * 4);
-            try k.attentionF32(s, p.q, p.k, p.v, p.at, L, heads, dim, valid, attn_scale);
+            try k.clipAttention(s, p.q, p.k, p.v, p.at, e.base + off.bias, valid);
             try e.after(nm(&nb, i, "self_attn.sdpa"), p.at, n * 4);
-            try k.linearF32(s, p.at, l.o_w, l.o_b, p.o, L, dim, dim, e.linear);
+            try e.linearCall(p.at, l.o_w, l.o_b, p.o, dim, dim);
             try e.after(nm(&nb, i, "self_attn.out_proj"), p.o, n * 4);
             try k.addF32(s, p.h, p.o, p.h, n);
             try e.after(nm(&nb, i, "attn_residual"), p.h, n * 4);
             try k.layerNorm(s, p.h, l.ln2_w, l.ln2_b, p.x, L, dim, dim, dim, eps);
             try e.after(nm(&nb, i, "layer_norm2"), p.x, n * 4);
-            try k.linearF32(s, p.x, l.fc1_w, l.fc1_b, p.f, L, ffn, dim, e.linear);
+            try e.linearCall(p.x, l.fc1_w, l.fc1_b, p.f, ffn, dim);
             try e.after(nm(&nb, i, "mlp.fc1"), p.f, @as(u64, L) * ffn * 4);
             try k.quickGelu(s, p.f, p.f, @as(u64, L) * ffn);
             try e.after(nm(&nb, i, "mlp.activation_fn"), p.f, @as(u64, L) * ffn * 4);
-            try k.linearF32(s, p.f, l.fc2_w, l.fc2_b, p.o, L, dim, ffn, e.linear);
+            try e.linearCall(p.f, l.fc2_w, l.fc2_b, p.o, dim, ffn);
             try e.after(nm(&nb, i, "mlp.fc2"), p.o, n * 4);
             try k.addF32(s, p.h, p.o, p.h, n);
             try e.after(nm(&nb, i, "mlp_residual"), p.h, n * 4);
@@ -261,8 +275,8 @@ test "bindWeights asks for exactly the manifest's names" {
 
 test "scratch plan" {
     const p = Plan.init();
-    inline for (.{ "ids", "h", "x", "q", "k", "v", "at", "o", "f" }) |f| try testing.expectEqual(@as(u64, 0), @field(p, f) % 256);
-    try testing.expectEqual(@as(u64, 2_602_496), scratchBytes());
+    inline for (.{ "ids", "h", "x", "q", "k", "v", "at", "o", "f", "tx", "tw", "bias", "locks" }) |f| try testing.expectEqual(@as(u64, 0), @field(p, f) % 256);
+    try testing.expectEqual(@as(u64, 13_010_944), scratchBytes());
 }
 
 test {

@@ -156,12 +156,13 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "768x448", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: ?[]const u8 = null, seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
-    const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
     var why: routes.Refusal = .{};
     const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
+    // absent: the model's default size, else 768x448
+    const wh = request.resolveSize(b.size, engine.defaultSize(app.scheduler.slots[tool].tool.config()), .{ 768, 448 }) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
@@ -305,7 +306,7 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits.","default":"768x448"},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omitted, the model's default size (else 768x448)."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
     \\"fps":{"type":"integer","default":24},
     \\"seed":{"type":"integer","minimum":0},

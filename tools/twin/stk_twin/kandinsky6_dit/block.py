@@ -685,7 +685,7 @@ class Dit:
         aud = self.buf(self.p.aud, A, Da)
         prow = self.buf(self.p.rows_in, N, c.patch_in())
         self.k.patchify(inp.x_video, prow, sh, c.visual_in())
-        self.linear(w.visual_in, prow, vis)
+        self.k.visual_gemm(prow, w.visual_in.w, w.visual_in.b, vis)
         self.emit("visual_embeddings", vis)
         audio_in = inp.x_audio
         if V(inp.x_audio).dtype == "f32":

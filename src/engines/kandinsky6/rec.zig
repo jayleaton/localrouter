@@ -9,6 +9,7 @@ const cuda = @import("cuda");
 
 pub const Dtype = enum {
     bfloat16,
+    float16,
     float32,
     uint8,
     int16,
@@ -17,7 +18,7 @@ pub const Dtype = enum {
     pub fn size(d: Dtype) u64 {
         return switch (d) {
             .uint8 => 1,
-            .bfloat16, .int16 => 2,
+            .bfloat16, .float16, .int16 => 2,
             .float32 => 4,
             .int64 => 8,
         };

@@ -15,7 +15,8 @@ from pathlib import Path
 
 PIN_COMMIT = "eac06e39b904940baff2c408e925cdb0c4529269"  # kandinskylab/kandinsky-6
 TORCH_PIN = "2.14.1+cu130"
-# The shared oracle prefix (Captain-verified, staged by Cody; receipts in k6-staging/oracle-export). It is a corrected
+# The full oracle prefix (receipts in k6-staging/oracle-full-v2-export). The minimal prefix lacks the upstream
+# pipeline's import dependencies. The full closure preserves its Python, torch and numerical library bytes. It is a corrected
 # install: one wheel's installed WHEEL tag and RECORD entry were rewritten (metadata-correction receipt), library
 # bytes unchanged. It is not byte-identical official metadata and is never labelled official.
 ORACLE = {
@@ -24,11 +25,11 @@ ORACLE = {
     "torch": TORCH_PIN,
     "cuda_major": "13",
     "numpy": "2.5.4",
-    "archive": "k6-oracle-prefix.tar.gz",
-    "archive_bytes": 3344315223,
-    "archive_sha256": "74118af7c8381f74ed810c6ddb3b009edc9f280d13844f2ace70f6f65ba0c474",
-    "manifest_sha256": "a1af1b3b5c25bb343ebe8ecc71aaa406199a9c2c74c5957c1425251fdc124b90",
-    "freeze_sha256": "d793ad20e79649f2b62374ef1f052526ac6954eae6e16a3bb4771f7d80090936",
+    "archive": "k6-oracle-full-v2-prefix.tar.gz",
+    "archive_bytes": 3629088624,
+    "archive_sha256": "106e608bf85c4195bd64e83017d918c35dcefe29d6149e2591ebcc916d39bc85",
+    "manifest_sha256": "e670043958ba3823ef157085f342c3a1c04cefb9efcada07b673c1f057acd395",
+    "freeze_sha256": "18f5e02f48be9515ec817d2660829276fac3148a4d2f6bdfaa39524d8f4f4451",
     "metadata_correction_sha256": "38cd6454e0340808b30ec2733cb57c0096a5e24d211d471ad76c14f6af0580a9",
     "install": "corrected (metadata-correction receipt); not byte-identical official metadata",
 }

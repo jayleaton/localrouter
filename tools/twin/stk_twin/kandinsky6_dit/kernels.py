@@ -21,7 +21,7 @@ from pathlib import Path
 
 import torch
 
-IMAGES = ("gemm", "attention", "ops")
+IMAGES = ("gemm", "attention", "ops", "flash")
 I32_MAX = 2**31 - 1
 U32_MAX = 2**32 - 1
 
@@ -203,8 +203,27 @@ class Kernels:
         self.mods = {n: self._load(images[n]) for n in IMAGES}
         g, a, o = self.mods["gemm"], self.mods["attention"], self.mods["ops"]
         self.gemm_fn = self._fn(g, "k6_gemm_bf16")
+        self.visual_gemm_fn = self._fn(g, "k6_visual_gemm_bf16")
+        self._check(self.cu.cuFuncSetAttribute(self.visual_gemm_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 73728),
+                    "visual GEMM shared memory")
         self.gemv_fn = self._fn(g, "k6_gemv_f32")
         self.gemv_tf32_fn = self._fn(g, "k6_gemv_tf32")
+        self.flash_fn = self._fn(self.mods["flash"], "k6_visual_flash")
+        self._check(cu.cuFuncSetAttribute(self.flash_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 65536),
+                    "visual Flash shared memory")
+        self.audio_flash_fn = self._fn(self.mods["flash"], "k6_audio_flash")
+        self._check(cu.cuFuncSetAttribute(self.audio_flash_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 65536),
+                    "cuFuncSetAttribute audio flash")
+        self.va_flash_fn = self._fn(self.mods["flash"], "k6_va_flash")
+        self._check(cu.cuFuncSetAttribute(self.va_flash_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 65536),
+                    "cuFuncSetAttribute VA flash")
+        self.av_flash_fn = self._fn(self.mods["flash"], "k6_av_flash")
+        self._check(cu.cuFuncSetAttribute(self.av_flash_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, 81920),
+                    "cuFuncSetAttribute AV flash")
+        self.av_combine_fn = self._fn(self.mods["flash"], "k6_av_combine")
+        self.audio_head_fn = self._fn(self.mods["flash"], "k6_audio_head_wmma")
+        self.audio_head_reset_fn = self._fn(self.mods["flash"], "k6_audio_head_reset")
+        self.flash_lse = torch.empty((32, 50220), device="cuda", dtype=torch.float32)
         self.attn_fn = self._fn(a, "k6_attention")
         self._check(cu.cuFuncSetAttribute(self.attn_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, SHARED_BYTES),
                     "cuFuncSetAttribute")
@@ -285,6 +304,35 @@ class Kernels:
                 i64(x.ld), i64(w.ld), i64(out.ld), ctypes.c_int32(epi), ctypes.c_int32(int(vec))]
         self._go(self.gemm_fn, (blocks(n, 128), blocks(m, 128)), 256, 0, args)
 
+    def visual_gemm(self, x, w, bias, out) -> None:
+        """launch.visualGemm: aligned-2, K32, three-stage BF16 VisualEmbeddings."""
+        x, w, b, out = view(x), view(w), view(bias), view(out)
+        m, n, kd = x.rows, w.rows, x.cols
+        x.expect("bf16", m, kd)
+        w.expect("bf16", n, kd)
+        b.expect("bf16", 1, n)
+        out.expect("bf16", m, n)
+        if not 0 < m <= I32_MAX or not 0 < n <= I32_MAX or kd > I32_MAX or kd % 2 or any(
+                v.ld % 2 or v.ptr % 4 for v in (x, w, b, out)):
+            raise InvalidGemm("visual GEMM requires aligned-2 BF16 views")
+        args = [u64(x.ptr), u64(w.ptr), u64(b.ptr), u64(out.ptr), i32(m), i32(n), i32(kd),
+                i64(x.ld), i64(w.ld), i64(out.ld)]
+        self._go(self.visual_gemm_fn, (blocks(m, 256), blocks(n, 128)), 256, 73728, args)
+
+    def audio_head(self, x, w, bias, out) -> None:
+        """launch.audioHead: captured 218x2048 / 400x2048 split-K=8 BF16 reduction."""
+        x, w, b, out = view(x), view(w), view(bias), view(out)
+        x.expect("bf16", 218, 2048)
+        w.expect("bf16", 400, 2048)
+        b.expect("bf16", 1, 400)
+        out.expect("bf16", 218, 400)
+        if (x.ld, w.ld, out.ld) != (2048, 2048, 400) or any(v.ptr % 16 for v in (x, w, b, out)):
+            raise InvalidGemm("audio head requires contiguous aligned-8 BF16 views")
+        scratch = self.flash_lse.data_ptr()
+        self._go(self.audio_head_reset_fn, (1,), 128, 0, [u64(scratch)])
+        self._go(self.audio_head_fn, (56, 2, 8), 128, 0,
+                 [u64(x.ptr), u64(w.ptr), u64(b.ptr), u64(out.ptr), u64(scratch)])
+
     def gemv(self, x, w, bias, out, silu: bool, math: str) -> None:
         """out[M, N] = act(x[M, K]) . float(w[N, K])^T + float(bias[N]): x fp32 or bf16, act SiLU when `silu`, out
         fp32 or bf16 (one rounding), in `math` (launch.Fp32Linear: "tf32_rna", "tf32_truncate" or "fp32"; none is a
@@ -332,6 +380,31 @@ class Kernels:
             raise InvalidAttention("key / value alignment")
         if mask is not None and (mask.ptr == 0 or mask.valid == 0 or mask.valid > k.rows):
             raise InvalidAttention("mask")
+        if (mask is None and q.rows == k.rows == 50220 and heads == 32
+                and q.ld == k.ld == v.ld == out.ld == 4096
+                and all(t.ptr % 16 == 0 for t in (q, k, v, out)) and scale == ATTN_SCALE):
+            self._go(self.flash_fn, (393, 1, 32), 128, 65536,
+                     [u64(q.ptr), u64(k.ptr), u64(v.ptr), u64(out.ptr), u64(self.flash_lse.data_ptr())])
+            return
+        if (mask is None and q.rows == 50220 and k.rows == 218 and heads == 32
+                and q.ld == k.ld == v.ld == out.ld == 4096
+                and all(t.ptr % 16 == 0 for t in (q, k, v, out)) and scale == ATTN_SCALE):
+            self._go(self.va_flash_fn, (393, 1, 32), 128, 65536,
+                     [u64(q.ptr), u64(k.ptr), u64(v.ptr), u64(out.ptr), u64(self.flash_lse.data_ptr())])
+            return
+        if (mask is None and q.rows == 218 and k.rows == 50220 and heads == 16
+                and q.ld == k.ld == v.ld == out.ld == 2048
+                and all(t.ptr % 16 == 0 for t in (q, k, v, out)) and scale == ATTN_SCALE):
+            args = [u64(q.ptr), u64(k.ptr), u64(v.ptr), u64(out.ptr), u64(self.flash_lse.data_ptr())]
+            self._go(self.av_flash_fn, (4, 3, 16), 128, 81920, args)
+            self._go(self.av_combine_fn, (872, 1, 1), 128, 0, args)
+            return
+        if (mask is None and q.rows == k.rows == 218 and heads == 16
+                and q.ld == k.ld == v.ld == out.ld == 2048
+                and all(x.ptr % 16 == 0 for x in (q, k, v, out))):
+            self._go(self.audio_flash_fn, (2, 1, 16), 128, 65536,
+                     [u64(q.ptr), u64(k.ptr), u64(v.ptr), u64(out.ptr), u64(self.flash_lse.data_ptr())])
+            return
         args = [u64(q.ptr), u64(k.ptr), u64(v.ptr), u64(out.ptr), u64(mask.ptr if mask is not None else 0),
                 i32(q.rows), i32(k.rows), i64(q.ld), i64(k.ld), i64(v.ld), i64(out.ld)]
         args += [i64(0) for _ in range(5)]  # batch strides: one batch a call

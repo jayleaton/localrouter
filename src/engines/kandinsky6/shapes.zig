@@ -9,8 +9,15 @@
 
 const std = @import("std");
 
+/// The generation geometry: the DiT's latent is 60 x 108 (864x480 at the VAE's 8x).
 pub const width: u32 = 864;
 pub const height: u32 = 480;
+/// The one supported request and written size, 832x480 landscape: the video VAE's emitted frame under its qualified
+/// tile plan (its tiles stop 32 columns before the 864 edge, as upstream's do for that plan). The decode is proven
+/// bit-exact on that plan only (kernels/cuda/kandinsky6/video_vae/QUALIFICATION.md), so no other size or orientation
+/// is offered.
+pub const out_width: u32 = 832;
+pub const out_height: u32 = 480;
 pub const fps: u32 = 24;
 pub const latent_frames: u32 = 31;
 pub const temporal_ratio: u32 = 4;
@@ -63,8 +70,8 @@ pub fn audioRows(frames: u32) u32 {
 pub const Request = struct { width: u32, height: u32, seconds: u32, fps: u32 };
 
 pub fn supported(r: Request, why: *std.Io.Writer) bool {
-    if (r.width != width or r.height != height) {
-        why.print("Kandinsky-6 Pro distilled generates {d}x{d} only, not {d}x{d}", .{ width, height, r.width, r.height }) catch {};
+    if (r.width != out_width or r.height != out_height) {
+        why.print("Kandinsky-6 Pro distilled supports {d}x{d} landscape only (the size its video decoder is proven bit-exact on), not {d}x{d}; omit size for {d}x{d}", .{ out_width, out_height, r.width, r.height, out_width, out_height }) catch {};
         return false;
     }
     if (r.fps != fps) {
@@ -105,9 +112,13 @@ test "pcm16 clips and truncates toward zero like numpy" {
     try std.testing.expectEqual(@as(i16, -16383), pcm16(-0.5));
 }
 
-test "only the native request is supported" {
+test "only 832x480 landscape is supported" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try std.testing.expect(supported(.{ .width = 864, .height = 480, .seconds = 5, .fps = 24 }, &w));
-    try std.testing.expect(!supported(.{ .width = 1344, .height = 768, .seconds = 5, .fps = 24 }, &w));
+    try std.testing.expect(supported(.{ .width = 832, .height = 480, .seconds = 5, .fps = 24 }, &w));
+    for ([_][2]u32{ .{ 480, 832 }, .{ 864, 480 }, .{ 640, 480 }, .{ 0, 0 }, .{ 1344, 768 } }) |wh| {
+        w = .fixed(&buf);
+        try std.testing.expect(!supported(.{ .width = wh[0], .height = wh[1], .seconds = 5, .fps = 24 }, &w));
+        try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "832x480 landscape only") != null);
+    }
 }

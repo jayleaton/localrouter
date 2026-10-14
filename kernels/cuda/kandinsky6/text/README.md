@@ -51,11 +51,11 @@ the op declared unsupported.
 | `embed_tokens` | gather | `stk_embed` (te.cu) | exact |
 | RoPE frequencies `inv_freq @ positions` (:557) | fp32 bmm, K = 1, under `high` (TF32 permitted) | `k6t_rope_table`, form = `Encoder.rope_freq` (no default): fp32 = one rounding; TF32 forms round the operands, product exact | UNQUALIFIED: algorithm uncaptured. `inv_freq` itself is an input: native's buffer bytes must be captured (`invFreqCandidate` is a host candidate, not qualified) |
 | cos / sin (:558-559), `* attention_scaling` (1.0) | `cosf` / `sinf` fp32 kernels | same in `k6t_rope_table` (scaling by 1.0 omitted: exact) | elementwise: expected equal given the same frequencies |
-| RMSNorm (input, post-attention, final) (:71-76) | `pow(2)`, `mean` (reduce kernel: sum times fp32 1/N), `+ eps`, `rsqrt`, `*`, `.to(bf16)`, `weight *` in bf16 | `k6t_rms_norm`: the same seven roundings; sum: thread-strided partials + shared tree, times `1/3584` | UNQUALIFIED: torch's reduce order (vectorization, block split) uncaptured; the elementwise steps are expected equal |
+| RMSNorm (input, post-attention, final) (:71-76) | `pow(2)`, vectorized `mean`, `+ eps`, `rsqrt`, `*`, `.to(bf16)`, `weight *` in bf16 | `k6t_rms_norm`: four accumulators per lane, 32 lanes, vector width 4; left-to-right combine and shuffle 16/8/4/2/1, then the same seven roundings | Seed-42 fixture: both observed layers, all 28 layer boundaries and final embeddings exact after matching ATen's reduction order |
 | q / k / v Linear + bias | cuBLASLt bf16, fp32 compute, bias epilogue, heuristic algorithm | `stk_gemm_bf16` (gemm.cu): K ascending in tiles of 32, no split-K, bias added to the fp32 sum, one rounding | UNQUALIFIED: algorithm uncaptured |
 | o_proj, gate_proj, up_proj, down_proj | cuBLAS(Lt) bf16 | `stk_gemm_bf16`, no bias | UNQUALIFIED: as above |
 | RoPE apply (:590-613) | bf16 `q*cos + rotate_half(q)*sin`, each op rounded | `stk_rope_half` (te.cu): the same three roundings, cos / sin rounded to bf16 | elementwise: expected equal |
-| Attention (sdpa) | bool-mask SDPA (mem-efficient or math backend, `repeat_kv`), scale `128**-0.5`; unpadded: flash `is_causal` with GQA | `pattn2` (attention.cu): streaming online softmax over 64-key tiles, `vis = j < valid && j <= i`, scale 0x3db504f3 | UNQUALIFIED: backend, tiling, exp and split differ until captured |
+| Attention (sdpa) | Captured EFFICIENT_ATTENTION specialization `fmha_cutlassF_bf16_aligned_64x128_rf_sm80`, scale `128**-0.5` | `text/attention.cu`: pinned source specialization, full BF16 causal/padding bias, 64x128 tiles, scale 0x3db504f3 | Integrated Qwen seed-42 fixture: 49 comparisons exact, including all 28 layer boundaries and final embeddings; whole pipeline gates remain pending |
 | Residual adds | bf16 add | `stk_add` | elementwise: expected equal |
 | SiLU(gate) * up (:584-587) | `F.silu` bf16 (`x / (1 + exp(-x))` in fp32), bf16 product | `stk_silu_mul` | elementwise: expected equal |
 | Crop rows 129.., mask crop | views | final norm written for rows 129..1152 only (rows independent) | exact |
@@ -66,9 +66,9 @@ the op declared unsupported.
 | --- | --- | --- | --- |
 | Tokenize (77, specials, truncation, padding) | tokenizers CLIP BPE (`</w>`), NFC, `\s+`, Lowercase | `clip_tokenizer.zig` + `prompt.clipIds` | equal on the host tests; Lowercase table Unicode 16.0.0 (Rust std's version must match), applied before NFC (see the file's comment) |
 | Token + position embedding | gather, fp32 add | `k6t_clip_embed` | exact / elementwise equal |
-| LayerNorm (layer_norm1/2, final) | `vectorized_layer_norm_kernel<float>` (block (32, 4), Welford) | `k6t_layer_norm_f32`: torch's expressions and launch shape, built with `--fmad=false` (uncontracted) | UNQUALIFIED: torch's build may contract the Welford and output expressions into FMAs; its SASS must be read and mirrored |
-| Linear + bias (q/k/v/out_proj, fc1, fc2) | `addmm` fp32 under `high`: cuBLASLt, TF32 permitted, algorithm unknown | `k6t_linear_f32`, form = `Encoder.linear` (no default): `tf32_rna`, `tf32_truncate` (exact products, fp32 accumulation) or `fp32` (strict FMA chain); K ascending, no split-K, bias once | UNQUALIFIED: executed algorithm uncaptured; no form claimed native |
-| Attention (sdpa, causal + padding bool mask) | fp32 SDPA (mem-efficient on SM80+ may use 3xTF32 `FastF32`), scale 0.125 | `k6t_attention_f32`: strict fp32, sequential FMA scores, max, `expf`, key-order sum, one division | UNQUALIFIED: backend and arithmetic uncaptured; this is the only form provided |
+| LayerNorm (layer_norm1/2, final) | `vectorized_layer_norm_kernel<float>` (block (32, 4), Welford) | `k6t_layer_norm_f32`: torch's expressions and launch shape, default FMA contraction retained | First-layer SM121 isolated fixture byte exact with contraction; disabling it gives 32,535 unequal bytes. Full encoder and all-layer gates remain pending |
+| Linear + bias (q/k/v/out_proj, fc1, fc2) | Captured `cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4`, under `high` | `clip_linear.cu`, explicit `tf32_rn`: RN-even TF32 operands, pinned CUTLASS 64x64x16 tile, six stages, bias epilogue; other candidate forms retained explicitly | First-layer q/k/v exact after integration; full encoder gate remains pending |
+| Attention (sdpa, causal + padding bool mask) | Captured `fmha_cutlassF_f32_aligned_64x64_rf_sm80`, scale 0.125 | `attention.cu`: pinned FP32 specialization with full 77-key causal/padding bias | Isolated reference backend output exact; integrated encoder gate remains pending |
 | quick_gelu | `x * sigmoid(1.702 * x)` as three fp32 ops (`1/(1+exp(-t))`) | `k6t_quick_gelu` | elementwise: expected equal |
 | Residual adds | fp32 add | `k6t_add_f32` | exact |
 | Pooled row | `argmax(input_ids)` gather | host-side index, final LayerNorm on that row only | exact |
@@ -92,7 +92,7 @@ available on the development host, so no direct comparison against it was made; 
 ```zig
 const qwen25 = @import("text/qwen25.zig");
 const clip = @import("text/clip.zig");
-var k = try qwen25.Kernels.load(&driver, .{ .text = k6_kernels.text, .qwen_te = qwen_image.kernels.te, .qwen_gemm = qwen_image.kernels.gemm, .qwen_attention = qwen_image.kernels.attention });
+var k = try qwen25.Kernels.load(&driver, .{ .text = k6_kernels.text, .qwen_te = qwen_image.kernels.te, .qwen_gemm = qwen_image.kernels.gemm, .text_attention = k6_kernels.text_attention });
 const qw = try qwen25.bindWeights(&store); // store.get(name) ?u64, BF16 as stored
 const cw = try clip.bindWeights(&store); // F32 as stored
 var ids: [1153]u32 = undefined;

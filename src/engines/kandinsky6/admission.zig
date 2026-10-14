@@ -21,14 +21,20 @@ pub const Status = enum {
     gpu_qualification_pending,
     /// Implemented, but a value or ABI is known to differ from the reference (named in `why`): diagnostic only.
     provisional,
+    /// Computed by a pinned vendor library (`src/engine/vendor`, docs/ARCHITECTURE.md) whose identity, closure, memory
+    /// bound or bit gates are not all proved on the target: refused for production. No contract uses it today.
+    vendor_pinned_pending,
     /// Cannot be computed yet: refused for every use.
     unresolved,
 };
 
 pub const Contract = struct { name: []const u8, status: Status, why: []const u8 };
 
+/// The capacity of `contracts`'s list (it lists 9 today).
+pub const max_contracts = 10;
+
 /// The pipeline's contracts, in pipeline order. Each entry changes only with the receipt that changes it.
-pub fn contracts(out: *[9]Contract) []const Contract {
+pub fn contracts(out: *[max_contracts]Contract) []const Contract {
     var n: usize = 0;
     out[n] = .{ .name = "text: Qwen2.5-VL + CLIP conditioning", .status = .gpu_qualification_pending, .why = "k6-components text gate" };
     n += 1;
@@ -86,7 +92,7 @@ fn audioContract(name: []const u8, part: anytype, state: audio.WeightState) Cont
 /// Refuses `use` unless every contract admits it; logs each blocker. Returns how many contracts are not qualified (the
 /// diagnostic run's label).
 pub fn admit(use: Use) error{ UnresolvedContract, NotQualified }!usize {
-    var buf: [9]Contract = undefined;
+    var buf: [max_contracts]Contract = undefined;
     const cs = contracts(&buf);
     for (cs) |c| {
         if (c.status == .qualified) continue;
@@ -111,7 +117,7 @@ pub fn decide(cs: []const Contract, use: Use) error{ UnresolvedContract, NotQual
 }
 
 test "production refuses until every contract is qualified" {
-    var buf: [9]Contract = undefined;
+    var buf: [max_contracts]Contract = undefined;
     const cs = contracts(&buf);
     try std.testing.expectEqual(@as(usize, 9), cs.len);
     var all = true;
@@ -133,4 +139,7 @@ test "diagnostic runs what is unqualified and refuses what is unresolved" {
     try std.testing.expectError(error.NotQualified, decide(&.{ ok, pending }, .production));
     try std.testing.expectError(error.UnresolvedContract, decide(&.{ ok, missing }, .diagnostic));
     try std.testing.expectEqual(@as(usize, 0), try decide(&.{ok}, .production));
+    const vendor: Contract = .{ .name = "d", .status = .vendor_pinned_pending, .why = "" };
+    try std.testing.expectError(error.NotQualified, decide(&.{ ok, vendor }, .production));
+    try std.testing.expectEqual(@as(usize, 1), try decide(&.{ ok, vendor }, .diagnostic));
 }

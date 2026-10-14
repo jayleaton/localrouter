@@ -5,7 +5,8 @@
 //
 // Every kernel names the torch expression it computes and keeps its rounding points: one fp32 rounding per torch op,
 // written as explicit __fmul_rn / __fadd_rn / __fdiv_rn / __fmaf_rn, and a bf16 rounding exactly where the upstream
-// tensor is bf16. Built with -O3 --fmad=false (build/kandinsky6.zig), no fast math. extern "C", raw arguments; rows are
+// tensor is bf16. LayerNorm's Welford and affine expressions retain Torch's contracted FMAs. Built with -O3
+// (build/kandinsky6.zig), no fast math. extern "C", raw arguments; rows are
 // independent in every kernel (a row's bits never depend on the grid or the other rows).
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -41,8 +42,8 @@ __device__ __forceinline__ float operand(float x, int mode) {
 
 // ---- torch 2.14.1 aten/src/ATen/native/cuda/layer_norm_kernel.cu (BSD-3-Clause, see README.md): the Welford
 // statistics of vectorized_layer_norm_kernel (T = float), copied from kernels/cuda/kandinsky6/dit/ops.cu. Launch shape
-// as torch's: block (32, 4), one block a row, vec_size 4. The expressions are torch's in plain operators; this file is
-// built with --fmad=false, so none is contracted (torch's own build may contract them: see README, UNQUALIFIED).
+// as torch's: block (32, 4), one block a row, vec_size 4. Plain operators deliberately retain the default FMA
+// contraction: isolated SM121 comparison against the pinned Torch first-layer input/output is byte exact.
 constexpr int vec_size = 4;
 constexpr int ln_threads_y = 4;
 
@@ -148,26 +149,32 @@ extern "C" __global__ void k6t_rope_table(const float* __restrict__ inv, float* 
 //   h = x.float(); v = h.pow(2).mean(-1)  ->  sum of fp32 squares (each rounded), times inv_dim (torch's MeanOps
 //   multiplies the sum by its float factor 1/N); r = rsqrt(v + eps) (fp32 add, rsqrtf); y = w * (h * r).to(bf16)
 //   (fp32 product rounded to bf16, then the bf16 x bf16 weight product rounded to bf16).
-// The sum runs in a fixed order: thread-strided partials (thread t adds t, t + 256, ...), then a shared-memory tree.
-// Native's reduction order is torch's reduce kernel's (UNQUALIFIED, see README). launch: block 256, grid rows.
+// Match ATen Reduce.cuh's contiguous float mean for 3584 columns: 32 lanes, four independent accumulators per
+// lane (input vectorization), combine those left-to-right, then shfl_down offsets 16/8/4/2/1. Changing this to a
+// 256-lane scalar reduction differs at BF16 rounding boundaries and propagates through later decoder layers.
+// launch: block 256, grid rows. Only the first warp reduces; all threads write the independent affine outputs.
 extern "C" __global__ void __launch_bounds__(256) k6t_rms_norm(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w,
                                                                __nv_bfloat16* __restrict__ y, int dim, long long ldx, long long ldy,
                                                                float eps, float inv_dim) {
-    __shared__ float s[kRmsThreads];
+    __shared__ float scale;
     const __nv_bfloat16* xr = x + (long long)blockIdx.x * ldx;
     __nv_bfloat16* yr = y + (long long)blockIdx.x * ldy;
-    float acc = 0.0f;
-    for (int i = threadIdx.x; i < dim; i += kRmsThreads) {
-        const float v = bf(xr[i]);
-        acc = __fadd_rn(acc, __fmul_rn(v, v));
+    if (threadIdx.x < 32) {
+        float sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int i = threadIdx.x * 4; i < dim; i += 128) {
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const float v = bf(xr[i + j]);
+                sums[j] = __fadd_rn(sums[j], __fmul_rn(v, v));
+            }
+        }
+        float acc = __fadd_rn(__fadd_rn(__fadd_rn(sums[0], sums[1]), sums[2]), sums[3]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            acc = __fadd_rn(acc, __shfl_down_sync(0xffffffff, acc, offset));
+        if (threadIdx.x == 0) scale = rsqrtf(__fadd_rn(__fmul_rn(acc, inv_dim), eps));
     }
-    s[threadIdx.x] = acc;
     __syncthreads();
-    for (int h = kRmsThreads / 2; h > 0; h >>= 1) {
-        if (threadIdx.x < h) s[threadIdx.x] = __fadd_rn(s[threadIdx.x], s[threadIdx.x + h]);
-        __syncthreads();
-    }
-    const float r = rsqrtf(__fadd_rn(__fmul_rn(s[0], inv_dim), eps));
+    const float r = scale;
     for (int i = threadIdx.x; i < dim; i += kRmsThreads) {
         const float n = bf(tobf(__fmul_rn(bf(xr[i]), r)));
         yr[i] = tobf(__fmul_rn(bf(w[i]), n));
@@ -188,7 +195,7 @@ extern "C" __global__ void k6t_clip_embed(const float* __restrict__ tok, const f
 
 // nn.LayerNorm(dim, eps) on fp32 rows (layer_norm1 / layer_norm2 / final_layer_norm): torch's
 // vectorized_layer_norm_kernel with T = float: Welford statistics above, rstd = rsqrt(var + eps), then
-// `gamma * (rstd * (x - mean)) + beta`, every step rounded on its own. dim % 4 == 0.
+// `gamma * (rstd * (x - mean)) + beta`, with Torch's FMA contraction. dim % 4 == 0.
 // launch: block (32, 4), grid rows. y must not alias x.
 extern "C" __global__ void __launch_bounds__(128) k6t_layer_norm_f32(const float* __restrict__ x, const float* __restrict__ w,
                                                                      const float* __restrict__ b, float* __restrict__ y, int dim,

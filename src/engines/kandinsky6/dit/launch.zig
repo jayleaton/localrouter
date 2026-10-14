@@ -18,6 +18,7 @@ pub const Error = cuda.Error || error{ ViewMismatch, InvalidAttention, InvalidGe
 pub const Images = struct {
     gemm: []const u8,
     attention: []const u8,
+    flash: []const u8,
     ops: []const u8,
 };
 
@@ -63,11 +64,22 @@ fn i32of(v: anytype) i32 {
 pub const Kernels = struct {
     gemm_mod: cuda.Module,
     attn_mod: cuda.Module,
+    flash_mod: cuda.Module,
+    flash_fn: cuda.Function,
+    audio_flash_fn: cuda.Function,
+    va_flash_fn: cuda.Function,
+    av_flash_fn: cuda.Function,
+    av_combine_fn: cuda.Function,
+    audio_head_fn: cuda.Function,
+    audio_head_reset_fn: cuda.Function,
     ops_mod: cuda.Module,
     gemm_fn: cuda.Function,
+    visual_gemm_fn: cuda.Function,
     gemv_fn: cuda.Function,
     gemv_tf32_fn: cuda.Function,
     attn_fn: cuda.Function,
+    attn_sdpa_fn: cuda.Function,
+    attn_bias_fn: cuda.Function,
     cast_fn: cuda.Function,
     add_fn: cuda.Function,
     ln_fn: cuda.Function,
@@ -80,19 +92,37 @@ pub const Kernels = struct {
     grid_major_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver, images: Images) Error!Kernels {
-        if (images.gemm.len == 0 or images.attention.len == 0 or images.ops.len == 0) return error.Invalid;
+        if (images.gemm.len == 0 or images.attention.len == 0 or images.flash.len == 0 or images.ops.len == 0) return error.Invalid;
         var k: Kernels = undefined;
         k.gemm_mod = try cuda.Module.load(d, images.gemm);
         errdefer k.gemm_mod.unload();
         k.attn_mod = try cuda.Module.load(d, images.attention);
         errdefer k.attn_mod.unload();
+        k.flash_mod = try cuda.Module.load(d, images.flash);
+        errdefer k.flash_mod.unload();
+        k.flash_fn = try k.flash_mod.function("k6_visual_flash");
+        try k.flash_fn.allowDynamicShared(65536);
+        k.audio_flash_fn = try k.flash_mod.function("k6_audio_flash");
+        try k.audio_flash_fn.allowDynamicShared(65536);
+        k.va_flash_fn = try k.flash_mod.function("k6_va_flash");
+        try k.va_flash_fn.allowDynamicShared(65536);
+        k.av_flash_fn = try k.flash_mod.function("k6_av_flash");
+        try k.av_flash_fn.allowDynamicShared(81920);
+        k.av_combine_fn = try k.flash_mod.function("k6_av_combine");
+        k.audio_head_fn = try k.flash_mod.function("k6_audio_head_wmma");
+        k.audio_head_reset_fn = try k.flash_mod.function("k6_audio_head_reset");
         k.ops_mod = try cuda.Module.load(d, images.ops);
         errdefer k.ops_mod.unload();
         k.gemm_fn = try k.gemm_mod.function("k6_gemm_bf16");
+        k.visual_gemm_fn = try k.gemm_mod.function("k6_visual_gemm_bf16");
+        try k.visual_gemm_fn.allowDynamicShared(73728);
         k.gemv_fn = try k.gemm_mod.function("k6_gemv_f32");
         k.gemv_tf32_fn = try k.gemm_mod.function("k6_gemv_tf32");
         k.attn_fn = try k.attn_mod.function("k6_attention");
         try k.attn_fn.allowDynamicShared(attention.shared_bytes);
+        k.attn_sdpa_fn = try k.attn_mod.function("k6_attention_sdpa");
+        try k.attn_sdpa_fn.allowDynamicShared(52224);
+        k.attn_bias_fn = try k.attn_mod.function("k6_attention_padding_bias");
         inline for (.{
             .{ "cast_fn", "k6_cast_bf16" },        .{ "add_fn", "k6_add_bf16" },      .{ "ln_fn", "k6_layer_norm" },
             .{ "norm_mod_fn", "k6_norm_mod" },     .{ "gate_fn", "k6_gate_sum" },     .{ "qk_fn", "k6_qk_norm_rope" },
@@ -103,6 +133,7 @@ pub const Kernels = struct {
     }
 
     pub fn unload(k: *Kernels) void {
+        k.flash_mod.unload();
         k.ops_mod.unload();
         k.attn_mod.unload();
         k.gemm_mod.unload();
@@ -131,6 +162,42 @@ pub const Kernels = struct {
         a.add(@backingInt(epi));
         a.add(@as(i32, @intFromBool(vec)));
         try go(k.gemm_fn, s, .{ .x = blocks(n, 128), .y = blocks(m, 128) }, .{ .x = 256 }, 0, &a);
+    }
+
+    /// VisualEmbeddings uses the reference's aligned-2, K32, three-stage BF16 reduction.
+    pub fn visualGemm(k: *const Kernels, s: cuda.Stream, x: View, w: View, bias: View, out: View) Error!void {
+        const m = x.rows;
+        const n = w.rows;
+        const kd = x.cols;
+        try x.expect(.bf16, m, kd);
+        try w.expect(.bf16, n, kd);
+        try bias.expect(.bf16, 1, n);
+        try out.expect(.bf16, m, n);
+        if (m == 0 or m > std.math.maxInt(i32) or n == 0 or n > std.math.maxInt(i32) or kd > std.math.maxInt(i32) or
+            kd % 2 != 0 or x.ld % 2 != 0 or w.ld % 2 != 0 or out.ld % 2 != 0 or
+            x.ptr % 4 != 0 or w.ptr % 4 != 0 or bias.ptr % 4 != 0 or out.ptr % 4 != 0) return error.InvalidGemm;
+        var a: cuda.launch.Args = .{};
+        inline for (.{ x.ptr, w.ptr, bias.ptr, out.ptr }) |v| a.add(v);
+        inline for (.{ m, n, kd }) |v| a.add(i32of(v));
+        inline for (.{ x.ld, w.ld, out.ld }) |v| a.add(i64of(v));
+        try go(k.visual_gemm_fn, s, .{ .x = blocks(m, 256), .y = blocks(n, 128) }, .{ .x = 256 }, 73728, &a);
+    }
+
+    /// Captured audio-head reduction: eight serial K partitions with BF16 epilogues.
+    /// Reuses 91 semaphore words of caller-owned Flash scratch on the same stream.
+    pub fn audioHead(k: *const Kernels, s: cuda.Stream, x: View, w: View, bias: View, out: View, scratch: u64) Error!void {
+        try x.expect(.bf16, 218, 2048);
+        try w.expect(.bf16, 400, 2048);
+        try bias.expect(.bf16, 1, 400);
+        try out.expect(.bf16, 218, 400);
+        if (x.ld != 2048 or w.ld != 2048 or out.ld != 400 or
+            x.ptr % 16 != 0 or w.ptr % 16 != 0 or bias.ptr % 16 != 0 or out.ptr % 16 != 0 or scratch % 16 != 0) return error.InvalidGemm;
+        var reset: cuda.launch.Args = .{};
+        reset.add(scratch);
+        try go(k.audio_head_reset_fn, s, .{ .x = 1 }, .{ .x = 128 }, 0, &reset);
+        var a: cuda.launch.Args = .{};
+        inline for (.{ x.ptr, w.ptr, bias.ptr, out.ptr, scratch }) |v| a.add(v);
+        try go(k.audio_head_fn, s, .{ .x = 56, .y = 2, .z = 8 }, .{ .x = 128 }, 0, &a);
     }
 
     /// fp32 out[M, N] = act(x[M, K]) . float(w[N, K])^T + float(bias[N]): x fp32 or bf16, act SiLU when `silu`, out
@@ -165,8 +232,70 @@ pub const Kernels = struct {
         }
     }
 
-    pub fn attend(k: *const Kernels, s: cuda.Stream, c: attention.Call) Error!void {
+    pub fn attend(k: *const Kernels, s: cuda.Stream, c: attention.Call, bias: View, lse: View) Error!void {
         try c.validate();
+        if (c.mask == .keys) {
+            try bias.expect(.bf16, 1, c.k.rows);
+            var mask_args: cuda.launch.Args = .{};
+            mask_args.add(c.mask.keys.ptr);
+            mask_args.add(bias.ptr);
+            mask_args.add(i32of(c.k.rows));
+            try go(k.attn_bias_fn, s, .{ .x = blocks(c.k.rows, 256) }, .{ .x = 256 }, 0, &mask_args);
+            var sdpa_args: cuda.launch.Args = .{};
+            inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr, bias.ptr }) |p| sdpa_args.add(p);
+            sdpa_args.add(i32of(c.q.rows));
+            sdpa_args.add(i32of(c.k.rows));
+            inline for (.{ c.q.ld, c.k.ld, c.v.ld, c.out.ld }) |ld| sdpa_args.add(i64of(ld));
+            sdpa_args.add(c.scale);
+            try go(k.attn_sdpa_fn, s, .{ .x = blocks(c.q.rows, 64), .y = c.heads }, .{ .x = 32, .y = 8 }, 52224, &sdpa_args);
+            return;
+        }
+        if (c.q.rows == 50220 and c.k.rows == 50220 and c.heads == 32 and
+            c.q.ld == 4096 and c.k.ld == 4096 and c.v.ld == 4096 and c.out.ld == 4096 and
+            c.q.ptr % 16 == 0 and c.k.ptr % 16 == 0 and c.v.ptr % 16 == 0 and c.out.ptr % 16 == 0 and
+            c.scale == layout.attn_scale)
+        {
+            try lse.expect(.f32, 32, 50220);
+            var flash_args: cuda.launch.Args = .{};
+            inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr, lse.ptr }) |p| flash_args.add(p);
+            try go(k.flash_fn, s, .{ .x = 393, .y = 1, .z = 32 }, .{ .x = 128 }, 65536, &flash_args);
+            return;
+        }
+        if (c.q.rows == 50220 and c.k.rows == 218 and c.heads == 32 and
+            c.q.ld == 4096 and c.k.ld == 4096 and c.v.ld == 4096 and c.out.ld == 4096 and
+            c.q.ptr % 16 == 0 and c.k.ptr % 16 == 0 and c.v.ptr % 16 == 0 and c.out.ptr % 16 == 0 and
+            c.scale == layout.attn_scale)
+        {
+            try lse.expect(.f32, 32, 50220);
+            var flash_args: cuda.launch.Args = .{};
+            inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr, lse.ptr }) |p| flash_args.add(p);
+            try go(k.va_flash_fn, s, .{ .x = 393, .y = 1, .z = 32 }, .{ .x = 128 }, 65536, &flash_args);
+            return;
+        }
+        if (c.q.rows == 218 and c.k.rows == 50220 and c.heads == 16 and
+            c.q.ld == 2048 and c.k.ld == 2048 and c.v.ld == 2048 and c.out.ld == 2048 and
+            c.q.ptr % 16 == 0 and c.k.ptr % 16 == 0 and c.v.ptr % 16 == 0 and c.out.ptr % 16 == 0 and
+            c.scale == layout.attn_scale)
+        {
+            try lse.expect(.f32, 32, 50220);
+            var flash_args: cuda.launch.Args = .{};
+            inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr, lse.ptr }) |p| flash_args.add(p);
+            try go(k.av_flash_fn, s, .{ .x = 4, .y = 3, .z = 16 }, .{ .x = 128 }, 81920, &flash_args);
+            try go(k.av_combine_fn, s, .{ .x = 872 }, .{ .x = 128 }, 0, &flash_args);
+            return;
+        }
+        if (c.q.rows == 218 and c.k.rows == 218 and c.heads == 16 and
+            c.q.ld == 2048 and c.k.ld == 2048 and c.v.ld == 2048 and c.out.ld == 2048 and
+            c.q.ptr % 16 == 0 and c.k.ptr % 16 == 0 and c.v.ptr % 16 == 0 and c.out.ptr % 16 == 0 and
+            c.scale == layout.attn_scale)
+        {
+            // The audio kernel uses the first 16 * 218 elements of the shared LSE scratch.
+            try lse.expect(.f32, 32, 50220);
+            var flash_args: cuda.launch.Args = .{};
+            inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr, lse.ptr }) |p| flash_args.add(p);
+            try go(k.audio_flash_fn, s, .{ .x = 2, .y = 1, .z = 16 }, .{ .x = 128 }, 65536, &flash_args);
+            return;
+        }
         var a: cuda.launch.Args = .{};
         inline for (.{ c.q.ptr, c.k.ptr, c.v.ptr, c.out.ptr }) |p| a.add(p);
         a.add(switch (c.mask) {

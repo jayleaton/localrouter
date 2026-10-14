@@ -25,9 +25,18 @@ Stages (run in this order):
   clip    k6.clip.pooled per prompt (the CLIP part of Kandinsky6TextEmbedder.encode)
   text    k6.qwen.embeds per prompt (Kandinsky6TextEmbedder.encode itself; ids and mask from a forward pre-hook)
   vae     k6.vae.decode: postprocess_video on the noise video (or --vae-latent's final latent), with the decode plan
+          (--vae-free-bytes N: the tiling reads N as the free CUDA memory, so a recorded plan replays; checked)
+          [--vae-trace first-tile]: diagnostic k6.aux.vae.trace.* (also in e2e): decode.input, then QUALIFICATION.md's
+          decoder checkpoints at their first call (the first tile's decoder pass), then the first blend_v / blend_h / tiled_decode / blend_t
+          returns, each as fp16 [positions][channels] (channels last), the layout native's trace records
   dit0    k6.dit.step0: the DiT inputs and outputs of outer step 0 of the real pipeline (a forward hook)
   e2e     the full generate: k6.dit.step{i} each step, k6.vae.decode, the audio chain
           k6.audio.latent_in/mel/wave/pcm16 (chained=true, each in = the previous out), k6.e2e.frames, the mp4
+  audio_decoder  diagnostic: the audio VAE decode of --audio-input's k6.audio.latent_in (upstream's own unscale and
+          wrapped_decode), every native decoder hook as k6.aux.audio.decoder.* (audio_trace.py), stopped after
+          --audio-trace's op (the native `--audio-trace` values; none: through mel), plus per-tensor placement readbacks
+  vocoder diagnostic: upstream BigVGAN on --audio-input's k6.audio.mel, every stage as k6.aux.audio.vocoder.*
+          (forward hooks only), plus placement readbacks; checks the wave against that capture's k6.audio.wave if any
 A stage whose snapshot files are missing is skipped and recorded as `skipped: missing <file>` (nothing is fabricated).
 Exit 0 when every stage ran, 2 when some were skipped, 1 when one failed. One JSON line.
 """
@@ -55,9 +64,10 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import AUX, ORACLE, PIN_COMMIT, QUALIFICATION, read_capture, sha256_file
+from . import AUX, ORACLE, PIN_COMMIT, QUALIFICATION, audio_trace, read_capture, sha256_file
 
-STAGES = ("noise", "rope", "piflow", "clip", "text", "vae", "dit0", "e2e")
+STAGES = ("noise", "rope", "piflow", "clip", "text", "vae", "dit0", "e2e", "audio_decoder", "vocoder")
+AUDIO_DIAGNOSTIC_STAGES = {"audio_decoder", "vocoder"}  # need no prompts
 REFUSED_ENV = ("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "NVIDIA_TF32_OVERRIDE", "LD_PRELOAD")
 PRED_SEED = 1000  # the piflow stage's synthetic grid predictions: CUDA generator seeded seed + PRED_SEED + step
 AUDIO_DOWNSAMPLE = 1024  # mmaudio FeaturesUtils.downsample_factor, a constant there; the pipeline reads it off the VAE
@@ -76,7 +86,8 @@ AUDIO_FILES = ("audio_vae/config.json", "audio_vae/diffusion_pytorch_model.safet
 DIT_FILES = ("transformer/config.json", "transformer/diffusion_pytorch_model.safetensors")
 ALL_FILES = DIT_FILES + QWEN_FILES + CLIP_FILES + VAE_FILES + AUDIO_FILES
 NEEDS = {"noise": (), "rope": (), "piflow": (), "clip": CLIP_FILES, "text": QWEN_FILES + CLIP_FILES,
-         "vae": VAE_FILES, "dit0": ALL_FILES, "e2e": ALL_FILES}
+         "vae": VAE_FILES, "dit0": ALL_FILES, "e2e": ALL_FILES, "audio_decoder": AUDIO_FILES[:2],
+         "vocoder": AUDIO_FILES[2:]}
 
 REC = None  # stk_twin.rec.REC, imported after the cuBLAS logging environment is set (rec.py imports torch)
 
@@ -160,6 +171,7 @@ def upstream(src: Path) -> SimpleNamespace:
         pmath=imp("kandinsky.core.algo.piflow_math"), post_video=imp("kandinsky.core.algo.postprocess_video"),
         dit=imp("kandinsky.core.components.dit"), rope=imp("kandinsky.core.components.rope"),
         te=imp("kandinsky.core.components.text_embedder"), vae_video=imp("kandinsky.core.components.vae_video"),
+        vae_audio=imp("kandinsky.core.components.vae_audio"),
         weights=imp("kandinsky.runtime.weights"), types=imp("kandinsky.core.types"))
 
 
@@ -245,27 +257,137 @@ def decode_plan(vae, free: int | None) -> dict:
     return plan
 
 
+# --vae-trace: QUALIFICATION.md's decoder checkpoint names (tools/spark/k6-video-vae/oracle.py's hooks, decoder side)
+VAE_TRACE_MODULE = re.compile(r"^(post_quant_conv|decoder\.(conv_in|conv_act|conv_out)|decoder\.up_blocks\.\d+\.upsamplers\.0)$")
+VAE_TRACE_RESNET = re.compile(r"^decoder\.(mid_block|up_blocks\.\d+)\.resnets\.\d+$")
+VAE_TRACE_ATTN = re.compile(r"^decoder\.mid_block\.attentions\.0$")
+VAE_TRACE_METHODS = ("blend_v", "blend_h", "tiled_decode", "blend_t")
+
+
+def trace_pass(v: str) -> int:
+    """--vae-trace VALUE -> the decoder pass: first-tile is 0, pass-N is N."""
+    if v == "first-tile":
+        return 0
+    m = re.fullmatch(r"pass-(\d+)", v)
+    if m is None:
+        raise ValueError(f"--vae-trace {v!r}: first-tile or pass-N")
+    return int(m.group(1))
+
+
+def trace_rows(t, layout: str):
+    """[positions][channels], channels last (batch 1): ncthw (B, C, T, H, W) -> T*H*W x C; nnc (B, N, C) -> N x C;
+    ncn (B, C, N) -> N x C. N is T*H*W in that order, so each is the bytes native's [t][h][w][c] buffer holds."""
+    t = t.detach()
+    assert t.shape[0] == 1, tuple(t.shape)
+    if layout == "ncthw":
+        t = t.permute(0, 2, 3, 4, 1)
+    elif layout == "ncn":
+        t = t.transpose(1, 2)
+    return t.reshape(-1, t.shape[-1]).contiguous()
+
+
+class VaeTrace:
+    """--vae-trace first-tile | pass-N: forward hooks on the decoder's checkpoints in decoder pass N (first-tile: 0; a
+    module's calls of pass N; a resnet's shared `nonlinearity` SiLU: its two calls of the pass as .0 / .1) and
+    instance-attribute wrappers of the tile-assembly methods (first return), each recorded as k6.aux.vae.trace.<name>.
+    Every wrapper returns the native value untouched."""
+
+    def __init__(self, vae, pass_index: int = 0):
+        self.vae, self.handles, self.calls = vae, [], {}
+        mods = dict(vae.named_modules())
+
+        def hook(name, layout, ncalls=1):
+            def f(_m, _inp, out):
+                k = self.calls.get(name, 0)
+                self.calls[name] = k + 1
+                lo = pass_index * ncalls
+                if lo <= k < lo + ncalls:
+                    self.put(f"{name}.{k - lo}" if ncalls > 1 else name, out, layout)
+            self.handles.append(mods[name].register_forward_hook(f))
+
+        for name, m in mods.items():
+            if VAE_TRACE_MODULE.match(name):
+                hook(name, "ncthw")
+            elif VAE_TRACE_RESNET.match(name):
+                hook(f"{name}.nonlinearity", "ncthw", 2)
+                hook(f"{name}.conv1", "ncthw")
+                if m.conv_shortcut is not None:
+                    hook(f"{name}.conv_shortcut", "ncthw")
+                hook(name, "ncthw")
+            elif VAE_TRACE_ATTN.match(name):
+                hook(f"{name}.group_norm", "ncn")  # applied to h.transpose(1, 2): (B, C, N)
+                for p in ("to_q", "to_k", "to_v"):
+                    hook(f"{name}.{p}", "nnc")
+                hook(name, "nnc")
+        for name in VAE_TRACE_METHODS:
+            setattr(vae, name, self.method(name, getattr(vae, name)))
+
+    def method(self, name, fn):
+        def w(*a, **kw):
+            r = fn(*a, **kw)
+            if name not in self.calls:
+                self.calls[name] = 1
+                self.put(name, r.sample if hasattr(r, "sample") else r[0] if isinstance(r, tuple) else r, "ncthw")
+            return r
+        return w
+
+    def put(self, name, t, layout):
+        with REC.op(AUX + "vae.trace." + name, "vae", {}) as o:
+            o.out(x=trace_rows(t, layout))
+
+    def remove(self):
+        for h in self.handles:
+            h.remove()
+        for name in VAE_TRACE_METHODS:
+            delattr(self.vae, name)  # back to the class methods
+
+
 def decode_op(ctx, vae, bundle, postprocess, bs: int = 1):
     """postprocess_video (upstream's own function) recorded as k6.vae.decode; vae.decode is wrapped only to record
-    its fp16 input and the free memory the tiling plan reads."""
+    its fp16 input and the free memory the tiling plan reads. --vae-free-bytes N makes torch.cuda.mem_get_info report N
+    free for the call (the tiling's only input from the device; nothing else reads it here), and the plan's
+    note_free_bytes is checked to be N. A pre-hook counts the decoder passes (note_decoder_passes)."""
     torch = ctx.torch
-    seen = {}
-    orig = vae.decode
+    seen = {"passes": 0}
+    orig, real_mem = vae.decode, torch.cuda.mem_get_info
+    forced = ctx.args.vae_free_bytes
+
+    def mem_get_info(device=None):
+        return forced, real_mem(device)[1]
 
     def decode(z, *a, **kw):
         seen["free"] = int(torch.cuda.mem_get_info(z.device)[0])
         seen["z"] = z
+        if trace is not None:
+            trace.put("decode.input", z, "ncthw")  # QUALIFICATION.md's decode.input; native marks it first
         return orig(z, *a, **kw)
 
-    vae.decode = decode
+    def count(*_):
+        seen["passes"] += 1
+
+    passes = trace = None
     attrs = {"bs": bs}
     try:
+        vae.decode = decode
+        passes = vae.decoder.register_forward_pre_hook(count)
+        trace = VaeTrace(vae, trace_pass(ctx.args.vae_trace)) if ctx.args.vae_trace else None
+        if forced:
+            torch.cuda.mem_get_info = mem_get_info
         with REC.op("k6.vae.decode", "vae", attrs, latent=bundle.video) as o:
             frames = postprocess(bundle, vae, bs=bs)
             attrs.update(decode_plan(vae, seen.get("free")))
+            attrs["note_decoder_passes"] = seen["passes"]
             o.out(frames=frames)
     finally:
-        del vae.decode
+        torch.cuda.mem_get_info = real_mem
+        if passes is not None:
+            passes.remove()
+        if trace is not None:
+            trace.remove()
+        vars(vae).pop("decode", None)
+    if forced:
+        check(ctx, "vae.forced_free_bytes", attrs["note_free_bytes"] == forced, forced=forced,
+              recorded=attrs["note_free_bytes"], tile_size=attrs["tile_size"], passes=seen["passes"])
     with REC.op(AUX + "vae.decoder_in", "vae", {}) as o:
         o.out(z=seen["z"])
     return frames
@@ -410,16 +532,58 @@ def stage_clip(ctx) -> None:
     model = TE._load_clip_text_model(path).to(ctx.dev).eval()  # as Kandinsky6TextEmbedder.__init__
     tok = TE.CLIPTokenizer.from_pretrained(TE.clip_tokenizer_dir(path))
     ctx.state["clip"] = {}
-    for i, p in enumerate(ctx.prompts):
-        # text_embedder.py Kandinsky6TextEmbedder.encode, its CLIP section, for one caption
-        inputs = tok([p], max_length=77, truncation=True, add_special_tokens=True, padding="max_length",
-                     return_tensors="pt").to(model.device)
-        pooled = model(**inputs)["pooler_output"]
-        ctx.state["clip"][i] = pooled
-        with REC.op("k6.clip.pooled", "clip", {"prompt": i}, ids=inputs["input_ids"]) as o:
-            o.out(pooled=pooled)
-        with REC.op(AUX + "clip.mask", "clip", {"prompt": i}) as o:
-            o.out(mask=inputs["attention_mask"])
+    hooks = first_text_layer_hooks(model, clip=True)
+    try:
+        for i, p in enumerate(ctx.prompts):
+            # text_embedder.py Kandinsky6TextEmbedder.encode, its CLIP section, for one caption
+            inputs = tok([p], max_length=77, truncation=True, add_special_tokens=True, padding="max_length",
+                         return_tensors="pt").to(model.device)
+            pooled = model(**inputs)["pooler_output"]
+            ctx.state["clip"][i] = pooled
+            with REC.op("k6.clip.pooled", "clip", {"prompt": i}, ids=inputs["input_ids"]) as o:
+                o.out(pooled=pooled)
+            with REC.op(AUX + "clip.mask", "clip", {"prompt": i}) as o:
+                o.out(mask=inputs["attention_mask"])
+    finally:
+        for h in hooks:
+            h.remove()
+
+
+def first_text_layer_hooks(model, clip: bool = False) -> list:
+    """Observe the same first-layer buffers as native's diagnostic hook; never replace their values."""
+    keys = ("embeddings", "encoder.layers.0.layer_norm1", "encoder.layers.0.self_attn.q_proj",
+            "encoder.layers.0.self_attn.k_proj", "encoder.layers.0.self_attn.v_proj",
+            "encoder.layers.0.self_attn.out_proj", "encoder.layers.0.layer_norm2",
+            "encoder.layers.0.mlp.fc1", "encoder.layers.0.mlp.fc2") if clip else (
+                "embed_tokens", "layers.0.input_layernorm", "layers.0.self_attn.q_proj",
+                "layers.0.self_attn.k_proj", "layers.0.self_attn.v_proj", "layers.0.self_attn.o_proj",
+                "layers.0.post_attention_layernorm", "layers.0.mlp.gate_proj", "layers.0.mlp.up_proj",
+                "layers.0.mlp.down_proj")
+    if not clip:
+        keys += tuple(k.replace("layers.0.", "layers.1.") for k in keys if k.startswith("layers.0."))
+    hooks = []
+    for name, module in model.named_modules():
+        key = next((k for k in keys if name == k or name.endswith("." + k)), None)
+        parts = name.split(".")
+        if not clip and len(parts) >= 2 and parts[-2] == "layers" and parts[-1].isdigit():
+            key = "layers." + parts[-1] + ".mlp_residual"
+        if key is None:
+            continue
+        def observe(_module, _inputs, output, key=key):
+            if isinstance(output, tuple):
+                output = output[0]
+            raw = output.detach().contiguous().view(ctx_torch.uint8).reshape(-1)
+            with REC.op(AUX + "text." + key, "diagnostic") as op:
+                op.out(raw=raw)
+        import torch as ctx_torch
+        hooks.append(module.register_forward_hook(observe))
+        if (not clip and key in ("layers.0.self_attn.o_proj", "layers.1.self_attn.o_proj")) or (clip and key == "encoder.layers.0.self_attn.out_proj"):
+            def observe_attention_input(_module, inputs, attention_key=key.replace("out_proj", "sdpa").replace("o_proj", "sdpa")):
+                raw = inputs[0].detach().contiguous().view(ctx_torch.uint8).reshape(-1)
+                with REC.op(AUX + "text." + attention_key, "diagnostic") as op:
+                    op.out(raw=raw)
+            hooks.append(module.register_forward_pre_hook(observe_attention_input))
+    return hooks
 
 
 def stage_text(ctx) -> None:
@@ -428,9 +592,17 @@ def stage_text(ctx) -> None:
                                    max_length=cfg.text_embedder.max_length, device=ctx.dev,
                                    quantized_qwen=cfg.text_embedder.quantized_qwen,
                                    text_token_padding=cfg.dit.text_token_padding)  # factory.py, offload none
+    # Native requires the actual initialized Qwen RoPE buffer, not a re-derived
+    # approximation. Keep this auxiliary capture outside the embedding bit gate.
+    inv = [(name, buf) for name, buf in te.qwen.named_buffers() if name.endswith("rotary_emb.inv_freq")]
+    if len(inv) != 1 or inv[0][1].numel() != 64:
+        raise RuntimeError("Qwen rotary inv_freq is not the single 64-value reference buffer")
+    with REC.op(AUX + "qwen.inv_freq", "freqs", {"buffer": inv[0][0]}) as o:
+        o.out(inv_freq=inv[0][1])
     seen = {}
     hooks = [te.qwen.register_forward_pre_hook(lambda m, a, kw: seen.__setitem__("qwen", kw), with_kwargs=True),
              te.clip.register_forward_pre_hook(lambda m, a, kw: seen.__setitem__("clip", kw), with_kwargs=True)]
+    hooks += first_text_layer_hooks(te.qwen) + first_text_layer_hooks(te.clip, clip=True)
     ctx.state["text"] = {}
     try:
         for i, p in enumerate(ctx.prompts):
@@ -468,6 +640,93 @@ def stage_vae(ctx) -> None:
         lat = noise(ctx).video.reshape(1, G.T, G.Hl, G.Wl, G.C)
     bundle = K.types.LatentBundle(video=lat, audio=None, video_cu_seqlens=None, audio_cu_seqlens=None)
     decode_op(ctx, vae, bundle, K.post_video.postprocess_video)
+
+
+def audio_input(ctx, name: str, role: str):
+    """The one `name` op's `role` output of --audio-input (a capture: a reference e2e run or an audio reference)."""
+    if not ctx.args.audio_input:
+        raise ValueError(f"--audio-input is required: a capture holding {name}")
+    root = Path(ctx.args.audio_input)
+    ops, _ = read_capture(root)
+    refs = [op["outs"][role] for op in ops if op.get("name") == name]
+    if len(refs) != 1:
+        raise ValueError(f"{root}: expected one {name} op, found {len(refs)}")
+    REC.note("audio_input", capture=str(root), op=name, role=role, sha=refs[0]["sha"])
+    return load_ref(ctx.torch, root, refs[0]).to(ctx.dev), refs[0]
+
+
+def placed(ctx, label: str, module):
+    """Moves a module built on the CPU to the device; notes each state tensor's CPU and device-readback sha256."""
+    torch = ctx.torch
+
+    def digest(t) -> str:
+        return hashlib.sha256(t.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()).hexdigest()
+
+    cpu = {k: digest(v) for k, v in module.state_dict().items()}
+    module = module.to(ctx.dev)
+    ok = True
+    for k, v in module.state_dict().items():
+        dev = digest(v)
+        REC.note("placement", module=label, key=k, cpu_sha256=cpu[k], gpu_readback_sha256=dev, shape=list(v.shape))
+        ok = ok and cpu[k] == dev
+    check(ctx, f"{label}.placement_readback", ok and len(cpu) > 0, tensors=len(cpu))
+    return module
+
+
+def aux_record(torch, prefix: str):
+    """record(name, tensor) -> k6.aux.audio.<prefix>.<name>, role raw, the tensor's contiguous bytes (as native)."""
+    def record(name: str, t) -> None:
+        with REC.op(f"{AUX}audio.{prefix}.{name}", "diagnostic") as o:
+            o.out(raw=t.detach().contiguous().reshape(-1).view(torch.uint8))
+    return record
+
+
+def stage_audio_decoder(ctx) -> None:
+    torch, av = ctx.torch, ctx.cfg.audio_vae
+    au = ctx.K.vae_audio.build_audio_vae(tod_vae_ckpt=av.tod_vae_ckpt, mode=av.mode, need_vae_encoder=av.need_vae_encoder,
+                                         need_vae_decoder=av.need_vae_decoder, scaling_factor=av.scaling_factor,
+                                         device="cpu")
+    au = placed(ctx, "audio_vae", au)
+    latent, _ = audio_input(ctx, "k6.audio.latent_in", "latent")
+    stop = audio_trace.STOPS[ctx.args.audio_trace] if ctx.args.audio_trace else None
+    seen = []
+    aux = aux_record(torch, "decoder")
+
+    def record(name: str, t) -> None:
+        seen.append(name)
+        aux(name, t)
+    # postprocess_audio (core/algo/postprocess_audio.py): unscale, one equal-length segment, [B, A, C] -> [B, C, A]
+    # through torch.stack(...).transpose(1, 2); then wrapped_decode's .to(dtype) and FeaturesUtils.decode's mode
+    scaled = latent / getattr(au, "scaling_factor", 1.0)
+    scaled = scaled + getattr(au, "mean_value", 0.0)
+    z = torch.stack([scaled[i] for i in range(scaled.shape[0])]).transpose(1, 2).to(dtype=au.dtype)
+    record("latent_unscale", z)
+    try:
+        with torch.inference_mode():
+            audio_trace.decode(au.tod.vae, z, record, stop)
+    except audio_trace.TraceStop as e:
+        REC.note("diagnostic_stop", after=e.after, qualification=QUALIFICATION)
+    names = audio_trace.DECODER_NAMES
+    upto = names.index(stop) + 1 if stop else len(names)
+    check(ctx, "audio_decoder.hook_names", tuple(seen) == names[:upto], recorded=len(seen), expected=upto)
+
+
+def stage_vocoder(ctx) -> None:
+    torch = ctx.torch
+    model = placed(ctx, "vocoder", ctx.K.vae_audio.build_vocoder(ckpt=ctx.cfg.vocoder.ckpt, device="cpu"))
+    mel, _ = audio_input(ctx, "k6.audio.mel", "mel")
+    hooks = audio_trace.vocoder_hooks(model, aux_record(torch, "vocoder"))
+    try:
+        wave = model(mel)  # as postprocess_audio's waveform_from calls it (under its torch.no_grad)
+    finally:
+        for h in hooks:
+            h.remove()
+    root = Path(ctx.args.audio_input)
+    ops, _ = read_capture(root)
+    refs = [op["outs"]["wave"] for op in ops if op.get("name") == "k6.audio.wave"]
+    if len(refs) == 1:
+        check(ctx, "vocoder.wave_equals_input_capture", torch.equal(wave, load_ref(torch, root, refs[0]).to(ctx.dev)),
+              capture_sha=refs[0]["sha"])
 
 
 def load_ref(torch, root: Path, ref: dict):
@@ -607,7 +866,9 @@ def device_note(torch) -> dict:
         if not k.startswith("_"):
             v = getattr(p, k, None)
             if isinstance(v, (int, float, str, bool)):
-                dev[k] = v
+                # Rec.note's first argument names the record; the CUDA device's
+                # `name` property must not collide with that argument.
+                dev["device_name" if k == "name" else k] = v
     dev["uuid"] = str(getattr(p, "uuid", ""))
     dev["multiProcessorCount"] = p.multi_processor_count
     dev["maxThreadsPerMultiProcessor"] = getattr(p, "max_threads_per_multi_processor", None)
@@ -799,6 +1060,15 @@ def main() -> None:
     ap.add_argument("--compile", default="none", choices=("none", "torch"))
     ap.add_argument("--e2e-prompt", type=int, default=0, help="the prompt line dit0/e2e generate")
     ap.add_argument("--vae-latent", default="", help="decode this capture's final latent instead of the noise")
+    ap.add_argument("--vae-free-bytes", type=int, default=0,
+                    help="the free CUDA memory the VAE's tiling reads (a recorded note_free_bytes); 0: the device's")
+    ap.add_argument("--vae-trace", default="", type=lambda v: (trace_pass(v), v)[1] if v else v,
+                    help="first-tile | pass-N: diagnostic k6.aux.vae.trace.* checkpoints of decoder pass N (first-tile:"
+                         " 0) and the first blends / tile assembly (vae and e2e stages)")
+    ap.add_argument("--audio-input", default="",
+                    help="audio_decoder / vocoder: the capture holding k6.audio.latent_in / k6.audio.mel")
+    ap.add_argument("--audio-trace", default="", choices=("", *audio_trace.STOPS),
+                    help="audio_decoder: stop after that op, as native --audio-trace (default: through mel)")
     ap.add_argument("--oracle-prefix", default="", help=f"require running from this staged prefix ({ORACLE['prefix']})")
     ap.add_argument("--probe-imports", action="store_true",
                     help="import upstream exactly as a capture does (CPU only, no model, no output), print the\n"
@@ -806,13 +1076,19 @@ def main() -> None:
     a = ap.parse_args()
     if a.probe_imports:
         return probe_imports(Path(a.src).absolute(), a.oracle_prefix)
-    missing = [f"--{n.replace('_', '-')}" for n in ("model", "stages", "prompt_file", "out") if getattr(a, n) is None]
+    missing = [f"--{n.replace('_', '-')}" for n in ("model", "stages", "out") if getattr(a, n) is None]
     if missing:
         ap.error(f"the following arguments are required: {', '.join(missing)}")
 
+    if a.vae_free_bytes < 0:
+        ap.error("--vae-free-bytes must be positive (0: the device's own free memory)")
     wanted = {s.strip() for s in a.stages.split(",") if s.strip()}
     if not wanted or wanted - set(STAGES):
         raise SystemExit(f"capture: unknown stages {sorted(wanted - set(STAGES))}; known {list(STAGES)}")
+    if a.prompt_file is None and not wanted <= AUDIO_DIAGNOSTIC_STAGES:
+        ap.error("the following arguments are required: --prompt-file")
+    if (wanted & AUDIO_DIAGNOSTIC_STAGES) and not a.audio_input:
+        ap.error("audio_decoder / vocoder need --audio-input")
     stages = [s for s in STAGES if s in wanted]
     bad = [v for v in REFUSED_ENV if v in os.environ]
     if bad:
@@ -820,9 +1096,9 @@ def main() -> None:
     out, model, src = Path(a.out).absolute(), Path(a.model).absolute(), Path(a.src).absolute()
     if out.exists():
         raise SystemExit(f"capture: {out} exists; a capture never overwrites")
-    pf = Path(a.prompt_file)
-    prompts = [ln.strip() for ln in pf.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-    if not prompts or not 0 <= a.e2e_prompt < len(prompts):
+    pf = Path(a.prompt_file) if a.prompt_file is not None else None
+    prompts = [ln.strip() for ln in pf.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")] if pf else []
+    if pf is not None and (not prompts or not 0 <= a.e2e_prompt < len(prompts)):
         raise SystemExit(f"capture: {pf} has {len(prompts)} prompts; --e2e-prompt {a.e2e_prompt}")
     if not model.is_dir():
         raise SystemExit(f"capture: no snapshot directory {model}")
@@ -848,8 +1124,9 @@ def main() -> None:
                           prompts=prompts, args=a, out=out, attention=a.attention, state={}, checks={})
     hf_dit = model / "transformer" / "config.json"
     REC.note("oracle", **oracle)
-    REC.note("request", qualification=QUALIFICATION, argv=sys.argv, stages=stages, seed=a.seed, prompts=prompts, prompt_file=str(pf),
-             prompt_file_sha256=sha256_file(pf), model=str(model), e2e_prompt=a.e2e_prompt, vae_latent=a.vae_latent,
+    REC.note("request", qualification=QUALIFICATION, argv=sys.argv, stages=stages, seed=a.seed, prompts=prompts, prompt_file=str(pf) if pf else None,
+             prompt_file_sha256=sha256_file(pf) if pf else None, audio_input=a.audio_input, audio_trace=a.audio_trace, model=str(model), e2e_prompt=a.e2e_prompt, vae_latent=a.vae_latent,
+             vae_free_bytes=a.vae_free_bytes or None, vae_trace=a.vae_trace or None,
              pred_seed_offset=PRED_SEED, geometry=vars(ctx.geo) | {"rope": list(ctx.geo.rope)})
     REC.note("upstream", src=str(src), commit=K.commit, tree_sha256=K.tree, kandinsky_sr=K.sr,
              config_file="/".join(CONFIG), config=cfg.model_dump(mode="json"),
@@ -862,7 +1139,8 @@ def main() -> None:
 
     fns = {"noise": stage_noise, "rope": stage_rope, "piflow": stage_piflow, "clip": stage_clip, "text": stage_text,
            "vae": stage_vae, "dit0": lambda c: stage_pipeline(c, True, False),
-           "e2e": lambda c: stage_pipeline(c, True, True)}
+           "e2e": lambda c: stage_pipeline(c, True, True), "audio_decoder": stage_audio_decoder,
+           "vocoder": stage_vocoder}
     status = {}
     with contextlib.ExitStack() as es:
         es.enter_context(torch.no_grad())
