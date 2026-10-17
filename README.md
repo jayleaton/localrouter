@@ -148,6 +148,7 @@ remain registered but cannot generate without their kernels.
 ```bash
 zig build                                    # zig-out/bin/localrouter
 zig build test                               # unit + integration tests (a real daemon and real workers)
+zig build integration-exe && zig-out/bin/integration-test   # the integration tests one at a time, each named as it runs
 zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120   # with the GPU engines
 localrouter check selftest                   # a private daemon, one image and one video, no GPU
 ```

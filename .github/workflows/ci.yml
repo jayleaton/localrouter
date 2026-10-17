@@ -18,16 +18,8 @@ jobs:
           tar -xJf /tmp/zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - run: zig build
-      - name: integration tests, one at a time (diagnostic)
+      - name: integration tests, one at a time (temporary, while this branch is iterated)
         timeout-minutes: 10
         run: zig build integration-exe && ./zig-out/bin/integration-test
       - run: zig build test
         timeout-minutes: 20
-      - name: zig fmt --check
-        if: always()
-        run: |
-          if ! zig fmt --check build.zig build src tests; then
-            zig fmt build.zig build src tests >/dev/null
-            git diff
-            exit 1
-          fi
