@@ -46,8 +46,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     it_mod.addOptions("build_options", it_opts);
-    const integration = b.addRunArtifact(b.addTest(.{ .root_module = it_mod }));
+    const it_test = b.addTest(.{ .root_module = it_mod });
+    const integration = b.addRunArtifact(it_test);
     integration.has_side_effects = true;
+    // The same tests as a program, run outside the build runner so each test's name and output appear as it runs.
+    b.step("integration-exe", "Install the integration tests as zig-out/bin/integration-test").dependOn(&b.addInstallArtifact(it_test, .{ .dest_sub_path = "integration-test" }).step);
 
     // Self-test: the binary starts its own daemon and makes an image and a video through the API.
     const selftest = b.addRunArtifact(exe);
