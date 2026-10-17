@@ -3,11 +3,12 @@
 
     python3 -I tools/speech/drama3/qualify.py assets ROOT CONFIG OUT [--tool ID]
     python3 -I tools/speech/drama3/qualify.py e2e    ROOT CONFIG OUT [--tool ID]
+    python3 -I tools/speech/drama3/qualify.py accuracy ROOT CONFIG OUT --reference RUNTIME [--tool ID]
     python3 -I tools/speech/drama3/qualify.py marker ROOT CONFIG OUT [--tool ID] [--write --accept-native-numerics]
 
 ROOT is the asset root fetch.sh and build.sh filled. CONFIG is the LocalRouter config: its drama3 tool (the speech
 tool whose cmd ends in drama3_worker.py; --tool picks one by id) and its top-level "gpu_lock". qualify.sh runs the
-three in order, each under a time limit, and is what an operator runs; OUT receives report.json and the audio.
+four in order, each under a time limit, and is what an operator runs; OUT receives report.json and the audio.
 
 assets checks that the tool serves ROOT's own layout, that the upstream checkout and every checkpoint file match
 pins.json by sha256 (fetch.sh --check, which also runs upstream's checkpoint.sha256), and that ROOT/engine.json
@@ -23,8 +24,11 @@ and require_qualification=False, on the real GPU:
   refusal  an unknown voice is refused as invalid_request_error, and the server stays up.
   long     with long_form, an input over long_form_chars is spoken in segments.
   unload   exit: the unit is inactive, the lock is free and MemAvailable is back within 2 GiB of its level before load.
-marker writes the tool's "qualification" file (--write, only with --accept-native-numerics and passing assets and
-e2e reports); without --write it writes nothing and warns if a marker that says qualified is already there.
+accuracy runs upstream's own qualification/ checks against the SGLang-Omni reference (see accuracy()); their
+verdicts are recorded, and do not decide acceptance.
+marker writes the tool's "qualification" file (--write, only with --accept-native-numerics, passing assets and e2e
+reports and an accuracy report with valid evidence, whose results it records); without --write it writes nothing
+and warns if a marker that says qualified is already there.
 """
 
 import argparse
@@ -416,6 +420,136 @@ def e2e(args):
             sys.exit(rc)
 
 
+# ── accuracy ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+GUARD_LIMIT_S = 900  # each guarded run: the guard's own 600 s unit deadline, plus admission and teardown
+
+
+def run_logged(argv, log_path, timeout):
+    """One command with its output in log_path; its exit code, or None when it outlived timeout."""
+    with open(log_path, "w") as log:
+        log.write(" ".join(argv) + "\n")
+        log.flush()
+        try:
+            return subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            return None
+
+
+def accuracy(args):
+    """Upstream's own accuracy checks against the SGLang-Omni reference, run as qualification/README.md runs them.
+
+    backbone  qualification/backbone-reference-check.py: the 40-layer backbone prefill of upstream's 182-token
+              fixture, native chunks 1/7/128 against one reference extend (hidden states and semantic logits), in
+              run-bounded-oracle.py's guard (the launcher's admission, cap, abort floor and the shared GPU lock).
+    rescore   qualification/rescore-native.py: the same native outputs under upstream's registered worst-row bar
+              (0.8712518909203973), every other threshold unchanged; CPU.
+    tower     qualification/tower-reference-check.py: the 13-layer tower, teacher-forced, at 1, 7 and 128 rows
+              against the reference's unfused AudioDecoder, in the guard.
+    They need RUNTIME (--reference): venv/ with the reference's dependencies and sglang-omni/ checked out at
+    recipe/sources.json's reference revision, as upstream's recipe describes. Their verdicts are recorded, pass or
+    fail; they do not decide the qualification (--accept-native-numerics does). This role fails only when the checks
+    could not produce valid evidence.
+    """
+    _, tool = load_tool(args.config, args.tool)
+    root = os.path.realpath(args.root)
+    up = os.path.join(root, "drama-tensorfold")
+    q = os.path.join(up, "qualification")
+    sources = read_json(os.path.join(up, "recipe", "sources.json"))
+    revision = sources["reference_runtime"]["revision"]
+    report = {"run": False, "reference_revision": revision, "upstream_reports_qualified": sources.get("native_drama_qualified"),
+              "checks": {}, "passed": False}
+
+    def finish(code):
+        with open(os.path.join(args.out, "report.json"), "w") as f:
+            json.dump(report, f, indent=1)
+        print(json.dumps({k: report[k] for k in ("run", "passed")} | {"error": report.get("error")}))
+        return code
+
+    if not args.reference:
+        report["error"] = ("no --reference RUNTIME: upstream's accuracy checks need the SGLang-Omni reference "
+                           f"(venv/ and sglang-omni/ at {revision})")
+        return finish(1)
+    runtime = os.path.realpath(args.reference)
+    py = os.path.join(runtime, "venv", "bin", "python")
+    head = git_head(os.path.join(runtime, "sglang-omni"))
+    engine = os.path.join(root, "build", "tensorfold")
+    missing = [p for p in (py, os.path.join(engine, "zig-out/oracle/bin/tf-drama-backbone-oracle"),
+                           os.path.join(engine, "zig-out/oracle/bin/tf-drama-tower-oracle")) if not os.path.isfile(p)]
+    if missing or head != revision:
+        report["error"] = f"the reference runtime or the oracle tools are not ready: missing {missing}, sglang-omni at {head}"
+        return finish(1)
+    lock = (read_json(args.config).get("gpu_lock") or "")
+    checkpoint = tool_paths(tool)["checkpoint"]
+    report["run"] = True
+    guard = [sys.executable, "-B", os.path.join(q, "run-bounded-oracle.py"), "--gpu-lock", lock, "--runtime-dir", runtime]
+    common = ["--checkpoint", checkpoint, "--reference", os.path.join(runtime, "sglang-omni"), "--engine", engine]
+    backbone, tower = os.path.join(args.out, "backbone"), os.path.join(args.out, "tower")
+    rescore = os.path.join(args.out, "rescore.json")
+
+    rc = run_logged([*guard, os.path.join(args.out, "backbone-guard"), py, "-B",
+                     os.path.join(q, "backbone-reference-check.py"), backbone, *common],
+                    os.path.join(args.out, "backbone.log"), GUARD_LIMIT_S)
+    report["checks"]["backbone"] = summarize_backbone(backbone, rc)
+    if report["checks"]["backbone"].get("evidence_valid"):
+        rc = run_logged([py, "-B", os.path.join(q, "rescore-native.py"), os.path.join(backbone, "native"), backbone, rescore],
+                        os.path.join(args.out, "rescore.log"), 300)
+        report["checks"]["rescore"] = summarize_rescore(rescore, rc)
+    else:
+        report["checks"]["rescore"] = {"evidence_valid": False, "passed": False, "error": "no valid backbone outputs"}
+    rc = run_logged([*guard, os.path.join(args.out, "tower-guard"), py, "-B",
+                     os.path.join(q, "tower-reference-check.py"), tower, *common],
+                    os.path.join(args.out, "tower.log"), GUARD_LIMIT_S)
+    report["checks"]["tower"] = summarize_tower(tower, rc)
+    checks = report["checks"].values()
+    report["evidence_valid"] = all(c.get("evidence_valid") for c in checks)
+    report["passed"] = report["evidence_valid"] and all(c.get("passed") for c in checks)
+    return finish(0 if report["evidence_valid"] else 1)
+
+
+def summarize_backbone(out, rc):
+    try:
+        r = read_json(os.path.join(out, "results.json"))
+    except (OSError, ValueError) as e:
+        return {"evidence_valid": False, "passed": False, "exit": rc, "error": f"no results.json: {e}"}
+    chunks = {}
+    for name, c in (r.get("comparisons") or {}).items():
+        h, s = c["hidden"], c["semantic"]
+        chunks[name] = {"pass": c["pass"], "hidden_cosine": h["all_rows"]["cosine"],
+                        "hidden_relative_l2": h["all_rows"]["relative_l2"], "hidden_min_row_cosine": h["rows"]["min_cosine"],
+                        "hidden_last_row_cosine": h["last_row"]["cosine"], "semantic_top1_equal": s["top1_equal"],
+                        "semantic_top30_overlap": s["top30_overlap"], "semantic_kl": s["kl_reference_to_native"]}
+    return {"evidence_valid": r.get("evidence_valid") is True, "passed": r.get("passed") is True, "exit": rc,
+            "thresholds": r.get("thresholds"), "chunks": chunks, "errors": r.get("errors", [])}
+
+
+def summarize_rescore(path, rc):
+    try:
+        r = read_json(path)
+    except (OSError, ValueError) as e:
+        return {"evidence_valid": False, "passed": False, "exit": rc, "error": f"no rescore: {e}"}
+    return {"evidence_valid": True, "passed": r.get("passed") is True, "exit": rc,
+            "worst_row_bar": r["thresholds_revised"]["hidden_min_row_cosine"],
+            "chunks": {k: {"hidden_min_row_cosine": c["hidden_min_row_cosine"], "failing_gates": c["failing_gates"]}
+                       for k, c in r.get("chunks", {}).items()}}
+
+
+def summarize_tower(out, rc):
+    try:
+        r = read_json(os.path.join(out, "results.json"))
+    except (OSError, ValueError) as e:
+        return {"evidence_valid": False, "passed": False, "exit": rc, "error": f"no results.json: {e}"}
+    cases = []
+    for c in r.get("cases", []):
+        h, head = c.get("hidden") or {}, c.get("head9") or {}
+        cases.append({"rows": c.get("rows"), "pass": c.get("pass"), "hidden_cosine": h.get("cosine"),
+                      "hidden_relative_l2": h.get("relative_l2"), "head9_top1_equal": head.get("top1_equal"),
+                      "head9_top30_overlap": head.get("top30_overlap"), "head9_kl": head.get("kl_reference_to_native")})
+    return {"evidence_valid": bool(cases), "passed": r.get("passed") is True, "exit": rc,
+            "thresholds": r.get("thresholds"), "cases": cases,
+            "torch_version": r.get("torch_version"), "sglang_version": r.get("sglang_version")}
+
+
 # ── marker ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def marker(args):
@@ -454,6 +588,15 @@ def marker(args):
         if not ok:
             print(f"qualify.py: {args.out}/{step}/report.json does not pass; no marker", file=sys.stderr)
             return 1
+    try:
+        acc = read_json(os.path.join(args.out, "accuracy", "report.json"))
+    except (OSError, ValueError):
+        acc = {}
+    if not (acc.get("run") and acc.get("evidence_valid")):
+        # Their verdict does not decide acceptance, but a qualification records it: no valid run, no marker.
+        print(f"qualify.py: upstream's accuracy checks did not run with valid evidence ({acc.get('error')}); no marker",
+              file=sys.stderr)
+        return 1
     engine = read_json(os.path.join(os.path.realpath(args.root), "engine.json"))
     native = tool_paths(tool)["native_bin"]
     digest = kw.sha256_file(native)
@@ -468,7 +611,10 @@ def marker(args):
     record = {"qualified": True, "model": MODEL, "host": os.uname().nodename, "gpu": gpu,
               "pins_sha256": kw.sha256_file(kw.PINS), "native_sha256": digest,
               "upstream_commit": pins["upstream"]["commit"], "checkpoint_revision": pins["checkpoint"]["revision"],
-              "numerics": NUMERICS, "report": args.out,
+              "numerics": NUMERICS,
+              "upstream_accuracy": {k: acc.get(k) for k in ("reference_revision", "passed", "upstream_reports_qualified",
+                                                             "checks")},
+              "report": args.out,
               "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     text = json.dumps(record, indent=1) + "\n"
     with open(path + ".tmp", "w") as f:
@@ -483,7 +629,7 @@ def marker(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("role", choices=["assets", "e2e", "marker"])
+    ap.add_argument("role", choices=["assets", "e2e", "accuracy", "marker"])
     ap.add_argument("root")
     ap.add_argument("config")
     ap.add_argument("out")
@@ -491,10 +637,11 @@ def main():
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--revoke", action="store_true")
     ap.add_argument("--accept-native-numerics", action="store_true")
+    ap.add_argument("--reference", help="accuracy: the SGLang-Omni reference runtime (venv/ and sglang-omni/)")
     args = ap.parse_args()
     args.out = os.path.abspath(args.out)
     os.makedirs(args.out, exist_ok=True)
-    return {"assets": assets, "e2e": e2e, "marker": marker}[args.role](args) or 0
+    return {"assets": assets, "e2e": e2e, "accuracy": accuracy, "marker": marker}[args.role](args) or 0
 
 
 if __name__ == "__main__":

@@ -118,7 +118,6 @@ curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
 | `speed` | 0.25 to 4 within the model's `speed` range; a model without a speed control takes only 1 |
 | `response_format` | `wav` (default), `pcm` (16-bit little-endian, mono; rate in the `x-sample-rate` header), `flac`, `mp3`, `opus`, `aac` |
 | `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
-
 | `stream` | Extension, for a model whose `stream` is true: `true` with `response_format: "pcm"` sends the audio as HTTP/1.1 chunks while it is made |
 | `references` | Extension, for a model whose `references` is true: `[{"text": "...", "vq_codes": [[...], ...]}]`, a clip's exact transcript and its codec codes (one list a codebook), spoken into the prompt before the model's voice |
 

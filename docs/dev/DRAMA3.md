@@ -73,8 +73,14 @@ engine checkout, build and caches):
 tools/speech/drama3/fetch.sh /data/models/drama3      # drama-tensorfold at the pin; the checkpoint, every file sha256-checked
 ZIG=/opt/zig-0.17.0/zig NVCC=/usr/local/cuda/bin/nvcc tools/speech/drama3/build.sh /data/models/drama3
 tools/speech/drama3/qualify.sh /data/models/drama3 /etc/localrouter/config.json /data/models/drama3/qualify-01 \
-  --accept-native-numerics
+  --reference /data/models/drama3/reference --accept-native-numerics
 ```
+
+The `--reference` directory is upstream's reference runtime, as its `recipe/README.md` describes: `venv/` with
+`sgl-omni` and the reference's dependencies installed, and an `sglang-omni/` checkout at the revision in
+`drama-tensorfold/recipe/sources.json` (`ab095ef9e779e56af33b6ed2c863645c9903372d`). Upstream pins that revision but
+not the venv's packages, so LocalRouter cannot pin them either; the qualify report records the reference's torch and
+SGLang versions.
 
 `fetch.sh` prints the weights' licence before downloading them and accepts nothing on anyone's behalf. `build.sh`
 runs upstream's `scripts/build-engine.sh`, checks that the patched TensorFold HEAD is the pinned one, and records the
@@ -114,7 +120,7 @@ Clips and voice files hold a person's voice: keep them out of source control.
 
 ## Qualification
 
-`qualify.sh ROOT CONFIG OUT [--accept-native-numerics]` runs on the GB10, every step under a time limit, and writes
+`qualify.sh ROOT CONFIG OUT --reference RUNTIME [--accept-native-numerics]` runs on the GB10, every step under a time limit, and writes
 `OUT/status.json` and a manifest as Kitten's does:
 
 - **assets:** the checkout, every pinned file and patch, the engine binary against `engine.json`, and the full sha256
@@ -123,11 +129,21 @@ Clips and voice files hold a person's voice: keep them out of source control.
   kHz mono, `stop`), again warm (byte-identical), and streamed (the same bytes); a 300-character paragraph whole and
   streamed (equal, warm RTF recorded); each configured voice, and inline references from a voice file; an unknown
   voice refused with a 400; long form when it is on; then unload: the unit inactive, the lock free and `MemAvailable`
-  back within 2 GiB.
+  back within 2 GiB;
+- **accuracy:** upstream's own checks from `qualification/`, as its README runs them, each in its bounded GPU guard
+  (`run-bounded-oracle.py`: the launcher's admission, 54 GiB cap, abort floor and the shared lock): the backbone
+  reference check (the 40-layer prefill of its 182-token fixture, native chunks 1, 7 and 128 against the reference's
+  extend: hidden states and semantic logits), the same native outputs rescored under upstream's registered worst-row
+  bar (CPU), and the tower reference check (13 layers, teacher-forced, at 1, 7 and 128 rows). Their verdicts and
+  metrics go into `OUT/accuracy/report.json` and the marker, pass or fail. Upstream reports that the backbone check
+  fails some bars, so a failing verdict is the expected result today. Upstream's codec gate and its tower full-context
+  replays are not reproducible from its repository (its `qualification/README.md` says so) and are not run.
 
-Only when both pass and `--accept-native-numerics` is given does it write the tool's `qualification` file:
-`{"qualified": true, "host", "gpu", "pins_sha256", "native_sha256", "upstream_commit", "checkpoint_revision",
-"numerics", "report", "qualified_at"}`. The daemon admits the model once that file says `"qualified": true`; the
+Only when assets and e2e pass, the accuracy checks produced valid evidence, and `--accept-native-numerics` is given,
+does it write the tool's `qualification` file: `{"qualified": true, "host", "gpu", "pins_sha256", "native_sha256",
+"upstream_commit", "checkpoint_revision", "numerics", "upstream_accuracy", "report", "qualified_at"}`, where
+`upstream_accuracy` holds the reference revision, each check's verdict and metrics, and upstream's own
+`native_drama_qualified`. The accuracy verdicts do not decide acceptance; the flag does. The daemon admits the model once that file says `"qualified": true`; the
 worker also refuses to load unless its `host` is this machine, its `pins_sha256` the current `pins.json` and its
 `native_sha256` the engine binary, so new pins or a rebuild need a new run.
 
@@ -138,9 +154,10 @@ not made quietly: the native engine is not bit-identical with the SGLang-Omni re
 reports that it misses some of its own accuracy bars (backbone all-row cosine 0.9986 against 0.999, last-row 0.99809
 against 0.999, hidden-state relative L2 0.0528 against 0.05; one-frame codec decode 33.1 dB against 40 dB; a tower
 top-1 that differs where the reference's logits tie). Its evidence is in upstream's `results/`. The qualify script
-checks LocalRouter's integration and the engine's self-consistency (cold and warm, whole and streamed), not those bars;
+checks LocalRouter's integration and the engine's self-consistency (cold and warm, whole and streamed), reruns
+upstream's reproducible accuracy checks on this host and records their verdicts, but does not require them to pass;
 `--accept-native-numerics` is the operator's recorded acceptance of the native build as the baseline, and the marker
-says so. Upstream's numbers come from upstream's hardware and corpus; none was measured here.
+says so next to those verdicts. Upstream's numbers come from upstream's hardware and corpus; none was measured here.
 
 ## What was taken from upstream
 
@@ -152,6 +169,7 @@ this repository):
 | `recipe/pilot.py` | the launcher the worker runs: its arguments, its stdout (`{"unit": …}`, `DRAMA_PILOT_READY`), its lock, memory guard and stop |
 | `scripts/build-engine.sh`, `engine/UPSTREAM`, `engine/patches/*.patch` | the engine build `build.sh` runs, pinned by hash |
 | `recipe/checksums/checkpoint.sha256`, `recipe/sources.json` | the checkpoint pins |
+| `qualification/run-bounded-oracle.py`, `backbone-reference-check.py`, `rescore-native.py`, `tower-reference-check.py` | the accuracy step `qualify.sh` runs, unmodified, against the reference at `sources.json`'s revision |
 | README ("HTTP contract", "Long replies", "Voice cloning", "License") and, in the patched TensorFold tree, `zig/src/server/speech.zig` and `docs/drama-voices.md` (patches 0007, 0015, 0018, 0031, 0032, 0035, 0039, 0041, 0042) | the HTTP contract the worker speaks and the test stand-in (`tests/fixtures/drama3_pilot.py`) follows: fields, WAV and PCM, chunked streams, `X-Finish-Reason` header and trailer, `X-Long-Form-Segments`, `/v1/voices`, 400/503/500 |
 
 ## Not verified
@@ -174,7 +192,7 @@ the worker against the stand-in only.
 - A free port: the server takes a fixed `--port` and the launcher refuses one in use; the tool's `port` must be
   unique on the host.
 - Control a speech API usually has: no `speed`, no `seed` (each synthesis is seeded from its prompt), no presets.
-- Numerical qualification against the reference ([Numerics](#numerics)).
+- Numerical qualification against the reference ([Numerics](#numerics)). Its reference runtime (the `sglang-omni` venv its accuracy checks need) is pinned by checkout revision only, not by package versions.
 
 ## Licences
 
