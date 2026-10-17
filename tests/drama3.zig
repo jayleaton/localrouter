@@ -104,6 +104,26 @@ fn sha256Hex(io: Io, a: std.mem.Allocator, path: []const u8) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+/// The step the test is on, for the watchdog's report.
+var step: []const u8 = "setup";
+var finished: std.atomic.Value(bool) = .init(false);
+
+fn at(name: []const u8) void {
+    std.debug.print("drama3: {s}\n", .{name});
+    step = name;
+}
+
+/// Fails the run with the step and the worker's log rather than letting a stuck request hang CI.
+fn watchdog(io: Io, seconds: i64) void {
+    Io.sleep(io, .fromSeconds(seconds), .awake) catch return;
+    if (finished.load(.acquire)) return;
+    std.debug.print("drama3: stuck at '{s}' after {d} s; worker log:\n", .{ step, seconds });
+    var buf: [64 * 1024]u8 = undefined;
+    const log = Io.Dir.cwd().readFile(io, "/tmp/localrouter-it-drama3/data/logs/fishaudio/drama-3.log", &buf) catch "(none)";
+    std.debug.print("{s}\n", .{log});
+    std.process.exit(1);
+}
+
 /// A free loopback port for the stand-in server.
 fn freePort(io: Io) !u16 {
     const addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -118,6 +138,8 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     defer arena.deinit();
     const a = arena.allocator();
     const cwd = Io.Dir.cwd();
+    (try std.Thread.spawn(.{}, watchdog, .{ io, 300 })).detach();
+    defer finished.store(true, .release);
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try cwd.createDirPath(io, root ++ "/build/tensorfold/zig-out/native/bin");
@@ -138,6 +160,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     defer d.stop();
     const say = "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}"; // 12 characters: 5292 samples
 
+    at("gate");
     // Listed, and refused before anything starts until this machine is qualified.
     const models = try d.call(a, .GET, "/v1/models", null);
     try expectHas(models.body, &.{ "\"id\":\"fishaudio/drama-3\"", "\"stream\":true,\"references\":true", "\"qualified\":false" });
@@ -150,6 +173,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     // A model without a gate is not affected.
     try testing.expectEqual(std.http.Status.ok, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\"}")).status);
 
+    at("stale marker");
     // A marker for other pins passes the daemon's gate but not the worker's: the load fails with the reason.
     var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
     const host = try std.posix.gethostname(&host_buf);
@@ -161,6 +185,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try cwd.writeFile(io, .{ .sub_path = marker, .data = try std.fmt.allocPrint(a, "{{\"qualified\": true, \"host\": \"{s}\", \"pins_sha256\": \"{s}\", \"native_sha256\": \"{s}\"}}", .{ host, &pins_sha, &bin_sha }) });
     try expectHas((try d.call(a, .GET, "/v1/models", null)).body, &.{"\"qualified\":true"});
 
+    at("whole");
     // Whole replies: WAV at 44.1 kHz with x-finish-reason, and the same samples as raw PCM.
     const whole = try speak(&d, a, say);
     try expectStatus(whole, 200, &.{"RIFF"});
@@ -173,6 +198,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expectEqualSlices(u8, whole.body[44..], pcm.body);
     try expectHas((try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Cut short [silence]\"}")).head, &.{"x-finish-reason: silence"});
 
+    at("stream");
     // Streamed: chunked raw PCM, the same samples; a clipped stream ends with the trailer, a finished one without.
     const streamed = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\",\"response_format\":\"pcm\",\"stream\":true}");
     try testing.expectEqual(@as(u16, 200), streamed.status);
@@ -185,6 +211,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try expectLevel(clipped.body, 441 * 17, 1000);
     try expectHas(clipped.trailers, &.{"x-finish-reason: length"});
 
+    at("long form");
     // Long form: the segments in a whole reply's head, and both trailers at the end of a stream.
     const long_text = "One sentence that is long. And another one after it.";
     const long_whole = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"" ++ long_text ++ "\"}");
@@ -193,6 +220,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expect(long_stream.complete);
     try expectHas(long_stream.trailers, &.{ "x-finish-reason: stop", "x-long-form-segments: 2;11466" });
 
+    at("voices and references");
     // Voices and references reach the server; refusals come back as 400s, from the daemon or from the server.
     const voiced = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"voice\":\"narrator\",\"response_format\":\"pcm\"}");
     try expectLevel(voiced.body, 441 * 3, 2000);
@@ -207,6 +235,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try expectStatus(try speak(&d, a, "{\"model\":\"tone\",\"input\":\"Hi.\",\"response_format\":\"pcm\",\"stream\":true}"), 400, &.{"model 'tone' does not stream its audio"});
     try expectStatus(try speak(&d, a, "{\"model\":\"tone\",\"input\":\"Hi.\",\"references\":[{\"text\":\"a\",\"vq_codes\":[[1]]}]}"), 400, &.{"model 'tone' takes no voice references"});
 
+    at("server errors");
     // The server's own errors: 503 while it is busy, 500 for its faults, and a stream that breaks off has no end.
     try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Wait [busy]\"}"), 503, &.{"the engine is busy"});
     try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Oops [fault]\"}"), 500, &.{"speech synthesis failed"});
@@ -216,17 +245,20 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expect(!broken.complete);
     try testing.expectEqualStrings("ready", try d.toolState(a, model));
 
+    at("mcp");
     // MCP: the same model by id, with the finish reason in the job summary.
     const res = try mcpCall(&d, a, "synthesize_speech", "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}");
     try testing.expect(!res.object.get("isError").?.bool);
     try testing.expectEqualStrings("audio/wav", res.object.get("content").?.array.items[0].object.get("mimeType").?.string);
     try testing.expectEqualStrings("stop", (try mcpText(a, res)).object.get("finish_reason").?.string);
 
+    at("crash");
     // A server that dies takes the worker with it: that job is a 503, and the next request starts it again.
     try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Down [crash]\"}"), 503, &.{"worker exited"});
     try testing.expectEqualStrings("unloaded", try d.toolState(a, model));
     try expectStatus(try speak(&d, a, say), 200, &.{"RIFF"});
 
+    at("idle unload");
     // Idle past its TTL, the model unloads: the launcher stops its server and releases the GPU lock.
     var state: []const u8 = "";
     for (0..100) |_| {

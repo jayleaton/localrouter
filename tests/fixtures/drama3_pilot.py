@@ -63,7 +63,8 @@ def main():
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print("DRAMA_PILOT_READY", flush=True)
-        stop.wait()
+        while not stop.wait(0.2):
+            pass
         server.shutdown()
         server.server_close()
         with open(os.path.join(args.evidence_dir, "completion.json"), "w") as f:
