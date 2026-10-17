@@ -20,8 +20,3 @@ jobs:
       - run: zig build
       - run: zig build test
         timeout-minutes: 20
-      - name: zig fmt on this branch's files (temporary)
-        if: always()
-        run: |
-          files="build.zig src/api/http.zig src/api/mcp.zig src/api/routes.zig src/api/speech.zig src/config.zig src/engine/engine.zig src/engine/worker.zig src/sched/jobs.zig src/sched/scheduler.zig src/serve.zig src/tool/process.zig src/tool/request.zig src/tool/tool.zig src/tool/wire.zig tests/drama3.zig tests/integration.zig "
-          zig fmt --check $files || { zig fmt $files >/dev/null; git diff; exit 1; }
