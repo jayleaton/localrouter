@@ -25,6 +25,9 @@ pub const ToolConfig = struct {
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
     options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
+    // A file the model's qualify script writes on this machine. When set, the tool is listed but refused (503) until it
+    // exists and holds `"qualified": true` (`engine.unqualified`); unset: no gate.
+    qualification: []const u8 = "",
 };
 
 pub const Config = struct {
@@ -37,6 +40,7 @@ pub const Config = struct {
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
+    gpu_lock: []const u8 = "", // the host's shared GPU lock file, passed to workers as LOCALROUTER_GPU_LOCK (Drama 3 takes it while loaded)
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     tools: []const ToolConfig = &default_tools,
 

@@ -18,6 +18,16 @@ SageAttention (https://github.com/thu-ml/SageAttention), Copyright 2024 by the S
 
 Qwen2.5 tokenizer files (tools/twin/stk_twin/h3/tokenizer/), from the Qwen team, Apache License 2.0.
 
+drama-tensorfold (https://github.com/plotarmordev/drama-tensorfold), Copyright 2026 plotarmordev, Apache License 2.0.
+  The optional Drama 3 speech tool (tools/speech/drama3/) runs that repository's launcher (recipe/pilot.py) and the
+  native server it builds: TensorFold (above) at c7137bb with drama-tensorfold's engine patch series, at commit
+  1a53b8aea738a99d3630f949b6b2a1f9389f0795. fetch.sh clones it unmodified, with its NOTICE, LICENSE and LICENSES/;
+  build.sh runs its scripts/build-engine.sh. No drama-tensorfold file is copied into LocalRouter. The integration
+  tests' stand-in server (tests/fixtures/drama3_pilot.py) follows its HTTP contract. As its NOTICE records, the
+  engine's chunked Gated DeltaNet prefill follows SGLang 0.5.21 (Apache License 2.0) with kernels adapted from
+  flash-linear-attention (https://github.com/fla-org/flash-linear-attention, MIT License, Copyright (c) 2023-2025,
+  Songlin Yang, Yu Zhang), and the port follows the SGLang-Omni Drama 3 reference implementation (Apache License 2.0).
+
 Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
 by the installer from their publishers and remain under their own licenses.
 
@@ -34,4 +44,11 @@ Kitten TTS 2 weights (KittenML / Stellon Labs), used by the optional speech tool
   Stellon Labs. Commercial use requires registration and ends above USD 1,000,000 revenue or funding; see
   docs/dev/KITTEN-TTS2.md. https://huggingface.co/KittenML/kitten-tts-2/blob/f2eee74f4467855ad58fe16f1fb7b7df473263fd/LICENSE.md
   Its decoder uses ResembleAI chatterbox-turbo's s3gen weights (MIT) and the kittenml package (Apache License 2.0).
+Fish Audio Drama 3 weights and codec checkpoint (fishaudio/drama-3 at e0a9218aa48888270f06ef1ed9ea67622c0e17d2), used
+  by the optional speech tool in tools/speech/drama3/ and downloaded by its fetch.sh, not distributed with LocalRouter:
+  Fish Audio Community License, Version 1.0. "These Fish Audio Materials are licensed under the Fish Audio Community
+  License, Version 1.0. Copyright © 39 AI, INC. All Rights Reserved." Built with Fish Audio. Commercial use only under
+  USD 500,000 annual revenue, and no Hosted Service (third parties generating speech, e.g. through an API) without a
+  separate licence (Section III(c)); see docs/dev/DRAMA3.md.
+  https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE
 These weight licences are separate from LocalRouter's software licence; installing locally does not waive them.

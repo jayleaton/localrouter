@@ -2,7 +2,8 @@
 //! encoded here) and POST /v1/audio/transcriptions (speech to text; json, text, verbose_json, srt or vtt). Both are
 //! synchronous jobs, like image generation. Uploads become the 16 kHz mono WAV every speech_to_text tool takes
 //! (`media/audio.zig`), one decode at a time, before the job is queued, so its length is known when it is priced.
-//! Not offered, and refused with a reason: translation, streamed responses, and speech `instructions`.
+//! A speech tool whose options say `stream` streams: `stream: true` sends raw PCM as HTTP/1.1 chunks as the tool writes
+//! it (`streamSpeech`). Not offered, and refused with a reason: translation, SSE streams, and speech `instructions`.
 //! The MCP tools (`mcp.zig`) share `startSpeech`, `startTranscription`, `readTranscript` and `encodeSpeech`.
 
 const std = @import("std");
@@ -14,6 +15,7 @@ const jobs = @import("../sched/jobs.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const audio = @import("../media/audio.zig");
+const posix = std.posix;
 
 const App = routes.App;
 
@@ -36,18 +38,50 @@ pub const SpeechArgs = struct {
     preset: []const u8 = "",
     seed: ?u64 = null,
     instructions: []const u8 = "",
+    stream: bool = false,
+    references: ?std.json.Value = null, // [{text, vq_codes}], for a tool whose options say `references`
 };
 
-/// Validates and queues a text to speech job; null with `why` set on refusal.
-pub fn startSpeech(app: *App, b: SpeechArgs, why: *Refusal) ?*jobs.Job {
+/// Validates and queues a text to speech job; null with `why` set on refusal. `references` become the job's
+/// `references.json`, allocated in `a`.
+pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, why: *Refusal) ?*jobs.Job {
     const tool = routes.resolve(app, b.model, .text_to_speech, why) orelse return null;
     if (b.instructions.len > 0) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' does not take instructions; send the text to speak as input", .{app.scheduler.slots[tool].tool.config().id}) catch "instructions are not supported";
         return null;
     }
     const cfg = app.scheduler.slots[tool].tool.config();
-    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io) }) };
-    return routes.enqueue(app, tool, r, &.{}, why);
+    var refs: [1]inputs.File = undefined;
+    var n: usize = 0;
+    if (b.references) |v| if (!(v == .null or (v == .array and v.array.items.len == 0))) {
+        refs[0] = .{ .name = "references.json", .data = referencesFile(a, v, why) orelse return null };
+        n = 1;
+    };
+    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (n > 0) "references.json" else "" }) };
+    return routes.enqueue(app, tool, r, refs[0..n], why);
+}
+
+/// A request's voice references as the file the tool reads: a list of `{text, vq_codes}` (a transcript and its codec
+/// codes, one list of integers a codebook). Only the shape is checked here; the model refuses the rest in its own words.
+fn referencesFile(a: std.mem.Allocator, v: std.json.Value, why: *Refusal) ?[]const u8 {
+    const shape = "references must be a list of objects, each with text (a string) and vq_codes (a list of lists of integers)";
+    if (v != .array) return bad(why, shape);
+    for (v.array.items) |ref| {
+        if (ref != .object) return bad(why, shape);
+        const text = ref.object.get("text") orelse return bad(why, shape);
+        const codes = ref.object.get("vq_codes") orelse return bad(why, shape);
+        if (text != .string or codes != .array) return bad(why, shape);
+        for (codes.array.items) |row| {
+            if (row != .array) return bad(why, shape);
+            for (row.array.items) |c| if (c != .integer) return bad(why, shape);
+        }
+    }
+    return std.json.Stringify.valueAlloc(a, v, .{}) catch return failed(why, "out of memory");
+}
+
+fn bad(why: *Refusal, msg: []const u8) ?[]const u8 {
+    refuse(why, 400, "invalid_request_error", msg);
+    return null;
 }
 
 /// The finished job's `speech.wav` in `format`, in `a`.
@@ -77,31 +111,148 @@ const SpeechBody = struct {
     instructions: []const u8 = "",
     response_format: []const u8 = "wav",
     stream_format: []const u8 = "audio",
+    stream: bool = false,
+    references: ?std.json.Value = null,
 };
 
-/// POST /v1/audio/speech: JSON in, audio bytes out.
+/// POST /v1/audio/speech: JSON in, audio bytes out (whole, or streamed with `stream`). A tool that says why its audio
+/// ended sets `x-finish-reason` (`stop`, `length`: clipped at its frame limit, `silence`: ended by its silence guard),
+/// and a long-form reply `x-long-form-segments`.
 pub fn speech(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     const b = std.json.parseFromSliceLeaky(SpeechBody, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
         return h.fail(req, a, 400, "invalid_request_error", "the body is not a valid speech request (JSON with input, voice, model)");
     const format = std.meta.stringToEnum(audio.Format, b.response_format) orelse
         return h.fail(req, a, 400, "invalid_request_error", "response_format must be wav, pcm, flac, mp3, opus or aac");
-    if (!std.mem.eql(u8, b.stream_format, "audio")) return h.fail(req, a, 400, "invalid_request_error", "stream_format sse is not supported: the audio comes back whole");
+    if (!std.mem.eql(u8, b.stream_format, "audio")) return h.fail(req, a, 400, "invalid_request_error", "stream_format sse is not supported: send stream true for raw PCM chunks");
+    if (b.stream and format != .pcm) return h.fail(req, a, 400, "invalid_request_error", "stream true needs response_format pcm: the other formats are encoded from the whole audio");
     var why: Refusal = .{};
-    const j = startSpeech(app, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions }, &why) orelse
+    const j = startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .stream = b.stream, .references = b.references }, &why) orelse
         return h.fail(req, a, why.status, why.typ, why.message);
+    if (b.stream) return streamSpeech(app, req, a, j);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
     const bytes = encodeSpeech(app, a, j, format, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
-    if (format != .pcm) return h.bytes(req, format.contentType(), bytes);
+    var extra: [5]std.http.Header = undefined;
+    var n: usize = 0;
+    if (j.finish_reason.len > 0) {
+        extra[n] = .{ .name = "x-finish-reason", .value = j.finish_reason };
+        n += 1;
+    }
+    if (j.segments.len > 0) {
+        extra[n] = .{ .name = "x-long-form-segments", .value = j.segments };
+        n += 1;
+    }
+    if (format != .pcm) return h.bytesWith(req, format.contentType(), bytes, extra[0..n]);
     // Raw samples carry no header: say what they are (16-bit signed little-endian; not audio/L16, which is big-endian).
     const wav = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, j.files[0] }), a, .limited(1 << 30)) catch return h.fail(req, a, 500, "server_error", "could not read the model's audio");
     const w = audio.parseWav(wav).?;
-    try h.bytesWith(req, format.contentType(), bytes, &.{
-        .{ .name = "x-sample-rate", .value = try std.fmt.allocPrint(a, "{d}", .{w.rate}) },
-        .{ .name = "x-channels", .value = try std.fmt.allocPrint(a, "{d}", .{w.channels}) },
+    extra[n] = .{ .name = "x-sample-rate", .value = try std.fmt.allocPrint(a, "{d}", .{w.rate}) };
+    extra[n + 1] = .{ .name = "x-channels", .value = try std.fmt.allocPrint(a, "{d}", .{w.channels}) };
+    extra[n + 2] = .{ .name = "x-sample-format", .value = "s16le" };
+    try h.bytesWith(req, format.contentType(), bytes, extra[0 .. n + 3]);
+}
+
+/// `stream: true`: the tool writes `speech.wav` as it goes, a canonical 44-byte header first (its sizes are fixed when
+/// the audio is complete), and each new run of samples is sent as an HTTP/1.1 chunk of raw 16-bit PCM, with the headers
+/// of `response_format: pcm`. A job that fails before any audio is an ordinary error reply. One that fails after the
+/// first chunk ends the connection without the terminating chunk, so a client cannot take the audio for complete; a
+/// client that leaves cancels the job. Audio cut short ends with an `x-finish-reason` trailer, a long-form reply with
+/// `x-long-form-segments` too; audio that ended by itself ends with the plain last chunk.
+fn streamSpeech(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !void {
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/speech.wav", .{j.dir}, 0);
+    var fd: posix.fd_t = -1;
+    defer closeFd(fd);
+    while (true) { // the header and the first samples, or the end of the job
+        const done = j.done.isSet();
+        if (fd < 0) fd = posix.openatZ(posix.AT.FDCWD, path, .{}, 0) catch -1;
+        if ((fd >= 0 and fileSize(fd) > wav_header) or done) break;
+        Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
+    }
+    if (j.done.isSet() and j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    var head: [wav_header]u8 = undefined;
+    if (fd < 0 or readAt(fd, &head, 0) != wav_header or streamRate(&head) == null) {
+        if (!j.done.isSet()) app.scheduler.cancel(j);
+        return h.fail(req, a, 500, "server_error", "the model wrote no streamable audio (speech.wav with a canonical 16-bit mono PCM header)");
+    }
+    var rate: [16]u8 = undefined;
+    var send: [16 * 1024]u8 = undefined;
+    var body = req.respondStreaming(&send, .{ .respond_options = .{ .extra_headers = &.{
+        .{ .name = "content-type", .value = audio.Format.pcm.contentType() },
+        .{ .name = "x-sample-rate", .value = std.fmt.bufPrint(&rate, "{d}", .{streamRate(&head).?}) catch unreachable },
+        .{ .name = "x-channels", .value = "1" },
         .{ .name = "x-sample-format", .value = "s16le" },
-    });
+        .{ .name = "trailer", .value = "x-finish-reason, x-long-form-segments" },
+    } } }) catch return gone(app, j);
+    var chunk: [64 * 1024]u8 = undefined;
+    var at: u64 = wav_header;
+    while (true) {
+        const done = j.done.isSet();
+        var end = fileSize(fd);
+        if (done and j.status == .completed and readAt(fd, &head, 0) == wav_header)
+            end = @min(end, wav_header + @as(u64, std.mem.readInt(u32, head[40..44], .little))); // the final size
+        var sent = false;
+        while (end > at and end - at >= 2) {
+            const got = readAt(fd, chunk[0..@intCast(@min(chunk.len, end - at))], at) & ~@as(usize, 1); // whole samples
+            if (got == 0) break;
+            body.writer.writeAll(chunk[0..got]) catch return gone(app, j);
+            at += got;
+            sent = true;
+        }
+        if (sent) {
+            body.writer.flush() catch return gone(app, j);
+            body.flush() catch return gone(app, j);
+        }
+        if (done) break;
+        Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
+    }
+    if (j.status != .completed) return error.StreamIncomplete; // no terminating chunk: the client sees an incomplete body
+    var trailers: [2]std.http.Header = undefined;
+    var n: usize = 0;
+    const cut = j.finish_reason.len > 0 and !std.mem.eql(u8, j.finish_reason, "stop");
+    if (cut or (j.segments.len > 0 and j.finish_reason.len > 0)) {
+        trailers[n] = .{ .name = "x-finish-reason", .value = j.finish_reason };
+        n += 1;
+    }
+    if (j.segments.len > 0) {
+        trailers[n] = .{ .name = "x-long-form-segments", .value = j.segments };
+        n += 1;
+    }
+    body.endChunked(.{ .trailers = trailers[0..n] }) catch return gone(app, j);
+}
+
+const wav_header = 44;
+const poll_ms = 20;
+
+/// The sample rate of a canonical header of 16-bit mono PCM (fmt then data, nothing between), else null.
+fn streamRate(head: *const [wav_header]u8) ?u32 {
+    if (!std.mem.eql(u8, head[0..4], "RIFF") or !std.mem.eql(u8, head[8..16], "WAVEfmt ") or !std.mem.eql(u8, head[36..40], "data")) return null;
+    if (std.mem.readInt(u32, head[16..20], .little) != 16 or std.mem.readInt(u16, head[20..22], .little) != 1) return null;
+    if (std.mem.readInt(u16, head[22..24], .little) != 1 or std.mem.readInt(u16, head[34..36], .little) != 16) return null;
+    const rate = std.mem.readInt(u32, head[24..28], .little);
+    return if (rate > 0) rate else null;
+}
+
+fn closeFd(fd: posix.fd_t) void {
+    if (fd >= 0) _ = posix.system.close(fd);
+}
+
+fn fileSize(fd: posix.fd_t) u64 {
+    const n = posix.system.lseek(fd, 0, posix.SEEK.END);
+    return if (n > 0) @intCast(n) else 0;
+}
+
+/// Bytes read into `buf` from `offset`; 0 on error.
+fn readAt(fd: posix.fd_t, buf: []u8, offset: u64) usize {
+    const rc = posix.system.pread(fd, buf.ptr, buf.len, @intCast(offset));
+    if (posix.errno(rc) != .SUCCESS) return 0;
+    return @intCast(rc);
+}
+
+/// The client left mid-stream: stop the job too.
+fn gone(app: *App, j: *jobs.Job) error{ClientGone} {
+    app.scheduler.cancel(j);
+    return error.ClientGone;
 }
 
 // ---------------------------------------------------------------- speech to text
@@ -292,4 +443,26 @@ test "timestamp granularities from a form or JSON" {
     try std.testing.expectEqual(request.Timestamps.segment, try granularitiesOf(a, "{\"timestamp_granularities\": [\"segment\"]}", "application/json"));
     try std.testing.expectEqual(request.Timestamps.none, try granularitiesOf(a, "{}", "application/json"));
     try std.testing.expectError(error.Invalid, granularitiesOf(a, "{\"timestamp_granularities\": [\"phoneme\"]}", "application/json"));
+}
+
+test "a streamed reply needs a canonical 16-bit mono PCM header; its sizes may be placeholders" {
+    var head: [wav_header]u8 = undefined;
+    @memcpy(head[0..4], "RIFF");
+    std.mem.writeInt(u32, head[4..8], 0xFFFFFFFF, .little);
+    @memcpy(head[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, head[16..20], 16, .little);
+    std.mem.writeInt(u16, head[20..22], 1, .little);
+    std.mem.writeInt(u16, head[22..24], 1, .little);
+    std.mem.writeInt(u32, head[24..28], 44100, .little);
+    std.mem.writeInt(u32, head[28..32], 88200, .little);
+    std.mem.writeInt(u16, head[32..34], 2, .little);
+    std.mem.writeInt(u16, head[34..36], 16, .little);
+    @memcpy(head[36..40], "data");
+    std.mem.writeInt(u32, head[40..44], 0xFFFFFFDB, .little);
+    try std.testing.expectEqual(@as(?u32, 44100), streamRate(&head));
+    std.mem.writeInt(u16, head[22..24], 2, .little); // stereo
+    try std.testing.expectEqual(@as(?u32, null), streamRate(&head));
+    std.mem.writeInt(u16, head[22..24], 1, .little);
+    @memcpy(head[36..40], "LIST"); // another chunk before the samples
+    try std.testing.expectEqual(@as(?u32, null), streamRate(&head));
 }

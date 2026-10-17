@@ -1,6 +1,7 @@
 //! ProcessTool: a Tool served by a worker process (`localrouter worker` for compiled-in engines, or the config's `cmd`).
 //! Unload is process exit, so every byte returns to the OS; abort and deadlines kill the worker's process group.
-//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL. Worker stderr is appended to `<data>/logs/<id>.log`.
+//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL, the host's GPU lock (`Config.gpu_lock`) as
+//! LOCALROUTER_GPU_LOCK. Worker stderr is appended to `<data>/logs/<id>.log` (an id with '/' gets subdirectories).
 
 const std = @import("std");
 const posix = std.posix;
@@ -17,6 +18,7 @@ pub const Setup = struct {
     self_exe: []const u8, // this binary, for `localrouter worker`
     environ: *const std.process.Environ.Map,
     log_dir: []const u8,
+    gpu_lock: []const u8 = "",
 };
 
 pub const ProcessTool = struct {
@@ -85,6 +87,14 @@ pub const ProcessTool = struct {
     fn load(ptr: *anyopaque) tool.Error!u64 {
         const p = self(ptr);
         if (p.child != null) return 0;
+        {
+            var arena: std.heap.ArenaAllocator = .init(p.setup.gpa);
+            defer arena.deinit();
+            if (engine.unqualified(p.setup.io, arena.allocator(), p.cfg, &p.fail_msg)) |why| {
+                p.fail = .{ .message = why, .type = "server_error" };
+                return tool.Error.LoadFailed;
+            }
+        }
         p.aborted.store(false, .release);
         p.st.store(.loading, .release);
         p.spawn() catch |err| return p.failed(.unloaded, tool.Error.LoadFailed, "could not start the worker: {s}", .{@errorName(err)});
@@ -108,7 +118,9 @@ pub const ProcessTool = struct {
         const r = p.awaitReply(sink, p.cfg.generate_timeout_s) catch |err| return p.died(err);
         defer r.deinit();
         if (r.value.ok != true) {
-            const t = if (std.mem.eql(u8, r.value.type, "invalid_request_error")) "invalid_request_error" else "server_error";
+            const t = for ([_][]const u8{ "invalid_request_error", "service_unavailable" }) |known| {
+                if (std.mem.eql(u8, r.value.type, known)) break known;
+            } else "server_error";
             p.fail = .{ .message = p.copyMsg("{s}", .{r.value.@"error"}), .type = t };
             p.st.store(.ready, .release);
             return tool.Error.GenerateFailed;
@@ -116,7 +128,17 @@ pub const ProcessTool = struct {
         p.st.store(.ready, .release);
         const files = arena.alloc([]const u8, r.value.files.len) catch return tool.Error.OutOfMemory;
         for (files, r.value.files) |*d, s| d.* = arena.dupe(u8, s) catch return tool.Error.OutOfMemory;
-        return .{ .files = files, .seed = r.value.seed, .ms = r.value.ms };
+        const finish = arena.dupe(u8, headerSafe(r.value.finish_reason)) catch return tool.Error.OutOfMemory;
+        const segments = arena.dupe(u8, headerSafe(r.value.segments)) catch return tool.Error.OutOfMemory;
+        return .{ .files = files, .seed = r.value.seed, .ms = r.value.ms, .finish_reason = finish, .segments = segments };
+    }
+
+    /// A worker's string that the API sends as a response header (`finish_reason`, `segments`): printable ASCII of at
+    /// most 512 bytes, else dropped.
+    fn headerSafe(s: []const u8) []const u8 {
+        if (s.len > 512) return "";
+        for (s) |c| if (c < 0x20 or c > 0x7e) return "";
+        return s;
     }
 
     /// Asks the worker to exit, then kills its group if it has not within 10 s.
@@ -153,12 +175,13 @@ pub const ProcessTool = struct {
         var it = p.setup.environ.iterator();
         while (it.next()) |kv| try env.put(kv.key_ptr.*, kv.value_ptr.*);
         try env.put("LOCALROUTER_TOOL", json);
+        if (p.setup.gpu_lock.len > 0) try env.put("LOCALROUTER_GPU_LOCK", p.setup.gpu_lock);
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
-        Io.Dir.cwd().createDirPath(p.setup.io, p.setup.log_dir) catch {};
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);
+        Io.Dir.cwd().createDirPath(p.setup.io, std.fs.path.dirname(log_path).?) catch {}; // ids such as fishaudio/drama-3
         const log = try Io.Dir.cwd().createFile(p.setup.io, log_path, .{ .truncate = false });
         defer log.close(p.setup.io);
         _ = posix.system.lseek(log.handle, 0, posix.SEEK.END);
