@@ -36,8 +36,13 @@ pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *Request) anyerror!
             var server = http.Server.init(&reader.interface, &writer.interface);
             while (server.reader.state == .ready) {
                 var req = server.receiveHead() catch return;
+                // The head's strings are invalid once the body is read: keep what the error line names.
+                const method = req.head.method;
+                var target: [256]u8 = undefined;
+                const n = @min(req.head.target.len, target.len);
+                @memcpy(target[0..n], req.head.target[0..n]);
                 handle(ctx, &req) catch |err| {
-                    std.log.warn("{s} {s}: {s}", .{ @tagName(req.head.method), req.head.target, @errorName(err) });
+                    std.log.warn("{s} {s}: {s}", .{ @tagName(method), target[0..n], @errorName(err) });
                     return;
                 };
             }
