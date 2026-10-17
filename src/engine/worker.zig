@@ -71,7 +71,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
                     try fail(gpa, "generate", err);
                     continue;
                 };
-                try reply(gpa, .{ .ok = true, .files = out.files, .seed = out.seed, .ms = out.ms });
+                try reply(gpa, .{ .ok = true, .files = out.files, .seed = out.seed, .ms = out.ms, .finish_reason = out.finish_reason, .segments = out.segments });
             },
         }
     }

@@ -293,6 +293,8 @@ pub const Scheduler = struct {
             error.Timeout => s.finish(j, .failed, 504, "timeout", f.message, null),
             error.GenerateFailed => if (std.mem.eql(u8, f.type, "invalid_request_error"))
                 s.finish(j, .failed, 400, f.type, f.message, null)
+            else if (std.mem.eql(u8, f.type, "service_unavailable")) // the model's own server is busy or not ready: retry later
+                s.finish(j, .failed, 503, "server_error", f.message, null)
             else
                 s.finish(j, .failed, 500, "server_error", f.message, null),
             error.OutOfMemory => s.finish(j, .failed, 503, "insufficient_memory", "out of memory", null),
@@ -323,6 +325,8 @@ pub const Scheduler = struct {
             j.percent = 100;
             j.seed = o.seed;
             j.ms = o.ms;
+            j.finish_reason = a.dupe(u8, o.finish_reason) catch "";
+            j.segments = a.dupe(u8, o.segments) catch "";
             if (a.alloc([]const u8, o.files.len)) |files| {
                 for (files, o.files) |*d, f| d.* = a.dupe(u8, f) catch "";
                 j.files = files;

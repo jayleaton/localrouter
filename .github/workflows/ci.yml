@@ -19,3 +19,11 @@ jobs:
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - run: zig build
       - run: zig build test
+      - name: zig fmt --check
+        if: always()
+        run: |
+          if ! zig fmt --check build.zig build src tests; then
+            zig fmt build.zig build src tests >/dev/null
+            git diff
+            exit 1
+          fi

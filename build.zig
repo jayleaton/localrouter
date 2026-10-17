@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) void {
     const it_opts = b.addOptions();
     it_opts.addOptionPath("localrouter_exe", exe.getEmittedBin());
     it_opts.addOptionPath("speech_worker", b.path("tests/fixtures/speech_worker.py"));
+    it_opts.addOptionPath("drama3_worker", b.path("tools/speech/drama3/drama3_worker.py"));
+    it_opts.addOptionPath("drama3_pins", b.path("tools/speech/drama3/pins.json"));
+    it_opts.addOptionPath("drama3_pilot", b.path("tests/fixtures/drama3_pilot.py"));
     const it_mod = b.createModule(.{
         .root_source_file = b.path("tests/integration.zig"),
         .target = target,

@@ -25,6 +25,8 @@ pub const Job = struct {
     error_message: []const u8 = "",
     error_type: []const u8 = "",
     http_status: u16 = 200,
+    finish_reason: []const u8 = "", // why the audio ended, when the tool says (speech: stop, length, silence)
+    segments: []const u8 = "", // a long-form reply's segment starts, when the tool says
     completed_at: i64 = 0,
     cancel: std.atomic.Value(bool) = .init(false),
     done: Io.Event = .unset,
@@ -139,6 +141,7 @@ pub fn dupeRequest(a: std.mem.Allocator, req: Request) !Request {
             c.input = try a.dupe(u8, v.input);
             c.voice = try a.dupe(u8, v.voice);
             c.preset = try a.dupe(u8, v.preset);
+            c.references = try a.dupe(u8, v.references);
             return .{ .speech = c };
         },
         .transcription => |v| {

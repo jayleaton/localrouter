@@ -64,7 +64,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
     for (procs, slots, cfg.tools) |*p, *s, *t| {
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir }, t);
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock }, t);
         s.* = .{ .tool = p.asTool() };
     }
     defer for (procs) |*p| p.deinit();
