@@ -29,6 +29,7 @@ pub const Request = struct {
     tool_choice: ?std.json.Value = null,
     temperature: ?f32 = null,
     max_tokens: ?u32 = null,
+    extra: ?std.json.Value = null, // more members for the body (`voice.chat_extra`)
 };
 
 /// Receives text as the model writes it (reasoning excluded).
@@ -55,7 +56,7 @@ pub const Why = struct {
     }
 };
 
-/// The JSON body OpenAI's API takes for `r`.
+/// The JSON body OpenAI's API takes for `r`; the members of `r.extra` (an object) are added, or replace.
 pub fn body(a: std.mem.Allocator, r: *const Request) ![]u8 {
     const Body = struct {
         model: ?[]const u8,
@@ -68,7 +69,13 @@ pub fn body(a: std.mem.Allocator, r: *const Request) ![]u8 {
         max_tokens: ?u32,
     };
     const b: Body = .{ .model = r.model, .messages = r.messages, .tools = if (r.tools.len > 0) r.tools else null, .tool_choice = if (r.tools.len > 0) r.tool_choice else null, .temperature = r.temperature, .max_tokens = r.max_tokens };
-    return std.json.Stringify.valueAlloc(a, b, .{ .emit_null_optional_fields = false });
+    const text = try std.json.Stringify.valueAlloc(a, b, .{ .emit_null_optional_fields = false });
+    const extra = r.extra orelse return text;
+    if (extra != .object or extra.object.count() == 0) return text;
+    var v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    var it = extra.object.iterator();
+    while (it.next()) |e| try v.object.put(a, e.key_ptr.*, e.value_ptr.*);
+    return std.json.Stringify.valueAlloc(a, v, .{});
 }
 
 /// Folds server-sent event lines into text deltas and tool calls.
@@ -288,4 +295,8 @@ test "the request body is OpenAI's, with tools only when there are some" {
     try std.testing.expect(std.mem.indexOf(u8, with, "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"generate_image\",\"description\":\"\",\"parameters\":{}}}]") != null);
     try std.testing.expectEqualStrings("overloaded", errorMessage(a, "{\"error\":{\"message\":\"overloaded\",\"type\":\"server_error\"}}"));
     try std.testing.expectEqualStrings("plain text", errorMessage(a, "plain text"));
+    const extra = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"chat_template_kwargs\": {\"enable_thinking\": false}, \"stream\": true}", .{});
+    const more = try body(a, &.{ .messages = &msgs, .extra = extra });
+    try std.testing.expect(std.mem.indexOf(u8, more, "\"chat_template_kwargs\":{\"enable_thinking\":false}") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, more, "\"stream\":"));
 }

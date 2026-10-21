@@ -380,6 +380,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
         .tool_choice = if (tools.items.len > 0) try events.chatToolChoice(a, st.tool_choice_json) else null,
         .temperature = st.temperature,
         .max_tokens = st.max_tokens,
+        .extra = s.voice.chat_extra,
     };
 }
 

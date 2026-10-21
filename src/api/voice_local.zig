@@ -31,6 +31,16 @@ pub const Local = struct {
         return .{ .app = app, .host = host, .client = .{ .io = app.io, .gpa = app.gpa, .base_url = base, .api_key = v.chat_api_key } };
     }
 
+    /// The chat model a session starts with: `voice.chat_model`, else (chat served here) this daemon's chat default.
+    pub fn defaultChatModel(app: *App) []const u8 {
+        const v = app.cfg.voice;
+        if (v.chat_model.len > 0 or v.chat_url.len > 0) return v.chat_model;
+        var ref: routes.Refusal = .{};
+        const i = routes.resolve(app, null, .chat_completion, &ref) orelse return "";
+        const c = app.scheduler.slots[i].tool.config();
+        return if (engine.supports(c, .chat_completion)) c.id else "";
+    }
+
     pub fn asBackend(l: *Local) backend.Backend {
         return .{ .ptr = l, .vtable = &vtable };
     }
@@ -89,12 +99,40 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     return if (text == .string) try a.dupe(u8, text.string) else "";
 }
 
+/// The speech models to try, in order: the one the session or config names, else the configured `speech_models` that
+/// exist here and are qualified, else the text_to_speech default (null).
+fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8) ![]const ?[]const u8 {
+    if (named_model.len > 0) return a.dupe(?[]const u8, &.{named_model});
+    var list: std.ArrayList(?[]const u8) = .empty;
+    var buf: [512]u8 = undefined;
+    for (app.cfg.voice.speech_models) |id| {
+        const c = app.cfg.tool(id) orelse continue;
+        if (!engine.supports(c, .text_to_speech) or engine.unqualified(app.io, a, c, &buf) != null) continue;
+        try list.append(a, id);
+    }
+    if (list.items.len == 0) try list.append(a, null);
+    return list.items;
+}
+
+/// Speaks with the first candidate that serves; a refusal or failure of one falls through to the next (its own default
+/// voice, since voices are per model).
 fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, stop: *Stop, why: *Why) backend.Error!backend.Pcm {
     const l = self(ptr);
     const app = l.app;
+    const candidates = try speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model);
+    for (candidates, 0..) |model, n| {
+        const voice = if (n > 0) "" else if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+        if (speakWith(app, a, model, voice, text, stop, why)) |pcm| return pcm else |err| {
+            if (err != error.Failed or n + 1 == candidates.len) return err;
+            std.log.warn("voice: speech model {s} failed ({s}); trying {s}", .{ model orelse "default", why.message, candidates[n + 1] orelse "default" });
+        }
+    }
+    return failed(why, "no speech model");
+}
+
+fn speakWith(app: *App, a: std.mem.Allocator, model: ?[]const u8, voice: []const u8, text: []const u8, stop: *Stop, why: *Why) backend.Error!backend.Pcm {
     var ref: routes.Refusal = .{};
-    const voice = if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
-    const j = speech.startSpeech(app, .{ .model = named(o.model, app.cfg.voice.speech_model), .input = text, .voice = voice }, &ref) orelse return failed(why, ref.message);
+    const j = speech.startSpeech(app, a, .{ .model = model, .input = text, .voice = voice }, &ref) orelse return failed(why, ref.message);
     try wait(app, j, stop);
     defer forget(app, j);
     if (j.status != .completed) return failed(why, j.error_message);
