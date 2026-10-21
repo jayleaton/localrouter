@@ -23,14 +23,16 @@ die() { echo "voice_e2e.sh: $*" >&2; exit 1; }
 
 stage() {
   local ref=${1:-integration/jarvis} host=${2:-dgx01@192.168.1.116}
-  local here sha tmp
+  local here top sha tmp
   here=$(cd "$(dirname "$0")" && pwd)
-  sha=$(git -C "$here" rev-parse --verify "$ref^{commit}") || die "no commit $ref"
+  top=$(git -C "$here" rev-parse --show-toplevel) # archive the whole tree (from a subdirectory git archives only it)
+  sha=$(git -C "$top" rev-parse --verify "$ref^{commit}") || die "no commit $ref"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' RETURN
-  git -C "$here" archive --format=tar.gz --prefix=localrouter/ -o "$tmp/localrouter-$sha.tar.gz" "$sha"
-  git -C "$here" show "$sha:tools/spark/jarvis/voice_e2e.sh" > "$tmp/voice_e2e.sh"
-  git -C "$here" show "$sha:tools/spark/jarvis/voice_e2e.py" > "$tmp/voice_e2e.py"
+  git -C "$top" archive --format=tar.gz --prefix=localrouter/ -o "$tmp/localrouter-$sha.tar.gz" "$sha"
+  tar -tzf "$tmp/localrouter-$sha.tar.gz" localrouter/build.zig > /dev/null || die "the archive has no build.zig"
+  git -C "$top" show "$sha:tools/spark/jarvis/voice_e2e.sh" > "$tmp/voice_e2e.sh"
+  git -C "$top" show "$sha:tools/spark/jarvis/voice_e2e.py" > "$tmp/voice_e2e.py"
   (cd "$tmp" && sha256sum localrouter-"$sha".tar.gz voice_e2e.sh voice_e2e.py > SHA256SUMS)
   ssh -o BatchMode=yes "$host" "mkdir -p jarvis/e2e/kit/$sha"
   scp -q -o BatchMode=yes "$tmp"/* "$host:jarvis/e2e/kit/$sha/"
