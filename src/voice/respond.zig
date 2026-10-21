@@ -11,12 +11,30 @@ const chat = @import("chat.zig");
 const chunker = @import("chunker.zig");
 const resample = @import("resample.zig");
 const Stop = @import("stop.zig").Stop;
+const tools = @import("tools.zig");
+const timing = @import("timing.zig");
 
 const Session = session.Session;
 const Task = session.Task;
 const Value = std.json.Value;
 
-/// One response in progress. Its arena belongs to the worker thread; `queue`, `spoken`, `text` and `audio_ms` are
+/// One response in progress. Its arena belongs to the worker thread; `queue`, `spoken`, `text` and `audio    var why: backend.Why = .{};
+    var worker_ms: u64 = 0;
+    var heard = o;
+    heard.worker_ms = &worker_ms;
+    const began = s.clock();
+    const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
+        s.backend.transcribe(a, pcm16, heard, &s.close_stop, &why)
+    else |_|
+        error.OutOfMemory;
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    if (final) {
+        s.stt_start_ns = began;
+        s.stt_end_ns = s.clock();
+        s.stt_worker_ms = worker_ms;
+    }
+ms` are
 /// read and written under the session's mutex.
 pub const Response = struct {
     arena: std.heap.ArenaAllocator,
@@ -31,6 +49,7 @@ pub const Response = struct {
     cond: Io.Condition = .init,
     spoken: std.ArrayList(session.Item.Spoken) = .empty, // gpa: moves to the item
     audio_ms: u64 = 0, // sent so far
+    marks: timing.Marks = .{},
 
     const Chunk = struct { text: []const u8, text_end: usize };
 };
@@ -71,12 +90,21 @@ fn hear(s: *Session, h: Task.Hearing, final: bool) void {
     const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, st.language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "" };
     s.mutex.unlock(s.io);
     var why: backend.Why = .{};
+    var worker_ms: u64 = 0;
+    var heard = o;
+    heard.worker_ms = &worker_ms;
+    const began = s.clock();
     const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
-        s.backend.transcribe(a, pcm16, o, &s.close_stop, &why)
+        s.backend.transcribe(a, pcm16, heard, &s.close_stop, &why)
     else |_|
         error.OutOfMemory;
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
+    if (final) {
+        s.stt_start_ns = began;
+        s.stt_end_ns = s.clock();
+        s.stt_worker_ms = worker_ms;
+    }
     if (!final) {
         s.partial_busy = false;
         const t = text catch return;
@@ -116,6 +144,7 @@ fn run(s: *Session, ask: Task.Ask) void {
     defer feed.think.deinit(s.gpa);
     defer feed.lead.deinit(s.gpa);
     var why: backend.Why = .{};
+    r.marks.chat_start = s.clock();
     const result = s.backend.stream(a, &req, .{ .ctx = &feed, .text = Feed.onText }, &r.stop, &why);
     feed.end();
     if (speaker) |t| t.join();
@@ -132,6 +161,14 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
     defer s.mutex.unlock(s.io);
     if (s.closing or (ask.auto and !s.fresh)) return false; // nothing new to answer (an empty transcript)
     r.audio = ask.audio orelse s.settings.audio;
+    r.marks.from_turn = ask.auto and s.stop_ns > 0; // answering a spoken turn: timed from its end
+    r.marks.t0 = if (r.marks.from_turn) s.stop_ns else s.clock();
+    if (r.marks.from_turn) {
+        r.marks.stt_start = s.stt_start_ns;
+        r.marks.stt_end = s.stt_end_ns;
+        r.marks.stt_worker_ms = s.stt_worker_ms;
+    }
+    s.stop_ns = 0;
     r.id = s.newId(a, "resp") catch return false;
     r.item_id = s.newId(a, "item") catch return false;
     req.* = request(s, a, ask) catch return false;
@@ -173,6 +210,7 @@ const Feed = struct {
 
     fn onText(ctx: *anyopaque, delta: []const u8) void {
         const f: *Feed = @ptrCast(@alignCast(ctx));
+        if (f.r.marks.first_token == 0) f.r.marks.first_token = f.s.clock();
         const visible = f.think.filter(f.s.gpa, f.r.arena.allocator(), delta) catch return;
         f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), visible, false) catch visible, false);
     }
@@ -197,6 +235,7 @@ const Feed = struct {
 
     /// Under the lock: a sentence for the speaker, with where it ends in the text (for truncation).
     fn queue(f: *Feed, c: []const u8) void {
+        if (f.r.marks.first_chunk == 0) f.r.marks.first_chunk = f.s.clock();
         const at = std.mem.indexOfPos(u8, f.r.text.items, f.search, c);
         const upto = if (at) |i| i + c.len else f.r.text.items.len;
         f.search = upto;
@@ -243,6 +282,7 @@ fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool
     var out: Voice = .{ .s = s, .r = r, .a = a };
     defer out.rs.deinit(s.gpa);
     var why: backend.Why = .{};
+    if (r.marks.tts_start == 0) r.marks.tts_start = s.clock();
     s.backend.speak(a, text, say, .{ .ctx = &out, .write = Voice.write }, &r.stop, &why) catch |err| {
         if (err == error.Cancelled) return false;
         s.mutex.lockUncancelable(s.io);
@@ -271,6 +311,7 @@ const Voice = struct {
 
     fn write(ctx: *anyopaque, samples: []const i16, rate: u32) void {
         const v: *Voice = @ptrCast(@alignCast(ctx));
+        if (v.r.marks.tts_first_pcm == 0) v.r.marks.tts_first_pcm = v.s.clock();
         if (v.failed or v.r.stop.cancelled()) return;
         if (v.rs.from == 0) v.rs.from = rate;
         if (rate != v.rs.from) { // a model that changes its rate mid-sentence: not ours to guess
@@ -312,6 +353,11 @@ const Voice = struct {
             defer s.mutex.unlock(s.io);
             if (r.stop.cancelled()) return false; // barge-in: not one more piece after speech_started
             s.emit.send(v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
+            if (r.marks.first_audio == 0) r.marks.first_audio = s.clock();
+            if (r.marks.first_voiced == 0) if (timing.firstLoud(samples)) |i| {
+                r.marks.first_voiced = s.clock();
+                r.marks.voiced_audio_ms = r.audio_ms + i * 1000 / session.rate;
+            };
             r.audio_ms += n * 1000 / session.rate;
             at += n;
         }
@@ -384,8 +430,9 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
         s.emit.send(a, "response.function_call_arguments.done", .{ .response_id = r.id, .item_id = it.id, .output_index = index, .call_id = it.call_id, .name = it.name, .arguments = it.arguments });
         s.emit.send(a, "response.output_item.done", .{ .response_id = r.id, .output_index = index, .item = item });
         outputs.append(a, item) catch {};
-        if (events.isBuiltin(it.name) and s.voice.tools) startTool(s, it);
+        if (events.isBuiltin(it.name) and s.voice.tools) tools.start(s, it);
     }
+    s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
 }
 
@@ -509,72 +556,6 @@ fn size(m: chat.Message) usize {
     return n;
 }
 
-// ---------------------------------------------------------------- tools
-
-const Call = struct { call_id: []u8, name: []u8, arguments: []u8 };
-
-/// Under the lock: a waiter thread for a built-in tool call.
-fn startTool(s: *Session, it: *const session.Item) void {
-    const c: Call = .{
-        .call_id = s.gpa.dupe(u8, it.call_id) catch return,
-        .name = s.gpa.dupe(u8, it.name) catch return,
-        .arguments = s.gpa.dupe(u8, it.arguments) catch return,
-    };
-    const t = std.Thread.spawn(.{}, waitTool, .{ s, c }) catch return;
-    s.waiters.append(s.gpa, t) catch t.detach();
-}
-
-fn waitTool(s: *Session, c: Call) void {
-    defer {
-        s.gpa.free(c.call_id);
-        s.gpa.free(c.name);
-        s.gpa.free(c.arguments);
-    }
-    var tmp: std.heap.ArenaAllocator = .init(s.gpa);
-    defer tmp.deinit();
-    const a = tmp.allocator();
-    var why: backend.Why = .{};
-    var job_id: []const u8 = "";
-    const kind: backend.JobKind = if (std.mem.eql(u8, c.name, "generate_video")) .video else .image;
-    const outcome: backend.Outcome = blk: {
-        const spec = jobSpec(a, kind, c.arguments, &why) orelse break :blk .{ .status = "failed", .@"error" = why.message };
-        const job = s.backend.startJob(a, spec, &why) catch break :blk .{ .status = "failed", .@"error" = why.message };
-        job_id = job.id;
-        s.mutex.lockUncancelable(s.io);
-        s.emit.send(a, "localrouter.job.created", .{ .call_id = c.call_id, .job_id = job.id, .kind = @tagName(kind) });
-        s.mutex.unlock(s.io);
-        break :blk s.backend.waitJob(a, job, s.voice.tool_wait_s, &s.close_stop);
-    };
-    if (s.close_stop.cancelled()) return;
-    const output = std.json.Stringify.valueAlloc(a, .{ .status = outcome.status, .job_id = job_id, .urls = outcome.urls, .@"error" = outcome.@"error" }, .{}) catch return;
-    s.mutex.lockUncancelable(s.io);
-    defer s.mutex.unlock(s.io);
-    if (s.closing) return;
-    const prev = s.lastId();
-    const id = s.newId(a, "item") catch return;
-    const it = s.addItem(.function_call_output, id) catch return;
-    it.call_id = it.arena.allocator().dupe(u8, c.call_id) catch "";
-    it.text = it.arena.allocator().dupe(u8, output) catch "";
-    s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = session.itemValue(a, it, s.settings.audio) catch Value.null });
-    s.emit.send(a, "localrouter.job.done", .{ .call_id = c.call_id, .job_id = job_id, .kind = @tagName(kind), .status = outcome.status, .urls = outcome.urls, .@"error" = outcome.@"error" });
-    s.fresh = true;
-    s.push(.{ .respond = .{ .auto = true } }) catch {};
-}
-
-/// The job a tool call's arguments ask for; null with `why` set when they are not usable.
-fn jobSpec(a: std.mem.Allocator, kind: backend.JobKind, arguments: []const u8, why: *backend.Why) ?backend.JobSpec {
-    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0 };
-    const args = std.json.parseFromSliceLeaky(Args, a, arguments, .{ .ignore_unknown_fields = true }) catch {
-        why.set("the tool call's arguments are not valid JSON: {s}", .{arguments[0..@min(arguments.len, 200)]});
-        return null;
-    };
-    if (std.mem.trim(u8, args.prompt, " ").len == 0) {
-        why.set("the tool call has no prompt", .{});
-        return null;
-    }
-    return .{ .kind = kind, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
-}
-
 test "history: tool calls group, outputs follow them or become notes, old turns are trimmed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -590,9 +571,4 @@ test "history: tool calls group, outputs follow them or become notes, old turns 
     trim(&msgs, 5, 1);
     try std.testing.expectEqual(@as(usize, 2), msgs.items.len); // the oldest turn went, the last stays
     try std.testing.expectEqualStrings("hi", msgs.items[1].content.?);
-    var why: backend.Why = .{};
-    try std.testing.expect(jobSpec(a, .image, "{\"prompt\": \"a fox\", \"size\": \"512x512\"}", &why) != null);
-    try std.testing.expect(jobSpec(a, .image, "{\"size\": \"512x512\"}", &why) == null);
-    try std.testing.expectEqualStrings("the tool call has no prompt", why.message);
-    try std.testing.expect(jobSpec(a, .video, "not json", &why) == null);
 }
