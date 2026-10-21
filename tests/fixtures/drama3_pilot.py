@@ -13,8 +13,8 @@ cut short, and X-Long-Form-Segments too for a long-form reply; GET /v1/voices; 4
 
 The audio is a constant level, 441 samples (10 ms) a character of input: 1000 for the default voice, 2000 for a named
 one, plus 300 a reference. Test hooks in the input: [length] and [silence] end the audio with that finish reason,
-[busy] is a 503, [fault] a 500, [break] a stream (or reply) that stops after its first chunk, [crash] ends the
-launcher and its server at once.
+[busy] is a 503, [fault] a 500, [slow] streams a chunk every 0.1 s, [break] a stream (or reply) that stops after its
+first chunk, [crash] ends the launcher and its server at once.
 """
 
 import argparse
@@ -209,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(0.5)
                 self.close_connection = True
                 return
-            time.sleep(0.005)
+            time.sleep(0.1 if "[slow]" in text else 0.005)
         trailers = ""
         if segments:
             trailers = f"X-Finish-Reason: {finish}\r\nX-Long-Form-Segments: {segments}\r\n"

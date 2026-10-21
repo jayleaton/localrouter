@@ -51,9 +51,14 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
   `MemAvailable` is at least 88 GiB, and kills the unit if `MemAvailable` falls below 34 GiB), which cannot pass on a
   box that keeps chat and Whisper warm (DGX-01 had 83 GiB free with chat, Whisper and Kitten loaded) and would fight
   the scheduler. The launcher has no option to turn it off, so LocalRouter runs it with a pinned patch,
-  `tools/speech/drama3/patches/pilot-external-admission.patch` (sha256 `57d1fdde…`): `--external-admission` skips
-  both checks and keeps everything else, its 54 GiB cgroup cap, the server's 54 GiB allocator cap and its lock.
-  `fetch.sh` writes the patched launcher to `ROOT/launcher/pilot.py` (sha256 `40efba1d…`, pinned) and leaves the
+  `tools/speech/drama3/patches/pilot-external-admission.patch` (sha256 `8b6304cd…`): `--external-admission` skips
+  both checks, and gives the engine its least memory reserve (`TENSORFOLD_MEMORY_RESERVE_GIB=2`, not 34). The engine
+  admits its own allocations against `MemAvailable` less that reserve, so with 34 it refused a load the scheduler had
+  admitted whenever less than about 73 GiB was free: on DGX-01, with 70.5 GiB free (another process holding 22 GiB),
+  every reload failed with `OutOfDeviceMemory`. Its footprint is set by its flags (`--parallel 1`,
+  `--prompt-cache-gib 0`, `--max-frames`), not by the reserve. Everything else stays: the 54 GiB cgroup cap, the
+  server's 54 GiB allocator cap and the lock.
+  `fetch.sh` writes the patched launcher to `ROOT/launcher/pilot.py` (sha256 `e0ce7087…`, pinned) and leaves the
   upstream checkout clean. `options.admission: "launcher"` restores upstream's checks for a launch with no
   scheduler.
 - **Load.** The worker checks the qualification marker, the pinned launcher and the checkpoint files (`verify`), then
@@ -75,6 +80,11 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
 - **Unload** (idle TTL, `POST /v1/tools/fishaudio/drama-3/unload`, eviction): the worker sends the launcher SIGTERM; it
   stops the unit, waits until systemd reports it inactive, then releases the lock. The worker keeps the daemon waiting
   with progress lines until then, so nothing else loads into memory the server still holds.
+- **Soft cancel.** The worker's load reply declares `"cancel": "signal"`: SIGUSR1 during a generate closes its
+  connection to the server (which cancels the synthesis), waits until the server's `/health` shows no request
+  running, and replies `{"ok": false, "type": "cancelled"}` with the model still loaded, so the next request needs no
+  reload. Without the signal a generate is unchanged. A daemon that sends the signal (barge-in) and its hard-abort
+  fallback are #15's.
 - **Cancel and deadlines** kill the worker's process group. The launcher runs in its own session with a parent-death
   signal, so it still gets SIGTERM and stops the unit. A launcher that is itself killed outright leaves its unit's name
   in `runtime/localrouter-drama3.unit`, and the next load stops that unit first.

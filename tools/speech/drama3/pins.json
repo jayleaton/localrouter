@@ -173,11 +173,11 @@
   },
   "launcher": {
     "patch": "patches/pilot-external-admission.patch",
-    "patch_sha256": "57d1fdde164d245fa54d7903d03c211525edb883ad8e1b57f09dd637f81538bb",
+    "patch_sha256": "8b6304cd606cd59177249b56aab3744c0634efa412d8554a4c0804780b64d2fe",
     "base": "recipe/pilot.py",
     "base_sha256": "864987c2fc0850910de4a6d3933bc9d3ab8281ed3a1773f2df8e01b368405ff4",
     "path": "launcher/pilot.py",
-    "sha256": "40efba1d4f92b345230130caa2d2b176ea8e228facfb8fcd63d1a63d87a01945",
-    "note": "upstream recipe/pilot.py with an --external-admission flag: LocalRouter admits the load from its own memory budget, so the launcher skips its 88 GiB MemAvailable admission and 34 GiB abort and keeps its 54 GiB cgroup cap and lock. fetch.sh writes path under ROOT, outside the upstream checkout"
+    "sha256": "e0ce7087b066bdb365bb9be95559b3d90c5287c655ee03459abbc3d214c8140f",
+    "note": "upstream recipe/pilot.py with an --external-admission flag: LocalRouter admits the load from its own memory budget, so the launcher skips its 88 GiB MemAvailable admission and 34 GiB abort and gives the engine its least memory reserve (TENSORFOLD_MEMORY_RESERVE_GIB 2, not 34); the 54 GiB cgroup and allocator caps and the lock stay. fetch.sh writes path under ROOT, outside the upstream checkout"
   }
 }
