@@ -249,7 +249,9 @@ test "a spoken turn: VAD boundaries, the transcript, a streamed reply in sentenc
     try rig.start(.{ .partial_interval_ms = 300 });
     defer rig.stop();
     try rig.audio(300, false);
-    try rig.audio(900, true);
+    try rig.audio(500, true);
+    _ = try rig.rec.wait("localrouter.transcription.partial", 0); // while the user still speaks
+    try rig.audio(400, true);
     try rig.audio(700, false);
     const done = try rig.rec.wait("response.done", 0);
     const order = [_][]const u8{ "session.created", "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped", "input_audio_buffer.committed", "conversation.item.input_audio_transcription.completed", "response.created", "response.audio_transcript.delta", "response.audio.delta", "response.audio.done", "response.done" };
@@ -259,7 +261,6 @@ test "a spoken turn: VAD boundaries, the transcript, a streamed reply in sentenc
         try testing.expect(i >= last);
         last = i;
     }
-    try testing.expect(rig.rec.count("localrouter.transcription.partial", 0) >= 1);
     const started = try rig.rec.get(a, try rig.rec.wait("input_audio_buffer.speech_started", 0));
     try testing.expectEqual(@as(i64, 0), started.object.get("audio_start_ms").?.integer); // onset 300 minus 300 of padding
     const stopped = try rig.rec.get(a, try rig.rec.wait("input_audio_buffer.speech_stopped", 0));
