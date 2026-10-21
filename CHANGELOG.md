@@ -15,8 +15,9 @@
 
 - Fish Audio Drama 3 text to speech (`fishaudio/drama-3`, `tools/speech/drama3`; Built with Fish Audio): a `cmd`
   worker that runs plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with its Drama 3 patch
-  series), built from pinned sources and started by that repository's own launcher under the host's shared GPU lock
-  (new config key `gpu_lock`) on loopback. Whole and streamed replies, voice files and inline `references`, long form.
+  series), built from pinned sources and started by that repository's own launcher on loopback. LocalRouter's scheduler admits
+  it (`resident_bytes` 54 GiB, the launcher's cgroup cap): a pinned patch adds `--external-admission` to the launcher,
+  which turns off its own 88 GiB admission and 34 GiB abort, so it stays warm beside chat and Whisper. Whole and streamed replies, voice files and inline `references`, long form.
   It is listed but refused until GPU-qualified: the new per-tool `qualification` file gates any model with a 503
   saying it is not GPU-qualified on this host until the model's qualify script (here `qualify.sh`, not yet run) says
   so. Nothing of it has run on a GPU yet ([docs](docs/dev/DRAMA3.md)).

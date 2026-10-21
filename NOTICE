@@ -22,7 +22,9 @@ drama-tensorfold (https://github.com/plotarmordev/drama-tensorfold), Copyright 2
   The optional Drama 3 speech tool (tools/speech/drama3/) runs that repository's launcher (recipe/pilot.py) and the
   native server it builds: TensorFold (above) at c7137bb with drama-tensorfold's engine patch series, at commit
   1a53b8aea738a99d3630f949b6b2a1f9389f0795. fetch.sh clones it unmodified, with its NOTICE, LICENSE and LICENSES/;
-  build.sh runs its scripts/build-engine.sh. No drama-tensorfold file is copied into LocalRouter. The integration
+  build.sh runs its scripts/build-engine.sh. No drama-tensorfold file is copied into LocalRouter, except as the
+  context lines of tools/speech/drama3/patches/pilot-external-admission.patch, LocalRouter's change to its
+  recipe/pilot.py (Apache License 2.0; the patched file says it was modified). The integration
   tests' stand-in server (tests/fixtures/drama3_pilot.py) follows its HTTP contract. As its NOTICE records, the
   engine's chunked Gated DeltaNet prefill follows SGLang 0.5.21 (Apache License 2.0) with kernels adapted from
   flash-linear-attention (https://github.com/fla-org/flash-linear-attention, MIT License, Copyright (c) 2023-2025,

@@ -41,19 +41,32 @@ into `speech.wav` as they arrive; the daemon sends each new run on as it lands (
 ```
 daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:port ──> tensorfold-native serve
                                    │                                              ▲
-                                   └── recipe/pilot.py (own session, parent-death SIGTERM) ── systemd-run --user unit
+                                   └── launcher/pilot.py --external-admission (own session, parent-death SIGTERM) ── systemd-run --user unit
 ```
 
+- **Admission is LocalRouter's.** The scheduler admits the model from its `resident_bytes` against the budget, as for
+  every model, beside the chat model and Whisper. Upstream's launcher has its own admission (it refuses unless
+  `MemAvailable` is at least 88 GiB, and kills the unit if `MemAvailable` falls below 34 GiB), which cannot pass on a
+  box that keeps chat and Whisper warm (DGX-01 had 83 GiB free with chat, Whisper and Kitten loaded) and would fight
+  the scheduler. The launcher has no option to turn it off, so LocalRouter runs it with a pinned patch,
+  `tools/speech/drama3/patches/pilot-external-admission.patch` (sha256 `57d1fdde…`): `--external-admission` skips
+  both checks and keeps everything else, its 54 GiB cgroup cap, the server's 54 GiB allocator cap and its lock.
+  `fetch.sh` writes the patched launcher to `ROOT/launcher/pilot.py` (sha256 `40efba1d…`, pinned) and leaves the
+  upstream checkout clean. `options.admission: "launcher"` restores upstream's checks for a launch with no
+  scheduler.
 - **Load.** The worker checks the qualification marker, the pinned launcher and the checkpoint files (`verify`), then
-  starts `recipe/pilot.py` with the host's shared GPU lock (`gpu_lock` in LocalRouter's config, passed as
-  `LOCALROUTER_GPU_LOCK`). The launcher takes the lock without blocking (another holder refuses the load), refuses
-  unless `MemAvailable` is at least 88 GiB, starts the server as a transient `systemd --user` unit capped at 54 GiB
-  with swap off, watches `MemAvailable` every 100 ms and kills the unit below 34 GiB. The worker is ready when the
+  starts the launcher with `--external-admission` and the lock file the daemon names in `LOCALROUTER_GPU_LOCK`: this
+  tool's own, uncontended `<data>/locks/fishaudio_drama-3.lock`, while the scheduler holds the host's `gpu_lock`
+  shared for every LocalRouter model ([the host's GPU lock](../ARCHITECTURE.md#the-hosts-gpu-lock)). The launcher
+  starts the server as a transient `systemd --user` unit capped at 54 GiB with swap off. The worker is ready when the
   launcher prints `DRAMA_PILOT_READY`; then every voice the config lists must be one the server loaded.
-- **Memory.** `resident_bytes` is 80 GiB: with the default 8 GiB `reserve_bytes`, the scheduler makes exactly the
-  88 GiB the launcher demands before it starts it, unloading idle tools as for any load. The worker reports no
-  measured size, so the scheduler keeps holding 80 GiB while the model is loaded, which keeps other models from
-  pushing `MemAvailable` under the launcher's 34 GiB abort floor.
+- **Memory.** `resident_bytes` is 54 GiB (57,982,058,496 bytes), the launcher's cgroup cap and the server's own
+  allocator cap, until `qualify.sh`'s bench measures the real peak (`peak_memory_bytes` in the marker). The worker
+  reports no measured size, so the scheduler holds 54 GiB for it while it is loaded. With chat (24 GiB) and Whisper
+  (about 4 GiB) that is 82 GiB of DGX-01's 106 usable (114 GiB free less the 8 GiB reserve): the three stay warm
+  together, and an image or video job beside them evicts Whisper, then Drama 3 (lower priorities first), and they come
+  back by themselves (`tests/drama3.zig`). For reference, TensorFold 1.1.1's own Drama 3 server was measured at 40 GiB
+  on DGX-01 (docs/dev/JARVIS-BRINGUP.md, PR #16); drama-tensorfold's own peak has not been measured.
 - **Requests.** One at a time, as for every LocalRouter tool (the server runs `--parallel 1`). The server's 400 is a
   400, its 503 (busy) a 503 and anything else a 500. A server that dies ends the worker without a reply: that job is
   a 503 with the log tail, and the next request starts it again.
@@ -166,7 +179,7 @@ this repository):
 
 | Upstream file | Used for |
 | --- | --- |
-| `recipe/pilot.py` | the launcher the worker runs: its arguments, its stdout (`{"unit": …}`, `DRAMA_PILOT_READY`), its lock, memory guard and stop |
+| `recipe/pilot.py` | the launcher the worker runs, as `ROOT/launcher/pilot.py` with LocalRouter's `--external-admission` patch: its arguments, its stdout (`{"unit": …}`, `DRAMA_PILOT_READY`), its lock, cgroup cap and stop |
 | `scripts/build-engine.sh`, `engine/UPSTREAM`, `engine/patches/*.patch` | the engine build `build.sh` runs, pinned by hash |
 | `recipe/checksums/checkpoint.sha256`, `recipe/sources.json` | the checkpoint pins |
 | `qualification/run-bounded-oracle.py`, `backbone-reference-check.py`, `rescore-native.py`, `tower-reference-check.py` | the accuracy step `qualify.sh` runs, unmodified, against the reference at `sources.json`'s revision |
@@ -183,9 +196,9 @@ the worker against the stand-in only.
 
 - A test mode: there is no CPU or scripted engine to run the server without a GPU, so CI tests the worker against a
   stand-in of the HTTP contract, not the server.
-- Memory figures LocalRouter can schedule with: the launcher's admission (88 GiB) and caps are constants in
-  `pilot.py`, and it reports no resident size, so the tool holds 80 GiB in LocalRouter's budget; the launcher's
-  34 GiB abort floor also watches memory other LocalRouter models use.
+- A way to let an outer scheduler admit the load: the launcher's admission (88 GiB free) and abort (34 GiB) are
+  constants in `pilot.py` with no option to turn them off, hence LocalRouter's `--external-admission` patch (a
+  candidate to offer upstream). It also reports no resident size, so the tool holds its 54 GiB cap until measured.
 - A launcher that cleans up when killed: its unit outlives a SIGKILLed launcher, so the worker keeps the unit's name
   and uses a parent-death signal; a stop hook in the unit, or a unit name chosen by the caller, would close that gap
   upstream.
