@@ -37,6 +37,64 @@ pub fn resample(a: std.mem.Allocator, in: []const i16, from: u32, to: u32) ![]i1
     return out;
 }
 
+/// `resample` for audio that arrives in pieces (streamed speech): the same kernel and the same output, sample for
+/// sample, with the input the next outputs still need kept between pieces.
+pub const Stream = struct {
+    from: u32,
+    to: u32,
+    hist: std.ArrayList(i16) = .empty, // input from absolute index `base` on
+    base: u64 = 0,
+    next: u64 = 0, // the next output's index
+
+    pub fn deinit(st: *Stream, gpa: std.mem.Allocator) void {
+        st.hist.deinit(gpa);
+    }
+
+    /// The outputs `in` completes (all that are left when `end`), in `a`.
+    pub fn push(st: *Stream, gpa: std.mem.Allocator, a: std.mem.Allocator, in: []const i16, end: bool) ![]i16 {
+        if (st.from == 0 or st.to == 0) return error.BadRate;
+        if (st.from == st.to) return a.dupe(i16, in);
+        try st.hist.appendSlice(gpa, in);
+        const total: u64 = st.base + st.hist.items.len;
+        if (total == 0) return &.{};
+        const fc: f64 = cutoff * @as(f64, @floatFromInt(@min(st.from, st.to))) / 2 / @as(f64, @floatFromInt(st.from));
+        const half: f64 = zero_crossings / (2 * fc);
+        const step: f64 = @as(f64, @floatFromInt(st.from)) / @as(f64, @floatFromInt(st.to));
+        const limit: u64 = if (end) (total * st.to + st.from / 2) / st.from else std.math.maxInt(u64);
+        const last: i64 = @intCast(total - 1);
+        var out: std.ArrayList(i16) = .empty;
+        while (st.next < limit) {
+            const t: f64 = @as(f64, @floatFromInt(st.next)) * step;
+            const want: i64 = @intFromFloat(@floor(t + half));
+            if (!end and want > last) break; // its window is not all here yet
+            const lo: i64 = @max(@as(i64, @intFromFloat(@ceil(t - half))), 0);
+            const hi: i64 = @min(want, last);
+            var acc: f64 = 0;
+            var wsum: f64 = 0;
+            var k = lo;
+            while (k <= hi) : (k += 1) {
+                const d: f64 = t - @as(f64, @floatFromInt(k));
+                const w = tap(d, fc, half);
+                acc += w * @as(f64, @floatFromInt(st.hist.items[@intCast(k - @as(i64, @intCast(st.base)))]));
+                wsum += w;
+            }
+            const y = if (@abs(wsum) > 1e-6) acc / wsum else acc;
+            try out.append(a, @intFromFloat(std.math.clamp(@round(y), -32768, 32767)));
+            st.next += 1;
+        }
+        // Input before the next output's window is never read again.
+        const t_next: f64 = @as(f64, @floatFromInt(st.next)) * step;
+        const keep: i64 = @max(@as(i64, @intFromFloat(@ceil(t_next - half))) - 1, 0);
+        const drop: usize = @intCast(@min(@as(u64, @intCast(keep)) -| st.base, st.hist.items.len));
+        if (drop > 0) {
+            std.mem.copyForwards(i16, st.hist.items[0 .. st.hist.items.len - drop], st.hist.items[drop..]);
+            st.hist.shrinkRetainingCapacity(st.hist.items.len - drop);
+            st.base += drop;
+        }
+        return out.items;
+    }
+};
+
 /// The low-pass kernel at `d` input samples from the centre: sinc at cutoff `fc` under a Blackman window.
 fn tap(d: f64, fc: f64, half: f64) f64 {
     const x = d / half; // -1 to 1 across the window
@@ -153,4 +211,28 @@ test "little-endian bytes round trip" {
     defer a.free(back);
     try std.testing.expectEqualSlices(u8, &bytes, back);
     try std.testing.expectError(error.OddLength, fromLe(a, bytes[0..3]));
+}
+
+test "a stream in uneven pieces resamples to exactly what the whole does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const in = try sine(a, 44_100, 523.25);
+    const whole = try resample(a, in, 44_100, 24_000);
+    var st: Stream = .{ .from = 44_100, .to = 24_000 };
+    defer st.deinit(std.testing.allocator);
+    var got: std.ArrayList(i16) = .empty;
+    const pieces = [_]usize{ 1, 7, 441, 2048, 9000, 13 };
+    var at: usize = 0;
+    var i: usize = 0;
+    while (at < in.len) : (i += 1) {
+        const n = @min(pieces[i % pieces.len], in.len - at);
+        try got.appendSlice(a, try st.push(std.testing.allocator, a, in[at..][0..n], false));
+        at += n;
+    }
+    try got.appendSlice(a, try st.push(std.testing.allocator, a, &.{}, true));
+    try std.testing.expectEqualSlices(i16, whole, got.items);
+    try std.testing.expect(st.hist.items.len < 2000); // only the kernel's reach is kept
+    var same: Stream = .{ .from = 24_000, .to = 24_000 };
+    try std.testing.expectEqualSlices(i16, in[0..10], try same.push(std.testing.allocator, a, in[0..10], false));
 }

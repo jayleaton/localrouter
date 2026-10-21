@@ -56,7 +56,7 @@ const Fake = struct {
         return a.dupe(u8, f.heard);
     }
 
-    fn speak(p: *anyopaque, a: std.mem.Allocator, text: []const u8, _: backend.Say, stop: *Stop, why: *backend.Why) backend.Error!backend.Pcm {
+    fn speak(p: *anyopaque, a: std.mem.Allocator, text: []const u8, _: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *backend.Why) backend.Error!void {
         const f = self(p);
         if (std.mem.indexOf(u8, text, "unspeakable") != null) {
             why.set("the fake voice failed", .{});
@@ -69,7 +69,10 @@ const Fake = struct {
         f.keep(&f.spoke, text);
         const samples = try a.alloc(i16, 2205 * @max(text.len / 10, 1)); // 100 ms at 22.05 kHz per 10 characters
         @memset(samples, 1000);
-        return .{ .samples = samples, .rate = 22_050 };
+        const half = samples.len / 2; // streamed, in two pieces
+        sink.write(sink.ctx, samples[0..half], 22_050);
+        if (!f.nap(f.speak_ms, stop)) return error.Cancelled;
+        sink.write(sink.ctx, samples[half..], 22_050);
     }
 
     fn chatFn(p: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *backend.Why) backend.Error!chat.Result {

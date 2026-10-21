@@ -6,11 +6,14 @@ refuse bad requests with invalid_request_error, and release everything on exit.
 Test hooks: speech input "crash" exits the process mid-job. The tool's `options` (from LOCALROUTER_TOOL) may set
 `phrases`, a list of {"hz", "text"}: the transcript is then the phrase whose hz is within 20% of the input's pitch
 (zero crossings of the samples above 200 in magnitude), else "" with no segments, so a test picks what was "said" by
-the tone it sends. `speak_ms` and `hear_ms` sleep that long in a speech or transcription job (slow models).
+the tone it sends. `speak_ms` and `hear_ms` sleep that long in a speech or transcription job (slow models). It offers
+the soft cancel: SIGUSR1 ends the job in progress with {"ok": false, "type": "cancelled"} and keeps it loaded; each
+load logs "speech worker loaded" to stderr (the tool's log), so a test can tell a cancel from a reload.
 """
 
 import json
 import os
+import signal
 import struct
 import sys
 import time
@@ -84,22 +87,49 @@ def transcribe(job_dir, r):
     return {"ok": True, "files": ["transcript.json"], "seed": r.get("seed", 0), "ms": 1}
 
 
+class Cancelled(Exception):
+    pass
+
+
+GENERATING = False
+
+
+def on_cancel(signum, frame):
+    """SIGUSR1: the daemon cancels the job in progress; the worker stays loaded (it said "cancel": "signal")."""
+    if GENERATING:
+        raise Cancelled()
+
+
+def generate(cmd):
+    global GENERATING
+    req = cmd["request"]
+    try:
+        GENERATING = True  # inside the try: a signal right after it is still caught
+        if "speech" in req:
+            out = speak(cmd["dir"], req["speech"])
+        elif "transcription" in req:
+            out = transcribe(cmd["dir"], req["transcription"])
+        else:
+            out = {"ok": False, "type": "invalid_request_error", "error": "not a speech request"}
+    except Cancelled:
+        out = {"ok": False, "type": "cancelled", "error": "cancelled"}
+    finally:
+        GENERATING = False
+    return out
+
+
 def main():
+    signal.signal(signal.SIGUSR1, on_cancel)
     held = None
     for line in sys.stdin:
         cmd = json.loads(line)
         op = cmd["op"]
         if op == "load":
             held = bytearray(8 << 20)
-            send({"ok": True, "resident": len(held)})
+            print("speech worker loaded", file=sys.stderr, flush=True)
+            send({"ok": True, "resident": len(held), "cancel": "signal"})
         elif op == "generate":
-            req = cmd["request"]
-            if "speech" in req:
-                send(speak(cmd["dir"], req["speech"]))
-            elif "transcription" in req:
-                send(transcribe(cmd["dir"], req["transcription"]))
-            else:
-                send({"ok": False, "type": "invalid_request_error", "error": "not a speech request"})
+            send(generate(cmd))
         elif op == "exit":
             held = None
             return

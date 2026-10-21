@@ -106,18 +106,52 @@ pub const Scheduler = struct {
         l.cond.signal(s.io);
     }
 
-    /// Cancels a queued job at once, or aborts the running one (its worker is killed).
+    /// Cancels a queued job at once, or ends the running one: early with the tool kept loaded when it offers that
+    /// (`Tool.cancel`), else by aborting it (its worker is killed).
     pub fn cancel(s: *Scheduler, j: *jobs.Job) void {
         j.cancel.store(true, .release);
-        s.mutex.lockUncancelable(s.io);
-        const running = s.lanes[index(s.laneOfTool(j.tool))].running == j;
-        s.mutex.unlock(s.io);
-        if (running) s.slots[j.tool].tool.abort();
+        if (s.isRunning(j)) s.end(j, true);
     }
 
-    /// Cancels a queued job; a running one finishes and its result is ignored (the voice loop: no worker reload).
-    pub fn drop(_: *Scheduler, j: *jobs.Job) void {
+    /// Cancels a queued job, and ends a running one early only if its tool can stay loaded; otherwise the running job
+    /// finishes and its result is ignored (the voice loop: never a reload).
+    pub fn drop(s: *Scheduler, j: *jobs.Job) void {
         j.cancel.store(true, .release);
+        if (s.isRunning(j)) s.end(j, false);
+    }
+
+    fn isRunning(s: *Scheduler, j: *const jobs.Job) bool {
+        return s.runningOn(s.laneOfTool(j.tool), j);
+    }
+
+    /// Whether `j` runs on `lane`; compares the pointer only, so it is safe after the job was freed.
+    fn runningOn(s: *Scheduler, lane: Lane, j: *const jobs.Job) bool {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        return s.lanes[index(lane)].running == j;
+    }
+
+    /// How long a soft cancel may take before a hard one (`cancel`) follows.
+    const soft_cancel_ns: i96 = 5 * std.time.ns_per_s;
+
+    fn end(s: *Scheduler, j: *jobs.Job, hard: bool) void {
+        const t = s.slots[j.tool].tool;
+        if (t.cancel()) {
+            if (!hard) return;
+            const watchdog = std.Thread.spawn(.{}, abortLate, .{ s, j.tool, @as(*const jobs.Job, j) }) catch return t.abort();
+            watchdog.detach();
+        } else if (hard) t.abort();
+    }
+
+    /// The soft cancel did not end the job in time: abort its tool (the job itself is never read again).
+    fn abortLate(s: *Scheduler, tool: usize, j: *const jobs.Job) void {
+        const lane = s.laneOfTool(tool);
+        const until = nowNs(s.io) + soft_cancel_ns;
+        while (nowNs(s.io) < until) {
+            if (!s.runningOn(lane, j)) return;
+            Io.sleep(s.io, .fromMilliseconds(50), .awake) catch {};
+        }
+        if (s.runningOn(lane, j)) s.slots[tool].tool.abort();
     }
 
     pub fn stop(s: *Scheduler) void {

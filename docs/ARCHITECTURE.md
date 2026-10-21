@@ -105,6 +105,10 @@ worker -> daemon   {"ok":true,"files":["0.png"],"seed":7,"ms":11800}
 daemon -> worker   {"op":"exit"}
 ```
 
+A worker that can end a generate early answers its load with `"cancel":"signal"` beside `ok`: a cancel then sends it
+SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no reload for the next request). Any other
+worker, or one that has not answered within 5 s, is cancelled by killing its process group.
+
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
 there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
