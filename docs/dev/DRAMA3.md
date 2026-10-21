@@ -67,13 +67,32 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
   shared for every LocalRouter model ([the host's GPU lock](../ARCHITECTURE.md#the-hosts-gpu-lock)). The launcher
   starts the server as a transient `systemd --user` unit capped at 54 GiB with swap off. The worker is ready when the
   launcher prints `DRAMA_PILOT_READY`; then every voice the config lists must be one the server loaded.
-- **Memory.** `resident_bytes` is 52,023,975,936 bytes (48.45 GiB): the largest peak measured on DGX-01,
-  43,434,041,344 bytes (40.45 GiB, the drop in `MemAvailable` from before the load, `run3`; 39.84 GiB in `run1`, 40.36
-  GiB beside the warm chat model in `run2`), plus 8 GiB, below the launcher's 54 GiB cap. GB10's CUDA memory does not show in the server's cgroup (its own peak was
-  1.1 GB), so the drop is the measure. The worker reports no size, so the scheduler holds 48.45 GiB for it while it is
-  loaded. With chat (24 GiB) and Whisper (about 4 GiB) that is 76 of DGX-01's 106 usable GiB (114 free less the 8
-  reserved): the three stay warm together, and an image or video job beside them evicts Whisper, then Drama 3 (lower
-  priorities first), and they come back by themselves (`tests/drama3.zig`).
+- **Memory.** `resident_bytes` is 45,097,156,608 bytes (42 GiB): the largest peak measured on DGX-01, 40.45 GiB
+  (the drop in `MemAvailable` from before the load, `run3`), plus 1.55 GiB, 1.5 times the spread of the nine block-FP8
+  peaks measured there (39.43 to 40.45 GiB: `run1` 39.84, `run2` 40.36 beside the warm chat model, `run3` 40.45, six
+  direct server sessions 39.43 to 39.91). GB10's CUDA memory does not show in the server's cgroup (its own peak was
+  1.1 GB), so the drop is the measure, and it already holds everything the process costs beyond its CUDA
+  allocations: of a direct session's 39.84 GiB drop, 38.00 GiB are the engine's own allocations (weights 36.27, codec frames 1.18, KV
+  caches and state 0.55), 0.18 GiB the CUDA context, 0.56 GiB host heap (the driver's module images and staging,
+  the tokenizer), about 0.27 GiB kernel slab and shared memory, and about 0.8 GiB the driver keeps outside the
+  `/proc/meminfo` categories. `qualify.sh` refuses a run whose peak exceeds `resident_bytes`. The worker reports
+  no size, so the scheduler holds `resident_bytes` for it while it is loaded. With chat (24 GiB) and Whisper (about
+  4 GiB) that is 70 of DGX-01's 106 usable GiB (114 free less the 8 reserved): the three stay warm together, an image
+  job beside them evicts only Whisper, a video job evicts the image, Drama 3, then chat (lower priorities first), and
+  they come back by themselves (`tests/drama3.zig`).
+
+  What holds memory for Drama 3, and what is only booked (measured through the daemon on DGX-01, 2026-10-21):
+
+  | Layer | Where | Real or booked | Before (`resident_bytes` 48.45 GiB) | Now (42 GiB) |
+  |---|---|---|---|---|
+  | The engine and its process | the `MemAvailable` drop | real | 39.97 GiB loaded and idle; no more while speaking | 39.45 GiB; the same |
+  | `resident_bytes` | the tool's config; the worker answers `load` with `"resident": 0` (`drama3_worker.py:286`), so the scheduler keeps the config's figure (`src/sched/scheduler.zig:296-297`) | booked for as long as it is loaded: it counts against `budget_bytes` and against `MemAvailable` at the next admission | 48.45 GiB, 8.49 above the real drop | 42 GiB, 2.54 above |
+  | `reserve_bytes` | daemon config, default 8 GiB (`src/config.zig:72`); `fits` (`src/sched/scheduler.zig:351-357`) | booked once for the whole machine, not per model: what LocalRouter leaves the OS | a load needs `MemAvailable` ≥ 56.45 GiB | ≥ 50 GiB |
+  | The launcher's caps: unit `MemoryMax=54G` and `TENSORFOLD_CUDA_MEMORY_LIMIT_GB=54` (`launcher/pilot.py:81-82, 134`) | upstream's launcher | ceilings only: nothing is allocated up to them (the engine allocates its 38 GiB and stops) | - | - |
+  | The engine's reserve, `TENSORFOLD_MEMORY_RESERVE_GIB=2` (`launcher/pilot.py:80`, the engine's `cuda_memory.zig` `room`) | the pinned launcher patch | a check at allocation time (free less 2 GiB), not held | - | - |
+
+  An earlier node config of DGX-01's qualification booked 57,982,058,496 bytes (54 GiB, the launcher's cap, before the
+  peak was measured): 14 GiB above the drop, 22 GiB with the reserve. It now books 42 GiB.
 - **Requests.** One at a time, as for every LocalRouter tool (the server runs `--parallel 1`). The server's 400 is a
   400, its 503 (busy) a 503 and anything else a 500. A server that dies ends the worker without a reply: that job is
   a 503 with the log tail, and the next request starts it again.
@@ -260,6 +279,13 @@ assets, e2e, bench and accuracy all passed again: first audio p50 0.142 s, warm 
 sha256 `a860364dd152537e98f67f818e768444df84ce8c6cab4b23125889e5d2d55db4` (`pins_sha256` `e30d5396…`); manifest sha256
 `37c314ca…`. The later worker change (`adbf05a`: a busy reply after a cancel is retried) changes no pin and leaves
 that marker valid.
+
+**Requalified at `resident_bytes` 42 GiB (`run4`, LocalRouter `889cf70`; same pins, same engine).** assets, e2e, bench
+and accuracy passed: first audio p50 0.142 s, warm RTF p50 0.667, peak 39.88 GiB (42,818,375,680 bytes, within the
+45,097,156,608 booked). Marker sha256 `90f9f4a36f7754737435a6522d6ffe28fb7b7591ad99bc70d6e3e48ea8b3962a`; manifest
+sha256 `51434b8f…` (399 files). Through the daemon at the old and new figure (one streamed paragraph, three times):
+loaded and idle the drop was 39.97 and 39.45 GiB, no higher while speaking, and back to within 0.2 GiB after unload;
+the scheduler booked 48.45 GiB (8.49 more than the drop) before and 42 GiB (2.54 more) now.
 
 **LocalRouter's admission is the only one (through the daemon, `verify/` on the node).** Ballasts held by a bounded
 `systemd-run` unit, Drama 3 loaded on demand by a `localrouter serve` built from this branch:
