@@ -18,23 +18,7 @@ const Session = session.Session;
 const Task = session.Task;
 const Value = std.json.Value;
 
-/// One response in progress. Its arena belongs to the worker thread; `queue`, `spoken`, `text` and `audio    var why: backend.Why = .{};
-    var worker_ms: u64 = 0;
-    var heard = o;
-    heard.worker_ms = &worker_ms;
-    const began = s.clock();
-    const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
-        s.backend.transcribe(a, pcm16, heard, &s.close_stop, &why)
-    else |_|
-        error.OutOfMemory;
-    s.mutex.lockUncancelable(s.io);
-    defer s.mutex.unlock(s.io);
-    if (final) {
-        s.stt_start_ns = began;
-        s.stt_end_ns = s.clock();
-        s.stt_worker_ms = worker_ms;
-    }
-ms` are
+/// One response in progress. Its arena belongs to the worker thread; `queue`, `spoken`, `text` and `audio_ms` are
 /// read and written under the session's mutex.
 pub const Response = struct {
     arena: std.heap.ArenaAllocator,
