@@ -341,11 +341,21 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
 
 
 BALLAST = r"""
-import sys
+import sys, threading, os, time
 b = bytearray(int(sys.argv[1]) << 30)
 for i in range(0, len(b), 4096):
     b[i] = 1  # touch every page: the memory is really in use
 print("ready", flush=True)
+def guard():  # never push the host toward its OOM killer: let go below the floor
+    floor = int(sys.argv[2]) << 20
+    while True:
+        with open("/proc/meminfo") as f:
+            avail = next(int(l.split()[1]) for l in f if l.startswith("MemAvailable:"))
+        if avail < floor:
+            print("guard", flush=True)
+            os._exit(0)
+        time.sleep(0.2)
+threading.Thread(target=guard, daemon=True).start()
 sys.stdin.read()
 """
 
@@ -358,10 +368,11 @@ def mem_available_gib():
     return 0.0
 
 
-def ballast(gib):
-    """`gib` GiB held by another process, in its own bounded user scope, until `release`."""
+def ballast(gib, floor_gib):
+    """`gib` GiB held by another process, in its own bounded user scope, until `release` (or until MemAvailable falls
+    below `floor_gib`, when it lets go at once: the host must never near its OOM killer)."""
     p = subprocess.Popen(["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={gib + 2}G", "timeout", "1800",
-                          "python3", "-I", "-c", BALLAST, str(gib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                          "python3", "-I", "-c", BALLAST, str(gib), str(floor_gib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     if p.stdout.readline().strip() != "ready":
         p.kill()
         p.wait()
@@ -378,10 +389,20 @@ def release(p):
         p.wait()
 
 
-def video_phase(args, name, results, checks, ballast_gib):
-    """A 1 s video; which of chat, STT and TTS it unloaded; how long each takes to be ready again after it."""
+def video_phase(args, name, results, checks, squeeze):
+    """A 1 s video; which of chat, STT and TTS it unloaded; how long each takes to be ready again after it. With
+    `squeeze`, idle tools outside the voice set are unloaded first and a ballast leaves only `--eviction-free-gib`
+    available, so the video can be admitted only by unloading part of the voice set."""
     voice = (args.chat, args.stt, args.tts)
-    held = ballast(ballast_gib) if ballast_gib else None
+    held, ballast_gib = None, 0
+    if squeeze:
+        _, _, body = http(f"{args.url}/v1/tools", timeout=30)
+        for t in json.loads(body)["data"]:
+            if t["id"] not in voice and t["state"] == "ready":
+                http(f"{args.url}/v1/tools/{t['id']}/unload", {}, timeout=120)
+        time.sleep(2)
+        ballast_gib = max(0, int(mem_available_gib() - args.eviction_free_gib))
+        held = ballast(ballast_gib, args.ballast_floor_gib) if ballast_gib else None
     down, back = set(), {}
     try:
         mem_before = mem_available_gib()
@@ -408,16 +429,18 @@ def video_phase(args, name, results, checks, ballast_gib):
             time.sleep(0.5)
         mem_low = mem_available_gib()
     finally:
+        guard_tripped = held is not None and held.poll() is not None
         if held:
             release(held)
     results[name] = {"video_status": v["status"], "video_s": round(video_s, 1), "unloaded_by_video": sorted(down),
                      "ready_after_video_s": back, "ballast_gib": ballast_gib, "mem_available_before_gib": mem_before,
-                     "mem_available_after_recovery_gib": mem_low, "video_error": v.get("error")}
+                     "mem_available_after_recovery_gib": mem_low, "ballast_guard_tripped": guard_tripped, "video_error": v.get("error")}
     log(f"{name}:", results[name])
     checks.append({"check": f"{name}: the clip completed", "ok": v["status"] == "completed", "detail": v.get("error")})
     checks.append({"check": f"{name}: chat, speech to text and text to speech are ready again", "ok": len(back) == 3, "detail": back})
-    if ballast_gib:
+    if squeeze:
         checks.append({"check": f"{name}: the video had to unload part of the voice set", "ok": bool(down), "detail": sorted(down)})
+        checks.append({"check": f"{name}: memory never neared the OOM killer (the ballast's guard held)", "ok": not guard_tripped, "detail": mem_low})
 
 
 def main():
@@ -429,7 +452,8 @@ def main():
     ap.add_argument("--chat", required=True)
     ap.add_argument("--video", required=True)
     ap.add_argument("--video-size", default="768x448")
-    ap.add_argument("--ballast-gib", type=int, default=16, help="memory another tenant holds during the eviction case")
+    ap.add_argument("--eviction-free-gib", type=int, default=30, help="MemAvailable left by the ballast in the eviction case")
+    ap.add_argument("--ballast-floor-gib", type=int, default=6, help="the ballast lets go if MemAvailable falls below this")
     ap.add_argument("--max-median-ms", type=int, default=2500)
     ap.add_argument("--max-barge-ms", type=int, default=4000)
     args = ap.parse_args()
@@ -518,8 +542,8 @@ def main():
     # 6. A short video job, then the voice models must be back and a new session answered. Then the same under memory
     #    pressure (a ballast, as another tenant), so the video must unload part of the voice set and the scheduler must
     #    bring it back.
-    for name, prompt, gib in (("video", "after_video", 0), ("eviction", "after_eviction", args.ballast_gib)):
-        video_phase(args, name, results, checks, gib)
+    for name, prompt, squeeze in (("video", "after_video", False), ("eviction", "after_eviction", True)):
+        video_phase(args, name, results, checks, squeeze)
         sess = Session(args.url, events)
         try:
             sess.pump(1.0)
