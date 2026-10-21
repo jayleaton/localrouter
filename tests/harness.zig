@@ -120,7 +120,6 @@ pub fn sleepMs(io: Io, ms: i64) void {
 
 pub const reserve = "\"reserve_bytes\": 67108864";
 
-
 /// One MCP tools/call; the result object (content, isError).
 pub fn mcpCall(d: *Daemon, a: std.mem.Allocator, tool: []const u8, args: []const u8) !std.json.Value {
     const body = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{{\"name\":\"{s}\",\"arguments\":{s}}}}}", .{ tool, args });
@@ -136,4 +135,3 @@ pub fn mcpText(a: std.mem.Allocator, result: std.json.Value) !std.json.Value {
         if (std.mem.eql(u8, c.object.get("type").?.string, "text")) return std.json.parseFromSliceLeaky(std.json.Value, a, c.object.get("text").?.string, .{});
     return error.NoText;
 }
-

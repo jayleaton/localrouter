@@ -192,7 +192,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     defer d.stop();
     // The tool's own lock, which the daemon names in LOCALROUTER_GPU_LOCK and the launcher takes (in this run's directory).
     const own_lock = try std.fmt.allocPrint(a, "{s}/data/locks/fishaudio_drama-3.lock", .{d.dir});
-    const say ="{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}"; // 12 characters: 5292 samples
+    const say = "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}"; // 12 characters: 5292 samples
 
     // Listed, and refused before anything starts until this machine is qualified.
     const models = try d.call(a, .GET, "/v1/models", null);
