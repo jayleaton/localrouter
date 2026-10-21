@@ -101,6 +101,28 @@ def last_voiced(s, threshold=500):
     return 0
 
 
+def squeeze(s, threshold=500, max_gap=0.3, edge=0.1):
+    """Speech as a person says one request: pauses longer than `max_gap` s shortened to it, edges trimmed to `edge` s.
+    The TTS that records the prompts can leave second-long pauses between sentences, which VAD rightly takes as the
+    end of the turn."""
+    loud = [i for i in range(0, len(s), 240) if max(abs(x) for x in s[i:i + 240]) > threshold]  # 10 ms blocks
+    if not loud:
+        return array.array("h", s)
+    out, gap, keep = array.array("h"), int(RATE * max_gap) // 240, int(RATE * edge) // 240
+    blocks = set(loud)
+    first, last = loud[0] // 240, loud[-1] // 240
+    quiet = 0
+    for b in range(max(first - keep, 0), min(last + keep + 1, (len(s) + 239) // 240)):
+        if b * 240 in blocks:
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet > gap and first <= b <= last:
+                continue
+        out.extend(s[b * 240:(b + 1) * 240])
+    return out
+
+
 def write_wav(path, s, rate=RATE):
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
@@ -337,9 +359,10 @@ def main():
         t0 = time.monotonic()
         status, headers, raw = http(f"{args.url}/v1/audio/speech", {"model": args.tts, "input": text, "response_format": "wav"})
         s, rate = wav_pcm(raw)
-        mic[name] = resample(s, rate, RATE)
+        raw_s = len(s) / rate
+        mic[name] = squeeze(resample(s, rate, RATE))
         write_wav(f"{args.out}/prompts/{name}.wav", mic[name])
-        log(f"prompt {name}: {len(mic[name]) / RATE:.2f} s of audio from {args.tts} ({rate} Hz) in {time.monotonic() - t0:.2f} s")
+        log(f"prompt {name}: {raw_s:.2f} s of audio from {args.tts} ({rate} Hz) in {time.monotonic() - t0:.2f} s, {len(mic[name]) / RATE:.2f} s with long pauses shortened")
     silence = lambda s: array.array("h", [0] * int(RATE * s))
 
     events = open(f"{args.out}/events.jsonl", "w")
@@ -439,7 +462,10 @@ def main():
         events.close()
 
     lat = [t["speech_end_to_first_audio_ms"] for n, t in turns.items() if n != "warmup" and t["speech_end_to_first_audio_ms"] is not None]
-    results["first_audio_ms"] = {"min": min(lat), "median": sorted(lat)[len(lat) // 2], "max": max(lat)} if lat else None
+    pct = lambda xs, p: sorted(xs)[min(len(xs) - 1, max(0, -(-p * len(xs) // 100) - 1))]
+    results["latency_ms"] = {k: {"median": pct(v, 50), "p90": pct(v, 90), "min": min(v), "max": max(v)} for k in ("speech_end_to_transcript_ms", "speech_end_to_first_text_ms", "speech_end_to_first_audio_ms")
+                             if (v := [t[k] for n, t in turns.items() if n != "warmup" and t[k] is not None])}
+    results["first_audio_ms"] = results["latency_ms"].get("speech_end_to_first_audio_ms")
     results["checks"] = checks
     results["passed"] = all(c["ok"] for c in checks) and bool(lat)
     with open(f"{args.out}/results.json", "w") as f:
