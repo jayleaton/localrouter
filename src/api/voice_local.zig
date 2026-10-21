@@ -89,7 +89,7 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     return if (text == .string) try a.dupe(u8, text.string) else "";
 }
 
-fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
+fn speak(ptr: *anyopaque, _: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     const l = self(ptr);
     const app = l.app;
     var ref: routes.Refusal = .{};
