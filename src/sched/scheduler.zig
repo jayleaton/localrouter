@@ -220,8 +220,8 @@ pub const Scheduler = struct {
             if (c.keep_loaded and !slot.released and slot.tool.state() == .unloaded) wait = @min(wait, reload_poll_ns);
             if (c.keep_loaded) continue;
             if (slot.resident == 0 and slot.tool.state() != .ready) continue;
-            const end = slot.last_used_ns + @as(i96, c.idle_ttl_s) * std.time.ns_per_s;
-            wait = @min(wait, @max(end - now, 1));
+            const ttl_end = slot.last_used_ns + @as(i96, c.idle_ttl_s) * std.time.ns_per_s;
+            wait = @min(wait, @max(ttl_end - now, 1));
         }
         return wait;
     }

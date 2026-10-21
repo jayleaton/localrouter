@@ -1,11 +1,4 @@
-//! T        if (head) |h| {
-            while (true) {
-                const n = readAt(fd, &buf, at) & ~@as(usize, 1); // whole samples; an odd byte waits for its pair
-                if (n == 0) break;
-                sink.write(sink.ctx, std.mem.bytesAsSlice(i16, buf[0..n]), h.rate);
-                at += n;
-            }
-        }e voice loop's backend in the daemon: speech to text and text to speech are ordinary scheduler jobs (on the
+//! The voice loop's backend in the daemon: speech to text and text to speech are ordinary scheduler jobs (on the
 //! realtime lane by default), the chat model is OpenAI's streaming API at `voice.chat_url` (this daemon's own /v1 when
 //! unset), and tool calls queue image and video jobs whose files are served from /v1/files. Voice jobs keep their
 //! audio only until the next expiry tick.
