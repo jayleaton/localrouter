@@ -57,8 +57,11 @@ def sha(b):
     return hashlib.sha256(b).hexdigest()
 
 
-def tool_config(root, device, threads, keep_float=True):
-    opts = {"device": device, "keep_float": keep_float, "min_speed": 1, "max_speed": 1}
+def tool_config(root, device, threads, keep_float=True, lm_decode="eager", graph_backend="inductor",
+                graph_tokens=2048):
+    opts = {"device": device, "keep_float": keep_float, "min_speed": 1, "max_speed": 1, "lm_decode": lm_decode}
+    if lm_decode == "graphs":
+        opts |= {"graph_backend": graph_backend, "graph_tokens": graph_tokens}
     if threads:
         opts["threads"] = threads
     return {"id": "kitten-tts-2", "kind": "speech", "weights": root, "options": opts}
@@ -86,11 +89,11 @@ def load_reference(root, device, threads):
     return KittenTTS2(kitten_dir, config, device=device)
 
 
-def load_worker_engine(root, device, threads):
+def load_worker_engine(root, device, threads, lm_decode="eager"):
     """The model loaded by the worker's own code path (pins, offline patch, determinism flags, threads)."""
     sys.path.insert(0, HERE)
     import kitten_worker as kw
-    engine = kw.KittenEngine(kw.Options(tool_config(root, device, threads)))
+    engine = kw.KittenEngine(kw.Options(tool_config(root, device, threads, lm_decode=lm_decode)))
     engine.load()
     return engine.model
 
@@ -242,7 +245,8 @@ class Worker:
 
 def run_role(role, args, out, fixtures):
     cmd = [sys.executable, "-I", os.path.abspath(__file__), role, args.root, out, "--fixtures", fixtures,
-           "--device", args.device, "--threads", str(args.threads)]
+           "--device", args.device, "--threads", str(args.threads), "--lm-decode", args.lm_decode,
+           "--graph-backend", args.graph_backend, "--graph-tokens", str(args.graph_tokens)]
     if role == "ops":
         cmd += ["--engine", args.engine]
     subprocess.run(cmd, check=True)
@@ -262,14 +266,9 @@ def compare(name, a, b, dtype=None):
     return r
 
 
-def gate(args):
-    import numpy as np
-    sys.path.insert(0, HERE)
-    import kitten_worker as kw
-    os.makedirs(args.out, exist_ok=True)
-    names = args.fixtures.split(",")
+def op_checks(args):
+    """ops: a reference process versus the worker's load path, same fixed inputs, bitwise."""
     checks = []
-    # ops: reference process versus the worker's load path, same fixed inputs.
     for engine in ("reference", "worker"):
         args.engine = engine
         run_role("ops", args, os.path.join(args.out, f"ops-{engine}"), args.fixtures)
@@ -277,6 +276,20 @@ def gate(args):
     for blob in sorted(os.listdir(a)):
         dtype = None if blob.endswith((".text", ".prompts")) else "<f4"
         checks.append({"level": "op", **compare(blob, read_blob(a, blob), read_blob(b, blob), dtype)})
+    return checks
+
+
+def gate(args):
+    if args.lm_decode == "graphs":
+        sys.path.insert(0, HERE)
+        import qualify_graphs
+        return qualify_graphs.gate(args)
+    import numpy as np
+    sys.path.insert(0, HERE)
+    import kitten_worker as kw
+    os.makedirs(args.out, exist_ok=True)
+    names = args.fixtures.split(",")
+    checks = op_checks(args)
     # chained and full: the reference's public generate, then the worker over the protocol (cold, then warm).
     ref = os.path.join(args.out, "reference")
     run_role("reference", args, ref, args.fixtures)
@@ -354,8 +367,12 @@ def bench(args):
     import torch
     import wave
     os.makedirs(args.out, exist_ok=True)
-    tool = tool_config(args.root, args.device, args.threads, keep_float=False)
-    result = {"device": args.device, "threads": args.threads, "env": environment(torch), "missing": []}
+    tool = tool_config(args.root, args.device, args.threads, keep_float=False, lm_decode=args.lm_decode,
+                       graph_backend=args.graph_backend, graph_tokens=args.graph_tokens)
+    result = {"device": args.device, "threads": args.threads, "lm_decode": args.lm_decode,
+              "graph_backend": args.graph_backend,
+              "graph_tokens": args.graph_tokens, "env": environment(torch),
+              "missing": []}
     missing = result["missing"]
 
     def save():
@@ -439,16 +456,29 @@ def bench(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("role", choices=["gate", "bench", "ops", "reference"])
+    ap.add_argument("role", choices=["gate", "bench", "marker", "ops", "reference"])
     ap.add_argument("root")
     ap.add_argument("out")
     ap.add_argument("--fixtures", default="F1,F2,F3,F4,F5")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--engine", default="reference", choices=["reference", "worker"])
+    ap.add_argument("--lm-decode", default="eager", choices=["eager", "graphs"])
+    ap.add_argument("--graph-backend", default="inductor", choices=["inductor", "cudagraphs"])
+    ap.add_argument("--graph-tokens", type=int, default=2048)
+    ap.add_argument("--baseline", default=os.path.join(HERE, "baselines"), help="the accepted graphs baselines")
+    ap.add_argument("--accept-baseline", action="store_true",
+                    help="graphs: record this run's bits as the accepted baseline (the operator's decision)")
+    ap.add_argument("--marker", help="marker: the qualification file the tool's config names")
+    ap.add_argument("--revoke", action="store_true", help="marker: remove the marker if this run (OUT) wrote it")
     args = ap.parse_args()
     args.out = os.path.abspath(args.out)
-    return {"gate": gate, "bench": bench, "ops": role_ops, "reference": role_reference}[args.role](args) or 0
+    if args.role == "marker":
+        sys.path.insert(0, HERE)
+        import qualify_graphs
+        return qualify_graphs.marker(args)
+    roles = {"gate": gate, "bench": bench, "ops": role_ops, "reference": role_reference}
+    return roles[args.role](args) or 0
 
 
 if __name__ == "__main__":
