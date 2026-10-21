@@ -1,7 +1,7 @@
 //! The scheduler owns the GPU: one executor thread a lane runs one job at a time, loads and unloads tools inside the
 //! memory budget, and unloads idle tools after their TTL. Other threads only queue work, cancel, and read state.
 //!
-//! Lanes: `main` (image, video) and `realtime` (speech and transcription by default, `config.laneOf`), so a short TTS
+//! Lanes: `main` (image, video), `realtime` (speech) and `listen` (transcription; `config.laneOf`), so a short TTS
 //! or STT job never waits behind a long one. A tool is loaded and run only by its own lane. Residency changes
 //! (admission, eviction, the reservation of a load) are serialized by `gate`; memory admitted but perhaps not yet
 //! allocated (a load in progress, the working bytes of a running job) is held back from MemAvailable.
@@ -62,6 +62,7 @@ fn index(l: Lane) usize {
     return switch (l) {
         .main => 0,
         .realtime => 1,
+        .listen => 2,
     };
 }
 
@@ -73,7 +74,7 @@ pub const Scheduler = struct {
     table: *jobs.Table,
     mutex: Io.Mutex = .init, // the queues and `running`
     gate: Io.Mutex = .init, // residency: admission, eviction, `in_use`, `pending`, `resident`
-    lanes: [2]LaneState = .{ .{}, .{} },
+    lanes: [3]LaneState = @splat(.{}),
     stopping: bool = false,
 
     pub fn deinit(s: *Scheduler) void {

@@ -25,15 +25,16 @@ pub const ToolConfig = struct {
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
     options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
-    lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech and transcription, else main
+    lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech, listen for transcription, else main
 };
 
 /// The scheduler's executors: one job at a time on each. Small speech models run beside a chat or image job.
-pub const Lane = enum { main, realtime };
+pub const Lane = enum { main, realtime, listen };
 
 pub fn laneOf(t: *const ToolConfig) Lane {
     return t.lane orelse switch (t.kind) {
-        .speech, .transcription => .realtime,
+        .speech => .realtime,
+        .transcription => .listen,
         else => .main, // image, video, and every other kind
     };
 }
