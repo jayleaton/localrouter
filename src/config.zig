@@ -59,6 +59,8 @@ pub const Voice = struct {
     partial_interval_ms: u32 = 0, // a partial transcript per this much new speech; 0 (default): none, since a partial
     // on a non-streaming STT model (Whisper) can hold the turn's final transcript back by a whole decode
     draft_after_ms: u32 = 150, // quiet after speech that starts a draft transcript, reused when the turn ends; 0: none
+    greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
+    // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
     early_end_ms: u32 = 300, // a draft that ends a sentence ends the turn after this much quiet, not silence_duration_ms;
     // 0: never
     max_history_chars: u32 = 24000, // older turns are dropped past this

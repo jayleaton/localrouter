@@ -30,6 +30,7 @@ os.dup2(2, 1)
 sys.stdout = sys.stderr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np  # noqa: E402
 import torch  # noqa: E402  (after CUBLAS_WORKSPACE_CONFIG and the stdout redirect)
 
 import whisper_core  # noqa: E402
@@ -126,13 +127,18 @@ class Worker:
                                                               self.opts.get("dtype", "auto"))
             t = time.monotonic()
             model, processor = whisper_core.load(weights, device, dtype, self.opts.get("attn", "sdpa"))
+            loaded = time.monotonic() - t
+            # One throwaway decode of a second of silence, so the first request does not pay the first-call CUDA
+            # setup (on GB10 a voice turn's transcript took 1.4 to 2.0 s right after a reload, 0.4 s warm).
+            t = time.monotonic()
+            whisper_core.transcribe(model, processor, np.zeros(whisper_core.SAMPLE_RATE, dtype=np.float32), {"language": "en"})
         except BaseException:
             del model, processor, vad
             self.release()
             raise
         self.model, self.processor, self.vad, self.mode = model, processor, vad, mode
         log(f"loaded {weights} on {device} {dtype} attn={model.config._attn_implementation} "
-            f"threads={torch.get_num_threads()} vad={mode} in {time.monotonic() - t:.1f}s")
+            f"threads={torch.get_num_threads()} vad={mode} in {loaded:.1f}s, warmed in {time.monotonic() - t:.1f}s")
         return {"ok": True, "resident": self.resident()}
 
     def generate(self, cmd):
@@ -151,7 +157,7 @@ class Worker:
             self.load()  # raises (and stays unloaded) unless the model and its selected gate both load
         if not self.ready() or (self.mode == "silero") != (self.vad is not None):
             raise RuntimeError("the worker is not loaded with its voice activity gate")
-        opts = {k: req.get(k) for k in ("language", "prompt", "temperature", "timestamps", "seed")}
+        opts = {k: req.get(k) for k in ("language", "prompt", "temperature", "timestamps", "seed", "decode")}
         opts["max_new_tokens"] = self.opts.get("max_new_tokens")
 
         def progress(step, of):
