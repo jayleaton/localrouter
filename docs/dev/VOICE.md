@@ -160,6 +160,16 @@ voiced sample. The table covers seven turns, with the warm-up left out of the st
   another process holds the memory. LocalRouter's admission said yes, but the server exited with status 1. Reloads
   therefore back off from 5 s, not a flat 60 s.
 - **Peak memory:** 13.1 GiB `MemAvailable` (of 114.4 idle) during the image job.
+- **Leaked reasoning:** run `24be911`, with thinking off, once answered "The capital of France is Paris.\n</think>\n\nThe
+  capital of France is Paris.".
+  - **Fix:** the voice request now also sends `reasoning_effort: none`, and `chunker.Lead` holds each reply's start.
+  - **Rerun (`f3dd471d`):** all 31 checks passed, including "no reply contains think>" and "no reply repeats its own
+    first sentence". Median first audio was 2.05 s and the barge-in turn 2.01 s; Drama 3 reloaded in 8.5 s with a
+    24 GiB ballast held.
+  - **What the hold costs:** first text came 0.1–0.46 s later than in the previous run; first audio did not move.
+  - **Did the server switch alone fix it?** Unknown. The leak did not reproduce in 20 + 20 streamed requests, with
+    thinking off only and with `reasoning_effort: none` added. Those probe requests carried no tools, while the one
+    observed leak happened in a voice request that did. The hold stays as the guard.
 
 ## Tests
 
