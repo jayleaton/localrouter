@@ -132,29 +132,33 @@ The daemon's own share is covered by `tests/voice.zig` with zero-latency fakes; 
 
 ### Measured on DGX-01 (2026-10-21)
 
-`tools/spark/jarvis/voice_e2e.sh` on `integration/jarvis` `24be911` (this branch with #14, #13 and #17). Qwen3.8-27B
-(TensorFold, thinking off), Drama 3 (whole sentences, not streamed), Whisper large-v3-turbo, `silence_duration_ms`
-500. The prompts were spoken by Drama 3 and streamed in real time; times are from the last voiced sample. Six turns,
-the warm-up excluded from the statistics:
+`tools/spark/jarvis/voice_e2e.sh` on `integration/jarvis` `5ed7de6f` (this branch with #14, #13 and #17). The models
+were Qwen3.8-27B (TensorFold, thinking off), Drama 3 streamed, and Whisper large-v3-turbo, with
+`silence_duration_ms` 500. The prompts were spoken by Drama 3 and streamed in real time; times run from the last
+voiced sample. The table covers seven turns, with the warm-up left out of the statistics (median, p90):
 
-| From speech end to | median | p90 |
+| From speech end to | before streaming (`24be911`) | streamed speech (`5ed7de6f`) |
 | --- | ---: | ---: |
-| final transcript | 1.66 s | 2.30 s |
-| first reply text | 1.83 s | 2.91 s |
-| first reply audio | 4.77 s | 8.20 s |
+| final transcript | 1.66 s, 2.30 s | 1.37 s, 2.18 s |
+| first reply text | 1.83 s, 2.91 s | 1.82 s, 2.37 s |
+| first reply audio | 4.77 s, 8.20 s | **2.20 s, 2.95 s** |
+| the barge-in turn's first audio | 8.20 s | **2.08 s** |
 
-VAD ends the turn 0.42–0.51 s after speech. Whisper takes 0.8–1.5 s more, and the chat model's first token about
-0.2–0.6 s. Most of the rest is Drama 3 synthesising the whole first sentence before any of it is sent (1.4–3.3 s).
-Two levers come next: streamed TTS (#13's worker streams) and a first chunk that breaks at a clause.
-
-The p90 (8.2 s) is the barge-in turn. Its first sentence waited for the interrupted answer's in-flight Drama 3
-sentence: a running speech job is finished, not killed, so that killing it costs no reload. A worker-level cancel
-would remove that wait.
-
-Barge-in: speech was detected 1 ms after the interruption began and the answer was cancelled 19–42 ms later; no audio
-of it arrived after `speech_started`. The tool turn's image (1024x1024, PNG at its `/v1/files` URL) was done 20 s
-after speech end and confirmed aloud. A 1 s video then took 24 s. It evicted only the idle image model, so chat, STT
-and TTS never went down. Peak memory: 13.0 GiB `MemAvailable` (of 114.3 idle) during the image job.
+- **Where the time goes:**
+  - VAD ends the turn 0.42–0.51 s after speech.
+  - Whisper takes another 0.8–1.5 s; partials are off, so none holds the final back.
+  - The chat model's first token comes 0.2–0.5 s later.
+  - The first audio delta follows the first clause by 0.3–0.6 s.
+- **Barge-in turn:** its first audio no longer waits for the interrupted sentence, which Drama 3's worker now ends on
+  the soft cancel (SIGUSR1). The cancel came 4–40 ms after `speech_started`, with no audio of the old answer after it.
+- **Tool turn:** the image was done 18.3 s after speech end, its PNG was fetched, and the confirmation was spoken.
+- **Eviction case:** idle tools were unloaded and a 23 GiB ballast stood in for another tenant, leaving 30 GiB free.
+  - The 1 s video then unloaded Drama 3 and Whisper; chat, at priority 100, stayed.
+  - After the clip, Whisper was already back and Drama 3 was ready in 7.5 s.
+- **Drama 3 behind another tenant:** its launcher keeps a 30 GiB headroom floor of its own, so it cannot start while
+  another process holds the memory. LocalRouter's admission said yes, but the server exited with status 1. Reloads
+  therefore back off from 5 s, not a flat 60 s.
+- **Peak memory:** 13.1 GiB `MemAvailable` (of 114.4 idle) during the image job.
 
 ## Tests
 
