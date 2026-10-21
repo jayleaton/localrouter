@@ -392,9 +392,10 @@ def release(p):
 def video_phase(args, name, results, checks, squeeze):
     """A 1 s video; which of chat, STT and TTS it unloaded; how long each takes to be ready again after it. With
     `squeeze`, idle tools outside the voice set are unloaded first and a ballast leaves only `--eviction-free-gib`
-    available, so the video can be admitted only by unloading part of the voice set."""
+    available while the video runs, so it can be admitted only by unloading part of the voice set; the ballast leaves
+    when the clip is done (Drama 3's launcher keeps a 30 GiB headroom floor of its own, so it cannot start beside it)."""
     voice = (args.chat, args.stt, args.tts)
-    held, ballast_gib = None, 0
+    held, ballast_gib, guard_tripped = None, 0, False
     if squeeze:
         _, _, body = http(f"{args.url}/v1/tools", timeout=30)
         for t in json.loads(body)["data"]:
@@ -418,6 +419,10 @@ def video_phase(args, name, results, checks, squeeze):
                 break
             time.sleep(0.5)
         video_s = time.monotonic() - t0
+        if held:  # the other tenant leaves with the job: what is measured next is our recovery
+            guard_tripped = held.poll() is not None
+            release(held)
+            held = None
         t1 = time.monotonic()
         while time.monotonic() - t1 < 600 and len(back) < 3:
             _, _, body = http(f"{args.url}/v1/tools", timeout=30)
@@ -429,8 +434,8 @@ def video_phase(args, name, results, checks, squeeze):
             time.sleep(0.5)
         mem_low = mem_available_gib()
     finally:
-        guard_tripped = held is not None and held.poll() is not None
         if held:
+            guard_tripped = held.poll() is not None
             release(held)
     results[name] = {"video_status": v["status"], "video_s": round(video_s, 1), "unloaded_by_video": sorted(down),
                      "ready_after_video_s": back, "ballast_gib": ballast_gib, "mem_available_before_gib": mem_before,

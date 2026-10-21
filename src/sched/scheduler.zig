@@ -37,6 +37,7 @@ pub const Slot = struct {
     released: bool = false, // unloaded through the API: `keep_loaded` does not bring it back until it is loaded again
     visited: bool = false, // scratch of `loadKept`
     retry_ns: i96 = 0, // a failed `keep_loaded` load is not retried before this time
+    backoff_ns: i96 = reload_backoff_min_ns, // the next wait after a failed load: doubles to the maximum, reset by a load
     in_use: bool = false, // its lane is loading or running it: never a victim (under `gate`)
     pending: u64 = 0, // admitted bytes that MemAvailable may not show yet (under `gate`)
     unload_after: bool = false, // unloaded on request while in use: its lane unloads it when done
@@ -45,7 +46,8 @@ pub const Slot = struct {
 /// How long a lane must be idle before a `keep_loaded` tool is reloaded, and how often it checks the memory.
 const reload_grace_ns: i96 = 2 * std.time.ns_per_s;
 const reload_poll_ns: i96 = 2 * std.time.ns_per_s;
-const reload_backoff_ns: i96 = 60 * std.time.ns_per_s;
+const reload_backoff_min_ns: i96 = 5 * std.time.ns_per_s; // a model refused by its own launcher (memory held elsewhere)
+const reload_backoff_max_ns: i96 = 60 * std.time.ns_per_s; // so it comes back within seconds once the memory frees
 
 /// Control work from the API (load, unload, release). Loads run on the tool's lane, the rest on the main lane.
 pub const Control = struct {
@@ -339,9 +341,11 @@ pub const Scheduler = struct {
             s.loadSlot(slot) catch |err| {
                 s.done(slot);
                 std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message });
-                slot.retry_ns = nowNs(s.io) + reload_backoff_ns;
+                slot.retry_ns = nowNs(s.io) + slot.backoff_ns;
+                slot.backoff_ns = @min(slot.backoff_ns * 2, reload_backoff_max_ns);
                 continue;
             };
+            slot.backoff_ns = reload_backoff_min_ns;
             s.done(slot);
             std.log.info("keep_loaded {s}: loaded ({d} MiB)", .{ c.id, slot.resident >> 20 });
         }
