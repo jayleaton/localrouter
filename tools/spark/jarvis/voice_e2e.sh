@@ -134,7 +134,7 @@ run() {
           cmd: [($J + "/venvs/whisper/bin/python"), ($R + "/tools/speech/whisper/worker.py")],
           weights: ($J + "/models/whisper/whisper-large-v3-turbo/" + $rev), resident_bytes: 4294967296, working_bytes: 2147483648,
           idle_ttl_s: 3600, priority: 90, keep_loaded: true,
-          options: {device: "cuda", dtype: "float16", attn: "sdpa", vad: "silero", vad_model: ($J + "/models/vad/silero_vad.jit")}}]
+          options: {device: "cuda", dtype: "float16", attn: "sdpa", threads: 4, vad: "silero", vad_model: ($J + "/models/vad/silero_vad.jit")}}]
          + (if $kitten == 1 then [{id: "kitten-tts-2", kind: "speech", name: "Kitten TTS 2",
           cmd: [($J + "/venvs/kitten/bin/python"), "-I", ($R + "/tools/speech/kitten/kitten_worker.py")],
           weights: ($J + "/models/kitten"), resident_bytes: 12884901888, working_bytes: 2147483648, idle_ttl_s: 600,

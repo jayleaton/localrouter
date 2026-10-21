@@ -288,7 +288,7 @@ class Session:
                     buf.extend(pcm)
                     self.first_delta.setdefault(rid, ev["_t"])
                     if rid not in self.voiced:
-                        k = next((i for i, x in enumerate(pcm) if abs(x) > 500), None)
+                        k = next((i for i, x in enumerate(pcm) if abs(x) > 250), None)  # about -42 dBFS, as the daemon's timing
                         if k is not None:
                             self.voiced[rid] = (ev["_t"], before + k)
                     ev = dict(ev, delta=f"<{len(pcm)} samples>")
@@ -329,7 +329,8 @@ def stages(r, tm):
     """Where a turn's time went, in ms: VAD's end-of-turn delay (client), then the server's stages from the daemon's
     `localrouter.response.timing` (measured from speech_stopped): transcription (queue, total, the worker's own),
     chat time to first token, the lead hold and chunker before speech gets text, speech queue and time to first
-    samples, delivery, and the silence at the head of the audio."""
+    samples, delivery, and the silence at the head of the audio. With a draft transcript (made at the pause) the
+    transcription can start before speech_stopped: stt_wait is then negative."""
     if not tm:
         return None
     m = tm["ms"]
@@ -338,7 +339,9 @@ def stages(r, tm):
             "stt_worker": tm.get("stt_worker_ms"), "to_chat": d("chat_start", "stt_end"), "chat_ttft": d("first_token", "chat_start"),
             "to_tts_text": d("first_chunk", "first_token"), "tts_wait": d("tts_start", "first_chunk"),
             "tts_first_pcm": d("tts_first_pcm", "tts_start"), "to_first_audio": d("first_audio", "tts_first_pcm"),
-            "leading_silence": tm.get("voiced_audio_ms"), "server_first_voiced": m.get("first_voiced")}
+            "leading_silence": tm.get("voiced_audio_ms"), "server_first_voiced": m.get("first_voiced"),
+            # how the turn ended: on its draft's sentence end, on silence with the draft reused, or on silence
+            "turn_end": "early" if tm.get("early_end") else "draft" if tm.get("stt_draft") else "silence"}
 
 
 def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
@@ -678,10 +681,10 @@ def main():
         print(f"{n:<12} {t['speech_end_to_vad_stop_ms']!s:>9} {t['speech_end_to_transcript_ms']!s:>11} {t['speech_end_to_first_text_ms']!s:>11} "
               f"{t['speech_end_to_first_audio_ms']!s:>12}  {t['transcript'][:50]!r} / {t['reply'][:60]!r}")
     print()
-    print(f"{'turn':<15}" + "".join(f"{k[:11]:>12}" for k in STAGES) + f"{'1st voiced':>12}")
+    print(f"{'turn':<15}" + "".join(f"{k[:11]:>12}" for k in STAGES) + f"{'1st voiced':>12}" + f"{'end':>9}")
     for n, t in turns.items():
         s = t.get("stages_ms") or {}
-        print(f"{n:<15}" + "".join(f"{s.get(k)!s:>12}" for k in STAGES) + f"{t.get('speech_end_to_first_voiced_ms')!s:>12}")
+        print(f"{n:<15}" + "".join(f"{s.get(k)!s:>12}" for k in STAGES) + f"{t.get('speech_end_to_first_voiced_ms')!s:>12}" + f"{s.get('turn_end')!s:>9}")
     print(f"{'median':<15}" + "".join(f"{results['stage_median_ms'].get(k)!s:>12}" for k in STAGES) + f"{(results['first_voiced_ms'] or {}).get('median')!s:>12}")
     for c in checks:
         print(("PASS " if c["ok"] else "FAIL ") + c["check"] + ("" if c["ok"] else f"  ({c['detail']})"))
