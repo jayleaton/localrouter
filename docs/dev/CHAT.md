@@ -8,10 +8,20 @@ image and video generation and speech to text and text to speech beside it. The 
 release binary `bin/tensorfold-native`). LocalRouter does not reimplement the model: it runs TensorFold's server as the
 tool's worker and proxies requests to it.
 
-**Status: not qualified on GB10.** Nothing in this page has run on a GPU yet. The tool is refused (503) until
-`tools/chat/qwen38-27b/qualify.sh` passes on the machine, and its memory figure is a placeholder (see
-[Memory](#memory)). TensorFold's own qualification table lists the 27B on Metal and on an RTX 4090, not on GB10
-(aarch64 CUDA); the qualify run is what establishes it there.
+**Status: qualified on DGX-01 (GB10)** by `tools/chat/qwen38-27b/qualify.sh` run2 at commit 685f517 on
+2026-10-21: 273 of 273 checks, with one named exception (see [Exceptions](#exceptions)). TensorFold's own
+qualification table lists the 27B only on Metal and an RTX 4090; this run establishes it on GB10 (aarch64 CUDA). Every
+other machine runs qualify.sh itself: the tool is refused (503) on a host until its own marker says qualified.
+
+| Run | Commit | Checks | Result |
+| --- | --- | --- | --- |
+| run1 | 6e83844 | 269 of 273 | not qualified: P1 and P2 stream vs whole `reasoning_content`, TensorFold's trailing `\n` (direct and through LocalRouter alike) |
+| run2 | 685f517 | 273 of 273 | qualified, with `tensorfold-1.1.1-stream-reasoning-trailing-newline` used by exactly those four checks (599 vs 598 B, 352 vs 351 B, tail `\n`). Memory drop 20.0 GiB (configured 24 GiB); cold load 12.5 s; servers stopped on SIGTERM in 0.8 s |
+
+Marker (sha256 `f64c573b5341c50d7d5fc4474c4b6e84df94d71eabe6c1d5ffd9f20748c5a61e`): `qualified: true`, host
+`dgx-01`, GPU `NVIDIA GB10`, `pins_sha256` `3be3ea41…`, `tensorfold_sha256` `2e0103a5…`, 273 checks, `exceptions:
+["tensorfold-1.1.1-stream-reasoning-trailing-newline"]`. Receipts on DGX-01 in `~/jarvis/qualify-chat/run2/` (manifest
+`SHA256SUMS` `2c1f290d…`).
 
 ## What it serves
 
