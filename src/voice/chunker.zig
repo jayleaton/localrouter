@@ -221,10 +221,12 @@ const stray_close = "</think>";
 
 /// The start of a reply, held until it is clear that no reasoning leaked into it. Some models write their reasoning as
 /// plain text closed by a `</think>` that was never opened: everything before such a tag is dropped with it. The hold
-/// ends at that tag, once the first sentence end is followed by text that cannot begin one (the observed leak is a whole
-/// answer, then "\n</think>\n\n" and the answer again), at `max` characters, or at the end of the reply; later stray
-/// tags are removed. The cost is about one token past the first sentence.
+/// ends at that tag, once the first sentence end (or a clause mark `clause` characters in, where the chunker may end the
+/// first chunk) is followed by text that cannot begin one (the observed leak is a whole answer, then "\n</think>\n\n"
+/// and the answer again), at `max` characters, or at the end of the reply; later stray tags are removed. The cost is
+/// about one token past the first clause or sentence.
 pub const Lead = struct {
+    clause: usize = 24,
     max: usize = 240,
     deciding: bool = true,
     held: std.ArrayList(u8) = .empty,
@@ -242,7 +244,7 @@ pub const Lead = struct {
                 const rest = std.mem.trimStart(u8, l.held.items[at + stray_close.len ..], &std.ascii.whitespace);
                 std.mem.copyForwards(u8, l.held.items[0..rest.len], rest);
                 l.held.shrinkRetainingCapacity(rest.len);
-            } else if (!last and l.held.items.len < l.max and !settled(l.held.items)) {
+            } else if (!last and l.held.items.len < l.max and !settled(l.held.items, l.clause)) {
                 return "";
             } else l.deciding = false;
         }
@@ -261,13 +263,14 @@ pub const Lead = struct {
     }
 };
 
-/// Whether a first sentence has ended (a mark then whitespace, or a line break) and what follows it is not, or cannot
-/// become, a `</think>`.
-fn settled(h: []const u8) bool {
+/// Whether a first sentence has ended (a mark then whitespace, or a line break), or a clause (, ; : then whitespace)
+/// at least `clause` characters in, and what follows it is not, or cannot become, a `</think>`.
+fn settled(h: []const u8, clause: usize) bool {
     var from: usize = 0;
-    while (std.mem.indexOfAnyPos(u8, h, from, ".!?\n")) |i| {
+    while (std.mem.indexOfAnyPos(u8, h, from, ".!?\n,;:")) |i| {
         from = i + 1;
         if (h[i] != '\n' and (from == h.len or !std.ascii.isWhitespace(h[from]))) continue; // "3.5", "e.g": not an end
+        if ((h[i] == ',' or h[i] == ';' or h[i] == ':') and from < clause) continue; // too short to speak on its own
         const rest = std.mem.trimStart(u8, h[from..], &std.ascii.whitespace);
         return rest.len > 0 and !std.mem.startsWith(u8, stray_close, rest[0..@min(rest.len, stray_close.len)]);
     }
@@ -309,6 +312,10 @@ test "a reply's lead: leaked reasoning before a stray </think> is dropped; a cle
     try std.testing.expectEqualStrings("", try quick.pass(gpa, a, "It is 3.5 km. ", false)); // "3.5" is no sentence end
     try std.testing.expectEqualStrings("", try quick.pass(gpa, a, "<", false)); // may still become </think>
     try std.testing.expectEqualStrings("It is 3.5 km. <b", try quick.pass(gpa, a, "b", false));
+    var clause: Lead = .{};
+    defer clause.deinit(gpa);
+    try std.testing.expectEqualStrings("", try clause.pass(gpa, a, "Keep your bedroom cool, dark, ", false)); // 22, 28 in
+    try std.testing.expectEqualStrings("Keep your bedroom cool, dark, and", try clause.pass(gpa, a, "and", false));
 }
 
 /// Drops <think>…</think> spans from a stream of deltas (tags may be split across deltas).
