@@ -252,7 +252,7 @@ pub const Lead = struct {
             try out.appendSlice(a, l.held.items[from..at]);
             from = at + stray_close.len;
         }
-        const keep: usize = if (last) 0 else partialTag(l.held.items[from..]);
+        const keep: usize = if (last) 0 else strayPrefix(l.held.items[from..]);
         try out.appendSlice(a, l.held.items[from .. l.held.items.len - keep]);
         const tail = l.held.items.len - keep;
         std.mem.copyForwards(u8, l.held.items[0..keep], l.held.items[tail..]);
@@ -268,7 +268,7 @@ fn settled(h: []const u8, after: usize) bool {
 }
 
 /// The length of the longest end of `h` that could be the start of `</think>`.
-fn partialTag(h: []const u8) usize {
+fn strayPrefix(h: []const u8) usize {
     var k: usize = @min(stray_close.len - 1, h.len);
     while (k > 0) : (k -= 1) {
         if (std.mem.eql(u8, h[h.len - k ..], stray_close[0..k])) return k;
