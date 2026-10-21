@@ -99,41 +99,16 @@ Neither is a responsive live-voice TTS on this box today. Kitten cannot keep up 
 first audio plus 0.94 RTF leaves almost no slack. The fastest measured part of the loop is the chat model: 0.13 s
 TTFT on a short turn, and 0.61 s on the next turn of a cached 20k-token conversation.
 
-### Kitten on GB10: why RTF 1.5 and 10.6 GiB (to confirm on the node)
+### Kitten on GB10: host-bound decode, non-realtime as served
 
 Kitten has not been GPU-qualified. `docs/dev/KITTEN-TTS2.md` records the GB10 gate as one failed run (9 of 37
 checks) and one run "pending … Until it passes, CUDA is not qualified". Its only speed figure is CPU on the dev box
 (RTF about 10). So RTF 1.5 is the first GB10 speed number, not a regression.
 
-**It did run on the GPU.** The evidence:
-- The setup printed `torch 2.11.0+cu130`.
-- The tool config sets `"device": "cuda"`.
-- The worker logged `cuda peak reserved 4760 MiB` on every request.
-- `nvidia-smi` listed the worker with 4.9 GiB.
-
-**Likely cause of the speed:** each request is host-bound per codec token.
-- The language model runs through stock transformers `generate()` (kittenml 0.9.4 `model.py:380`): eager PyTorch,
-  batch 1, bf16, sdpa attention (FA2 when importable), and a LogitsProcessor chain at every step (repetition,
-  token-run, temperature, top-k, top-p).
-- Each codec token is one Python step launching every kernel of the 1.7B model, about 28 layers' worth, from
-  GB10's Arm cores. The GPU waits on those launches.
-- One second of audio needs 25 tokens. The run made about 170 tokens in about 10 s, roughly 20 tokens/s.
-- The decoder (S3 flow plus HiFT) should be the small part.
-- Not the cause: CPU fallback, or batch and warm-up (the voice conditioning is built at load, and three warm runs
-  gave the same RTF).
-- Torch's default of 20 CPU threads is a minor suspect. The probe also runs with 4.
-
-**Likely cause of the memory:** 10.6 GiB is 4.8 GiB of CUDA reserve (the bf16 LM 3.5 GB, s3gen about 1 GB, KV)
-plus 5.5 GiB of host RSS.
-- That host RSS equals the CPU-only resident on the dev box (5.51 GB). The host copy of the weights is the likely
-  reason.
-- `lm_weights: packed` is unpacked to bf16 on the CPU and installed with `load_state_dict(assign=True)`, then
-  copied by `.to("cuda")` (`model.py:179-188`).
-- The CPU tensors are freed, but tensors under glibc's 32 MiB mmap threshold go back to malloc's arenas, not the
-  OS. Torch and its CUDA libraries account for the rest.
-
-**Confirm with one probe** (`tools/spark/jarvis/kitten_probe.py`). It runs the worker's own load and synthesis
-three times, timed apart. It needs about 12 GiB and 3 minutes, and nothing else may run on the GPU:
+**Probe** (`tools/spark/jarvis/kitten_probe.py`, DGX-01, 2026-10-21, nothing else on the GPU). It runs the worker's
+own load and synthesis three times on the 125-character calendar sentence (6.54 s of audio, 161 codec tokens, seed 7),
+once with torch's default 20 CPU threads and once with 4. The third run is under `torch.profiler`, so its wall time is
+inflated:
 
 ```sh
 scp tools/spark/jarvis/kitten_probe.py dgx01@192.168.1.116:jarvis/scripts/
@@ -142,19 +117,55 @@ ssh dgx01@192.168.1.116 'for t in 0 4; do systemd-run --user --scope -q -p Memor
   | tee ~/jarvis/out/kitten-probe-t$t.jsonl; done'
 ```
 
-| Hypothesis | Confirmed if |
-| --- | --- |
-| On the GPU | `env`: `lm_devices` and `decoder_devices` are `["cuda:0"]` |
-| Host-bound decode | `run`: `lm_tokens_per_s` about 20, `lm_cpu_over_wall` about 1.0 (one core busy for the whole LM), `gpu_kernel_share` well under 0.5, `decoder_s` a small part of `wall_s` |
-| Threads | the `t4` run's RTF is no better (if it is clearly better, set `threads` in the tool config) |
-| Retained host weights | `memory`: `rss_after_trim_gib` about 3 GiB below `rss_gib` |
+| | 20 threads (default) | 4 threads |
+| --- | --- | --- |
+| LM and decoder devices | `cuda:0`, bf16, sdpa (no flash-attn) | same |
+| Load | 18.2 s | 16.7 s |
+| Warm RTF (runs 0, 1) | **1.64, 1.54** | 1.65, 1.59 |
+| LM time / tokens | 10.25 s and 9.61 s for 161 tokens: **15.7–16.7 tokens/s** (real time needs 25) | 15.6–16.1 tokens/s |
+| LM process CPU / wall | **0.99–1.00**: one core busy for the whole decode | 1.00 |
+| Decoder (S3 flow + HiFT) | 0.19–0.31 s, **2–3 %** of the wall | 0.20–0.30 s |
+| GPU kernel time, profiled run (a re-run with `t=0` counting the kernel events alone) | **24.8 ms a token**, 25 % of the profiled LM wall (the first runs' 0.48 counted each kernel twice, under its op too) | |
+| Memory after load | RSS 4.44 GiB (**RssAnon 3.95**, RssFile 0.45, RssShmem 0.05), CUDA allocated 4.25 / reserved 4.33 GiB, reported 8.77 GiB | same |
+| RSS after `malloc_trim(0)` | 4.44 GiB: **no change** | same |
 
-**Fixes, not made here:**
-- **Memory:** a `malloc_trim(0)` after load, or loading the LM straight to the device. Either keeps the bits and
-  should save about 3 GiB. Re-run the gate to show it.
-- **Speed:** a static KV cache with CUDA graphs (`torch.compile(mode="reduce-overhead")`), or kittenml's own vLLM
-  backend (`kittentts2/vllm/`). Both pick other kernels, so per `CONTRIBUTING.md` they need the bit gate re-run or
-  an accepted new baseline.
+What the probe shows:
+- **On the GPU: confirmed.**
+- **Host-bound decode: confirmed.** The language model is 97 % of the time. It decodes at 57–64 ms a token while
+  holding one CPU core at 100 %, and the GPU runs kernels for 24.8 ms of each token. So about 60 % of every token is
+  Python and kernel-launch overhead. The bf16 weights (3.5 GB read per token) put GB10's bandwidth floor near 14 ms
+  a token.
+- **Threads: ruled out.** 4 threads is no faster.
+- **The malloc-arena theory: refuted.** `malloc_trim` frees nothing, so this is not freed heap that glibc kept.
+- **Something does keep a host copy.** 3.95 GiB of *live* anonymous memory remains, about the size of the bf16 LM
+  (3.47 GB), so something still references a host copy of the weights. The prime suspects:
+  - the unpacked state;
+  - CPU tensors kept by the speaker head;
+  - the tied embedding.
+- **Where the 10.6 GiB goes:** the `MemAvailable` drop measured through the daemon matches 4.4 GiB host + 4.3 GiB
+  CUDA + the CUDA context.
+- **Memory fix:** find and drop that reference, which should save about 3.5 GiB. It doesn't change the bits.
+
+**The cheap fix: CUDA-graph decode.** Use a static KV cache plus `torch.compile(mode="reduce-overhead")`, i.e.
+transformers' `cache_implementation="static"` with its compiled forward. It takes the per-token Python and launch
+overhead out of the loop, leaving the kernels.
+- With the overhead gone the LM runs at about its kernel time, 23–25 ms a token, so about 40 tokens/s against 16
+  today.
+- 161 tokens would take about 4 s, plus 0.2–0.3 s of decoder and a few ms a token of host-side sampling. That is an
+  estimated **RTF 0.6–0.75**, against 1.52–1.64 now, so real time with about 25 % margin.
+- Fusing kernels toward the 14 ms bandwidth floor would be a further step, not a cheap one.
+- Costs:
+  - a compile warm-up at load (expect tens of seconds, cached afterwards);
+  - other kernels, so per `CONTRIBUTING.md` the bit gate is re-run against a new, accepted baseline;
+  - the LogitsProcessor chain stays per step on the host (a few ms).
+- **The alternative** is kittenml's own vLLM backend (`kittentts2/vllm/`). It is graph-captured too, but adds vLLM
+  on aarch64/cu130 and its preallocated memory pool, which must be capped on a shared box.
+- **Lower precision does not help.** `emb4`, or a 4-bit LM, cuts bytes read, but decode is host-bound, not
+  bandwidth-bound, so it would not move RTF until the overhead is gone.
+
+**Verdict:** as served today Kitten is **non-realtime** on GB10 (RTF 1.5–1.6, whole replies only), so document it as
+a non-realtime fallback. With CUDA-graph decode it should become a realtime fallback, which needs a gate re-run to
+claim.
 
 ## Recommendation for PR #13 (Drama 3 adapter)
 

@@ -27,6 +27,13 @@ def rss():
         return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 
 
+def rss_split():
+    """RssAnon (heap, tensors) and RssFile (mapped libraries and files) in GiB."""
+    with open("/proc/self/status") as f:
+        kib = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in f) if k in ("RssAnon", "RssFile", "RssShmem")}
+    return {k: round(v / 2**20, 2) for k, v in kib.items()}
+
+
 def out(**fields):
     print(json.dumps(fields), flush=True)
 
@@ -55,7 +62,7 @@ out(probe="env", torch=torch.__version__, cuda=torch.version.cuda, cuda_availabl
 before = rss()
 ctypes.CDLL("libc.so.6").malloc_trim(0)
 out(probe="memory", reported_resident_gib=round(resident / 2**30, 2), rss_gib=round(before / 2**30, 2),
-    rss_after_trim_gib=round(rss() / 2**30, 2), cuda_allocated_gib=round(torch.cuda.memory_allocated() / 2**30, 2),
+    rss_after_trim_gib=round(rss() / 2**30, 2), rss_split_gib=rss_split(), cuda_allocated_gib=round(torch.cuda.memory_allocated() / 2**30, 2),
     cuda_reserved_gib=round(torch.cuda.memory_reserved() / 2**30, 2))
 
 timing = {}
@@ -89,12 +96,17 @@ for i in range(3):
         from torch.profiler import ProfilerActivity, profile
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             wav, _ = engine.synthesize(speech, lambda done, of: None)
-        kernel_us = sum(getattr(e, "self_device_time_total", getattr(e, "self_cuda_time_total", 0))
-                        for e in prof.key_averages())
+        from torch.autograd import DeviceType
+        # the kernels themselves only (an op's self device time would count each of its kernels a second time)
+        events = prof.events()
+        kernel_us = sum(e.time_range.elapsed_us() for e in events if e.device_type == DeviceType.CUDA)
+        if kernel_us == 0:  # this torch lists kernels only under the ops that launched them
+            kernel_us = sum(k.duration for e in events for k in getattr(e, "kernels", []))
         gpu_share = round(kernel_us / 1e6 / (timing["lm_s"] + timing["decoder_s"]), 3)
+        timing["kernel_ms_per_token"] = kernel_us / 1e3 / timing["tokens"]
     wall = time.monotonic() - wall
     audio_s = len(wav) / m.sample_rate
     out(probe="run", run=i, profiled=i == 2, audio_s=round(audio_s, 2), wall_s=round(wall, 2), rtf=round(wall / audio_s, 3),
         lm_s=round(timing["lm_s"], 2), tokens=timing["tokens"], lm_tokens_per_s=round(timing["tokens"] / timing["lm_s"], 1),
         lm_cpu_over_wall=round(timing["lm_cpu_s"] / timing["lm_s"], 2), decoder_s=round(timing["decoder_s"], 2),
-        gpu_kernel_share=gpu_share)
+        gpu_kernel_share=gpu_share, kernel_ms_per_token=round(timing.get("kernel_ms_per_token", 0), 2) or None)
