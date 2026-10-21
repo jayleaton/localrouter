@@ -42,8 +42,8 @@ Then add the tools from `tools/speech/kitten/config.example.json` to the daemon'
 each way:
 - **`kitten-tts-2`:** `lm_decode: "eager"`, kittenml's own generate, bit for bit the reference. It is **not real
   time on GB10**: RTF 1.5–1.6, host-bound (see [GB10](#gb10)).
-- **`kitten-tts-2-graphs`:** `lm_decode: "graphs"`, the decode step as CUDA graphs, made to be the realtime fallback.
-  It is the `text_to_speech` default.
+- **`kitten-tts-2-graphs`:** `lm_decode: "graphs"`, the decode step as CUDA graphs: real time on GB10 (RTF 0.82),
+  the realtime fallback and the `text_to_speech` default.
 
 Each names its own `qualification` file. The daemon serves a tool only once `qualify.sh --marker` has written that
 file on this machine (see [Qualification](#qualification)). `weights` is the directory `fetch.sh` filled; `voices`,
@@ -109,7 +109,8 @@ Results:
 | DEV: AMD Ryzen 7 6800U, CPU, torch 2.11.0+cpu, 8 threads | F1 | **pass**, 13 of 13 checks bitwise equal: normalized text and prompt ids, prefill logits (158,241 fp32), flow mel, vocoder waveform; tokens and chunk samples; float32 waveform (sha256 `2be41205…`), PCM16 (`c20521fa…`), cold = warm |
 | DEV, through the daemon (`/v1/audio/speech` wav and pcm, MCP `synthesize_speech`) | F1 | the same PCM16 bytes (`c20521fa…`) on every path |
 | GB10 (dgx02), CUDA, worker with `torch.use_deterministic_algorithms(True)` (36cd15a) | F1 to F5 | **fail**, 9 of 37 checks: op `hift_wav`; full `F1`, `F3`, `F4` and `F1-warm`, each `.f32` and `.wav_pcm16`. Equal: every other op (text, prompts, prefill logits, flow mel), every chained check (tokens, chunk samples), and full `F2` and `F5` |
-| GB10 (dgx02), CUDA, worker with the reference's torch settings | F1 to F5 | pending: `tools/speech/kitten/qualify.sh` in an owner-granted window. Until it passes, CUDA is not qualified |
+| GB10 (DGX-01), CUDA, `lm_decode: "eager"`, the reference's torch settings (f296b75, 2026-10-21) | F1 to F5 | **pass**, 37 of 37 checks bitwise equal (op, chained, full, F1 warm), with the weights moved to the device during load. Qualified (`qualification-eager.json`) |
+| GB10 (DGX-01), CUDA, `lm_decode: "graphs"` (inductor, 2048 tokens) | F1 to F5 | **pass**, 41 of 41 under the named exception below: op and self 25 of 25 bitwise, quality within tolerance, baseline `graphs-nvidia-gb10.json` accepted and reproduced bit for bit by a second run. Qualified (`qualification-graphs.json`) |
 
 Why the first GB10 run failed, measured in one process per setting on dgx02 (torch 2.11.0+cu130): with torch's
 defaults the reference reproduces itself exactly from process to process (HiFT at six token lengths and the whole of
@@ -144,7 +145,7 @@ bit-exact rule. It is made explicit here, so it is not made quietly, and it rela
 
 | Name | Scope | Still exact | Tolerances against the eager reference | Evidence |
 | --- | --- | --- | --- | --- |
-| `kitten-tts-2-graphs-decode` | `lm_decode: "graphs"` only: the language model under graphs (the prefill over the static cache with its explicit mask, and the decode step as CUDA graphs), so its logits, codec tokens and audio | **op:** text, prompts, eager prefill logits, flow mel and vocoder, via the shared eager load path. **self:** cold and warm in one process, and across two processes. **baseline:** the accepted bits for this GPU and runtime | each fixture's audio length within 0.75–1.33x of the reference; its longest silence (−45 dBFS, 20 ms frames) at most the reference's + 0.5 s, and at least 1 s allowed | pending: the first accepted GB10 run |
+| `kitten-tts-2-graphs-decode` | `lm_decode: "graphs"` only: the language model under graphs (the prefill over the static cache with its explicit mask, and the decode step as CUDA graphs), so its logits, codec tokens and audio | **op:** text, prompts, eager prefill logits, flow mel and vocoder, via the shared eager load path. **self:** cold and warm in one process, and across two processes. **baseline:** the accepted bits for this GPU and runtime | each fixture's audio length within 0.75–1.33x of the reference; its longest silence (−45 dBFS, 20 ms frames) at most the reference's + 0.5 s, and at least 1 s allowed | DGX-01, 2026-10-21: two qualify runs wrote the same baseline (sha256 `8fa7375d…5aa3a7`); the ASR check (`asr_check.py`, Whisper large-v3-turbo through the daemon) passed every fixture, the graphs transcripts scoring the same WER as eager on each (table in [GB10](#gb10)) |
 
 `qualify.py gate --lm-decode graphs` is in `qualify_graphs.py`. It checks all of that and records how many tokens
 each fixture matched the reference for (information, not a gate).
@@ -208,20 +209,53 @@ baseline of its own (an explicit, documented decision, not taken here); on GB10 
 
 ## GB10
 
-Eager, measured before this change (DGX-01, 2026-10-21, `tools/spark/jarvis/kitten_probe.py`, the 125-character
-calendar sentence, 161 codec tokens, 6.54 s of audio):
+DGX-01, 2026-10-21, commit f296b75 plus the baseline-check fix. Torch 2.11.0+cu130, transformers 5.19.0, kittenml 0.9.4.
+`qualify.sh` bench: F1 (3.94 s of audio, one chunk) three times, then F5 (31.7 s, two chunks):
 
-| | |
+| | `lm_decode: "eager"` | `lm_decode: "graphs"` (inductor, 2048 tokens) |
+| --- | --- | --- |
+| Warm RTF, F1 | 1.54 (1.68 first request) | **0.82** (0.85 first request) |
+| RTF, F5 | 1.56 | **0.81** |
+| First chunk, warm F1 (whole reply: one chunk) | 6.05 s | 3.22 s |
+| First chunk, F5 | 24.3 s | 12.7 s |
+| Cold load (process start to ready) | 15.8 s | 25.8 s (34.6–51 s with an empty inductor cache) |
+| `MemAvailable` drop after load | 8.19 GiB | 9.0–9.4 GiB |
+| CUDA peak reserved | 5210 MiB | 5432 MiB |
+| Cancel (SIGKILL of the worker group) | reaped in 0.4 s, memory returned | same |
+
+Graphs is 1.9x faster and real time with about 20 % margin. It is not the 0.6–0.75 estimated, because the host part
+of each step stays: logits processors, sampling, and two syncs a step. The static cache, inductor's kernels and the
+graph pool cost about 0.8–1.2 GiB more than eager.
+
+**Host memory.** Moving the unpacked weights to the device worked: after load the live CPU tensors are 40 MiB, not the
+3.5 GB bf16 copy. But anonymous RSS fell only from 3.95 to 3.3 GiB. It isn't the weights, CUDA allocations (they don't
+count in RSS on GB10: a 4 GiB device fill left RssAnon unchanged), or freed heap (`malloc_trim` releases nothing). Per
+load stage, measured on DGX-01:
+
+| Stage | RssAnon added |
 | --- | --- |
-| Warm RTF | 1.52–1.64 (20 or 4 CPU threads alike) |
-| Language model | 15.6–17.0 tokens/s (real time needs 25): 57–64 ms a token wall, 24.8 ms of it kernels, one CPU core at 100 % |
-| Decoder (S3 flow + HiFT) | 0.19–0.31 s, 2–3 % of the wall |
-| Memory after load | host RSS 4.44 GiB (3.95 anonymous, live: `malloc_trim` frees nothing), CUDA 4.33 GiB reserved; 10.6 GiB `MemAvailable` drop through the daemon |
-| Load | 16–18 s |
+| `import torch`, CUDA context, cuBLAS, cuDNN | 0.6 GiB |
+| text normalizer grammars | under 0.1 GiB |
+| language model load (weights already on the device) | 1.53 GiB |
+| S3 decoder (`S3Codec`) | 0.53 GiB |
+| the default voice's conditioning (`_voice_reference`) | 0.84 GiB |
 
-So eager decode is host-bound. The graphs decode removes the per-token Python and launch overhead, and the estimate is
-about 40 tokens/s (RTF 0.6–0.75). Moving the unpacked weights to the device during load should remove about 3.5 GiB of
-host memory. Both are measured by `qualify.sh` (gate and bench, eager and graphs). This section gets the numbers then.
+Python-level allocations total only 292 MiB (`tracemalloc`), so these are native buffers inside the libraries. Finding
+them is the next memory step; this change does not claim it.
+
+**ASR check of the graphs baseline** (`asr_check.py`, eager against graphs per fixture, Whisper large-v3-turbo through
+the daemon; WER against the input after markup removal and normalization):
+
+| Fixture | Eager transcript (WER) | Graphs transcript (WER) | Duration graphs / eager | Silence share eager / graphs |
+| --- | --- | --- | --- | --- |
+| F1 | One day, a little girl named Lily found a needle in her room. (0) | One day, a little girl named Lily found a needle in her room. (0) | 1.00 | 0.218 / 0.223 |
+| F2 | On March 3, 2026, the ticket cost $12.50, about 40% less than before. (0) | On March 3, 2026, the ticket cost $12.50, about 40% less than before. (0) | 1.08 | 0.319 / 0.334 |
+| F3 | We won the grant. Laugh. I can hardly believe it. (0.11) | We won the grant. Laugh, I can hardly believe it. (0.11) | 0.90 | 0.411 / 0.376 |
+| F4 | Guten Morgen! Ich wünsche dir einen wunderschönen Tag! (0) | Guten Morgen! Ich wünsche dir einen wunderschönen Tag! (0) | 1.03 | 0.183 / 0.173 |
+| F5 | the 640-character paragraph, word for word but "112" and "harbor" (0.017) | identical to eager (0.017) | 1.01 | 0.126 / 0.121 |
+
+F3's "Laugh" is the `<laugh>` event tag. The model renders it, Whisper hears it as the word, and the WER counts it
+against both paths alike. All five fixtures pass, so `baselines/graphs-nvidia-gb10.json` was committed.
 
 ## Measurements
 

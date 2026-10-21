@@ -34,7 +34,9 @@ EXCEPTIONS = {
                  "Still exact: the shared eager load path (op: text, prompts, eager prefill logits, flow mel, "
                  "vocoder); the graphs path against itself (self) and against its accepted baseline (baseline)",
         "tolerances": {"duration_ratio": [0.75, 1.33], "silence_over_reference_s": 0.5, "silence_floor_s": 1.0},
-        "evidence": "docs/dev/KITTEN-TTS2.md, Numerics: the accepted GB10 baseline and its listening check",
+        "evidence": "DGX-01 2026-10-21: baselines/graphs-nvidia-gb10.json (sha256 8fa7375d) reproduced by a "
+                    "second run; "
+                    "asr_check.py passed F1-F5 (graphs WER = eager WER); docs/dev/KITTEN-TTS2.md, GB10",
     },
 }
 SILENCE_DBFS = -45.0
@@ -137,8 +139,9 @@ def gate(args):
         with open(written, "w") as f:
             json.dump(record, f, indent=1)
         baseline.update(accepted_now=True, written=written, sha256=sha(open(written, "rb").read()))
-    checks.append({"level": "baseline", "check": "graphs baseline", "equal": same or bool(baseline.get("accepted_now")),
-                   **baseline})
+    # "equal" last: baseline carries its own (the comparison with the file), which an acceptance overrides
+    checks.append({"level": "baseline", "check": "graphs baseline", **baseline,
+                   "equal": same or bool(baseline.get("accepted_now"))})
     # quality: within the exception's tolerances, against the eager reference
     tol = EXCEPTIONS[EXCEPTION]["tolerances"]
     for n in names:
