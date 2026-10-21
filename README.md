@@ -104,7 +104,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
     {"id": "qwen-image-2.1-nvfp4", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
      "priority": 10, "options": {"precision": "nvfp4"}},
     {"id": "minimax-h3", "kind": "video", "engine": "minimax_h3", "weights": "/models/minimax-h3",
-     "idle_ttl_s": 300, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
+     "idle_ttl_s": 30, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
   ]
 }
 ```

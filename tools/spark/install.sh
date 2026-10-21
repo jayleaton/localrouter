@@ -17,7 +17,11 @@
 # images only), PRECISIONS (the image model: "fp8s", the default and primary; "fp8s nvfp4" adds the faster NVFP4 as
 # qwen-image-2.1-nvfp4), IMAGE_MODELS (the image checkpoints: "qwen-image-2.1 qwen-image-2.1-turbo", the default, or
 # either alone; Turbo adds about 25 GB), IMAGE_DEFAULT (the model a request without one gets: qwen-image-2.1-turbo when
-# installed, else qwen-image-2.1; it is also the one kept warm), LOCALROUTER_SKIP_SMOKE=1.
+# installed, else qwen-image-2.1; it is also the one kept warm), IMAGE_KEEP_WARM (1, the default: keep IMAGE_DEFAULT
+# loaded; 0: load it on demand like the others, for a box that keeps chat and voice warm beside it), IMAGE_IDLE_TTL_S
+# (60) and VIDEO_IDLE_TTL_S (30): seconds an idle image or video model stays loaded. Short, so the memory comes back to
+# kept-warm models (chat, speech) soon after a job: they reload only once it fits without unloading anything, and a
+# reload costs about 9 s (image) or 8 s (video) on GB10. LOCALROUTER_SKIP_SMOKE=1.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 LOCALROUTER_HOME=${LOCALROUTER_HOME:-/data/localrouter}
@@ -38,6 +42,10 @@ for m in $IMAGE_MODELS; do [[ $m == qwen-image-2.1 || $m == qwen-image-2.1-turbo
 [[ " $IMAGE_MODELS " == *" qwen-image-2.1-turbo "* ]] && IMAGE_DEFAULT=${IMAGE_DEFAULT:-qwen-image-2.1-turbo}
 IMAGE_DEFAULT=${IMAGE_DEFAULT:-qwen-image-2.1}
 [[ " $IMAGE_MODELS " == *" $IMAGE_DEFAULT "* ]] || die "IMAGE_DEFAULT '$IMAGE_DEFAULT' is not in IMAGE_MODELS"
+IMAGE_KEEP_WARM=${IMAGE_KEEP_WARM:-1} IMAGE_IDLE_TTL_S=${IMAGE_IDLE_TTL_S:-60} VIDEO_IDLE_TTL_S=${VIDEO_IDLE_TTL_S:-30}
+[[ $IMAGE_KEEP_WARM == [01] ]] || die "IMAGE_KEEP_WARM is '$IMAGE_KEEP_WARM': use 1 or 0"
+for v in IMAGE_IDLE_TTL_S VIDEO_IDLE_TTL_S; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v is '${!v}': use whole seconds (0: unload right after each job)"; done
+export IMAGE_KEEP_WARM IMAGE_IDLE_TTL_S VIDEO_IDLE_TTL_S
 
 # ---- who may connect: LOCALROUTER_BIND, else what an earlier run saved, else (on a terminal) ask, else this machine only
 BIND_MODE=${LOCALROUTER_BIND:-$(envsaved LOCALROUTER_BIND_MODE)}
@@ -115,20 +123,22 @@ if "image" in models:
             if turbo and not os.path.exists(f"{sys.argv[7]}/acts-{p.removesuffix('s')}-turbo.json"):
                 continue  # no committed Turbo scales for this precision: prepare.sh made no pack
             # FP8 is each checkpoint's primary model (closest to the original); NVFP4 (faster) gets the -nvfp4 id. If
-            # only NVFP4 was asked for, it takes the primary id. The image default is kept warm and kept past the others
-            # when memory is needed; the other image models load on demand.
+            # only NVFP4 was asked for, it takes the primary id. The image default is kept warm (IMAGE_KEEP_WARM) and
+            # kept past the others when memory is needed; the other image models load on demand.
             tid = model if p == primary else f"{model}-{p.replace('fp8s', 'fp8')}"
             label = "NVFP4" if p == "nvfp4" else "FP8"
             tools.append({"id": tid, "kind": "image", "engine": "qwen_image_turbo" if turbo else "qwen_image",
                           "name": f"Qwen-Image 2.1 Turbo ({label}, 8 steps)" if turbo else f"Qwen-Image 2.1 ({label})",
-                          "weights": "/models/qwen-image-2.1", "idle_ttl_s": 300, "priority": 10 if tid == image_default else 5,
-                          "keep_loaded": tid == image_default, "options": {"precision": p, "max_side": 1664}})
+                          "weights": "/models/qwen-image-2.1", "idle_ttl_s": int(os.environ["IMAGE_IDLE_TTL_S"]),
+                          "priority": 10 if tid == image_default else 5,
+                          "keep_loaded": tid == image_default and os.environ["IMAGE_KEEP_WARM"] == "1",
+                          "options": {"precision": p, "max_side": 1664}})
     if any(t["id"] == image_default for t in tools):
         defaults["text_to_image"] = image_default
 if "video" in models:
     # the video tool loads on demand (priority 0): it makes room by unloading idle tools, the image model last
     tools.append({"id": "minimax-h3", "kind": "video", "name": "MiniMax H3 (video with audio, Turbo 8 steps)",
-                  "engine": "minimax_h3", "weights": "/models/minimax-h3", "idle_ttl_s": 300,
+                  "engine": "minimax_h3", "weights": "/models/minimax-h3", "idle_ttl_s": int(os.environ["VIDEO_IDLE_TTL_S"]),
                   "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}})
 # machine: this host's name for list_models (inside the container the hostname is the container's id)
 json.dump({"machine": sys.argv[3], "reserve_bytes": 8 << 30, "defaults": defaults, "tools": tools}, open(sys.argv[1], "w"), indent=1)
