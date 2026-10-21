@@ -217,6 +217,88 @@ fn link(text: []const u8, open: usize) ?[2]usize {
     return .{ k, m + 1 };
 }
 
+const stray_close = "</think>";
+
+/// The start of a reply, held until it is clear that no reasoning leaked into it. Some models write their reasoning as
+/// plain text closed by a `</think>` that was never opened: everything before such a tag is dropped with it. The hold
+/// ends at that tag, at the first sentence end followed by `after` more characters, at `max` characters, or at the end
+/// of the reply; later stray tags are removed. The cost is the time to write `after` characters past the first sentence.
+pub const Lead = struct {
+    after: usize = 24,
+    max: usize = 240,
+    deciding: bool = true,
+    held: std.ArrayList(u8) = .empty,
+
+    pub fn deinit(l: *Lead, gpa: std.mem.Allocator) void {
+        l.held.deinit(gpa);
+    }
+
+    /// What may be shown and spoken now (in `a`); `last` at the end of the reply.
+    pub fn pass(l: *Lead, gpa: std.mem.Allocator, a: std.mem.Allocator, text: []const u8, last: bool) ![]const u8 {
+        try l.held.appendSlice(gpa, text);
+        if (l.deciding) {
+            if (std.mem.indexOf(u8, l.held.items, stray_close)) |at| {
+                l.deciding = false;
+                const rest = std.mem.trimStart(u8, l.held.items[at + stray_close.len ..], &std.ascii.whitespace);
+                std.mem.copyForwards(u8, l.held.items[0..rest.len], rest);
+                l.held.shrinkRetainingCapacity(rest.len);
+            } else if (!last and l.held.items.len < l.max and !settled(l.held.items, l.after)) {
+                return "";
+            } else l.deciding = false;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, l.held.items, from, stray_close)) |at| {
+            try out.appendSlice(a, l.held.items[from..at]);
+            from = at + stray_close.len;
+        }
+        const keep: usize = if (last) 0 else partialTag(l.held.items[from..]);
+        try out.appendSlice(a, l.held.items[from .. l.held.items.len - keep]);
+        const tail = l.held.items.len - keep;
+        std.mem.copyForwards(u8, l.held.items[0..keep], l.held.items[tail..]);
+        l.held.shrinkRetainingCapacity(keep);
+        return out.items;
+    }
+};
+
+/// Whether a first sentence has ended with at least `after` characters written past it.
+fn settled(h: []const u8, after: usize) bool {
+    const i = std.mem.indexOfAny(u8, h, ".!?\n") orelse return false;
+    return h.len - (i + 1) >= after;
+}
+
+/// The length of the longest end of `h` that could be the start of `</think>`.
+fn partialTag(h: []const u8) usize {
+    var k: usize = @min(stray_close.len - 1, h.len);
+    while (k > 0) : (k -= 1) {
+        if (std.mem.eql(u8, h[h.len - k ..], stray_close[0..k])) return k;
+    }
+    return 0;
+}
+
+test "a reply's lead: leaked reasoning before a stray </think> is dropped; a clean start waits only a few characters" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var leak: Lead = .{};
+    defer leak.deinit(gpa);
+    try std.testing.expectEqualStrings("", try leak.pass(gpa, a, "The capital of France is Paris.\n", false));
+    try std.testing.expectEqualStrings("", try leak.pass(gpa, a, "</thi", false));
+    try std.testing.expectEqualStrings("The capital of France is Paris.", try leak.pass(gpa, a, "nk>\n\nThe capital of France is Paris.", false));
+    try std.testing.expectEqualStrings(" More </th", try leak.pass(gpa, a, " More </th", true));
+    var clean: Lead = .{};
+    defer clean.deinit(gpa);
+    try std.testing.expectEqualStrings("", try clean.pass(gpa, a, "Hello there! ", false));
+    try std.testing.expectEqualStrings("Hello there! How are you doing today, my friend?", try clean.pass(gpa, a, "How are you doing today, my friend?", false));
+    try std.testing.expectEqualStrings(" Fine", try clean.pass(gpa, a, " Fine</", false));
+    try std.testing.expectEqualStrings(".", try clean.pass(gpa, a, "think>.", false));
+    var short: Lead = .{};
+    defer short.deinit(gpa);
+    try std.testing.expectEqualStrings("", try short.pass(gpa, a, "Paris.", false));
+    try std.testing.expectEqualStrings("Paris.", try short.pass(gpa, a, "", true));
+}
+
 /// Drops <think>…</think> spans from a stream of deltas (tags may be split across deltas).
 pub const ThinkFilter = struct {
     inside: bool = false,
