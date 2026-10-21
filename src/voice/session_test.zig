@@ -307,7 +307,7 @@ test "a pause starts a draft transcript: one ending a sentence ends the turn ear
     try testing.expect(end >= 900 + 300 and end <= 1300); // speech ends at 900; early_end_ms 300
     const heard = try rig.rec.get(a, try rig.rec.wait("conversation.item.input_audio_transcription.completed", 0));
     try testing.expectEqualStrings("What is two plus two?", heard.object.get("transcript").?.string);
-    try testing.expectEqual(@as(u32, 1), rig.fake.hears); // the draft only
+    try testing.expectEqual(@as(u32, 2), rig.fake.hears); // the first speech warms the idle STT, then the draft only
 
     rig.heard("and once more"); // no sentence end: the turn waits for silence_duration_ms, then reuses the draft
     try rig.audio(600, true);
@@ -315,7 +315,7 @@ test "a pause starts a draft transcript: one ending a sentence ends the turn ear
     _ = try rig.rec.wait("response.done", 1);
     const second = try rig.rec.get(a, try rig.rec.wait("input_audio_buffer.speech_stopped", 1));
     try testing.expect(@abs(second.object.get("audio_end_ms").?.integer - (1300 + 600 + 500)) <= 40);
-    try testing.expectEqual(@as(u32, 2), rig.fake.hears);
+    try testing.expectEqual(@as(u32, 3), rig.fake.hears); // no warm-up: it transcribed just now
 }
 
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {

@@ -85,6 +85,8 @@ gen_kwargs = {
   about 135 ms sooner on a voice turn. It refuses `temperature` above 0 and `debug`.
 * After loading, the worker decodes a second of silence once and discards it: the first request would otherwise pay
   the first-call CUDA setup (on GB10, 1.1 s against 0.36 s warm).
+* The gate's Silero intervals are computed in a thread while `generate()` runs on the GPU (they depend on the samples
+  only), so the gate adds about 50 ms less to a request; the transcript is the same.
 * `return_timestamps=True` always (one decode whatever the response format), so `segments` are always written;
   `timestamps: "word"` adds `return_token_timestamps=True` (the ASR pipeline's `return_timestamps="word"` mechanism,
   cross-attention DTW over the generation config's `alignment_heads`) and groups tokens into words the way the

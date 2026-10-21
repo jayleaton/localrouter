@@ -12,6 +12,7 @@ import copy
 import hashlib
 import math
 import os
+import threading
 import wave
 
 import numpy as np
@@ -210,6 +211,18 @@ def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=
         if progress and total:
             progress(min(n_windows - 1, seek * n_windows // total), n_windows)
 
+    # The gate's speech intervals depend on the samples only: Silero runs on the CPU while generate() runs.
+    found = {}
+    finder = None
+    if vad is not None:
+        def find_speech():
+            try:
+                found["speech"] = speech_intervals(vad, samples)
+            except BaseException as e:  # re-raised below, in the caller's thread
+                found["error"] = e
+        finder = threading.Thread(target=find_speech, name="silero", daemon=True)
+        finder.start()
+
     attn = model.config._attn_implementation
     torch.manual_seed(seed)
     try:
@@ -219,6 +232,8 @@ def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=
     finally:
         if model.config._attn_implementation != attn:  # word timestamps switch the model to eager attention
             _set_attn(model, attn)
+        if finder is not None:
+            finder.join()  # never two Silero runs at once, even when generate() raised
     if progress:
         progress(n_windows, n_windows)
 
@@ -242,8 +257,10 @@ def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=
             result["words"] = [{"word": c["text"].strip(), "start": c["timestamp"][0], "end": c["timestamp"][1]}
                                for c in extra.get("chunks", [])]
     model_result = copy.deepcopy(result)  # the model's own transcript, independent of what the gate and debug add
-    if vad is not None:
-        speech = speech_intervals(vad, samples)
+    if finder is not None:
+        if "error" in found:
+            raise found["error"]
+        speech = found["speech"]
         result, dropped = gate(result, [s["tokens"].tolist() for s in segs], speech, tok)
         result = dict(result)  # model_result stays the model's own transcript
         result["vad"] = {"model": VAD_NAME, "speech": [[round(s, 3), round(e, 3)] for s, e in speech],

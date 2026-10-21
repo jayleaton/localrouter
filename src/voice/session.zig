@@ -18,6 +18,7 @@ const Value = std.json.Value;
 pub const rate: u32 = 24_000; // pcm16 in and out
 const keep_silence_ms: u64 = 500; // audio kept before an onset beyond prefix_padding_ms, while nobody speaks
 const max_buffer_ms: u64 = 10 * 60 * 1000; // a manual turn longer than this is refused
+const warm_idle_ns: i96 = 20 * std.time.ns_per_s; // STT idle this long: warm it when someone starts speaking
 
 pub const Kind = enum { user, assistant, system, function_call, function_call_output };
 
@@ -43,6 +44,7 @@ pub const Task = union(enum) {
     draft: Hearing,
     final: Hearing,
     respond: Ask,
+    warm: void, // a throwaway transcription of silence: speech started after the STT model sat idle
 
     /// key: the draft's quiet run (session ms where it began); for a final, the draft it may reuse (0: none).
     pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
@@ -55,6 +57,7 @@ pub const Task = union(enum) {
                 gpa.free(h.pcm);
             },
             .respond => |r| if (r.instructions) |i| gpa.free(i),
+            .warm => {},
         }
     }
 };
@@ -111,6 +114,7 @@ pub const Session = struct {
     stt_worker_ms: u64 = 0, // the transcription as the worker timed it
     early_end: bool = false, // the turn ended on its draft's sentence end
     stt_draft: bool = false, // its final transcript is the draft made when the speaker paused
+    last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
     draft: ?Draft = null,
     language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
     language_len: usize = 0,
@@ -308,6 +312,11 @@ pub const Session = struct {
         const id = try s.newId(s.gpa, "item");
         s.turn = .{ .item_id = id, .start_ms = @max(ms, s.input_start_ms), .partial_ms = ms };
         s.emit.send(a, "input_audio_buffer.speech_started", .{ .audio_start_ms = ms, .item_id = id });
+        if (s.last_heard_ns == 0 or s.clock() - s.last_heard_ns > warm_idle_ns) { // on GB10 the first decode after
+            // a load or another model's job took 1.1 to 1.7 s, against 0.3 s warm: pay it while the user still talks
+            s.last_heard_ns = s.clock();
+            try s.push(.warm);
+        }
         if (!s.settings.interrupt_response) return;
         if (s.resp != null) s.cancelResponse("turn_detected");
         var i: usize = 0;
