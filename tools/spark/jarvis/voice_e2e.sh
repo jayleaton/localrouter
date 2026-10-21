@@ -124,11 +124,12 @@ run() {
     + (if $lock == "" then {} else {gpu_lock: $lock} end)
     + {defaults: {chat_completion: $chat.id, text_to_speech: $drama.id, speech_to_text: "whisper-large-v3-turbo",
                   text_to_image: "qwen-image-2.1-turbo", text_to_video: "minimax-h3"},
-       voice: {chat_extra: {chat_template_kwargs: {enable_thinking: false}}, partial_interval_ms: 1000,
+       voice: {chat_extra: {chat_template_kwargs: {enable_thinking: false}},
                speech_models: ([$drama.id] + (if $kitten == 1 then ["kitten-tts-2"] else [] end)), tool_wait_s: 900},
        tools: ([
          ($chat + {keep_loaded: true, priority: 100}),
-         ($drama + {keep_loaded: true, priority: 90, lane: "realtime"}),
+         ($drama + {keep_loaded: true, priority: 90, lane: "realtime"}
+           + (if ($drama.cmd // [] | length) == 3 then {cmd: [$drama.cmd[0], $drama.cmd[1], ($R + "/tools/speech/drama3/drama3_worker.py")]} else {} end)),
          {id: "whisper-large-v3-turbo", kind: "transcription", name: "Whisper large-v3-turbo",
           cmd: [($J + "/venvs/whisper/bin/python"), ($R + "/tools/speech/whisper/worker.py")],
           weights: ($J + "/models/whisper/whisper-large-v3-turbo/" + $rev), resident_bytes: 4294967296, working_bytes: 2147483648,

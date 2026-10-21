@@ -26,6 +26,7 @@ import re
 import select
 import socket
 import struct
+import subprocess
 import sys
 import time
 import urllib.request
@@ -41,6 +42,7 @@ PROMPTS = {
     "interrupt": "Sorry to interrupt. Which time zone is Tokyo in?",
     "picture": "Please make me a picture of a red fox sitting in fresh snow.",
     "after_video": "Are you still there and listening to me?",  # one sentence: Drama 3 dropped the second of two here
+    "after_eviction": "What is two plus two?",
 }
 
 
@@ -338,6 +340,86 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
     return r
 
 
+BALLAST = r"""
+import sys
+b = bytearray(int(sys.argv[1]) << 30)
+for i in range(0, len(b), 4096):
+    b[i] = 1  # touch every page: the memory is really in use
+print("ready", flush=True)
+sys.stdin.read()
+"""
+
+
+def mem_available_gib():
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return round(int(line.split()[1]) / 1048576, 1)
+    return 0.0
+
+
+def ballast(gib):
+    """`gib` GiB held by another process, in its own bounded user scope, until `release`."""
+    p = subprocess.Popen(["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={gib + 2}G", "timeout", "1800",
+                          "python3", "-I", "-c", BALLAST, str(gib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    if p.stdout.readline().strip() != "ready":
+        p.kill()
+        p.wait()
+        raise RuntimeError("the ballast did not start")
+    return p
+
+
+def release(p):
+    p.stdin.close()
+    try:
+        p.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+
+
+def video_phase(args, name, results, checks, ballast_gib):
+    """A 1 s video; which of chat, STT and TTS it unloaded; how long each takes to be ready again after it."""
+    voice = (args.chat, args.stt, args.tts)
+    held = ballast(ballast_gib) if ballast_gib else None
+    down, back = set(), {}
+    try:
+        mem_before = mem_available_gib()
+        t0 = time.monotonic()
+        _, _, body = http(f"{args.url}/v1/videos", {"model": args.video, "prompt": "waves rolling onto a beach at dusk", "size": args.video_size, "seconds": "1"})
+        vid = json.loads(body)["id"]
+        while True:
+            _, _, body = http(f"{args.url}/v1/videos/{vid}", timeout=30)
+            v = json.loads(body)
+            _, _, body = http(f"{args.url}/v1/tools", timeout=30)
+            down |= {t["id"] for t in json.loads(body)["data"] if t["id"] in voice and t["state"] != "ready"}
+            if v["status"] in ("completed", "failed", "cancelled") or time.monotonic() - t0 > 1200:
+                break
+            time.sleep(0.5)
+        video_s = time.monotonic() - t0
+        t1 = time.monotonic()
+        while time.monotonic() - t1 < 600 and len(back) < 3:
+            _, _, body = http(f"{args.url}/v1/tools", timeout=30)
+            for t in json.loads(body)["data"]:
+                if t["id"] in voice and t["state"] == "ready" and t["id"] not in back:
+                    back[t["id"]] = round(time.monotonic() - t1, 1)
+                elif t["id"] in voice and t["state"] != "ready":
+                    down.add(t["id"])
+            time.sleep(0.5)
+        mem_low = mem_available_gib()
+    finally:
+        if held:
+            release(held)
+    results[name] = {"video_status": v["status"], "video_s": round(video_s, 1), "unloaded_by_video": sorted(down),
+                     "ready_after_video_s": back, "ballast_gib": ballast_gib, "mem_available_before_gib": mem_before,
+                     "mem_available_after_recovery_gib": mem_low, "video_error": v.get("error")}
+    log(f"{name}:", results[name])
+    checks.append({"check": f"{name}: the clip completed", "ok": v["status"] == "completed", "detail": v.get("error")})
+    checks.append({"check": f"{name}: chat, speech to text and text to speech are ready again", "ok": len(back) == 3, "detail": back})
+    if ballast_gib:
+        checks.append({"check": f"{name}: the video had to unload part of the voice set", "ok": bool(down), "detail": sorted(down)})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
@@ -347,6 +429,9 @@ def main():
     ap.add_argument("--chat", required=True)
     ap.add_argument("--video", required=True)
     ap.add_argument("--video-size", default="768x448")
+    ap.add_argument("--ballast-gib", type=int, default=16, help="memory another tenant holds during the eviction case")
+    ap.add_argument("--max-median-ms", type=int, default=2500)
+    ap.add_argument("--max-barge-ms", type=int, default=4000)
     args = ap.parse_args()
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
     os.makedirs(f"{args.out}/replies", exist_ok=True)
@@ -430,42 +515,28 @@ def main():
             write_wav(f"{args.out}/replies/{rid}.wav", s)
         sess.close()
 
-    # 6. A short video job, then the voice models must be back and a new session answered.
-    t0 = time.monotonic()
-    _, _, body = http(f"{args.url}/v1/videos", {"model": args.video, "prompt": "waves rolling onto a beach at dusk", "size": args.video_size, "seconds": "1"})
-    vid = json.loads(body)["id"]
-    while True:
-        _, _, body = http(f"{args.url}/v1/videos/{vid}", timeout=30)
-        v = json.loads(body)
-        if v["status"] in ("completed", "failed", "cancelled") or time.monotonic() - t0 > 1200:
-            break
-        time.sleep(1)
-    video_s = time.monotonic() - t0
-    back, t1 = {}, time.monotonic()
-    while time.monotonic() - t1 < 600 and len(back) < 3:
-        _, _, body = http(f"{args.url}/v1/tools", timeout=30)
-        for t in json.loads(body)["data"]:
-            if t["id"] in (args.chat, args.stt, args.tts) and t["state"] == "ready" and t["id"] not in back:
-                back[t["id"]] = round(time.monotonic() - t1, 1)
-        time.sleep(1)
-    results["video_recovery"] = {"video_status": v["status"], "video_s": round(video_s, 1), "ready_after_video_s": back,
-                                 "video_error": v.get("error")}
-    log("video recovery:", results["video_recovery"])
-    checks.append({"check": "video: the clip completed", "ok": v["status"] == "completed", "detail": v.get("error")})
-    checks.append({"check": "video: chat, speech to text and text to speech are ready again", "ok": len(back) == 3, "detail": back})
-    sess = Session(args.url, events)
-    try:
-        sess.pump(1.0)
-        turn(sess, "after_video", mic["after_video"], turns, checks)
-    finally:
-        sess.close()
-        events.close()
+    # 6. A short video job, then the voice models must be back and a new session answered. Then the same under memory
+    #    pressure (a ballast, as another tenant), so the video must unload part of the voice set and the scheduler must
+    #    bring it back.
+    for name, prompt, gib in (("video", "after_video", 0), ("eviction", "after_eviction", args.ballast_gib)):
+        video_phase(args, name, results, checks, gib)
+        sess = Session(args.url, events)
+        try:
+            sess.pump(1.0)
+            turn(sess, prompt, mic[prompt], turns, checks)
+        finally:
+            sess.close()
+    events.close()
 
     lat = [t["speech_end_to_first_audio_ms"] for n, t in turns.items() if n != "warmup" and t["speech_end_to_first_audio_ms"] is not None]
     pct = lambda xs, p: sorted(xs)[min(len(xs) - 1, max(0, -(-p * len(xs) // 100) - 1))]
     results["latency_ms"] = {k: {"median": pct(v, 50), "p90": pct(v, 90), "min": min(v), "max": max(v)} for k in ("speech_end_to_transcript_ms", "speech_end_to_first_text_ms", "speech_end_to_first_audio_ms")
                              if (v := [t[k] for n, t in turns.items() if n != "warmup" and t[k] is not None])}
     results["first_audio_ms"] = results["latency_ms"].get("speech_end_to_first_audio_ms")
+    if lat:
+        checks.append({"check": f"latency: median speech end to first audio <= {args.max_median_ms} ms", "ok": pct(lat, 50) <= args.max_median_ms, "detail": pct(lat, 50)})
+    barge = turns.get("interrupt", {}).get("speech_end_to_first_audio_ms")
+    checks.append({"check": f"latency: the barge-in turn's first audio <= {args.max_barge_ms} ms", "ok": barge is not None and barge <= args.max_barge_ms, "detail": barge})
     results["checks"] = checks
     results["passed"] = all(c["ok"] for c in checks) and bool(lat)
     with open(f"{args.out}/results.json", "w") as f:
