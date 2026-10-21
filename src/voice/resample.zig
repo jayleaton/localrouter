@@ -18,6 +18,7 @@ pub fn resample(a: std.mem.Allocator, in: []const i16, from: u32, to: u32) ![]i1
     const half: f64 = zero_crossings / (2 * fc);
     const step: f64 = @as(f64, @floatFromInt(from)) / @as(f64, @floatFromInt(to));
     const last: i64 = @intCast(in.len - 1);
+    var memo: Memo = .{};
     for (out, 0..) |*o, i| {
         const t: f64 = @as(f64, @floatFromInt(i)) * step; // the output sample's position in the input
         const lo: i64 = @max(@as(i64, @intFromFloat(@ceil(t - half))), 0);
@@ -27,7 +28,7 @@ pub fn resample(a: std.mem.Allocator, in: []const i16, from: u32, to: u32) ![]i1
         var k = lo;
         while (k <= hi) : (k += 1) {
             const d: f64 = t - @as(f64, @floatFromInt(k));
-            const w = tap(d, fc, half);
+            const w = memo.get(d, fc, half);
             acc += w * @as(f64, @floatFromInt(in[@intCast(k)]));
             wsum += w;
         }
@@ -92,6 +93,26 @@ pub const Stream = struct {
             st.base += drop;
         }
         return out.items;
+    }
+};
+
+/// `tap` values by the exact bits of `d` (fc and half are fixed per call): the same value `tap` returns, without a
+/// sine and a cosine for each of the ~50 taps of every output. At rates in a simple ratio (24 to 16 kHz) a few
+/// hundred offsets recur; elsewhere it just computes.
+const Memo = struct {
+    keys: [1024]u64 = undefined,
+    vals: [1024]f64 = undefined,
+    used: [1024]bool = @splat(false),
+
+    fn get(m: *Memo, d: f64, fc: f64, half: f64) f64 {
+        const bits: u64 = @bitCast(d);
+        const at: usize = @intCast((bits *% 0x9E3779B97F4A7C15) >> 54);
+        if (m.used[at] and m.keys[at] == bits) return m.vals[at];
+        const w = tap(d, fc, half);
+        m.keys[at] = bits;
+        m.vals[at] = w;
+        m.used[at] = true;
+        return w;
     }
 };
 
@@ -235,4 +256,16 @@ test "a stream in uneven pieces resamples to exactly what the whole does" {
     try std.testing.expect(st.hist.items.len < 2000); // only the kernel's reach is kept
     var same: Stream = .{ .from = 24_000, .to = 24_000 };
     try std.testing.expectEqualSlices(i16, in[0..10], try same.push(std.testing.allocator, a, in[0..10], false));
+}
+
+test "the memoized kernel gives what the computed one does: 24 to 16 kHz noise, against the stream" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(11);
+    const noise = try a.alloc(i16, 24_000);
+    for (noise) |*x| x.* = prng.random().int(i16);
+    var st: Stream = .{ .from = 24_000, .to = 16_000 };
+    defer st.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(i16, try st.push(std.testing.allocator, a, noise, true), try resample(a, noise, 24_000, 16_000));
 }
