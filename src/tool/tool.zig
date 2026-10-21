@@ -29,6 +29,8 @@ pub const Output = struct {
     files: []const []const u8,
     seed: u64 = 0,
     ms: u64 = 0,
+    finish_reason: []const u8 = "", // speech: why the audio ended (stop, length, silence); "": the tool does not say
+    segments: []const u8 = "", // speech: a long-form reply's segments, "N;S2,S3,..." (sample offsets); "": one
 };
 
 /// One request for a tool: where its inputs and outputs live and what to make.

@@ -145,7 +145,9 @@ pub const ProcessTool = struct {
         const r = p.awaitReply(sink, p.cfg.generate_timeout_s) catch |err| return p.died(err);
         defer r.deinit();
         if (r.value.ok != true) {
-            const t = if (std.mem.eql(u8, r.value.type, "invalid_request_error")) "invalid_request_error" else "server_error";
+            const t = for ([_][]const u8{ "invalid_request_error", "service_unavailable" }) |known| {
+                if (std.mem.eql(u8, r.value.type, known)) break known;
+            } else "server_error";
             p.fail = .{ .message = p.copyMsg("{s}", .{r.value.@"error"}), .type = t };
             p.st.store(.ready, .release);
             return tool.Error.GenerateFailed;
@@ -153,7 +155,17 @@ pub const ProcessTool = struct {
         p.st.store(.ready, .release);
         const files = arena.alloc([]const u8, r.value.files.len) catch return tool.Error.OutOfMemory;
         for (files, r.value.files) |*d, s| d.* = arena.dupe(u8, s) catch return tool.Error.OutOfMemory;
-        return .{ .files = files, .seed = r.value.seed, .ms = r.value.ms };
+        const finish = arena.dupe(u8, headerSafe(r.value.finish_reason)) catch return tool.Error.OutOfMemory;
+        const segments = arena.dupe(u8, headerSafe(r.value.segments)) catch return tool.Error.OutOfMemory;
+        return .{ .files = files, .seed = r.value.seed, .ms = r.value.ms, .finish_reason = finish, .segments = segments };
+    }
+
+    /// A worker's string that the API sends as a response header (`finish_reason`, `segments`): printable ASCII of at
+    /// most 512 bytes, else dropped.
+    fn headerSafe(s: []const u8) []const u8 {
+        if (s.len > 512) return "";
+        for (s) |c| if (c < 0x20 or c > 0x7e) return "";
+        return s;
     }
 
     /// A chat request, POSTed to the worker's own server on loopback; the reply goes into the job directory as it arrives:
@@ -249,9 +261,9 @@ pub const ProcessTool = struct {
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
-        Io.Dir.cwd().createDirPath(p.setup.io, p.setup.log_dir) catch {};
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);
+        Io.Dir.cwd().createDirPath(p.setup.io, std.fs.path.dirname(log_path).?) catch {}; // ids such as fishaudio/drama-3
         const log = try Io.Dir.cwd().createFile(p.setup.io, log_path, .{ .truncate = false });
         defer log.close(p.setup.io);
         _ = posix.system.lseek(log.handle, 0, posix.SEEK.END);

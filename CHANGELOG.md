@@ -13,6 +13,18 @@
   together. Workers get `LOCALROUTER_GPU_LOCK_HELD=1`, the host lock in `LOCALROUTER_HOST_GPU_LOCK`, and a private
   `<data>/locks/<id>.lock` in `LOCALROUTER_GPU_LOCK` for a launcher that insists on taking one.
 
+- Fish Audio Drama 3 text to speech (`fishaudio/drama-3`, `tools/speech/drama3`; Built with Fish Audio): a `cmd`
+  worker that runs plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with its Drama 3 patch
+  series), built from pinned sources and started by that repository's own launcher under the host's shared GPU lock
+  (new config key `gpu_lock`) on loopback. Whole and streamed replies, voice files and inline `references`, long form.
+  It is listed but refused until GPU-qualified: the new per-tool `qualification` file gates any model with a 503
+  saying it is not GPU-qualified on this host until the model's qualify script (here `qualify.sh`, not yet run) says
+  so. Nothing of it has run on a GPU yet ([docs](docs/dev/DRAMA3.md)).
+- Speech API: `stream: true` (with `response_format: "pcm"`) streams raw PCM as HTTP/1.1 chunks for models that
+  offer it; `x-finish-reason` (`stop`, `length`, `silence`) and `x-long-form-segments` as headers, or as a stream's
+  trailers; a stream that fails after it started ends without its last chunk. `references` (voice references) for
+  models that take them, over HTTP and MCP. Workers may refuse with `service_unavailable` (503) and report
+  `finish_reason` and `segments`.
 - Speech: two new kinds, `speech` (`text_to_speech`) and `transcription` (`speech_to_text`), behind OpenAI's
   `POST /v1/audio/speech` (wav, pcm, flac, mp3, opus, aac) and `POST /v1/audio/transcriptions` (json, text,
   verbose_json, srt, vtt; segment and word timestamps), and the MCP tools `synthesize_speech` and `transcribe_audio`.
