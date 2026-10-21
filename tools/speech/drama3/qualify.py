@@ -83,7 +83,7 @@ def load_tool(config_path, tool_id):
 
 def layout(root):
     """The paths the worker derives from its weights (ROOT) when no option overrides them."""
-    return {"pilot": os.path.join(root, "drama-tensorfold", "recipe", "pilot.py"),
+    return {"pilot": os.path.join(root, "launcher", "pilot.py"),
             "native_bin": os.path.join(root, "build", "tensorfold", "zig-out", "native", "bin", "tensorfold-native"),
             "checkpoint": os.path.join(root, "drama-3"),
             "runtime_dir": os.path.join(root, "runtime")}

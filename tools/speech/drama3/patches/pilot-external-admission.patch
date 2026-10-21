@@ -1,0 +1,64 @@
+LocalRouter's change to plotarmordev/drama-tensorfold's recipe/pilot.py (Apache License 2.0, Copyright 2026
+plotarmordev), at 1a53b8aea738a99d3630f949b6b2a1f9389f0795. It adds --external-admission: when an outer scheduler
+(LocalRouter) admits the load from its own memory budget, the launcher skips its MemAvailable admission (88 GiB) and
+its 34 GiB abort. Its cgroup cap (54 GiB), the server's allocator cap and its lock are unchanged. This patch is
+licensed under the Apache License 2.0. fetch.sh applies it with `git apply` to a copy at ROOT/launcher/pilot.py.
+
+diff --git a/recipe/pilot.py b/recipe/pilot.py
+index f4a80a2..5db3fb3 100644
+--- a/recipe/pilot.py
++++ b/recipe/pilot.py
+@@ -1,5 +1,8 @@
+ #!/usr/bin/env python3
+ """Run a bounded Linux/systemd pilot without changing another service or GPU policy."""
++# Modified by LocalRouter (tools/speech/drama3/patches/pilot-external-admission.patch): adds --external-admission,
++# which skips the MemAvailable admission and the 34 GiB abort when an outer scheduler admits the load. Original:
++# plotarmordev/drama-tensorfold@1a53b8aea738a99d3630f949b6b2a1f9389f0795 recipe/pilot.py, Apache License 2.0.
+ from __future__ import annotations
+ 
+ import argparse
+@@ -43,6 +46,9 @@ def main() -> int:
+     parser.add_argument('--evidence-dir', type=Path, required=True)
+     parser.add_argument('--port', type=int, default=18793)
+     parser.add_argument('--ready-timeout', type=float, default=900)
++    parser.add_argument('--external-admission', action='store_true',
++                        help='An outer scheduler (LocalRouter) admits this load from its own memory budget: skip the '
++                             'MemAvailable admission and the 34 GiB abort; the cgroup cap and the lock stay')
+     parser.add_argument('serve_args', nargs='*', metavar='SERVE_ARG',
+                         help='Extra tensorfold-native serve flags, after --, e.g. -- --max-frames 4096 --long-form')
+     args = parser.parse_args()
+@@ -98,7 +104,9 @@ def main() -> int:
+             parser.error('Another workload owns the GPU slot; no model was started')
+         available = memory_available()
+         required = max(weights + HEADROOM, CGROUP_CAP + HEADROOM + STOP_MARGIN)
+-        if available < required:
++        if args.external_admission:
++            required = None
++        elif available < required:
+             parser.error(f'Need {required/GIB:.2f} GiB available, have {available/GIB:.2f}; no model was started')
+         try:
+             with socket.socket() as port_check:
+@@ -132,10 +140,12 @@ def main() -> int:
+                    *server_command]
+         initial = {'backend': args.backend, 'weights_bytes': weights, 'initial_memavailable_bytes': available,
+                    'required_memavailable_bytes': required, 'cgroup_memory_max_bytes': CGROUP_CAP,
+-                   'headroom_floor_bytes': HEADROOM, 'abort_threshold_bytes': HEADROOM + STOP_MARGIN,
++                   'headroom_floor_bytes': HEADROOM,
++                   'abort_threshold_bytes': None if args.external_admission else HEADROOM + STOP_MARGIN,
+                    'unit': unit, 'server_command': server_command, 'launch_command': command,
+                    'started_at_epoch': started_at_epoch,
+-                   'admission': 'operator-approved weights + 30 GiB; additional cgroup-cap reserve',
++                   'admission': ('external: the outer scheduler admits by its own memory budget' if args.external_admission
++                                 else 'operator-approved weights + 30 GiB; additional cgroup-cap reserve'),
+                    'allocator_caps_gib': allocator_caps,
+                    'allocation_cap_excludes_driver_and_library_private_memory': True}
+         (evidence / 'session.json').write_text(json.dumps(initial, indent=2) + '\n')
+@@ -154,7 +164,7 @@ def main() -> int:
+                         output.write(json.dumps({'elapsed_s': time.monotonic() - started,
+                                                  'memavailable_bytes': current}) + '\n')
+                         output.flush()
+-                        if current < HEADROOM + STOP_MARGIN:
++                        if not args.external_admission and current < HEADROOM + STOP_MARGIN:
+                             raise MemoryError(f'MemAvailable {current/GIB:.2f} GiB crossed the 34 GiB abort threshold')
+             except Exception as exc:
+                 failure.append(f'{type(exc).__name__}: {exc}')

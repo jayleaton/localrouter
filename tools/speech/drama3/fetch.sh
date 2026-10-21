@@ -3,7 +3,8 @@
 #   tools/speech/drama3/fetch.sh ROOT [--no-weights] [--check]
 # ROOT/drama-tensorfold is plotarmordev/drama-tensorfold at the pinned commit: the launcher (recipe/pilot.py), the
 # engine build script and the patch series. ROOT/drama-3 is the fishaudio/drama-3 checkpoint at the pinned revision
-# (41.5 GB). Files already present with the pinned size and hash are kept. --no-weights stops after the upstream
+# (41.5 GB). ROOT/launcher/pilot.py is upstream's launcher with LocalRouter's pinned admission patch
+# (patches/). Files already present with the pinned size and hash are kept. --no-weights stops after the upstream
 # checkout. --check fetches and changes nothing: it verifies what is there and fails on any difference (build.sh and
 # qualify.sh use it). Nothing is executed from the downloads, and nothing here accepts the weights' licence.
 set -euo pipefail
@@ -26,6 +27,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 root=$(cd "$root" && pwd)
 
 # One line a pin: repo URL COMMIT DIR | file PATH SHA256 | patch NAME SHA256 | series COUNT SHA256 |
+# launcher PATCH PATCH_SHA256 BASE PATH SHA256 |
 # ckpt REPO REVISION DIR PATH SIZE SHA256.
 plan=$(python3 -I - "$here/pins.json" <<'EOF'
 import json, sys
@@ -37,6 +39,8 @@ for path, digest in sorted(u["files"].items()):
 for name, digest in sorted(p["files"].items()):
     print("patch", p["dir"] + "/" + name, digest)
 print("series", p["count"], p["series_sha256"], p["dir"])
+l = pins["launcher"]
+print("launcher", l["patch"], l["patch_sha256"], l["base"], l["path"], l["sha256"])
 for path, (size, digest) in sorted(c["files"].items()):
     print("ckpt", c["repo"], c["revision"], c["dir"], path, size, digest)
 EOF
@@ -83,6 +87,24 @@ got=$(cat "$up/$pdir"/*.patch 2>/dev/null | sha256sum | cut -d' ' -f1 || echo mi
 [ "$got" = "$series" ] || { echo "fetch.sh: patch series sha256 $got, pinned $series" >&2; bad=1; }
 [ "$bad" = 0 ] || die "$up does not match pins.json; refusing it"
 echo "fetch.sh: $updir at $commit verified ($count patches, series $series)"
+
+# LocalRouter's launcher: upstream's recipe/pilot.py plus patches/pilot-external-admission.patch (an
+# --external-admission flag: LocalRouter's scheduler admits the load from its budget, so the launcher skips its own
+# 88 GiB MemAvailable admission and 34 GiB abort; its 54 GiB cgroup cap and lock stay). Written to ROOT/launcher/,
+# outside the upstream checkout, which stays clean. Both the patch and the result are pinned.
+read -r lpatch lpatch_sha lbase lout lout_sha <<< "$(pinned launcher)"
+got=$(sha "$here/$lpatch")
+[ "$got" = "$lpatch_sha" ] || die "$lpatch sha256 $got, pinned $lpatch_sha"
+if [ "$check" = 0 ]; then
+  tmp=$(mktemp -d)
+  mkdir -p "$tmp/$(dirname "$lbase")" "$root/$(dirname "$lout")"
+  cp "$up/$lbase" "$tmp/$lbase"
+  (cd "$tmp" && git apply "$here/$lpatch") || { rm -rf "$tmp"; die "$lpatch does not apply to $updir/$lbase"; }
+  mv "$tmp/$lbase" "$root/$lout.tmp" && rm -rf "$tmp" && mv "$root/$lout.tmp" "$root/$lout"
+fi
+got=$(sha "$root/$lout" 2>/dev/null || echo missing)
+[ "$got" = "$lout_sha" ] || die "$lout sha256 $got, pinned $lout_sha"
+echo "fetch.sh: $lout is $updir/$lbase with $lpatch (sha256 $got)"
 [ "$weights" = 1 ] || exit 0
 
 if [ "$check" = 0 ]; then

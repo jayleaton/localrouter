@@ -10,10 +10,14 @@ Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on std
     {"op":"exit"}
 
 The model is plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with the Drama 3 patch
-series), built from the pins in pins.json and started by that repository's own launcher, recipe/pilot.py. The
-launcher takes the host's shared GPU lock (LOCALROUTER_GPU_LOCK, from LocalRouter's `gpu_lock`) without blocking,
-checks memory before it loads, runs the server as a transient systemd user unit capped at 54 GiB on 127.0.0.1, and
-stops the unit and releases the lock when it is told to stop. This worker is a client of that server:
+series), built from the pins in pins.json and started by that repository's own launcher, recipe/pilot.py, with
+LocalRouter's pinned admission patch (patches/pilot-external-admission.patch; fetch.sh writes ROOT/launcher/pilot.py).
+LocalRouter's scheduler is the only admission authority: it admits the load from the tool's resident_bytes (54 GiB,
+the launcher's cgroup cap) against its budget, so the worker passes --external-admission and the launcher skips its
+own 88 GiB MemAvailable admission and 34 GiB abort. The launcher still runs the server as a transient systemd user
+unit capped at 54 GiB on 127.0.0.1, takes the lock it is given (LOCALROUTER_GPU_LOCK: the private, uncontended
+per-tool lock file the daemon names; a lock under the runtime directory when run outside the daemon), and stops the
+unit and releases the lock when it is told to stop. This worker is a client of that server:
 
 - load: the qualification marker (written by qualify.sh on this machine), the pinned files, then the launcher; ready
   when the launcher prints DRAMA_PILOT_READY. The configured voices must be ones the server loaded.
@@ -111,7 +115,8 @@ class Options:
         o = tool.get("options") or {}
         known = {"voices", "default_voice", "max_input_chars", "min_speed", "max_speed", "presets", "stream",
                  "references", "port", "max_frames", "long_form", "long_form_chars", "long_form_history",
-                 "voices_dir", "verify", "pilot", "native_bin", "checkpoint", "runtime_dir", "ready_timeout_s"}
+                 "voices_dir", "verify", "pilot", "native_bin", "checkpoint", "runtime_dir", "ready_timeout_s",
+                 "admission"}
         unknown = sorted(set(o) - known)
         if unknown:
             log(f"options not used by the worker: {unknown}")
@@ -119,7 +124,12 @@ class Options:
         if not root:
             raise ValueError("the tool's weights must be the Drama 3 root that fetch.sh and build.sh filled")
         self.root = root
-        self.pilot = o.get("pilot") or os.path.join(root, "drama-tensorfold", "recipe", "pilot.py")
+        self.pilot = o.get("pilot") or os.path.join(root, "launcher", "pilot.py")
+        # external: LocalRouter admits the load (the default); launcher: upstream's own admission and abort, for a
+        # launch outside any scheduler.
+        self.admission = o.get("admission", "external")
+        if self.admission not in ("external", "launcher"):
+            raise ValueError("admission must be external or launcher")
         self.native_bin = o.get("native_bin") or os.path.join(root, "build", "tensorfold", "zig-out", "native", "bin",
                                                                "tensorfold-native")
         self.checkpoint = o.get("checkpoint") or os.path.join(root, "drama-3")
@@ -269,13 +279,11 @@ class Worker:
         if self.require_qualification:
             self._check_qualification()
         self._check_files()
-        lock = self.environ.get("LOCALROUTER_GPU_LOCK", "")
-        if not lock:
-            raise ValueError("no shared GPU lock: set gpu_lock in LocalRouter's config to the lock every GPU job on "
-                             "this host takes")
-        if not os.path.isfile(lock):
-            raise ValueError(f"the shared GPU lock {lock} does not exist")
         os.makedirs(self.opts.runtime_dir, exist_ok=True)
+        # The launcher insists on a lock. The daemon names this tool's own (uncontended) one; without it, one of ours.
+        lock = self.environ.get("LOCALROUTER_GPU_LOCK", "") or os.path.join(self.opts.runtime_dir, "drama3.lock")
+        if not os.path.isfile(lock):
+            open(lock, "a").close()
         self._stop_stale_unit()
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         evidence = os.path.join(self.opts.root, "evidence", f"{stamp}-{os.getpid()}")
@@ -284,6 +292,8 @@ class Worker:
                 "--runtime-dir", self.opts.runtime_dir, "--checkpoint", self.opts.checkpoint, "--gpu-lock", lock,
                 "--evidence-dir", evidence, "--port", str(self.opts.port),
                 "--ready-timeout", str(self.opts.ready_timeout_s)]
+        if self.opts.admission == "external":
+            argv.append("--external-admission")
         serve = self.opts.serve_args()
         if serve:
             argv += ["--", *serve]
@@ -297,8 +307,10 @@ class Worker:
 
         self.pilot = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       start_new_session=True, preexec_fn=detach)
-        threading.Thread(target=self._read, args=(self.pilot.stdout, True), daemon=True).start()
-        threading.Thread(target=self._read, args=(self.pilot.stderr, False), daemon=True).start()
+        readers = [threading.Thread(target=self._read, args=(pipe, protocol), daemon=True)
+                   for pipe, protocol in ((self.pilot.stdout, True), (self.pilot.stderr, False))]
+        for t in readers:
+            t.start()
         deadline = time.monotonic() + self.opts.ready_timeout_s + 30
         while True:
             try:
@@ -316,6 +328,8 @@ class Worker:
                     with open(os.path.join(self.opts.runtime_dir, UNIT_FILE), "w", encoding="utf-8") as f:
                         f.write(self.unit + "\n")
             if line is None and self.pilot.poll() is not None:
+                for t in readers:  # its last words (a refusal) are in the pipes until they are read
+                    t.join(timeout=5)
                 raise RuntimeError(f"the launcher exited ({self.pilot.returncode}) before the server was ready")
             if time.monotonic() > deadline:
                 raise RuntimeError("the server was not ready in time")
@@ -362,9 +376,9 @@ class Worker:
         if o.verify == "none":
             return
         pins = load_pins()
-        launcher = pins["upstream"]["files"]["recipe/pilot.py"]
+        launcher = pins["launcher"]["sha256"]
         if sha256_file(o.pilot) != launcher:
-            raise ValueError(f"{o.pilot} is not the pinned launcher (sha256 {launcher})")
+            raise ValueError(f"{o.pilot} is not the pinned launcher (sha256 {launcher}): run fetch.sh")
         for name, (size, digest) in sorted(pins["checkpoint"]["files"].items()):
             path = os.path.join(o.checkpoint, name)
             if not os.path.isfile(path) or os.path.getsize(path) != size:
