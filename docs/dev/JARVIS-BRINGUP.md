@@ -61,6 +61,19 @@ Consequences for the design:
    evicting anything. The idle video model held 39 GiB and left 15.8 GiB free, so Kitten could not come back. It
    stays unloaded until the video model's idle TTL expires (600 s in the test config). On the Jarvis box, generation
    models want a short `idle_ttl_s` (or 0) so that voice comes back right after the job.
+   - **Defaults, this branch:** `install.sh` now writes `idle_ttl_s` 60 for image models and 30 for video
+     (`IMAGE_IDLE_TTL_S`, `VIDEO_IDLE_TTL_S`; both were 300). `docker/tools.json` and the README example match.
+     A reload costs 9.3 s (image) or 7.5 s (video), so a burst of jobs still reuses the loaded model.
+     `IMAGE_KEEP_WARM=0` stops the default image model being kept warm. A kept-warm model ignores its TTL, so
+     beside Drama 3 it would pin about 36 GiB. The default stays 1, as before.
+   - **PR #14 (chat as a tool) does not close this gap.** Its `loadKept` is main's: a kept-warm tool reloads only
+     when `fits(resident)` without evicting anything (`src/sched/scheduler.zig:178` on main; the same check in #14).
+     That holds for every kind, Whisper and Kitten included. So after a video, TTS comes back only once the video's
+     TTL ends: with the new 30 s default, about 30 s + 2 s of grace + Kitten's 21 s load. #14's chat tool (priority
+     100) waits the same way. #14's `tests/jarvis.zig` gives its video tool `idle_ttl_s: 1`, which hides this.
+   - **The fix belongs in the scheduler.** A kept-warm tool that does not fit should be allowed to evict idle tools
+     of lower priority, the way a request's admission does. #14 also checks resident bytes only when a kept-warm
+     tool returns, not working bytes, so that tool's first job may have to evict again.
 3. **Admission does not hold the reserve after a load.** It checks the request's estimate against
    `MemAvailable - reserve_bytes`, but the idle model it leaves behind can push the machine below the reserve (7.1
    GiB measured). Nothing was killed. DGX-01's earlyoom (`-m 2,1`) acts only below 2 % available, about 2.4 GiB.
@@ -83,6 +96,63 @@ Consequences for the design:
 Neither is a responsive live-voice TTS on this box today. Kitten cannot keep up with playback, and Drama 3's 1.4 s
 first audio plus 0.94 RTF leaves almost no slack. The fastest measured part of the loop is the chat model: 0.13 s
 TTFT on a short turn, and 0.61 s on the next turn of a cached 20k-token conversation.
+
+### Kitten on GB10: why RTF 1.5 and 10.6 GiB (to confirm on the node)
+
+Kitten has not been GPU-qualified. `docs/dev/KITTEN-TTS2.md` records the GB10 gate as one failed run (9 of 37
+checks) and one run "pending … Until it passes, CUDA is not qualified". Its only speed figure is CPU on the dev box
+(RTF about 10). So RTF 1.5 is the first GB10 speed number, not a regression.
+
+**It did run on the GPU.** The evidence:
+- The setup printed `torch 2.11.0+cu130`.
+- The tool config sets `"device": "cuda"`.
+- The worker logged `cuda peak reserved 4760 MiB` on every request.
+- `nvidia-smi` listed the worker with 4.9 GiB.
+
+**Likely cause of the speed:** each request is host-bound per codec token.
+- The language model runs through stock transformers `generate()` (kittenml 0.9.4 `model.py:380`): eager PyTorch,
+  batch 1, bf16, sdpa attention (FA2 when importable), and a LogitsProcessor chain at every step (repetition,
+  token-run, temperature, top-k, top-p).
+- Each codec token is one Python step launching every kernel of the 1.7B model, about 28 layers' worth, from
+  GB10's Arm cores. The GPU waits on those launches.
+- One second of audio needs 25 tokens. The run made about 170 tokens in about 10 s, roughly 20 tokens/s.
+- The decoder (S3 flow plus HiFT) should be the small part.
+- Not the cause: CPU fallback, or batch and warm-up (the voice conditioning is built at load, and three warm runs
+  gave the same RTF).
+- Torch's default of 20 CPU threads is a minor suspect. The probe also runs with 4.
+
+**Likely cause of the memory:** 10.6 GiB is 4.8 GiB of CUDA reserve (the bf16 LM 3.5 GB, s3gen about 1 GB, KV)
+plus 5.5 GiB of host RSS.
+- That host RSS equals the CPU-only resident on the dev box (5.51 GB). The host copy of the weights is the likely
+  reason.
+- `lm_weights: packed` is unpacked to bf16 on the CPU and installed with `load_state_dict(assign=True)`, then
+  copied by `.to("cuda")` (`model.py:179-188`).
+- The CPU tensors are freed, but tensors under glibc's 32 MiB mmap threshold go back to malloc's arenas, not the
+  OS. Torch and its CUDA libraries account for the rest.
+
+**Confirm with one probe** (`tools/spark/jarvis/kitten_probe.py`). It runs the worker's own load and synthesis
+three times, timed apart. It needs about 12 GiB and 3 minutes, and nothing else may run on the GPU:
+
+```sh
+scp tools/spark/jarvis/kitten_probe.py dgx01@192.168.1.116:jarvis/scripts/
+ssh dgx01@192.168.1.116 'for t in 0 4; do systemd-run --user --scope -q -p MemoryMax=24G timeout 900 \
+  ~/jarvis/venvs/kitten/bin/python -I ~/jarvis/scripts/kitten_probe.py ~/jarvis/src/localrouter ~/jarvis/models/kitten $t \
+  | tee ~/jarvis/out/kitten-probe-t$t.jsonl; done'
+```
+
+| Hypothesis | Confirmed if |
+| --- | --- |
+| On the GPU | `env`: `lm_devices` and `decoder_devices` are `["cuda:0"]` |
+| Host-bound decode | `run`: `lm_tokens_per_s` about 20, `lm_cpu_over_wall` about 1.0 (one core busy for the whole LM), `gpu_kernel_share` well under 0.5, `decoder_s` a small part of `wall_s` |
+| Threads | the `t4` run's RTF is no better (if it is clearly better, set `threads` in the tool config) |
+| Retained host weights | `memory`: `rss_after_trim_gib` about 3 GiB below `rss_gib` |
+
+**Fixes, not made here:**
+- **Memory:** a `malloc_trim(0)` after load, or loading the LM straight to the device. Either keeps the bits and
+  should save about 3 GiB. Re-run the gate to show it.
+- **Speed:** a static KV cache with CUDA graphs (`torch.compile(mode="reduce-overhead")`), or kittenml's own vLLM
+  backend (`kittentts2/vllm/`). Both pick other kernels, so per `CONTRIBUTING.md` they need the bit gate re-run or
+  an accepted new baseline.
 
 ## Recommendation for PR #13 (Drama 3 adapter)
 
@@ -196,7 +266,9 @@ against. The two changes for #13:
   - The one failure is environmental. `pack.zig`'s "aligned reads" test writes to the fixed path
     `/var/tmp/stk-pack-direct-test`, and a root job left that directory root-owned on 2026-10-17. I left it in
     place because it is outside `~/jarvis`.
-  - A test that writes to a fixed shared path collides across users. It should use a per-run temporary directory.
+  - A test that writes to a fixed shared path collides across users. This branch gives every such test a directory
+    unique to the run (`src/engines/qwen_image/testdir.zig`; the same random suffix in `audio.zig` and the
+    integration harness): the pack, capture, memcap receipt, audio and integration-daemon directories.
   - The suite's selftest line reads "image 251 ms, video 205 ms". Idle daemon RSS was 14,144 KiB, and `/v1/models`
     p50 was 1.2 ms.
 - **`tools/spark/install.sh` fails at origin/main** on a fresh machine with the default `IMAGE_MODELS` (which
