@@ -135,7 +135,7 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -199,11 +199,11 @@ fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Valu
 }
 
 fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true };
+    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true, references: ?Value = null };
     const b = try parseArgs(Args, a, args, out);
     const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
     var why: routes.Refusal = .{};
-    const j = speech.startSpeech(app, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed }, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .references = b.references }, &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_audio) {
@@ -347,6 +347,8 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
         .seed = j.request.seed(),
         .ms = j.ms,
         .files = urls,
+        .finish_reason = if (j.finish_reason.len > 0) @as(?[]const u8, j.finish_reason) else null,
+        .segments = if (j.segments.len > 0) @as(?[]const u8, j.segments) else null,
         .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?[]const u8, try a.dupe(u8, j.error_message)) else null,
         .next = if (j.finished()) @as(?[]const u8, null) else "call get_job with this id (wait_s up to 3000) until status is completed",
     };
@@ -439,6 +441,7 @@ const tool_list = [_]Tool{
     \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
     \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
     \\"seed":{"type":"integer","minimum":0},
+    \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},
     \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}}}
     } },
     .{ .name = "chat", .title = "Chat", .description = "A chat completion from the local chat model (OpenAI Chat Completions semantics). Returns the reply's text (or its tool calls as JSON when it called a tool instead), then the whole completion as JSON (message, reasoning_content when the model thought, finish_reason, usage). The chat model stays loaded, so replies start at once.", .inputSchema = .{ .text =

@@ -23,6 +23,14 @@ always-warm worker:
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
 their input-image ports land. Check each model's advertised capabilities before submitting a job.
 
+Speech comes as optional adapters that run a model's own implementation as a worker:
+
+| Speech model | Can do | Status |
+| --- | --- | --- |
+| **Fish Audio Drama 3** (`fishaudio/drama-3`, [setup](docs/dev/DRAMA3.md)): plotarmordev's [drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) native server on TensorFold. Built with Fish Audio | text to 44.1 kHz speech, whole or streamed as it is made; voice files and inline voice references; long-form replies | qualified on DGX-01 (GB10): first audio 0.14 s streamed, RTF 0.66, 40.4 GiB, also beside the warm chat model; refused on any other host until `tools/speech/drama3/qualify.sh` passes there |
+| **Kitten TTS 2** ([setup](docs/dev/KITTEN-TTS2.md)) | text to 24 kHz speech, 47 voices | CPU checked bit for bit; GB10 CUDA not yet qualified |
+| **Whisper large-v3-turbo** | speech to text | checked against its recipe on GB10 |
+
 More models, and more kinds (music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
 
 ## Why
@@ -144,6 +152,7 @@ remain registered but cannot generate without their kernels.
 ```bash
 zig build                                    # zig-out/bin/localrouter
 zig build test                               # unit + integration tests (a real daemon and real workers)
+zig build integration-exe && zig-out/bin/integration-test   # the integration tests one at a time, each named as it runs
 zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120   # with the GPU engines
 localrouter check selftest                   # a private daemon, one image and one video, no GPU
 ```
@@ -161,12 +170,19 @@ LocalRouter stands on [**TensorFold**](https://github.com/ashhart/TensorFold) by
 NVFP4 kernels and its Python model implementations were the baselines these engines were ported from and verified
 against. Thank you, Ash. We expect to contribute parts of the Zig work back upstream.
 
+The Drama 3 speech tool runs [**drama-tensorfold**](https://github.com/plotarmordev/drama-tensorfold) by **plotarmordev**
+(Apache-2.0), which ports Fish Audio Drama 3 to TensorFold. Built with Fish Audio.
+
 The INT8 attention kernels are SageAttention's, as shipped in NVIDIA's comfy-kitchen. Qwen-Image is by the Qwen team
 and MiniMax H3 by MiniMax; their weights are downloaded from their publishers under their own licenses.
 Qwen-Image 2.1 is restricted to non-commercial research or evaluation under its
 [Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
 MiniMax H3's [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU,
 UK and South Korea and imposes downstream use conditions. Check these terms before installing or using either model.
+Fish Audio Drama 3's weights are under the [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE):
+commercial use only under USD 500,000 annual revenue, and no Hosted Service (letting third parties generate speech
+through an API) without a separate licence from Fish Audio, so keep LocalRouter on loopback for it
+([details](docs/dev/DRAMA3.md#licences)). Built with Fish Audio.
 The Apache-2.0 licence below covers the software. See [NOTICE](NOTICE).
 
 ## License

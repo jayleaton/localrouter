@@ -24,7 +24,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `generate_video` | `prompt`, `size`, `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
 | `transcribe_audio` | `audio` (base64, data URL or URL), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
-| `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`: the audio inline (WAV by default) and as a URL |
+| `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
@@ -43,8 +43,9 @@ curl -s $BASE/models | jq '.data[] | {id, kind, running}'
 
 `kind` is `image`, `video`, `speech`, `transcription` or `chat`. `running: true` means it is loaded now. `capabilities` lists
 what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`,
-`speech_to_text`, `chat_completion`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take) and
-`max_input_chars`; transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
+`speech_to_text`, `chat_completion`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
+`max_input_chars`, `stream` (whether `stream: true` works) and `references` (whether voice references do);
+transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
 Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
 refused with a 400 naming the model and the capability; a model of the other kind is a 400 and an unknown one a 404,
@@ -118,9 +119,33 @@ curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
 | `speed` | 0.25 to 4 within the model's `speed` range; a model without a speed control takes only 1 |
 | `response_format` | `wav` (default), `pcm` (16-bit little-endian, mono; rate in the `x-sample-rate` header), `flac`, `mp3`, `opus`, `aac` |
 | `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
+| `stream` | Extension, for a model whose `stream` is true: `true` with `response_format: "pcm"` sends the audio as HTTP/1.1 chunks while it is made |
+| `references` | Extension, for a model whose `references` is true: `[{"text": "...", "vq_codes": [[...], ...]}]`, a clip's exact transcript and its codec codes (one list a codebook), spoken into the prompt before the model's voice |
 
-`instructions` and `stream_format: "sse"` are refused (400): the models take no style prompt and the audio comes back
-whole. Anything a model cannot do is refused before it loads, never approximated.
+`instructions` and `stream_format: "sse"` are refused (400): the models take no style prompt. Anything a model cannot
+do is refused before it loads, never approximated.
+
+A model that says why its audio ended sets `x-finish-reason`: `stop` (it ended by itself), `length` (clipped at its
+frame limit; the audio is cut short) or `silence` (its silence guard ended a reply that fell silent or into a steady hum
+for 10 s; the audio before it is kept). A long-form reply also sets `x-long-form-segments: N;S2,S3,...`, the number of
+segments and the sample at which each after the first starts.
+
+A streamed reply (`stream: true`) is raw 16-bit mono PCM (`x-sample-rate`, `x-channels`, `x-sample-format` headers, as
+for `pcm`) in chunks. Read it to its end:
+
+- It ended by itself: the plain last chunk.
+- It was cut short, or is long form: the last chunk carries the `x-finish-reason` trailer (and `x-long-form-segments`).
+- It failed after it started: the connection closes without a last chunk. Treat the audio as incomplete.
+- It failed before any audio: an ordinary error reply. Closing the connection cancels the job.
+
+**Fish Audio Drama 3** (`fishaudio/drama-3`, when the operator has set it up; Built with Fish Audio) speaks 44.1 kHz
+audio up to 47.6 s a synthesis by default (longer with the operator's `max_frames`, and whole long inputs in segments
+with `long_form`). It has one built-in voice, `default`, plus the voice files the operator loaded (`voices` in
+`/v1/models`); there is no `speed` or `preset`, and `seed` is ignored (the engine seeds each synthesis from its prompt). Write
+delivery cues in the text, such as `[sighs]` or `[laughs]` where they should land. Clone only a voice the model
+invented, your own, or one whose owner has consented on record: the model's licence forbids imitating anyone else.
+Until the operator has qualified it on the machine's GPU it is listed with `"qualified": false` and every request gets
+a 503 saying it is not GPU-qualified on this host.
 
 ## Transcriptions (OpenAI Audio API)
 

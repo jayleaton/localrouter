@@ -19,3 +19,4 @@ jobs:
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - run: zig build
       - run: zig build test
+        timeout-minutes: 20

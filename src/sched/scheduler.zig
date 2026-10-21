@@ -396,6 +396,8 @@ pub const Scheduler = struct {
             j.percent = 100;
             j.seed = o.seed;
             j.ms = o.ms;
+            j.finish_reason = a.dupe(u8, o.finish_reason) catch "";
+            j.segments = a.dupe(u8, o.segments) catch "";
             if (a.alloc([]const u8, o.files.len)) |files| {
                 for (files, o.files) |*d, f| d.* = a.dupe(u8, f) catch "";
                 j.files = files;

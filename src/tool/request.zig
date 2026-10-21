@@ -60,6 +60,8 @@ pub const Speech = struct {
     speed: f32 = 1,
     preset: []const u8 = "", // a model-native style the tool lists in its `presets` option; "": none
     seed: u64 = 0,
+    stream: bool = false, // the tool writes `speech.wav` as it goes (header first, sizes fixed at the end), for a streamed reply
+    references: []const u8 = "", // "references.json" in the job directory: the voice references the request sent; "": none
 };
 
 pub const Timestamps = enum { none, segment, word };
@@ -166,6 +168,7 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (!(v.speed >= l.min_speed and v.speed <= l.max_speed)) return fail(why, "speed must be 0.25 to 4");
             if (v.voice.len > 64 or !token(v.voice)) return fail(why, "voice must be a voice id (letters, digits, '-', '_' and '.')");
             if (v.preset.len > 32 or !token(v.preset)) return fail(why, "preset must be a preset id (letters, digits, '-', '_' and '.')");
+            if (v.references.len > 0 and !token(v.references)) return fail(why, "references must name a file in the job directory");
         },
         .transcription => |v| {
             if (v.audio.len == 0 or !token(v.audio)) return fail(why, "audio must name a file in the job directory");

@@ -1,7 +1,8 @@
 //! End to end: the real `localrouter` daemon and real worker processes, driven over HTTP. No part is mocked; the
 //! testpattern engine stands in for a GPU engine (same protocol, memory accounting and output paths).
 //! `harness.zig` starts the daemon; `router.zig` has the tests of priorities, image inputs and the stdio bridge;
-//! `speech.zig` those of text to speech and speech to text; `chat.zig` those of the chat kind (tests/fixtures/chat_server.py); `jarvis.zig` chat and voice warm together.
+//! `speech.zig` those of text to speech and speech to text; `chat.zig` those of the chat kind (tests/fixtures/chat_server.py); `jarvis.zig` chat and voice warm together;
+//! `drama3.zig` those of the Drama 3 adapter.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,6 +24,7 @@ test {
     _ = @import("speech.zig");
     _ = @import("chat.zig");
     _ = @import("jarvis.zig");
+    _ = @import("drama3.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;
