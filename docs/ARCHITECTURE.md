@@ -138,10 +138,9 @@ the model: input decoding, response encodings, and the limits checked before a t
 ### A model's own server (`openai_server`)
 
 Some models ship their own OpenAI-compatible server (TensorFold's `serve`, a llama.cpp server). The compiled-in
-`openai_server` engine runs one as the worker: on `load` it takes the host's GPU lock (`gpu_lock`, passed as
-`LOCALROUTER_GPU_LOCK`) without waiting, starts `options.server` (an argv; `{port}`, `{id}` and `{weights}` are filled
-in) on a free loopback port with `options.env`, waits until `options.health` (default `/health`) answers 200, and
-replies `{"ok":true,"resident":0,"port":N}`. Any `cmd` worker may name a `port` the same way.
+`openai_server` engine runs one as the worker: on `load` it starts `options.server` (an argv; `{port}`, `{id}` and
+`{weights}` are filled in) on a free loopback port with `options.env`, waits until `options.health` (default `/health`)
+answers 200, and replies `{"ok":true,"resident":0,"port":N}`. Any `cmd` worker may name a `port` the same way.
 
 ```
 {"id": "qwen3.8-27b", "kind": "chat", "engine": "openai_server", "resident_bytes": 51539607552,
@@ -154,8 +153,20 @@ writes the reply into the job directory as it arrives: `completion.json`, or the
 the route forwards while it grows. The server's 4xx is a 400, its 503 a 503, anything else a 500. Cancelling closes the
 request's connection and leaves the worker loaded (the server keeps its weights and prompt cache warm); a server that is
 gone, or silent past `generate_timeout_s`, kills the worker, so the next request starts it again. Unload stops the
-server with SIGTERM (SIGKILL after `stop_timeout_s`, default 8) and releases the lock; if the daemon dies, the worker
-stops the server first. `resident_bytes` and `working_bytes` are the model's measured figures: a server reports none.
+server with SIGTERM (SIGKILL after `stop_timeout_s`, default 8); if the daemon dies, the worker stops the server first.
+`resident_bytes` and `working_bytes` are the model's measured figures: a server reports none.
+
+### The host's GPU lock
+
+A machine whose GPU is shared with jobs outside LocalRouter names their lock file in `gpu_lock`; those jobs take it
+exclusively. The scheduler is the one admission authority for LocalRouter's own models: it decides what is loaded
+together from `resident_bytes` against the budget alone, and holds the host lock once for all of them (`flock`, shared,
+without waiting) from the first load until nothing is loaded. While an outside job holds it, nothing loads: the request,
+explicit load or `keep_loaded` start fails with a 503 naming the lock. No worker takes the host lock, so the chat model,
+a voice model and a transcription model stay loaded side by side. A worker sees `LOCALROUTER_GPU_LOCK_HELD=1` and the
+host lock's path in `LOCALROUTER_HOST_GPU_LOCK`; `LOCALROUTER_GPU_LOCK` names a lock file of its own,
+`<data>/locks/<id>.lock` (created, uncontended), for a launcher that insists on taking a lock (Drama 3's `pilot.py`,
+given `--gpu-lock "$LOCALROUTER_GPU_LOCK"`), so it can never keep another LocalRouter model out.
 
 ### Qualification
 

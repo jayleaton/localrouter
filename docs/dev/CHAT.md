@@ -34,8 +34,9 @@ refused before its first event gets the plain JSON error; one that breaks off la
 The tool uses the compiled-in `openai_server` engine (`src/engines/openai_server.zig`; the protocol is in
 [ARCHITECTURE.md](../ARCHITECTURE.md#a-models-own-server-openai_server)):
 
-1. **Load.** The worker takes the host's GPU lock (`gpu_lock` in the config, `LOCALROUTER_GPU_LOCK` in its
-   environment) with `flock(LOCK_EX | LOCK_NB)`: another holder fails the load. It picks a free loopback port, starts
+1. **Load.** The scheduler admits the model by `resident_bytes` against the budget, like every other model, and holds
+   the host's GPU lock for LocalRouter as a whole ([The GPU lock](#the-gpu-lock)); the worker takes no lock. The
+   worker picks a free loopback port, starts
    `tensorfold-native serve ... --host 127.0.0.1 --port {port} --name {id}` in its own process group with the server's
    output in the tool's log (`<data>/logs/qwen3.8-27b.log`), and polls `GET /health` every 250 ms until it answers 200
    (the server exiting first fails the load with its status). The load reply names the port.
@@ -45,7 +46,7 @@ The tool uses the compiled-in `openai_server` engine (`src/engines/openai_server
 3. **Cancel.** A client that closes a stream, or `cancel_job`, closes that request's connection. The worker, the
    weights and the prompt cache stay loaded.
 4. **Unload.** SIGTERM (TensorFold drains for `TF_DRAIN_S`, set to 5 s in the example), SIGKILL after
-   `stop_timeout_s` (8 s), then the lock is released. If the daemon dies, the worker kills the server before it exits.
+   `stop_timeout_s` (8 s). If the daemon dies, the worker kills the server before it exits.
 
 The server reads the checkpoint and drafter from the Hugging Face cache that `fetch.sh` fills
 (`HF_HUB_CACHE=/data/models/chat/hf`, `HF_HUB_OFFLINE=1`), pinned to their revisions by `refs/main`.
@@ -70,6 +71,28 @@ daemon starts, never unloaded for idleness, unloaded last when a request needs m
 the memory is free. With the placeholder 48 GiB, the chat model and the FP8 image model (about 40 GiB) fit side by side
 in GB10's 128 GB with the default 8 GiB reserve; a MiniMax H3 video job, which needs most of the machine, evicts the
 image model first and then the chat model, and the chat model comes back after the video model idles out.
+
+The box's voice models sit beside it the same way: chat (priority 100), text to speech and speech to text (give them
+priorities below 100, e.g. 50 and 10, and `keep_loaded`) are loaded together whenever their `resident_bytes` fit the
+budget, and a job that needs the machine evicts them lowest priority first: transcription, then speech, then chat.
+They all come back by themselves once it is done. `tests/jarvis.zig` checks both: the three warm together under one
+GPU lock, serving in turn without a reload, and the eviction order and return.
+
+## The GPU lock
+
+LocalRouter's scheduler is the one admission authority on the box: it decides which models are loaded together from
+their `resident_bytes` against the budget, nothing else. `gpu_lock` only keeps GPU users outside LocalRouter out (they
+take the file exclusively): the scheduler takes it once, `flock(LOCK_SH | LOCK_NB)`, when the first model loads, holds
+it while any model is loaded or loading, and releases it when none is. If an outside job holds it, nothing loads; the
+request (or explicit load, or `keep_loaded` start) fails with a 503 naming the lock, and `keep_loaded` models retry
+after a minute.
+
+No LocalRouter worker takes the host lock. Each worker's environment says so: `LOCALROUTER_GPU_LOCK_HELD=1`, the host
+lock's path in `LOCALROUTER_HOST_GPU_LOCK`, and in `LOCALROUTER_GPU_LOCK` a lock file of its own,
+`<data>/locks/<id>.lock` ('/' in the id becomes '_'), created and uncontended. A launcher that insists on taking a lock
+gets that file: Drama 3's worker (PR #13) passes `LOCALROUTER_GPU_LOCK` to `pilot.py --gpu-lock` unchanged, so its
+exclusive, non-blocking take succeeds and never keeps the chat model, or any other LocalRouter model, out. Run outside
+LocalRouter, the same launcher is given the host lock and guards the machine as before.
 
 ## Setup
 
@@ -123,10 +146,10 @@ checkpoint or drafter) needs a new run.
 
 ## Known interactions
 
-- **The GPU lock is exclusive while the chat model is loaded.** Since it is kept loaded, another worker that takes the
-  same lock (Drama 3's launcher, PR #13) cannot load beside it, and the scheduler does not know to unload the chat model
-  for it: that load fails with a 503 until an operator unloads the chat tool (`POST /v1/tools/qwen3.8-27b/unload`).
-  Sharing the lock between LocalRouter's own workers is a follow-up.
+- **PR #13 merge.** #13 sets `LOCALROUTER_GPU_LOCK` to the host lock in `process.zig`; this PR replaces that line
+  with the environment above. Take this PR's version when the two meet. Drama 3's own memory checks (its launcher wants
+  88 GiB of `MemAvailable` before it starts) still apply beside the warm chat model; its `resident_bytes` (80 GiB) makes
+  the scheduler free that room first.
 - **One request at a time.** Chat requests queue behind image, video and speech jobs like any other job, and vice
   versa; a long reply holds the queue for its length (`max_tokens`, 4096 by default).
 

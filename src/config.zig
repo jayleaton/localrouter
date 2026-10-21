@@ -40,7 +40,7 @@ pub const Config = struct {
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
-    gpu_lock: []const u8 = "", // the host's shared GPU lock file, passed to workers as LOCALROUTER_GPU_LOCK (model servers take it while loaded)
+    gpu_lock: []const u8 = "", // the host's GPU lock: the scheduler holds it (shared) while any tool is loaded, against GPU users outside LocalRouter
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     tools: []const ToolConfig = &default_tools,
 

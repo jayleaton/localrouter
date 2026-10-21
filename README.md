@@ -121,7 +121,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
 | `keep_outputs_s` | 86400 | how long outputs stay |
 | `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
-| `gpu_lock` | none | the host's shared GPU lock file. A worker that runs a model server of its own (`openai_server`) takes it, without waiting, while the server runs; it reaches workers as `LOCALROUTER_GPU_LOCK` |
+| `gpu_lock` | none | the host's GPU lock file, the one GPU jobs outside LocalRouter take exclusively. LocalRouter holds it once, shared and without waiting, while any of its models is loaded, and releases it when none is; while someone else holds it nothing loads (503). LocalRouter's own models never take it: they are admitted by memory alone, so chat, speech and transcription stay loaded side by side |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
 | `tools[].priority` | 0 (chat: 100) | higher is unloaded later when memory is needed |

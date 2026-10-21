@@ -1,9 +1,9 @@
 //! `openai_server`: a worker that runs a model's own OpenAI-compatible HTTP server (TensorFold's `serve`, a llama.cpp
-//! server, ...) on loopback and supervises it; the daemon proxies each request to it (`ProcessTool`). Load takes the
-//! host's GPU lock (LOCALROUTER_GPU_LOCK) when one is configured, starts `options.server` (`{port}`, `{id}` and
-//! `{weights}` substituted) in the worker's process group with its output in the tool's log, and waits until
-//! `options.health` (default /health) answers 200; the load reply names the port. Unload stops the server (SIGTERM,
-//! then SIGKILL after `stop_timeout_s`) and releases the lock. If the daemon dies, the worker takes the server with it.
+//! server, ...) on loopback and supervises it; the daemon proxies each request to it (`ProcessTool`). Load starts
+//! `options.server` (`{port}`, `{id}` and `{weights}` substituted) in the worker's process group with its output in the
+//! tool's log, and waits until `options.health` (default /health) answers 200; the load reply names the port. It takes
+//! no GPU lock: the scheduler holds the host's for every LocalRouter model and admits by memory alone. Unload stops the
+//! server (SIGTERM, then SIGKILL after `stop_timeout_s`). If the daemon dies, the worker takes the server with it.
 //! Memory is the config's `resident_bytes` and `working_bytes`: the model's measured figures, not guessed here.
 
 const std = @import("std");
@@ -28,7 +28,6 @@ const Server = struct {
     cfg: *const ToolConfig,
     pid: posix.pid_t = 0,
     listen_port: u16 = 0,
-    lock: posix.fd_t = -1,
 
     fn self(ptr: *anyopaque) *Server {
         return @ptrCast(@alignCast(ptr));
@@ -43,7 +42,6 @@ const Server = struct {
             engine.explain("options.server is required: the command line of the model's server", .{});
             return error.NoServerCommand;
         };
-        try s.takeLock(a);
         const fixed = engine.optionInt(s.cfg, "port", 0);
         s.listen_port = if (fixed > 0 and fixed < 65536) @intCast(fixed) else try upstream.freePort();
         const port_text = try std.fmt.allocPrint(a, "{d}", .{s.listen_port});
@@ -80,23 +78,6 @@ const Server = struct {
         return 0; // the scheduler keeps the config's resident_bytes, the measured figure
     }
 
-    /// Takes LOCALROUTER_GPU_LOCK (an existing file) without blocking; another holder refuses the load.
-    fn takeLock(s: *Server, a: std.mem.Allocator) !void {
-        const parent = s.env.environ orelse return;
-        const path = parent.get("LOCALROUTER_GPU_LOCK") orelse return;
-        if (path.len == 0) return;
-        const fd = posix.openatZ(posix.AT.FDCWD, try a.dupeSentinel(u8, path, 0), .{ .CLOEXEC = true }, 0) catch |err| {
-            engine.explain("the GPU lock {s} cannot be opened: {s}", .{ path, @errorName(err) });
-            return err;
-        };
-        if (std.c.flock(fd, posix.LOCK.EX | posix.LOCK.NB) != 0) {
-            _ = std.c.close(fd);
-            engine.explain("the GPU lock {s} is held by another job", .{path});
-            return error.GpuLockHeld;
-        }
-        s.lock = fd; // held until unload; the server does not inherit it (CLOEXEC), so it ends with this process
-    }
-
     /// Polls the health path until it answers 200, the server exits, or the load timeout passes.
     fn awaitReady(s: *Server) !void {
         const path = engine.optionString(s.cfg, "health", "/health");
@@ -130,7 +111,7 @@ const Server = struct {
         return self(ptr).listen_port;
     }
 
-    /// Stops the server (SIGTERM, SIGKILL after `stop_timeout_s`), releases the lock and frees the engine.
+    /// Stops the server (SIGTERM, SIGKILL after `stop_timeout_s`) and frees the engine.
     fn unload(ptr: *anyopaque) void {
         const s = self(ptr);
         if (s.pid > 0) {
@@ -147,7 +128,6 @@ const Server = struct {
             }
             server_pid.store(0, .release);
         }
-        if (s.lock >= 0) _ = std.c.close(s.lock); // closing the descriptor releases the lock
         s.env.gpa.destroy(s);
     }
 };

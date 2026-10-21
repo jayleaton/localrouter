@@ -1,7 +1,10 @@
 //! ProcessTool: a Tool served by a worker process (`localrouter worker` for compiled-in engines, or the config's `cmd`).
 //! Unload is process exit, so every byte returns to the OS; abort and deadlines kill the worker's process group.
-//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL, the host's GPU lock (`Config.gpu_lock`) as
-//! LOCALROUTER_GPU_LOCK. Worker stderr is appended to `<data>/logs/<id>.log`. A worker whose load reply names a `port`
+//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL. Worker stderr is appended to `<data>/logs/<id>.log`.
+//! With a host GPU lock configured, the scheduler holds it for every LocalRouter tool (`gpu_lock` in the scheduler), and
+//! the worker learns so: LOCALROUTER_GPU_LOCK_HELD=1, the host lock in LOCALROUTER_HOST_GPU_LOCK, and in
+//! LOCALROUTER_GPU_LOCK a lock file of its own (`<data>/locks/<id>.lock`), uncontended, for a launcher that insists on
+//! taking one; so no worker can keep another LocalRouter model out. A worker whose load reply names a `port`
 //! runs the model's own HTTP server there: chat requests are proxied to it (`proxy`), and cancelling one ends the request,
 //! not the worker.
 
@@ -38,6 +41,7 @@ pub const ProcessTool = struct {
     port: u16 = 0, // the loopback port of the worker's own server (its load reply); 0: none
     proxying: std.atomic.Value(bool) = .init(false), // a chat request is being proxied: abort ends it, not the worker
     upstream_fd: std.atomic.Value(posix.fd_t) = .init(-1), // that request's connection
+    lock_path: [1024]u8 = undefined, // `ownLock`
 
     pub fn init(setup: Setup, cfg: *const ToolConfig) !ProcessTool {
         return .{ .setup = setup, .cfg = cfg, .buf = try setup.gpa.alloc(u8, wire.max_line) };
@@ -237,7 +241,11 @@ pub const ProcessTool = struct {
         var it = p.setup.environ.iterator();
         while (it.next()) |kv| try env.put(kv.key_ptr.*, kv.value_ptr.*);
         try env.put("LOCALROUTER_TOOL", json);
-        if (p.setup.gpu_lock.len > 0) try env.put("LOCALROUTER_GPU_LOCK", p.setup.gpu_lock);
+        if (p.setup.gpu_lock.len > 0) {
+            try env.put("LOCALROUTER_HOST_GPU_LOCK", p.setup.gpu_lock);
+            try env.put("LOCALROUTER_GPU_LOCK_HELD", "1");
+            try env.put("LOCALROUTER_GPU_LOCK", try p.ownLock());
+        }
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
@@ -251,6 +259,20 @@ pub const ProcessTool = struct {
         p.child = child;
         p.pid.store(child.id.?, .release);
         p.lines = .{ .fd = child.stdout.?.handle, .buf = p.buf };
+    }
+
+    /// This tool's own lock file, `<data>/locks/<id>.lock` ('/' in the id becomes '_'), created if missing: what the
+    /// worker gets as LOCALROUTER_GPU_LOCK while the scheduler holds the host's lock.
+    fn ownLock(p: *ProcessTool) ![]const u8 {
+        const data = std.fs.path.dirname(p.setup.log_dir) orelse ".";
+        const path = try std.fmt.bufPrint(&p.lock_path, "{s}/locks/{s}.lock", .{ data, p.cfg.id });
+        for (path[path.len - p.cfg.id.len - ".lock".len ..][0..p.cfg.id.len]) |*ch| if (ch.* == '/') {
+            ch.* = '_';
+        };
+        Io.Dir.cwd().createDirPath(p.setup.io, std.fs.path.dirname(path).?) catch {};
+        const file = try Io.Dir.cwd().createFile(p.setup.io, path, .{ .truncate = false });
+        file.close(p.setup.io);
+        return path;
     }
 
     fn stdinFd(p: *ProcessTool) posix.fd_t {
