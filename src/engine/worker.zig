@@ -13,8 +13,8 @@ const stdout_fd = 1;
 
 /// Runs until `exit` or EOF; `tool_json` is the tool's config as the daemon serialized it, `parent` the daemon's pid
 /// (LOCALROUTER_PARENT, 0 when unset: no check; it is 1 when the daemon is a container's init, so the check cannot compare with 1).
-pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i32) !u8 {
-    _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
+pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i32, environ: ?*const std.process.Environ.Map) !u8 {
+    _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0);
     if (parent != 0 and linux.getppid() != parent) return 0; // the daemon died before the line above
     const parsed = try std.json.parseFromSlice(ToolConfig, gpa, tool_json, .{ .allocate = .alloc_always });
     defer parsed.deinit();
@@ -44,7 +44,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
             .exit => return 0,
             .load => {
                 if (loaded == null) {
-                    const e = entry.create(.{ .gpa = gpa, .io = io }, cfg) catch |err| {
+                    const e = entry.create(.{ .gpa = gpa, .io = io, .environ = environ }, cfg) catch |err| {
                         try fail(gpa, "load", err);
                         continue;
                     };
@@ -54,7 +54,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
                         continue;
                     };
                     loaded = e;
-                    try reply(gpa, .{ .ok = true, .resident = resident });
+                    try reply(gpa, .{ .ok = true, .resident = resident, .port = e.port() });
                 } else try reply(gpa, .{ .ok = true });
             },
             .generate => {
@@ -71,7 +71,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
                     try fail(gpa, "generate", err);
                     continue;
                 };
-                try reply(gpa, .{ .ok = true, .files = out.files, .seed = out.seed, .ms = out.ms });
+                try reply(gpa, .{ .ok = true, .files = out.files, .seed = out.seed, .ms = out.ms, .finish_reason = out.finish_reason, .segments = out.segments });
             },
         }
     }
@@ -90,11 +90,13 @@ fn reply(gpa: std.mem.Allocator, r: wire.Reply) !void {
     try wire.send(stdout_fd, gpa, r);
 }
 
-/// Reports a failed call; `error.Refused` is the caller's fault (400), anything else the tool's.
+/// Reports a failed call, with the engine's explanation when it gave one; `error.Refused` is the caller's fault (400),
+/// anything else the tool's.
 fn fail(gpa: std.mem.Allocator, what: []const u8, err: anyerror) !void {
     std.log.err("{s} failed: {s}", .{ what, @errorName(err) });
     const kind = if (err == error.Refused) "invalid_request_error" else "server_error";
-    var msg_buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "{s} failed: {s}", .{ what, @errorName(err) }) catch what;
+    var msg_buf: [640]u8 = undefined;
+    const detail = engine.explained();
+    const msg = std.fmt.bufPrint(&msg_buf, "{s} failed: {s}", .{ what, if (detail.len > 0) detail else @errorName(err) }) catch what;
     try reply(gpa, .{ .ok = false, .@"error" = msg, .type = kind });
 }

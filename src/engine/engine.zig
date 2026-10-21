@@ -25,6 +25,7 @@ pub const Engine = struct {
         load: *const fn (ptr: *anyopaque) anyerror!u64,
         generate: *const fn (ptr: *anyopaque, job: *const Job, sink: Sink, arena: std.mem.Allocator) anyerror!Output,
         unload: *const fn (ptr: *anyopaque) void,
+        port: ?*const fn (ptr: *anyopaque) u16 = null, // an engine that runs its own HTTP server: its loopback port
     };
 
     /// Loads weights and kernels; returns the resident bytes it now holds.
@@ -34,6 +35,10 @@ pub const Engine = struct {
     /// Runs one request into `job.dir`; result strings live in `arena`.
     pub fn generate(e: Engine, job: *const Job, sink: Sink, arena: std.mem.Allocator) anyerror!Output {
         return e.vtable.generate(e.ptr, job, sink, arena);
+    }
+    /// The loopback port of the engine's own HTTP server (named in the load reply), 0 for none.
+    pub fn port(e: Engine) u16 {
+        return if (e.vtable.port) |f| f(e.ptr) else 0;
     }
     /// Frees everything `load` took and the engine itself.
     pub fn unload(e: Engine) void {
@@ -45,6 +50,7 @@ pub const Engine = struct {
 pub const Env = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    environ: ?*const std.process.Environ.Map = null, // the worker's environment (LOCALROUTER_GPU_LOCK, ...)
 };
 
 pub const Entry = struct {
@@ -62,13 +68,14 @@ pub const entries = [_]Entry{
     @import("../engines/qwen_image_tool.zig").entry,
     @import("../engines/qwen_image_tool.zig").turbo_entry,
     @import("../engines/minimax_h3_tool.zig").entry,
+    @import("../engines/openai_server.zig").entry,
 };
 
 /// Whether the tool can serve `cap`: its configured capabilities, else its engine's, else its kind's plain one (text to
-/// image, text to video, text to speech, speech to text); always within the tool's kind.
+/// image, text to video, text to speech, speech to text, chat completion); always within the tool's kind.
 pub fn supports(cfg: *const ToolConfig, cap: Capability) bool {
     if (cap.kind() != cfg.kind) return false;
-    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text };
+    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text, .chat_completion };
     return std.mem.indexOfScalar(Capability, base, cap) != null;
 }
 
@@ -90,8 +97,9 @@ pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) b
 
 /// A speech tool's own limits, from its options, checked before it loads (so nothing is resampled or ignored quietly):
 /// `max_input_chars` (at most 4096), `min_speed` and `max_speed` (1 and 1 for a model without a speed control),
-/// `voices` (the ids it has; `default_voice` fills an empty voice, see `speechDefaults`) and `presets` (the
-/// model-native styles a request's `preset` may name; none listed: no preset is taken).
+/// `voices` (the ids it has; `default_voice` fills an empty voice, see `speechDefaults`), `presets` (the model-native
+/// styles a request's `preset` may name; none listed: no preset is taken), and `stream` and `references` (true: the
+/// tool streams its audio as it writes it, and takes voice references; absent: it does not).
 pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Writer) bool {
     const max_chars = optionInt(cfg, "max_input_chars", 4096);
     if ((std.unicode.utf8CountCodepoints(v.input) catch v.input.len) > max_chars) {
@@ -117,6 +125,14 @@ pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Write
             return false;
         }
     }
+    if (v.stream and !optionBool(cfg, "stream", false)) {
+        why.print("model '{s}' does not stream its audio: leave stream unset for the whole reply", .{cfg.id}) catch {};
+        return false;
+    }
+    if (v.references.len > 0 and !optionBool(cfg, "references", false)) {
+        why.print("model '{s}' takes no voice references", .{cfg.id}) catch {};
+        return false;
+    }
     return true;
 }
 
@@ -128,6 +144,8 @@ pub const AudioInfo = struct {
     presets: ?[]const std.json.Value = null,
     speed: ?[2]f32 = null,
     max_input_chars: ?u64 = null,
+    stream: ?bool = null,
+    references: ?bool = null,
     max_audio_s: ?u64 = null,
 };
 
@@ -139,6 +157,8 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .presets = optionList(cfg, "presets") orelse &.{},
             .speed = .{ optionFloat(cfg, "min_speed", 0.25), optionFloat(cfg, "max_speed", 4) },
             .max_input_chars = optionInt(cfg, "max_input_chars", 4096),
+            .stream = optionBool(cfg, "stream", false),
+            .references = optionBool(cfg, "references", false),
         },
         .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60) },
         else => .{},
@@ -301,10 +321,103 @@ test "a speech tool's voices are checked before it loads; cmd tools get their ki
     try std.testing.expectEqualStrings("tool 't': default_voice 'b' is not one of its voices", why.buffered());
 }
 
+/// A boolean option from the tool's `options` object, else `default`.
+pub fn optionBool(cfg: *const ToolConfig, key: []const u8, default: bool) bool {
+    const opts = cfg.options orelse return default;
+    if (opts != .object) return default;
+    const v = opts.object.get(key) orelse return default;
+    return if (v == .bool) v.bool else default;
+}
+
+/// Why a tool gated by a `qualification` file may not run on this machine, written in `buf`; null when it may (no gate,
+/// or the file holds `"qualified": true`). The file is the verdict of the model's qualify script on this host's GPU.
+pub fn unqualified(io: std.Io, a: std.mem.Allocator, cfg: *const ToolConfig, buf: []u8) ?[]const u8 {
+    const path = cfg.qualification;
+    if (path.len == 0) return null;
+    const problem: []const u8 = if (std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20))) |text| blk: {
+        const Verdict = struct { qualified: bool = false };
+        const v = std.json.parseFromSliceLeaky(Verdict, a, text, .{ .ignore_unknown_fields = true }) catch break :blk "does not say \"qualified\": true";
+        if (v.qualified) return null;
+        break :blk "does not say \"qualified\": true";
+    } else |_| "does not exist";
+    return std.fmt.bufPrint(buf, "model '{s}' is not GPU-qualified on this host: {s} {s}; an operator runs the model's qualify script on this machine first", .{ cfg.id, path, problem }) catch "the model is not GPU-qualified on this host";
+}
+
+/// Why the last `load` or `generate` in this worker failed, in words (an engine sets it with `explain`; the worker
+/// sends it in its failure reply and clears it). Workers are single-threaded.
+var explained_buf: [512]u8 = undefined;
+var explained_len: usize = 0;
+
+pub fn explain(comptime fmt: []const u8, args: anytype) void {
+    const s = std.fmt.bufPrint(&explained_buf, fmt, args) catch {
+        explained_len = explained_buf.len; // cut at the buffer's end
+        return;
+    };
+    explained_len = s.len;
+}
+
+/// The reason `explain` recorded ("" for none), cleared for the next call.
+pub fn explained() []const u8 {
+    defer explained_len = 0;
+    return explained_buf[0..explained_len];
+}
+
 /// A string option from the tool's `options` object, else `default`.
 pub fn optionString(cfg: *const ToolConfig, key: []const u8, default: []const u8) []const u8 {
     const opts = cfg.options orelse return default;
     if (opts != .object) return default;
     const v = opts.object.get(key) orelse return default;
     return if (v == .string) v.string else default;
+}
+
+test "a qualification file gates a tool until it says qualified" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const path = "/tmp/localrouter-unit-qualification-chat.json";
+    const c = try config.parse(a,
+        \\{"gpu_lock": "/var/lock/gpu.lock", "tools": [
+        \\  {"id": "gated", "kind": "chat", "engine": "openai_server", "qualification": "/tmp/localrouter-unit-qualification-chat.json"},
+        \\  {"id": "plain", "kind": "chat", "cmd": ["y"]}]}
+    );
+    try std.testing.expectEqualStrings("/var/lock/gpu.lock", c.gpu_lock);
+    const gated = c.tool("gated").?;
+    var buf: [512]u8 = undefined;
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try std.testing.expectEqualStrings("model 'gated' is not GPU-qualified on this host: " ++ path ++ " does not exist; an operator runs the model's qualify script on this machine first", unqualified(io, a, gated, &buf).?);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "{\"qualified\": false}" });
+    try std.testing.expect(std.mem.indexOf(u8, unqualified(io, a, gated, &buf).?, path ++ " does not say \"qualified\": true") != null);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "not json" });
+    try std.testing.expect(unqualified(io, a, gated, &buf) != null);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "{\"qualified\": true, \"host\": \"gb10\"}" });
+    try std.testing.expect(unqualified(io, a, gated, &buf) == null);
+    try std.testing.expect(unqualified(io, a, c.tool("plain").?, &buf) == null);
+    try std.testing.expect(supports(gated, .chat_completion));
+    try std.testing.expect(supports(c.tool("plain").?, .chat_completion)); // a `cmd` chat tool: its kind's capability
+    try std.testing.expect(!supports(gated, .text_to_image));
+    explain("the GPU lock {s} is held by another job", .{"/x"});
+    try std.testing.expectEqualStrings("the GPU lock /x is held by another job", explained());
+    try std.testing.expectEqualStrings("", explained());
+}
+
+test "stream and references need the speech tool to offer them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "gated", "kind": "speech", "cmd": ["x"], "options": {"stream": true}},
+        \\           {"id": "plain", "kind": "speech", "cmd": ["y"]}]}
+    );
+    const gated = c.tool("gated").?;
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(check(gated, &.{ .speech = .{ .input = "hi", .stream = true } }, &w));
+    try std.testing.expect(!check(c.tool("plain").?, &.{ .speech = .{ .input = "hi", .stream = true } }, &w));
+    try std.testing.expectEqualStrings("model 'plain' does not stream its audio: leave stream unset for the whole reply", w.buffered());
+    w = .fixed(&buf);
+    try std.testing.expect(!check(gated, &.{ .speech = .{ .input = "hi", .references = "references.json" } }, &w));
+    try std.testing.expectEqualStrings("model 'gated' takes no voice references", w.buffered());
+    try std.testing.expectEqual(@as(?bool, true), audioInfo(gated).stream);
+    try std.testing.expectEqual(@as(?bool, false), audioInfo(c.tool("plain").?).references);
 }

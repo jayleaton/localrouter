@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Chat: a new kind, `chat` (`chat_completion`), behind OpenAI's `POST /v1/chat/completions` (whole and server-sent
+  events) and the MCP `chat` tool. The first model is Qwen3.8 27B on TensorFold 1.1.1's own server (MLX 4-bit with the
+  DFlash2 drafter), run by the new `openai_server` worker engine, which supervises a model's OpenAI-compatible server
+  on loopback while the daemon proxies requests to it. A chat tool is `keep_loaded` with
+  priority 100 by default; cancelling a request leaves it loaded. Gated by a per-model `qualification` file until
+  `tools/chat/qwen38-27b/qualify.sh` passes on the machine (docs/dev/CHAT.md).
+- Host GPU lock (`gpu_lock`): the scheduler holds it once, shared, while any model is loaded, against GPU users
+  outside LocalRouter; its own models are admitted by memory alone and never take it, so chat and voice stay warm
+  together. Workers get `LOCALROUTER_GPU_LOCK_HELD=1`, the host lock in `LOCALROUTER_HOST_GPU_LOCK`, and a private
+  `<data>/locks/<id>.lock` in `LOCALROUTER_GPU_LOCK` for a launcher that insists on taking one.
+
+- Fish Audio Drama 3 text to speech (`fishaudio/drama-3`, `tools/speech/drama3`; Built with Fish Audio): a `cmd`
+  worker that runs plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with its Drama 3 patch
+  series), built from pinned sources and started by that repository's own launcher on loopback. LocalRouter's scheduler admits
+  it (`resident_bytes` 48.45 GiB: the measured 40.45 GiB peak plus 8): a pinned patch adds `--external-admission` to the launcher,
+  which turns off its own 88 GiB admission and 34 GiB abort and lowers the engine's 34 GiB reserve, so it stays warm beside chat and Whisper. Its worker declares soft cancel (`"cancel": "signal"`: SIGUSR1 ends a generate and keeps the model loaded). Whole and streamed replies, voice files and inline `references`, long form.
+  It is listed but refused until GPU-qualified: the new per-tool `qualification` file gates any model with a 503
+  saying it is not GPU-qualified on this host until the model's qualify script (here `qualify.sh`) says
+  so. Qualified on DGX-01: first audio 0.142 s, warm RTF 0.663, beside the chat model too ([docs](docs/dev/DRAMA3.md)).
+- Speech API: `stream: true` (with `response_format: "pcm"`) streams raw PCM as HTTP/1.1 chunks for models that
+  offer it; `x-finish-reason` (`stop`, `length`, `silence`) and `x-long-form-segments` as headers, or as a stream's
+  trailers; a stream that fails after it started ends without its last chunk. `references` (voice references) for
+  models that take them, over HTTP and MCP. Workers may refuse with `service_unavailable` (503) and report
+  `finish_reason` and `segments`.
+
 - Voice: a full-duplex conversation on `GET /v1/realtime`, a WebSocket speaking the OpenAI Realtime API's events
   (pcm16 24 kHz in and out), and a built-in browser client at `/voice`. Server VAD ends each turn; the turn is
   transcribed (partials while speaking), sent with the session's history to the chat model (OpenAI streaming

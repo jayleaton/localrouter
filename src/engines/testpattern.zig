@@ -23,7 +23,7 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     const side: u64 = switch (req.*) {
         .image => |v| @max(v.width, v.height),
         .video => |v| @max(v.width, v.height),
-        .speech, .transcription => return true,
+        .speech, .transcription, .chat => return true,
     };
     if (max == 0 or side <= max) return true;
     why.print("model '{s}' takes sizes up to {d} pixels a side", .{ cfg.id, max }) catch {};
@@ -42,6 +42,7 @@ fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
         .video => |v| @as(u64, v.width) * v.height * 3 * 2 + (64 << 20), // a frame, plus ffmpeg's own buffers
         .speech => |v| speechSamples(v) * 2 * 2, // the samples, and the file's copy
         .transcription => |v| v.duration_ms * audio.input_rate / 1000 * 2 + (1 << 20), // the samples read back, and the transcript
+        .chat => 0, // never served: a chat tool runs a model server (`openai_server`)
     };
     return .{ .resident = residentBytes(cfg), .working = working };
 }
@@ -67,6 +68,7 @@ const TestPattern = struct {
             .video => |v| try t.video(job.dir, v, try t.inputHash(job.dir, if (v.first_frame) |f| &.{f} else &.{}), sink, arena),
             .speech => |v| try t.speech(job.dir, v, sink, arena),
             .transcription => |v| try t.transcribe(job.dir, v, sink, arena),
+            .chat => return engine.Refused.Refused,
         };
         const ms = start.durationTo(std.Io.Clock.awake.now(t.env.io)).toMilliseconds();
         return .{ .files = files, .seed = job.request.seed(), .ms = @intCast(ms) };

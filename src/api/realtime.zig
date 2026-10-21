@@ -119,7 +119,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     var url_buf: [96]u8 = undefined;
     var local = Local.init(app, host, &url_buf);
     var sink: Sink = .{ .c = &c };
-    const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, model) catch
+    const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, if (model.len > 0) model else Local.defaultChatModel(app)) catch
         return c.close(1011, "could not start the session");
     defer s.destroy();
     while (true) {

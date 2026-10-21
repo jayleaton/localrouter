@@ -10,18 +10,28 @@ that can do it, makes room for it if it has to, runs the job and unloads the mod
 in memory that nobody is using, and the models you care about can stay warm.
 
 It starts on the NVIDIA DGX Spark with two hand-built engines, written in Zig with their own GPU kernels and checked
-bit for bit against reference implementations of the same models:
+bit for bit against reference implementations of the same models, and a chat model served by its own runtime as an
+always-warm worker:
 
 | Model | Can do | On a DGX Spark (GB10) |
 | --- | --- | --- |
 | **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
 | **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
 | **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
+| **Qwen3.8 27B** (chat; TensorFold 1.1.1's own server, MLX 4-bit with the DFlash2 drafter, run as a worker) | chat completions, whole and streamed: tools, structured output, reasoning on or off | refused until `tools/chat/qwen38-27b/qualify.sh` passes on the machine; not yet measured on GB10 ([docs/dev/CHAT.md](docs/dev/CHAT.md)) |
 
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
 their input-image ports land. Check each model's advertised capabilities before submitting a job.
 
-More models, and more kinds (speech, music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
+Speech comes as optional adapters that run a model's own implementation as a worker:
+
+| Speech model | Can do | Status |
+| --- | --- | --- |
+| **Fish Audio Drama 3** (`fishaudio/drama-3`, [setup](docs/dev/DRAMA3.md)): plotarmordev's [drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) native server on TensorFold. Built with Fish Audio | text to 44.1 kHz speech, whole or streamed as it is made; voice files and inline voice references; long-form replies | qualified on DGX-01 (GB10): first audio 0.14 s streamed, RTF 0.66, 40.4 GiB, also beside the warm chat model; refused on any other host until `tools/speech/drama3/qualify.sh` passes there |
+| **Kitten TTS 2** ([setup](docs/dev/KITTEN-TTS2.md)) | text to 24 kHz speech, 47 voices | CPU checked bit for bit; GB10 CUDA not yet qualified |
+| **Whisper large-v3-turbo** | speech to text | checked against its recipe on GB10 |
+
+More models, and more kinds (music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
 
 ## Why
 
@@ -82,10 +92,12 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 | `list_models` | the models, what each can do, which capabilities each serves by default (`default_for`), and whether it is loaded |
 | `generate_image` | text to image. Waits, returns the PNGs inline and as links; edit inputs are accepted by the API but refused by the current engines |
 | `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
+| `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
 | `get_job`, `cancel_job` | follow or stop a video job |
 | `release_models` | unload everything now |
 
-The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`):
+The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`,
+`/v1/audio/...`, `/v1/chat/completions` whole or streamed):
 [docs/AGENTS.md](docs/AGENTS.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
 
 ## Configuration
@@ -117,13 +129,15 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
 | `keep_outputs_s` | 86400 | how long outputs stay |
 | `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
+| `gpu_lock` | none | the host's GPU lock file, the one GPU jobs outside LocalRouter take exclusively. LocalRouter holds it once, shared and without waiting, while any of its models is loaded, and releases it when none is; while someone else holds it nothing loads (503). LocalRouter's own models never take it: they are admitted by memory alone, so chat, speech and transcription stay loaded side by side |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
-| `tools[].priority` | 0 | higher is unloaded later when memory is needed |
-| `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
+| `tools[].priority` | 0 (chat: 100) | higher is unloaded later when memory is needed |
+| `tools[].keep_loaded` | false (chat: true) | load at start, never unload for idleness, reload as soon as the scheduler is idle (unloading idle tools of lower priority) |
+| `tools[].qualification` | none | a file the model's qualify script writes on this machine. Until it exists and says `"qualified": true` the model is listed (`"qualified": false` in `/v1/models`) and refused with a 503 saying it is not GPU-qualified on this host |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
-| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `testpattern` |
+| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
@@ -138,6 +152,7 @@ remain registered but cannot generate without their kernels.
 ```bash
 zig build                                    # zig-out/bin/localrouter
 zig build test                               # unit + integration tests (a real daemon and real workers)
+zig build integration-exe && zig-out/bin/integration-test   # the integration tests one at a time, each named as it runs
 zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120   # with the GPU engines
 localrouter check selftest                   # a private daemon, one image and one video, no GPU
 ```
@@ -155,12 +170,19 @@ LocalRouter stands on [**TensorFold**](https://github.com/ashhart/TensorFold) by
 NVFP4 kernels and its Python model implementations were the baselines these engines were ported from and verified
 against. Thank you, Ash. We expect to contribute parts of the Zig work back upstream.
 
+The Drama 3 speech tool runs [**drama-tensorfold**](https://github.com/plotarmordev/drama-tensorfold) by **plotarmordev**
+(Apache-2.0), which ports Fish Audio Drama 3 to TensorFold. Built with Fish Audio.
+
 The INT8 attention kernels are SageAttention's, as shipped in NVIDIA's comfy-kitchen. Qwen-Image is by the Qwen team
 and MiniMax H3 by MiniMax; their weights are downloaded from their publishers under their own licenses.
 Qwen-Image 2.1 is restricted to non-commercial research or evaluation under its
 [Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
 MiniMax H3's [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU,
 UK and South Korea and imposes downstream use conditions. Check these terms before installing or using either model.
+Fish Audio Drama 3's weights are under the [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE):
+commercial use only under USD 500,000 annual revenue, and no Hosted Service (letting third parties generate speech
+through an API) without a separate licence from Fish Audio, so keep LocalRouter on loopback for it
+([details](docs/dev/DRAMA3.md#licences)). Built with Fish Audio.
 The Apache-2.0 licence below covers the software. See [NOTICE](NOTICE).
 
 ## License

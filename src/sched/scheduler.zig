@@ -1,18 +1,25 @@
 //! The scheduler owns the GPU: one executor thread a lane runs one job at a time, loads and unloads tools inside the
 //! memory budget, and unloads idle tools after their TTL. Other threads only queue work, cancel, and read state.
 //!
-//! Lanes: `main` (image, video), `realtime` (speech) and `listen` (transcription; `config.laneOf`), so a short TTS
-//! or STT job never waits behind a long one. A tool is loaded and run only by its own lane. Residency changes
-//! (admission, eviction, the reservation of a load) are serialized by `gate`; memory admitted but perhaps not yet
-//! allocated (a load in progress, the working bytes of a running job) is held back from MemAvailable.
+//! Lanes: `main` (image, video), `chat`, `realtime` (speech) and `listen` (transcription; `config.laneOf`), so a
+//! short TTS or STT job never waits behind a chat reply or a video, nor a chat turn behind a video. A tool is loaded and
+//! run only by its own lane. Residency changes (admission, eviction, the reservation of a load, the GPU lock) are
+//! serialized by `gate`; memory admitted but perhaps not yet allocated (a load in progress, the working bytes of a
+//! running job) is held back from MemAvailable.
 //!
 //! Eviction: when a request needs room, idle tools are unloaded lowest `priority` first, least recently used among
 //! equals, until it fits. Priority only orders the victims: a request is never refused while unloading idle tools
-//! (whatever their priority) would make room; a loading or busy tool is never a victim. `keep_loaded` tools are
-//! loaded at start when they fit, skip the idle TTL, and come back by themselves (without evicting anything) once
-//! their lane has been idle for a moment and they fit again, unless they were unloaded on request through the API.
+//! (whatever their priority) would make room; a loading or busy tool (on any lane) is never a victim. `keep_loaded`
+//! tools are loaded at start when they fit, skip the idle TTL, and come back by themselves once their lane has been
+//! idle for a moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one
+//! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
+//!
+//! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
+//! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
+//! and releases it when none is. Co-residency is decided by the memory budget alone; a tool never takes the lock itself.
 
 const std = @import("std");
+const posix = std.posix;
 const Io = std.Io;
 const tool_mod = @import("../tool/tool.zig");
 const Tool = tool_mod.Tool;
@@ -60,11 +67,14 @@ const LaneState = struct {
     idle_since_ns: i96 = 0, // when the executor last finished an item
 };
 
+const lane_count = 4;
+
 fn index(l: Lane) usize {
     return switch (l) {
         .main => 0,
         .realtime => 1,
-        .listen => 2,
+        .chat => 2,
+        .listen => 3,
     };
 }
 
@@ -75,12 +85,67 @@ pub const Scheduler = struct {
     slots: []Slot,
     table: *jobs.Table,
     mutex: Io.Mutex = .init, // the queues and `running`
-    gate: Io.Mutex = .init, // residency: admission, eviction, `in_use`, `pending`, `resident`
-    lanes: [3]LaneState = @splat(.{}),
+    gate: Io.Mutex = .init, // residency: admission, eviction, `in_use`, `pending`, `resident`, the GPU lock
+    lanes: [lane_count]LaneState = @splat(.{}),
     stopping: bool = false,
+    gpu_lock_fd: posix.fd_t = -1, // the host's GPU lock while any tool is loaded (`holdGpuLock`); under `gate`
+    lock_msg: [512]u8 = undefined,
+    lock_len: usize = 0,
 
     pub fn deinit(s: *Scheduler) void {
+        s.releaseGpuLock();
         for (&s.lanes) |*l| l.queue.deinit(s.gpa);
+    }
+
+    /// Under `gate`: takes the host's GPU lock for LocalRouter (shared, without waiting) if it is configured and not
+    /// yet held; false, with `lock_msg` set, when a GPU user outside LocalRouter holds it.
+    fn holdGpuLock(s: *Scheduler) bool {
+        const path = s.cfg.gpu_lock;
+        if (path.len == 0 or s.gpu_lock_fd >= 0) return true;
+        const fd = posix.openat(posix.AT.FDCWD, path, .{ .CLOEXEC = true }, 0) catch |err| {
+            s.lockRefusal("the GPU lock {s} cannot be opened: {s}", .{ path, @errorName(err) });
+            return false;
+        };
+        if (std.c.flock(fd, posix.LOCK.SH | posix.LOCK.NB) != 0) {
+            _ = std.c.close(fd);
+            s.lockRefusal("the GPU lock {s} is held by another job outside LocalRouter; nothing loads until it is free", .{path});
+            return false;
+        }
+        s.gpu_lock_fd = fd;
+        return true;
+    }
+
+    fn lockRefusal(s: *Scheduler, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.bufPrint(&s.lock_msg, fmt, args) catch {
+            s.lock_len = 0;
+            return;
+        };
+        s.lock_len = msg.len;
+        std.log.warn("{s}", .{msg});
+    }
+
+    fn lockMessage(s: *Scheduler) []const u8 {
+        return if (s.lock_len > 0) s.lock_msg[0..s.lock_len] else "the host's GPU lock is held by another job outside LocalRouter";
+    }
+
+    /// Under `gate`: releases the GPU lock once no tool is loaded, loading or in use, so GPU users outside LocalRouter may run.
+    fn releaseIdleGpuLock(s: *Scheduler) void {
+        if (s.gpu_lock_fd < 0) return;
+        for (s.slots) |slot| if (slot.in_use or slot.tool.state() != .unloaded) return;
+        s.releaseGpuLock();
+    }
+
+    fn releaseGpuLock(s: *Scheduler) void {
+        if (s.gpu_lock_fd < 0) return;
+        _ = std.c.close(s.gpu_lock_fd); // closing the descriptor releases the lock
+        s.gpu_lock_fd = -1;
+    }
+
+    /// `releaseIdleGpuLock` under `gate`.
+    fn releaseIdle(s: *Scheduler) void {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        s.releaseIdleGpuLock();
     }
 
     pub fn laneOfTool(s: *const Scheduler, i: usize) Lane {
@@ -168,6 +233,7 @@ pub const Scheduler = struct {
         defer {
             s.gate.lockUncancelable(s.io);
             for (s.slots, 0..) |*slot, i| if (s.laneOfTool(i) == lane and !slot.in_use) s.unloadSlot(slot);
+            s.releaseIdleGpuLock();
             s.gate.unlock(s.io);
         }
         s.loadKept(lane, false);
@@ -182,6 +248,7 @@ pub const Scheduler = struct {
             l.running = null;
             s.mutex.unlock(s.io);
             l.idle_since_ns = nowNs(s.io);
+            s.releaseIdle();
         }
     }
 
@@ -208,6 +275,7 @@ pub const Scheduler = struct {
             s.mutex.unlock(s.io);
             s.unloadIdle(lane);
             s.loadKept(lane, true);
+            s.releaseIdle();
             if (lane == .main) s.table.expire(s.io, nowUnix(s.io), s.cfg.keep_outputs_s);
         }
     }
@@ -239,8 +307,9 @@ pub const Scheduler = struct {
         }
     }
 
-    /// Loads the lane's `keep_loaded` tools that are down, highest priority first, each only if it fits without
-    /// unloading anything. At start (`wait_idle` false) it logs the outcome; later it waits for `reload_grace_ns` of idleness.
+    /// Loads the lane's `keep_loaded` tools that are down, highest priority first, each if it fits once idle tools of
+    /// lower priority (on any lane) are unloaded. At start (`wait_idle` false) it logs the outcome; later it waits for
+    /// `reload_grace_ns` of the lane's idleness.
     fn loadKept(s: *Scheduler, lane: Lane, wait_idle: bool) void {
         if (wait_idle and nowNs(s.io) - s.lanes[index(lane)].idle_since_ns < reload_grace_ns) return;
         for (s.slots, 0..) |*slot, i| if (s.laneOfTool(i) == lane) {
@@ -248,29 +317,30 @@ pub const Scheduler = struct {
         };
         while (true) {
             s.gate.lockUncancelable(s.io);
-            var best: ?*Slot = null;
+            var best: ?usize = null;
             for (s.slots, 0..) |*slot, i| {
                 const c = slot.tool.config();
                 if (s.laneOfTool(i) != lane or !c.keep_loaded or slot.visited or slot.released or slot.tool.state() != .unloaded) continue;
-                if (best == null or c.priority > best.?.tool.config().priority) best = slot;
+                if (best == null or c.priority > s.slots[best.?].tool.config().priority) best = i;
             }
-            const slot = best orelse {
+            const i = best orelse {
                 s.gate.unlock(s.io);
                 return;
             };
+            const slot = &s.slots[i];
             slot.visited = true;
             const c = slot.tool.config();
             const estimate = slot.tool.needs(&placeholder(c.kind)).resident;
-            if (nowNs(s.io) < slot.retry_ns or !s.fits(estimate)) {
+            if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate, c.priority)) {
                 s.gate.unlock(s.io);
                 if (!wait_idle and nowNs(s.io) >= slot.retry_ns) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
                 continue;
             }
             s.reserve(slot, estimate);
             s.gate.unlock(s.io);
-            s.loadSlot(slot) catch {
+            s.loadSlot(slot) catch |err| {
                 s.done(slot);
-                std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, slot.tool.failure().message });
+                std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message });
                 slot.retry_ns = nowNs(s.io) + slot.backoff_ns;
                 slot.backoff_ns = @min(slot.backoff_ns * 2, reload_backoff_max_ns);
                 continue;
@@ -298,6 +368,7 @@ pub const Scheduler = struct {
             slot.unload_after = false;
             s.unloadSlot(slot);
         }
+        s.releaseIdleGpuLock(); // a failed load or an unload may leave nothing loaded
     }
 
     /// Under `gate`, or by the slot's own lane while it holds `in_use`. Every lane is woken: the tool's own lane may be
@@ -324,18 +395,20 @@ pub const Scheduler = struct {
                 s.gate.lockUncancelable(s.io);
                 defer s.gate.unlock(s.io);
                 s.unloadOrDefer(&s.slots[c.tool]);
+                s.releaseIdleGpuLock(); // before `done`: the caller sees the lock free once nothing is loaded
             },
             .release => {
                 s.gate.lockUncancelable(s.io);
                 defer s.gate.unlock(s.io);
                 for (s.slots) |*slot| s.unloadOrDefer(slot);
+                s.releaseIdleGpuLock();
             },
             .load => {
                 const slot = &s.slots[c.tool];
                 if (slot.tool.state() == .ready) return;
                 const n = slot.tool.needs(&placeholder(slot.tool.config().kind));
                 s.gate.lockUncancelable(s.io);
-                if (!s.admit(c.tool, n.resident)) {
+                if (!s.admit(c.tool, n.resident, null)) {
                     s.gate.unlock(s.io);
                     c.failed = true;
                     c.message = "insufficient memory to load this tool";
@@ -344,17 +417,22 @@ pub const Scheduler = struct {
                 s.reserve(slot, n.resident);
                 s.gate.unlock(s.io);
                 defer s.done(slot);
-                s.loadSlot(slot) catch {
+                s.loadSlot(slot) catch |err| {
                     c.failed = true;
-                    c.message = slot.tool.failure().message;
+                    c.message = if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message;
                 };
             },
         }
     }
 
-    /// Loads outside `gate` (the reservation holds the memory), then records the measured bytes.
-    fn loadSlot(s: *Scheduler, slot: *Slot) !void {
+    /// Loads outside `gate` (the reservation holds the memory) while LocalRouter holds the host's GPU lock, then records
+    /// the measured bytes; `error.GpuLockHeld` (why: `lockMessage`) when a GPU user outside LocalRouter holds it.
+    fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
         const estimate = slot.tool.needs(&placeholder(slot.tool.config().kind)).resident;
+        s.gate.lockUncancelable(s.io);
+        const locked = s.holdGpuLock();
+        s.gate.unlock(s.io);
+        if (!locked) return error.GpuLockHeld;
         const measured = try slot.tool.load();
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
@@ -371,7 +449,7 @@ pub const Scheduler = struct {
         s.gate.lockUncancelable(s.io);
         const cold = slot.tool.state() != .ready;
         const extra = n.working + if (cold) n.resident else 0;
-        if (!s.admit(j.tool, extra)) {
+        if (!s.admit(j.tool, extra, null)) {
             s.gate.unlock(s.io);
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is free within the budget", .{extra >> 20}) catch "insufficient memory";
@@ -382,7 +460,10 @@ pub const Scheduler = struct {
         defer s.done(slot);
         if (cold) {
             s.setPhase(j, "load");
-            s.loadSlot(slot) catch |err| return s.finishError(j, slot, err);
+            s.loadSlot(slot) catch |err| {
+                if (err == error.GpuLockHeld) return s.finish(j, .failed, 503, "server_error", s.lockMessage(), null);
+                return s.finishError(j, slot, @errorCast(err));
+            };
         }
         var arena: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena.deinit();
@@ -408,13 +489,23 @@ pub const Scheduler = struct {
     }
 
     /// Under `gate`: true when `extra` more bytes fit; unloads idle tools, lowest priority then least recently used
-    /// first, until they do. A tool in use by any lane is never a victim.
-    fn admit(s: *Scheduler, target: usize, extra: u64) bool {
+    /// first, until they do. A tool in use by any lane is never a victim. With `below`, only tools of a lower priority
+    /// than it are victims (a `keep_loaded` tool coming back), and nothing is unloaded unless unloading all of them
+    /// would make room: a reload that cannot happen costs no one their model.
+    fn admit(s: *Scheduler, target: usize, extra: u64, below: ?i32) bool {
+        if (below) |p| {
+            var freeable: u64 = 0;
+            for (s.slots, 0..) |slot, i| {
+                if (i != target and !slot.in_use and slot.tool.state() == .ready and slot.tool.config().priority < p) freeable += slot.resident;
+            }
+            if (!s.fits(extra -| freeable)) return false;
+        }
         while (true) {
             if (s.fits(extra)) return true;
             var victim: ?*Slot = null;
             for (s.slots, 0..) |*slot, i| {
                 if (i == target or slot.in_use or slot.tool.state() != .ready) continue;
+                if (below) |p| if (slot.tool.config().priority >= p) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
             s.unloadSlot(victim orelse return false);
@@ -447,6 +538,8 @@ pub const Scheduler = struct {
             error.Timeout => s.finish(j, .failed, 504, "timeout", f.message, null),
             error.GenerateFailed => if (std.mem.eql(u8, f.type, "invalid_request_error"))
                 s.finish(j, .failed, 400, f.type, f.message, null)
+            else if (std.mem.eql(u8, f.type, "service_unavailable")) // the model's own server is busy or not ready: retry later
+                s.finish(j, .failed, 503, "server_error", f.message, null)
             else
                 s.finish(j, .failed, 500, "server_error", f.message, null),
             error.OutOfMemory => s.finish(j, .failed, 503, "insufficient_memory", "out of memory", null),
@@ -477,6 +570,8 @@ pub const Scheduler = struct {
             j.percent = 100;
             j.seed = o.seed;
             j.ms = o.ms;
+            j.finish_reason = a.dupe(u8, o.finish_reason) catch "";
+            j.segments = a.dupe(u8, o.segments) catch "";
             if (a.alloc([]const u8, o.files.len)) |files| {
                 for (files, o.files) |*d, f| d.* = a.dupe(u8, f) catch "";
                 j.files = files;
@@ -523,6 +618,7 @@ fn placeholder(kind: @import("../tool/request.zig").Kind) @import("../tool/reque
         .video => .{ .video = .{ .prompt = "" } },
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
+        .chat => .{ .chat = .{ .body = "" } },
     };
 }
 

@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         const parent = std.fmt.parseInt(i32, init.environ_map.get("LOCALROUTER_PARENT") orelse "0", 10) catch 0;
-        return worker.run(gpa, io, json, parent);
+        return worker.run(gpa, io, json, parent, init.environ_map);
     }
     if (std.mem.eql(u8, cmd, "serve")) return serve.run(gpa, io, arena, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "gen")) return gen.run(gpa, io, arena, args[2..], init.environ_map);
@@ -63,6 +63,7 @@ test {
     _ = @import("sched/memory.zig");
     _ = @import("sched/jobs.zig");
     _ = @import("sched/scheduler.zig");
+    _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
     _ = @import("media/png.zig");
     _ = @import("media/mp4.zig");
@@ -76,6 +77,9 @@ test {
     _ = @import("cli/mcp_stdio.zig");
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");
+    _ = @import("api/chat.zig");
+    _ = @import("tool/upstream.zig");
+    _ = @import("engines/openai_server.zig");
     _ = @import("media/audio.zig");
     _ = @import("api/realtime.zig");
     _ = @import("api/voice_local.zig");

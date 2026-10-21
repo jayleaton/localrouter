@@ -64,7 +64,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
     for (procs, slots, cfg.tools) |*p, *s, *t| {
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir }, t);
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock }, t);
         s.* = .{ .tool = p.asTool() };
     }
     defer for (procs) |*p| p.deinit();
@@ -97,12 +97,14 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     installSignals();
     const exec = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.main });
     const exec_rt = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.realtime });
+    const exec_chat = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.chat });
     const exec_listen = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.listen });
     const watcher = try std.Thread.spawn(.{}, watchStop, .{ io, &server, &app });
     http.Server(routes.App, routes.handle).serve(io, &server, &app, &stop_flag);
     scheduler.stop();
     exec.join();
     exec_rt.join();
+    exec_chat.join();
     exec_listen.join();
     watcher.join();
     return 0;

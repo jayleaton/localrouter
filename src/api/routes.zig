@@ -1,4 +1,5 @@
-//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos and /v1/audio (`speech.zig`)
+//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
+//! /v1/chat/completions (`chat.zig`)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/tools for residency, and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
@@ -14,6 +15,7 @@ const mcp = @import("mcp.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
+const chat = @import("chat.zig");
 const realtime = @import("realtime.zig");
 
 pub const App = struct {
@@ -52,6 +54,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..]);
     if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a);
     if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype);
+    if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a);
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
@@ -66,7 +69,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, max_audio_s: ?u64 = null };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -74,6 +77,8 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i) };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
+        var buf: [512]u8 = undefined;
+        if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
 }
@@ -146,6 +151,7 @@ fn article(k: request.Kind) []const u8 {
         .video => "a video",
         .speech => "a speech",
         .transcription => "a transcription",
+        .chat => "a chat",
     };
 }
 
@@ -260,6 +266,15 @@ pub fn enqueue(app: *App, tool: usize, r: request.Request, files: []const inputs
     var w: Io.Writer = .fixed(why.buf[0..384]);
     if (!engine.check(cfg, &r, &w)) {
         why.message = if (w.end > 0) w.buffered() else "the model cannot serve this request";
+        return null;
+    }
+    // A model gated by a qualification file is refused before anything loads until this machine has qualified it.
+    var gate: std.heap.ArenaAllocator = .init(app.gpa);
+    defer gate.deinit();
+    if (engine.unqualified(app.io, gate.allocator(), cfg, why.buf[0..384])) |msg| {
+        why.status = 503;
+        why.typ = "server_error";
+        why.message = msg;
         return null;
     }
     const j = app.table.create(app.io, app.jobs_dir, tool, r, sched.nowUnix(app.io)) catch |err| {
