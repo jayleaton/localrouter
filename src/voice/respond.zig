@@ -114,6 +114,7 @@ fn run(s: *Session, ask: Task.Ask) void {
     var feed: Feed = .{ .s = s, .r = r, .chunks = .{ .gpa = s.gpa } };
     defer feed.chunks.deinit();
     defer feed.think.deinit(s.gpa);
+    defer feed.lead.deinit(s.gpa);
     var why: backend.Why = .{};
     const result = s.backend.stream(a, &req, .{ .ctx = &feed, .text = Feed.onText }, &r.stop, &why);
     feed.end();
@@ -167,12 +168,13 @@ const Feed = struct {
     r: *Response,
     chunks: chunker.Chunker,
     think: chunker.ThinkFilter = .{},
+    lead: chunker.Lead = .{}, // holds the reply's start until no leaked reasoning can precede it
     search: usize = 0, // where the next sentence is looked for in the text
 
     fn onText(ctx: *anyopaque, delta: []const u8) void {
         const f: *Feed = @ptrCast(@alignCast(ctx));
         const visible = f.think.filter(f.s.gpa, f.r.arena.allocator(), delta) catch return;
-        f.add(visible, false);
+        f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), visible, false) catch visible, false);
     }
 
     fn add(f: *Feed, visible: []const u8, last: bool) void {
@@ -205,7 +207,7 @@ const Feed = struct {
     /// The stream ended: what the filter held back, the last sentence, and no more.
     fn end(f: *Feed) void {
         const rest = f.think.flush(f.s.gpa, f.r.arena.allocator()) catch "";
-        f.add(rest, true);
+        f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), rest, true) catch rest, true);
         f.s.mutex.lockUncancelable(f.s.io);
         f.r.closed = true;
         f.r.cond.signal(f.s.io);
