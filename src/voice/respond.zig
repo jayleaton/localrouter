@@ -55,6 +55,7 @@ pub fn work(s: *Session) void {
             .draft => |h| hear(s, h, .draft),
             .final => |h| hear(s, h, .final),
             .respond => |ask| run(s, ask),
+            .warm => warm(s),
         }
     }
 }
@@ -62,6 +63,25 @@ pub fn work(s: *Session) void {
 // ---------------------------------------------------------------- transcription
 
 const Pass = enum { partial, draft, final };
+
+/// A second of silence through the session's STT model, the result discarded (see Task.warm).
+fn warm(s: *Session) void {
+    var tmp: std.heap.ArenaAllocator = .init(s.gpa);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+    s.mutex.lockUncancelable(s.io);
+    const st = &s.settings;
+    const language = if (st.language.len > 0) st.language else s.heardLanguage();
+    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .greedy = s.voice.greedy_transcripts };
+    s.mutex.unlock(s.io);
+    const silence = a.alloc(i16, 16_000) catch return;
+    @memset(silence, 0);
+    var why: backend.Why = .{};
+    _ = s.backend.transcribe(a, silence, o, &s.close_stop, &why) catch {};
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    s.last_heard_ns = s.clock();
+}
 
 fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
@@ -99,6 +119,7 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     s.noteLanguage(detected);
+    s.last_heard_ns = s.clock();
     switch (pass) {
         .partial => {
             s.partial_busy = false;
