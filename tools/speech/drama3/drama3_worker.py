@@ -3,7 +3,8 @@
 
 Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on stdin and stdout, logs on stderr.
 
-    {"op":"load"}                                   -> {"ok":true,"resident":0}
+    {"op":"load"}                                   -> {"ok":true,"resident":0,"cancel":"signal"}
+    SIGUSR1 during a generate                       -> {"ok":false,"type":"cancelled"} (the server connection closed, still loaded)
     {"op":"generate","id","dir","request":{"speech":{"input":"Hello.","voice":"default","stream":false,
         "references":""}}}                          -> {"ok":true,"files":["speech.wav"],"seed":0,"ms":…,
                                                         "finish_reason":"stop","segments":""}
@@ -58,6 +59,19 @@ UNIT_FILE = "localrouter-drama3.unit"  # in the runtime directory: the launcher'
 READY = "DRAMA_PILOT_READY"
 PR_SET_PDEATHSIG = 1
 _prctl = ctypes.CDLL(None, use_errno=True).prctl  # resolved before any fork, so the child only calls it
+
+
+class Cancelled(BaseException):
+    """SIGUSR1 during a generate: the daemon cancels it (barge-in). Not an Exception, so no handler turns it into a
+    server error; the reply is {"ok": false, "type": "cancelled"} and the model stays loaded."""
+
+
+GENERATING = False
+
+
+def on_cancel(signum, frame):
+    if GENERATING:
+        raise Cancelled()  # interrupts the blocking read of the stream (PEP 475); _speak closes the connection
 
 
 class Refused(Exception):
@@ -267,7 +281,7 @@ class Worker:
     def load(self):
         try:
             self._load()
-            return {"ok": True, "resident": 0}  # the launcher's cap and admission bound it: the config's estimate stands
+            return {"ok": True, "resident": 0, "cancel": "signal"}  # SIGUSR1 ends a generate early (on_cancel); the launcher's cap and admission bound it: the config's estimate stands
         except Exception as e:  # noqa: BLE001 - every failure is the reply's reason
             self._stop()
             why = str(e) or type(e).__name__
@@ -548,7 +562,19 @@ def watch_parent(worker):
     threading.Thread(target=run, daemon=True).start()
 
 
+def generate(worker, cmd):
+    global GENERATING
+    try:
+        GENERATING = True  # inside the try: a signal right after it is still caught
+        return worker.generate(cmd)
+    except Cancelled:
+        return {"ok": False, "type": "cancelled", "error": "cancelled"}
+    finally:
+        GENERATING = False
+
+
 def main():
+    signal.signal(signal.SIGUSR1, on_cancel)
     try:
         worker = Worker(json.loads(os.environ.get("LOCALROUTER_TOOL", "{}")))
     except (ValueError, TypeError) as e:
@@ -566,7 +592,7 @@ def main():
         if op == "load":
             send(worker.load())
         elif op == "generate":
-            reply = worker.generate(cmd)
+            reply = generate(worker, cmd)
             if reply.pop("gone", False):
                 log(f"{reply['error']}: exiting so the daemon restarts the model")
                 worker._stop()
