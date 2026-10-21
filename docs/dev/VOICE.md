@@ -57,6 +57,20 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
            "partial_interval_ms": 1000, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
 ```
 
+A Jarvis box keeps the three voice models warm above the image and video models, so a picture or a clip evicts
+neither (the tool entries are the adapters' own, abbreviated):
+
+```json
+{"defaults": {"text_to_speech": "kitten-tts-2", "speech_to_text": "whisper-large-v3-turbo"},
+ "voice": {"chat_model": "qwen3.8-27b"},
+ "tools": [
+  {"id": "qwen3.8-27b", "kind": "...", "priority": 100, "keep_loaded": true},
+  {"id": "whisper-large-v3-turbo", "kind": "transcription", "priority": 90, "keep_loaded": true, "lane": "realtime"},
+  {"id": "kitten-tts-2", "kind": "speech", "priority": 90, "keep_loaded": true, "lane": "realtime"},
+  {"id": "qwen-image-2.1-turbo", "kind": "image", "priority": 10},
+  {"id": "minimax-h3", "kind": "video", "priority": 0}]}
+```
+
 ## Events
 
 Client to server: `session.update`, `input_audio_buffer.append` / `.commit` / `.clear`, `conversation.item.create`

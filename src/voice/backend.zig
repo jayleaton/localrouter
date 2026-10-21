@@ -42,7 +42,7 @@ pub const Backend = struct {
     pub const VTable = struct {
         transcribe: *const fn (ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: Hear, stop: *Stop, why: *Why) Error![]const u8,
         speak: *const fn (ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: Say, stop: *Stop, why: *Why) Error!Pcm,
-        chat: *const fn (ptr: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result,
+        stream: *const fn (ptr: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result,
         start_job: *const fn (ptr: *anyopaque, a: std.mem.Allocator, spec: JobSpec, why: *Why) Error!Job,
         wait_job: *const fn (ptr: *anyopaque, a: std.mem.Allocator, job: Job, timeout_s: u32, stop: *Stop) Outcome,
         offer: *const fn (ptr: *anyopaque) Offer,
@@ -58,8 +58,8 @@ pub const Backend = struct {
         return b.vtable.speak(b.ptr, a, text, o, stop, why);
     }
     /// Streams a completion; text deltas go to `sink` as they arrive.
-    pub fn chat(b: Backend, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result {
-        return b.vtable.chat(b.ptr, a, r, sink, stop, why);
+    pub fn stream(b: Backend, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result {
+        return b.vtable.stream(b.ptr, a, r, sink, stop, why);
     }
     /// Queues an image or video job.
     pub fn startJob(b: Backend, a: std.mem.Allocator, spec: JobSpec, why: *Why) Error!Job {

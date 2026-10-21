@@ -36,7 +36,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .chat = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check };
 
 fn self(ptr: *anyopaque) *Local {
     return @ptrCast(@alignCast(ptr));

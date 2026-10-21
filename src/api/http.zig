@@ -76,7 +76,7 @@ pub fn fail(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8,
     const Env = struct { @"error": struct { message: []const u8, type: []const u8, param: ?[]const u8 = null, code: ?[]const u8 = null } };
     const text = try std.json.Stringify.valueAlloc(gpa, Env{ .@"error" = .{ .message = message, .type = typ } }, .{});
     defer gpa.free(text);
-    try json(req, @enumFromInt(status), text);
+    try json(req, @fromBackingInt(@intCast(status)), text);
 }
 
 pub fn bytes(req: *Request, content_type: []const u8, data: []const u8) !void {

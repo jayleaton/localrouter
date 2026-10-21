@@ -70,6 +70,7 @@ pub const Session = struct {
     settings_arena: std.heap.ArenaAllocator,
     settings: events.Settings,
     detector: ?vad.Vad = null,
+    detector_ms: u64 = 0, // session time the detector started at (its events count from there)
     input: std.ArrayList(i16) = .empty, // since the last commit or clear (only a recent tail while nobody speaks)
     input_start_ms: u64 = 0, // session time of input[0]
     heard: u64 = 0, // samples received this session
@@ -205,6 +206,7 @@ pub const Session = struct {
 
     fn resetDetector(s: *Session) void {
         s.detector = if (s.settings.vad) |c| vad.Vad.init(c, rate) else null;
+        s.detector_ms = s.nowMs();
     }
 
     // ------------------------------------------------------------ audio in
@@ -228,8 +230,8 @@ pub const Session = struct {
         var evs: std.ArrayList(vad.Event) = .empty;
         try s.detector.?.feed(a, pcm, &evs);
         for (evs.items) |e| switch (e.kind) {
-            .speech_started => try s.speechStarted(a, e.ms),
-            .speech_stopped => try s.speechStopped(a, e.ms),
+            .speech_started => try s.speechStarted(a, s.detector_ms + e.ms),
+            .speech_stopped => try s.speechStopped(a, s.detector_ms + e.ms),
         };
         if (s.turn == null and !s.detector.?.speaking()) s.trimSilence();
         try s.maybePartial();

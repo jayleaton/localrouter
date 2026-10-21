@@ -73,7 +73,8 @@ fn hear(s: *Session, h: Task.Hearing, final: bool) void {
     var why: backend.Why = .{};
     const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
         s.backend.transcribe(a, pcm16, o, &s.close_stop, &why)
-    else |_| error.OutOfMemory;
+    else |_|
+        error.OutOfMemory;
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (!final) {
@@ -114,7 +115,7 @@ fn run(s: *Session, ask: Task.Ask) void {
     defer feed.chunks.deinit();
     defer feed.think.deinit(s.gpa);
     var why: backend.Why = .{};
-    const result = s.backend.chat(a, &req, .{ .ctx = &feed, .text = Feed.onText }, &r.stop, &why);
+    const result = s.backend.stream(a, &req, .{ .ctx = &feed, .text = Feed.onText }, &r.stop, &why);
     feed.end();
     if (speaker) |t| t.join();
     finish(s, r, result, &why);

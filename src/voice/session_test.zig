@@ -25,7 +25,7 @@ const Fake = struct {
     speech_cancelled: std.atomic.Value(bool) = .init(false),
 
     fn b(f: *Fake) backend.Backend {
-        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .chat = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check } };
+        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check } };
     }
 
     fn self(p: *anyopaque) *Fake {
@@ -154,7 +154,7 @@ const Rec = struct {
     fn typeAt(r: *Rec, i: usize) []const u8 {
         const t = r.list.items[i];
         const at = std.mem.indexOf(u8, t, "\"type\":\"").? + 8;
-        return t[at .. std.mem.indexOfScalarPos(u8, t, at, '"').?];
+        return t[at..std.mem.indexOfScalarPos(u8, t, at, '"').?];
     }
 
     /// The index of the `nth` (0-based) event of `typ`, waiting up to 5 s for it.
