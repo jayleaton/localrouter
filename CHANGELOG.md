@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Chat: a new kind, `chat` (`chat_completion`), behind OpenAI's `POST /v1/chat/completions` (whole and server-sent
+  events) and the MCP `chat` tool. The first model is Qwen3.8 27B on TensorFold 1.1.1's own server (MLX 4-bit with the
+  DFlash2 drafter), run by the new `openai_server` worker engine, which supervises a model's OpenAI-compatible server
+  on loopback under the host's GPU lock while the daemon proxies requests to it. A chat tool is `keep_loaded` with
+  priority 100 by default; cancelling a request leaves it loaded. Gated by a per-model `qualification` file until
+  `tools/chat/qwen38-27b/qualify.sh` passes on the machine (docs/dev/CHAT.md).
+
 - Speech: two new kinds, `speech` (`text_to_speech`) and `transcription` (`speech_to_text`), behind OpenAI's
   `POST /v1/audio/speech` (wav, pcm, flac, mp3, opus, aac) and `POST /v1/audio/transcriptions` (json, text,
   verbose_json, srt, vtt; segment and word timestamps), and the MCP tools `synthesize_speech` and `transcribe_audio`.

@@ -10,18 +10,20 @@ that can do it, makes room for it if it has to, runs the job and unloads the mod
 in memory that nobody is using, and the models you care about can stay warm.
 
 It starts on the NVIDIA DGX Spark with two hand-built engines, written in Zig with their own GPU kernels and checked
-bit for bit against reference implementations of the same models:
+bit for bit against reference implementations of the same models, and a chat model served by its own runtime as an
+always-warm worker:
 
 | Model | Can do | On a DGX Spark (GB10) |
 | --- | --- | --- |
 | **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
 | **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
 | **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
+| **Qwen3.8 27B** (chat; TensorFold 1.1.1's own server, MLX 4-bit with the DFlash2 drafter, run as a worker) | chat completions, whole and streamed: tools, structured output, reasoning on or off | refused until `tools/chat/qwen38-27b/qualify.sh` passes on the machine; not yet measured on GB10 ([docs/dev/CHAT.md](docs/dev/CHAT.md)) |
 
 The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
 their input-image ports land. Check each model's advertised capabilities before submitting a job.
 
-More models, and more kinds (speech, music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
+More models, and more kinds (music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
 
 ## Why
 
@@ -82,10 +84,12 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 | `list_models` | the models, what each can do, which capabilities each serves by default (`default_for`), and whether it is loaded |
 | `generate_image` | text to image. Waits, returns the PNGs inline and as links; edit inputs are accepted by the API but refused by the current engines |
 | `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
+| `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
 | `get_job`, `cancel_job` | follow or stop a video job |
 | `release_models` | unload everything now |
 
-The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`):
+The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`,
+`/v1/audio/...`, `/v1/chat/completions` whole or streamed):
 [docs/AGENTS.md](docs/AGENTS.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
 
 ## Configuration
@@ -117,13 +121,15 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
 | `keep_outputs_s` | 86400 | how long outputs stay |
 | `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
+| `gpu_lock` | none | the host's shared GPU lock file. A worker that runs a model server of its own (`openai_server`) takes it, without waiting, while the server runs; it reaches workers as `LOCALROUTER_GPU_LOCK` |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
-| `tools[].priority` | 0 | higher is unloaded later when memory is needed |
-| `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
+| `tools[].priority` | 0 (chat: 100) | higher is unloaded later when memory is needed |
+| `tools[].keep_loaded` | false (chat: true) | load at start, never unload for idleness, reload when memory frees |
+| `tools[].qualification` | none | a file the model's qualify script writes on this machine. Until it exists and says `"qualified": true` the model is listed (`"qualified": false` in `/v1/models`) and refused with a 503 saying it is not GPU-qualified on this host |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
-| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `testpattern` |
+| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet

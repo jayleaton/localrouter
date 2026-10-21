@@ -85,7 +85,7 @@ const Server = struct {
         const parent = s.env.environ orelse return;
         const path = parent.get("LOCALROUTER_GPU_LOCK") orelse return;
         if (path.len == 0) return;
-        const fd = posix.openatZ(posix.AT.FDCWD, try a.dupeZ(u8, path), .{ .CLOEXEC = true }, 0) catch |err| {
+        const fd = posix.openatZ(posix.AT.FDCWD, try a.dupeSentinel(u8, path, 0), .{ .CLOEXEC = true }, 0) catch |err| {
             engine.explain("the GPU lock {s} cannot be opened: {s}", .{ path, @errorName(err) });
             return err;
         };

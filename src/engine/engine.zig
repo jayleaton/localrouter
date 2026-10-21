@@ -336,7 +336,11 @@ var explained_buf: [512]u8 = undefined;
 var explained_len: usize = 0;
 
 pub fn explain(comptime fmt: []const u8, args: anytype) void {
-    explained_len = (std.fmt.bufPrint(&explained_buf, fmt, args) catch explained_buf[0..]).len;
+    const s = std.fmt.bufPrint(&explained_buf, fmt, args) catch {
+        explained_len = explained_buf.len; // cut at the buffer's end
+        return;
+    };
+    explained_len = s.len;
 }
 
 /// The reason `explain` recorded ("" for none), cleared for the next call.
