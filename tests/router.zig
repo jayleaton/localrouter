@@ -234,8 +234,9 @@ test "URL inputs: private, loopback and link-local addresses are refused unless 
 
     // Nothing is fetched from these: a 400 with the reason, for edits, image to video and the MCP tools.
     const bad = [_][]const u8{
-        "http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:1/x.png", "http://[::1]:1/x.png", "http://0.0.0.0/x.png",
-        "http://10.0.0.1/x.png", "http://192.168" ++ ".1.1:8080/x.png", "http://172.16.5.5/x.png", "https://[fd00::1]/x.png", "http://[::ffff:10.0.0.1]/x.png",
+        "http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:1/x.png",            "http://[::1]:1/x.png",    "http://0.0.0.0/x.png",
+        "http://10.0.0.1/x.png",                    "http://192.168" ++ ".1.1:8080/x.png", "http://172.16.5.5/x.png", "https://[fd00::1]/x.png",
+        "http://[::ffff:10.0.0.1]/x.png",
     };
     for (bad) |u| {
         errdefer std.debug.print("url: {s}\n", .{u});
