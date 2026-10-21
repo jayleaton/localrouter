@@ -10,7 +10,7 @@
       "cmd": ["/usr/bin/python3", "-I", "/opt/localrouter/tools/speech/drama3/drama3_worker.py"],
       "weights": "/data/models/drama3",
       "qualification": "/data/models/drama3/qualification.json",
-      "resident_bytes": 52023975936,
+      "resident_bytes": 45097156608,
       "working_bytes": 0,
       "keep_loaded": true,
       "priority": 50,
