@@ -141,10 +141,26 @@ The tool's config names `qualification: /data/models/chat/qwen38-27b-qualificati
    reply equals TensorFold's (content, reasoning, tool calls, finish reason, completion tokens), each stream's joined
    deltas equal its whole reply, and each stream ends with `data: [DONE]`.
 5. **Marker:** `{"qualified": true, "host", "gpu", "pins_sha256", "tensorfold_sha256", "checks", "report",
-   "qualified_at"}`, written atomically.
+   "qualified_at"}`, written atomically, plus `exceptions` (the names of the exceptions below that the run used, `[]`
+   when none) and `exception_evidence`.
 
 The daemon checks only `"qualified": true`; the marker's other fields record what was qualified. A new pin (TensorFold,
 checkpoint or drafter) needs a new run.
+
+### Exceptions
+
+Every comparison is exact, with one named exception, defined in `qualify.py` (`EXCEPTIONS`) and listed in the marker
+when a run used it:
+
+| Name | `tensorfold-1.1.1-stream-reasoning-trailing-newline` |
+| --- | --- |
+| Scope | `reasoning_content` only; a stream against the whole reply of the same server only (direct stream vs direct whole, LocalRouter stream vs LocalRouter whole); the joined stream may be the whole reply's text followed by whitespace, nothing else. Pinned TensorFold 1.1.1 only |
+| Still exact | tokens (`completion_tokens`), `content`, `tool_calls`, `finish_reason`, determinism (two whole runs), LocalRouter against TensorFold, and every other field |
+| Evidence | DGX-01 run1 (commit 6e83844): P1 stream 599 B vs whole 598 B, P2 352 B vs 351 B. The stream's last reasoning delta ends with `\n` (`"…Canberra.\"\n"`) that the whole reply strips; the bytes are the same direct and through LocalRouter, so it is TensorFold's, not the proxy's |
+| Upstream | drafted, not posted: `tools/chat/qwen38-27b/upstream-issue-stream-reasoning-newline.md` |
+
+LocalRouter passes both forms through unchanged: a streaming client gets the newline, a whole reply does not. Any
+other mismatch, including any difference inside the reasoning text, fails the run.
 
 ## Pins
 

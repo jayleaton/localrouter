@@ -310,8 +310,35 @@ def expectation(kind, want, rec):
     raise Fail(f"unknown expectation {kind}")
 
 
+# Named, narrow exceptions to exact equality, each admitted on recorded evidence; nothing else is relaxed. A check
+# passed under one names it, and the marker lists every exception the run used.
+STREAM_REASONING_TRAILING_WS = "tensorfold-1.1.1-stream-reasoning-trailing-newline"
+EXCEPTIONS = {
+    STREAM_REASONING_TRAILING_WS: {
+        "tensorfold": "1.1.1",
+        "scope": "reasoning_content only, a stream against the whole reply of the same server only: the stream may "
+                 "end with whitespace the whole reply lacks; everything else in both must be equal",
+        "evidence": "DGX-01 qualify run1 (commit 6e83844): P1 stream reasoning_content 599 B vs whole 598 B, P2 352 B "
+                    "vs 351 B; the stream's last reasoning delta ends with \\n that the whole reply strips; the same "
+                    "bytes direct and through LocalRouter",
+        "upstream": "tools/chat/qwen38-27b/upstream-issue-stream-reasoning-newline.md",
+    },
+}
+
+
+def stream_reasoning_tail(stream, whole, tensorfold):
+    """True when `stream` is `whole` plus whitespace only, on the TensorFold version the exception names."""
+    if tensorfold != EXCEPTIONS[STREAM_REASONING_TRAILING_WS]["tensorfold"]:
+        return False
+    if not isinstance(stream, str) or not isinstance(whole, str) or len(stream) <= len(whole):
+        return False
+    return stream.startswith(whole) and stream[len(whole):].strip() == ""
+
+
 def compare(args):
     checks = []
+    used = set()
+    tensorfold = read_json(PINS)["tensorfold"]["version"]
 
     def add(name, ok, **info):
         checks.append({"check": name, "pass": bool(ok), **info})
@@ -351,15 +378,25 @@ def compare(args):
             ra, rb = recs.get(a) or {}, recs.get(b) or {}
             for f in FIELDS:
                 same = ok[a] and ok[b] and ra.get(f) == rb.get(f)
+                if (not same and ok[a] and ok[b] and f == "reasoning_content" and a.endswith(".stream")
+                        and stream_reasoning_tail(ra.get(f), rb.get(f), tensorfold)):
+                    used.add(STREAM_REASONING_TRAILING_WS)
+                    add(f"{pid}.{a}=={b}.{f}", True, exception=STREAM_REASONING_TRAILING_WS,
+                        stream_bytes=len(ra[f].encode()), whole_bytes=len(rb[f].encode()),
+                        stream_tail=ra[f][len(rb[f]):])
+                    continue
                 info = {} if same else {a: ra.get(f), b: rb.get(f)}
                 add(f"{pid}.{a}=={b}.{f}", same, **info)
         base = recs.get("direct.whole1") or {}
         for kind, want in p.get("expect", {}).items():
             add(f"{pid}.expect.{kind}", ok["direct.whole1"] and expectation(kind, want, base), want=want)
     failed = [c["check"] for c in checks if not c["pass"]]
-    result = {"pass": not failed, "checks": len(checks), "failed": failed, "list": checks}
+    exceptions = sorted(used)
+    result = {"pass": not failed, "checks": len(checks), "failed": failed, "exceptions": exceptions,
+              "exception_terms": {n: EXCEPTIONS[n] for n in exceptions}, "list": checks}
     write_json(os.path.join(args.out, "compare.json"), result)
-    print(json.dumps({"pass": result["pass"], "checks": len(checks), "failed": failed}, indent=1))
+    print(json.dumps({"pass": result["pass"], "checks": len(checks), "failed": failed, "exceptions": exceptions},
+                     indent=1))
     return 0 if result["pass"] else 1
 
 
@@ -387,7 +424,9 @@ def marker(args):
         raise Fail(f"no marker: nvidia-smi names {gpu!r}, not a GB10")
     record = {"qualified": True, "model": MODEL, "host": os.uname().nodename, "gpu": gpu,
               "pins_sha256": sha256_file(PINS), "tensorfold_sha256": pins_r["archive"]["sha256"],
-              "checks": comp["checks"], "report": args.out,
+              "checks": comp["checks"], "exceptions": comp.get("exceptions", []),
+              "exception_evidence": {n: EXCEPTIONS[n]["evidence"] for n in comp.get("exceptions", [])},
+              "report": args.out,
               "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     text = json.dumps(record, indent=1) + "\n"
     os.makedirs(os.path.dirname(path), exist_ok=True)
