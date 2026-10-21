@@ -236,6 +236,8 @@ class Session:
         self.next_send = time.monotonic()
         self.sent_samples = 0
         self.audio = {}  # response id -> samples received
+        self.first_delta = {}  # response id -> arrival of its first audio delta
+        self.voiced = {}  # response id -> (arrival of the delta with its first non-silent sample, that sample's index)
         self.wait_for("session.created", 30)
         self.ws.send({"type": "session.update", "session": {
             "modalities": ["audio", "text"],
@@ -280,7 +282,15 @@ class Session:
                     pcm.frombytes(base64.b64decode(ev["delta"]))
                     if sys.byteorder == "big":
                         pcm.byteswap()
-                    self.audio.setdefault(ev["response_id"], array.array("h")).extend(pcm)
+                    rid = ev["response_id"]
+                    buf = self.audio.setdefault(rid, array.array("h"))
+                    before = len(buf)
+                    buf.extend(pcm)
+                    self.first_delta.setdefault(rid, ev["_t"])
+                    if rid not in self.voiced:
+                        k = next((i for i, x in enumerate(pcm) if abs(x) > 500), None)
+                        if k is not None:
+                            self.voiced[rid] = (ev["_t"], before + k)
                     ev = dict(ev, delta=f"<{len(pcm)} samples>")
                 self.file.write(json.dumps(ev) + "\n")
 
@@ -311,6 +321,26 @@ def overlap(said, heard):
     return len(s & h) / max(len(s), 1)
 
 
+STAGES = ("vad", "stt_wait", "stt", "stt_worker", "to_chat", "chat_ttft", "to_tts_text", "tts_wait", "tts_first_pcm",
+          "to_first_audio", "leading_silence")
+
+
+def stages(r, tm):
+    """Where a turn's time went, in ms: VAD's end-of-turn delay (client), then the server's stages from the daemon's
+    `localrouter.response.timing` (measured from speech_stopped): transcription (queue, total, the worker's own),
+    chat time to first token, the lead hold and chunker before speech gets text, speech queue and time to first
+    samples, delivery, and the silence at the head of the audio."""
+    if not tm:
+        return None
+    m = tm["ms"]
+    d = lambda a, b: None if m.get(a) is None or m.get(b) is None else m[a] - m[b]
+    return {"vad": r["speech_end_to_vad_stop_ms"], "stt_wait": m.get("stt_start"), "stt": d("stt_end", "stt_start"),
+            "stt_worker": tm.get("stt_worker_ms"), "to_chat": d("chat_start", "stt_end"), "chat_ttft": d("first_token", "chat_start"),
+            "to_tts_text": d("first_chunk", "first_token"), "tts_wait": d("tts_start", "first_chunk"),
+            "tts_first_pcm": d("tts_first_pcm", "tts_start"), "to_first_audio": d("first_audio", "tts_first_pcm"),
+            "leading_silence": tm.get("voiced_audio_ms"), "server_first_voiced": m.get("first_voiced")}
+
+
 def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
     """One spoken turn; its measurements go to results[name]."""
     mark = len(sess.events)
@@ -330,6 +360,13 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
          "speech_end_to_vad_stop_ms": ms(stopped["_t"]), "speech_end_to_transcript_ms": ms(heard["_t"]),
          "speech_end_to_first_text_ms": ms(first_text), "speech_end_to_first_audio_ms": ms(first_audio),
          "reply_audio_s": round(len(sess.audio.get(rid, [])) / RATE, 2), "response_id": rid}
+    tm = next((e for e in span if e["type"] == "localrouter.response.timing" and e["response_id"] == rid), None)
+    voiced = None
+    if rid in sess.voiced:  # when its first non-silent sample plays: audio plays from its first delta on
+        t_arr, pos = sess.voiced[rid]
+        voiced = max(t_arr, sess.first_delta[rid] + pos / RATE)
+    r["speech_end_to_first_voiced_ms"] = ms(voiced)
+    r["stages_ms"] = stages(r, tm)
     results[name] = r
     log(f"{name}: heard {r['transcript']!r}; first audio {r['speech_end_to_first_audio_ms']} ms; reply {text[:100]!r}")
     checks.append({"check": f"{name}: transcript matches the prompt", "ok": overlap(PROMPTS[name], heard["transcript"]) >= 0.6,
@@ -503,6 +540,8 @@ def main():
     ap.add_argument("--ballast-floor-gib", type=int, default=6, help="the ballast lets go if MemAvailable falls below this")
     ap.add_argument("--max-median-ms", type=int, default=2500)
     ap.add_argument("--max-barge-ms", type=int, default=4000)
+    ap.add_argument("--max-voiced-median-ms", type=int, default=1000, help="speech end to first non-silent reply audio, median")
+    ap.add_argument("--max-voiced-p90-ms", type=int, default=1500, help="the same, p90 over the turns without a tool call")
     ap.add_argument("--leak-probe", type=int, default=20, help="streamed chat requests per variant in the reasoning-leak probe (0: none)")
     args = ap.parse_args()
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
@@ -609,6 +648,13 @@ def main():
         checks.append({"check": f"latency: median speech end to first audio <= {args.max_median_ms} ms", "ok": pct(lat, 50) <= args.max_median_ms, "detail": pct(lat, 50)})
     barge = turns.get("interrupt", {}).get("speech_end_to_first_audio_ms")
     checks.append({"check": f"latency: the barge-in turn's first audio <= {args.max_barge_ms} ms", "ok": barge is not None and barge <= args.max_barge_ms, "detail": barge})
+    voiced = {n: t["speech_end_to_first_voiced_ms"] for n, t in turns.items() if n != "warmup" and t.get("speech_end_to_first_voiced_ms") is not None}
+    plain = [v for n, v in voiced.items() if n != "picture"]  # the tool turn speaks after its call
+    results["first_voiced_ms"] = {"median": pct(list(voiced.values()), 50), "p90_non_tool": pct(plain, 90) if plain else None} if voiced else None
+    checks.append({"check": f"latency: median speech end to first non-silent audio <= {args.max_voiced_median_ms} ms", "ok": bool(voiced) and pct(list(voiced.values()), 50) <= args.max_voiced_median_ms, "detail": results["first_voiced_ms"]})
+    checks.append({"check": f"latency: p90 (non-tool turns) speech end to first non-silent audio <= {args.max_voiced_p90_ms} ms", "ok": bool(plain) and pct(plain, 90) <= args.max_voiced_p90_ms, "detail": results["first_voiced_ms"]})
+    rows = {n: t["stages_ms"] for n, t in turns.items() if t.get("stages_ms")}
+    results["stage_median_ms"] = {k: pct(v, 50) for k in STAGES if (v := [s[k] for n, s in rows.items() if n != "warmup" and s.get(k) is not None])}
     replies = {n: t["reply"] for n, t in turns.items()}
     if "tool" in results:
         replies["picture confirmation"] = results["tool"].get("confirmation", "")
@@ -631,6 +677,12 @@ def main():
     for n, t in turns.items():
         print(f"{n:<12} {t['speech_end_to_vad_stop_ms']!s:>9} {t['speech_end_to_transcript_ms']!s:>11} {t['speech_end_to_first_text_ms']!s:>11} "
               f"{t['speech_end_to_first_audio_ms']!s:>12}  {t['transcript'][:50]!r} / {t['reply'][:60]!r}")
+    print()
+    print(f"{'turn':<15}" + "".join(f"{k[:11]:>12}" for k in STAGES) + f"{'1st voiced':>12}")
+    for n, t in turns.items():
+        s = t.get("stages_ms") or {}
+        print(f"{n:<15}" + "".join(f"{s.get(k)!s:>12}" for k in STAGES) + f"{t.get('speech_end_to_first_voiced_ms')!s:>12}")
+    print(f"{'median':<15}" + "".join(f"{results['stage_median_ms'].get(k)!s:>12}" for k in STAGES) + f"{(results['first_voiced_ms'] or {}).get('median')!s:>12}")
     for c in checks:
         print(("PASS " if c["ok"] else "FAIL ") + c["check"] + ("" if c["ok"] else f"  ({c['detail']})"))
     print("voice e2e:", "PASSED" if results["passed"] else "FAILED")
