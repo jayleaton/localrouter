@@ -19,7 +19,9 @@ const model = "fishaudio/drama-3";
 const root = "/tmp/localrouter-it-drama3-root";
 const native = root ++ "/build/tensorfold/zig-out/native/bin/tensorfold-native";
 const marker = root ++ "/qualification.json";
-const lock = root ++ "/gpu.lock";
+const lock = root ++ "/gpu.lock"; // the host's lock: the scheduler holds it shared while any model is loaded
+/// The tool's own lock, which the daemon names in LOCALROUTER_GPU_LOCK and the launcher takes.
+const own_lock = "/tmp/localrouter-it-drama3/data/locks/fishaudio_drama-3.lock";
 
 /// A raw HTTP/1.1 reply: its status, its head (lowercased), the body (de-chunked), the trailers (lowercased) and
 /// whether a chunked body ended with its terminating chunk.
@@ -87,9 +89,9 @@ fn expectLevel(pcm: []const u8, n: usize, level: i16) !void {
     while (i < pcm.len) : (i += 2) try testing.expectEqual(level, std.mem.readInt(i16, pcm[i..][0..2], .little));
 }
 
-/// Whether the shared GPU lock is free now: a non-blocking exclusive flock on it succeeds (and is released again).
-fn lockFree(io: Io) !bool {
-    const f = try Io.Dir.cwd().openFile(io, lock, .{});
+/// Whether the lock at `path` is free now: a non-blocking exclusive flock on it succeeds (and is released again).
+fn lockFree(io: Io, path: []const u8) !bool {
+    const f = Io.Dir.cwd().openFile(io, path, .{}) catch |err| return if (err == error.FileNotFound) true else err;
     defer f.close(io);
     const rc = std.os.linux.flock(f.handle, std.posix.LOCK.EX | std.posix.LOCK.NB);
     if (std.os.linux.errno(rc) != .SUCCESS) return false;
@@ -102,6 +104,29 @@ fn sha256Hex(io: Io, a: std.mem.Allocator, path: []const u8) ![64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+/// A fresh asset root as fetch.sh and build.sh leave it (a stand-in engine binary, a checkpoint directory, a voice
+/// file) and the host's lock, without a qualification marker.
+fn makeRoot(io: Io) !void {
+    const cwd = Io.Dir.cwd();
+    cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/build/tensorfold/zig-out/native/bin");
+    try cwd.createDirPath(io, root ++ "/drama-3");
+    try cwd.createDirPath(io, root ++ "/voices");
+    try cwd.writeFile(io, .{ .sub_path = native, .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = .executable_file } });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/drama-3/codec.pth", .data = "" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/voices/narrator.json", .data = "{\"format\": \"drama3-voice/1\"}" });
+    try cwd.writeFile(io, .{ .sub_path = lock, .data = "" });
+}
+
+/// The marker qualify.sh writes on this host for these pins and this engine binary.
+fn qualify(io: Io, a: std.mem.Allocator) !void {
+    var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const host = try std.posix.gethostname(&host_buf);
+    const pins_sha = try sha256Hex(io, a, opts.drama3_pins);
+    const bin_sha = try sha256Hex(io, a, native);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = try std.fmt.allocPrint(a, "{{\"qualified\": true, \"host\": \"{s}\", \"pins_sha256\": \"{s}\", \"native_sha256\": \"{s}\"}}", .{ host, &pins_sha, &bin_sha }) });
 }
 
 /// A free loopback port for the stand-in server.
@@ -118,22 +143,17 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     defer arena.deinit();
     const a = arena.allocator();
     const cwd = Io.Dir.cwd();
-    cwd.deleteTree(io, root) catch {};
+    try makeRoot(io);
     defer cwd.deleteTree(io, root) catch {};
-    try cwd.createDirPath(io, root ++ "/build/tensorfold/zig-out/native/bin");
-    try cwd.createDirPath(io, root ++ "/drama-3");
-    try cwd.createDirPath(io, root ++ "/voices");
-    try cwd.writeFile(io, .{ .sub_path = native, .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = .executable_file } });
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/drama-3/codec.pth", .data = "" });
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/voices/narrator.json", .data = "{\"format\": \"drama3-voice/1\"}" });
-    try cwd.writeFile(io, .{ .sub_path = lock, .data = "" });
     const port = try freePort(io);
     const cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", \"gpu_lock\": \"{s}\", \"tools\": [" ++
         "{{\"id\": \"fishaudio/drama-3\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
         " \"resident_bytes\": 8388608, \"idle_ttl_s\": 3, \"load_timeout_s\": 60, \"generate_timeout_s\": 60, \"options\": {{" ++
         "\"voices\": [\"default\", \"narrator\"], \"default_voice\": \"default\", \"min_speed\": 1, \"max_speed\": 1, \"stream\": true," ++
         " \"references\": true, \"port\": {d}, \"long_form\": true, \"long_form_chars\": 40, \"voices_dir\": \"{s}/voices\", \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
-        "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot });
+        "{{\"id\": \"upstream-admission\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
+        " \"resident_bytes\": 8388608, \"load_timeout_s\": 60, \"options\": {{\"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\", \"admission\": \"launcher\"}}}}," ++
+        "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot });
     var d = try Daemon.start(testing.allocator, io, "drama3", cfg);
     defer d.stop();
     const say = "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}"; // 12 characters: 5292 samples
@@ -146,7 +166,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expectEqual(std.http.Status.service_unavailable, load.status);
     try expectHas(load.body, &.{"is not GPU-qualified on this host"});
     try testing.expectEqualStrings("unloaded", try d.toolState(a, model));
-    try testing.expect(try lockFree(io));
+    try testing.expect(try lockFree(io, own_lock));
     // A model without a gate is not affected.
     try testing.expectEqual(std.http.Status.ok, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\"}")).status);
 
@@ -156,10 +176,13 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     const bin_sha = try sha256Hex(io, a, native);
     try cwd.writeFile(io, .{ .sub_path = marker, .data = try std.fmt.allocPrint(a, "{{\"qualified\": true, \"host\": \"{s}\", \"pins_sha256\": \"{s}\", \"native_sha256\": \"{s}\"}}", .{ host, "0000000000000000000000000000000000000000000000000000000000000000", &bin_sha }) });
     try expectStatus(try speak(&d, a, say), 503, &.{ "load failed", "qualified other pins" });
-    try testing.expect(try lockFree(io));
-    const pins_sha = try sha256Hex(io, a, opts.drama3_pins);
-    try cwd.writeFile(io, .{ .sub_path = marker, .data = try std.fmt.allocPrint(a, "{{\"qualified\": true, \"host\": \"{s}\", \"pins_sha256\": \"{s}\", \"native_sha256\": \"{s}\"}}", .{ host, &pins_sha, &bin_sha }) });
+    try testing.expect(try lockFree(io, own_lock));
+    try qualify(io, a);
     try expectHas((try d.call(a, .GET, "/v1/models", null)).body, &.{"\"qualified\":true"});
+
+    // LocalRouter admits the load. Under the launcher's own admission (88 GiB free; 83 here, as on DGX-01 with chat,
+    // Whisper and Kitten warm) the same model would not start.
+    try expectStatus(try speak(&d, a, "{\"model\":\"upstream-admission\",\"input\":\"Hi.\"}"), 503, &.{"Need 88.00 GiB available, have 83.00"});
 
     // Whole replies: WAV at 44.1 kHz with x-finish-reason, and the same samples as raw PCM.
     const whole = try speak(&d, a, say);
@@ -167,7 +190,8 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try expectHas(whole.head, &.{ "content-type: audio/wav", "x-finish-reason: stop" });
     try testing.expectEqual(@as(u32, 44100), std.mem.readInt(u32, whole.body[24..28], .little));
     try expectLevel(whole.body[44..], 5292, 1000);
-    try testing.expect(!try lockFree(io)); // the launcher holds the shared GPU lock while the model is loaded
+    try testing.expect(!try lockFree(io, own_lock)); // the launcher holds the tool's own lock while the model is loaded
+    try testing.expect(!try lockFree(io, lock)); // and LocalRouter the host's, shared
     const pcm = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\",\"response_format\":\"pcm\"}");
     try expectHas(pcm.head, &.{ "x-finish-reason: stop", "x-sample-rate: 44100", "x-sample-format: s16le" });
     try testing.expectEqualSlices(u8, whole.body[44..], pcm.body);
@@ -235,5 +259,102 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
         sleepMs(io, 100);
     }
     try testing.expectEqualStrings("unloaded", state);
-    try testing.expect(try lockFree(io));
+    try testing.expect(try lockFree(io, own_lock));
+}
+
+fn waitState(d: *Daemon, a: std.mem.Allocator, id: []const u8, want: []const u8) !void {
+    var got: []const u8 = "";
+    for (0..120) |_| {
+        got = try d.toolState(a, id);
+        if (std.mem.eql(u8, got, want)) return;
+        sleepMs(d.io, 250);
+    }
+    std.debug.print("{s}: wanted {s}, is {s}\n", .{ id, want, got });
+    return error.TestExpectedEqual;
+}
+
+fn expectState(d: *Daemon, a: std.mem.Allocator, id: []const u8, want: []const u8) !void {
+    const got = try d.toolState(a, id);
+    if (!std.mem.eql(u8, got, want)) std.debug.print("{s}: wanted {s}, is {s}\n", .{ id, want, got });
+    try testing.expectEqualStrings(want, got);
+}
+
+/// The voice loop: one chat reply, Drama 3 speaking a sentence (streamed), and Whisper hearing 200 ms.
+fn converse(d: *Daemon, a: std.mem.Allocator) !void {
+    const chat = try d.call(a, .POST, "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+    try testing.expectEqual(std.http.Status.ok, chat.status);
+    const said = try speak(d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\",\"response_format\":\"pcm\",\"stream\":true}");
+    try testing.expectEqual(@as(u16, 200), said.status);
+    try testing.expect(said.complete);
+    try expectLevel(said.body, 5292, 1000);
+    var pcm: [6400]u8 = undefined;
+    for (0..3200) |i| std.mem.writeInt(i16, pcm[i * 2 ..][0..2], @intCast(@as(i32, @intCast(i % 4000)) - 2000), .little);
+    var head: [44]u8 = undefined;
+    @memcpy(head[0..4], "RIFF");
+    std.mem.writeInt(u32, head[4..8], 36 + pcm.len, .little);
+    @memcpy(head[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, head[16..20], 16, .little);
+    std.mem.writeInt(u16, head[20..22], 1, .little);
+    std.mem.writeInt(u16, head[22..24], 1, .little);
+    std.mem.writeInt(u32, head[24..28], 16000, .little);
+    std.mem.writeInt(u32, head[28..32], 32000, .little);
+    std.mem.writeInt(u16, head[32..34], 2, .little);
+    std.mem.writeInt(u16, head[34..36], 16, .little);
+    @memcpy(head[36..40], "data");
+    std.mem.writeInt(u32, head[40..44], pcm.len, .little);
+    const enc = std.base64.standard.Encoder;
+    const wav = try std.mem.concat(a, u8, &.{ &head, &pcm });
+    const heard = try mcpCall(d, a, "transcribe_audio", try std.fmt.allocPrint(a, "{{\"model\":\"whisper\",\"audio\":\"{s}\"}}", .{enc.encode(try a.alloc(u8, enc.calcSize(wav.len)), wav)}));
+    try testing.expect(!heard.object.get("isError").?.bool);
+}
+
+test "Jarvis box: chat, Drama 3 and Whisper warm together under LocalRouter's admission; evicted lowest priority first" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try makeRoot(io);
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    try qualify(io, a);
+    // DGX-01 in MiB for GiB: 106 usable (MemAvailable 114 less the 8 reserved). Chat 24 (its resident_bytes; priority
+    // 100 and keep_loaded by default), Drama 3 54 (its launcher's cgroup cap; 50), Whisper 4 (10): 82 warm together.
+    // The launcher's own admission would refuse Drama 3 here (83 GiB free < 88); the worker turns it off.
+    const cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", \"budget_bytes\": 111149056, \"gpu_lock\": \"{s}\", \"tools\": [" ++
+        "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 25165824, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
+        "{{\"id\": \"fishaudio/drama-3\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
+        " \"resident_bytes\": 56623104, \"keep_loaded\": true, \"priority\": 50, \"load_timeout_s\": 60, \"options\": {{" ++
+        "\"voices\": [\"default\"], \"min_speed\": 1, \"max_speed\": 1, \"stream\": true, \"references\": true, \"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
+        "{{\"id\": \"whisper\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 4194304, \"keep_loaded\": true, \"priority\": 10}}," ++
+        "{{\"id\": \"img\", \"kind\": \"image\", \"engine\": \"testpattern\", \"idle_ttl_s\": 600, \"options\": {{\"resident_mb\": 39}}}}," ++
+        "{{\"id\": \"video\", \"kind\": \"video\", \"engine\": \"testpattern\", \"idle_ttl_s\": 1, \"options\": {{\"resident_mb\": 30}}}}]}}", .{ lock, opts.chat_server, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot, opts.speech_worker });
+    var d = try Daemon.start(testing.allocator, io, "drama3-jarvis", cfg);
+    defer d.stop();
+    const warm = [_][]const u8{ "chat", "fishaudio/drama-3", "whisper" };
+    for (warm) |id| try waitState(&d, a, id, "ready");
+    for (0..2) |_| try converse(&d, a); // alternating models: nothing reloads
+    for (warm) |id| try expectState(&d, a, id, "ready");
+
+    // An image (39.4 MiB) beside the 82 MiB voice loop: Whisper (10) goes, then Drama 3 (50); chat (100) stays.
+    try testing.expectEqual(std.http.Status.ok, (try harness.image(&d, a, "img", "")).status);
+    try expectState(&d, a, "whisper", "unloaded");
+    try expectState(&d, a, "fishaudio/drama-3", "unloaded");
+    try expectState(&d, a, "chat", "ready");
+
+    // A video clip (94.4 MiB) fits only alone: the idle image (0), then chat.
+    const V = struct { id: []const u8, status: []const u8 };
+    const create = "{\"model\":\"video\",\"prompt\":\"bars\",\"size\":\"256x256\",\"seconds\":\"1\",\"steps\":1,\"audio\":false}";
+    const job = try std.json.parseFromSliceLeaky(V, a, (try d.call(a, .POST, "/v1/videos", create)).body, .{ .ignore_unknown_fields = true });
+    var status: []const u8 = "";
+    for (0..300) |_| {
+        status = (try std.json.parseFromSliceLeaky(V, a, (try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/videos/{s}", .{job.id}), null)).body, .{ .ignore_unknown_fields = true })).status;
+        if (std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "failed")) break;
+        sleepMs(io, 100);
+    }
+    try testing.expectEqualStrings("completed", status);
+    try expectState(&d, a, "img", "unloaded");
+    try expectState(&d, a, "chat", "unloaded");
+
+    // Once the scheduler is idle and they fit, chat, Drama 3 and Whisper load again by themselves, and serve.
+    for (warm) |id| try waitState(&d, a, id, "ready");
+    try converse(&d, a);
 }

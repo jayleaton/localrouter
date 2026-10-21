@@ -1,6 +1,9 @@
 """A stand-in for drama-tensorfold's launcher (recipe/pilot.py) and the server it starts, for the integration tests of
-tools/speech/drama3/drama3_worker.py. Plain Python, no dependencies, no GPU: it takes the launcher's arguments, takes
-the shared GPU lock without blocking (refusing as the launcher does when it is held), prints the session line and
+tools/speech/drama3/drama3_worker.py. Plain Python, no dependencies, no GPU: it takes the launcher's arguments (with
+LocalRouter's patched --external-admission), takes the lock it is given without blocking (refusing as the launcher
+does when it is held), refuses as the launcher's own admission does when MemAvailable is under 88 GiB unless
+--external-admission is given (MemAvailable is DRAMA3_FAKE_MEMAVAILABLE_GIB, default 83: what DGX-01 had free with
+chat, Whisper and Kitten warm), prints the session line and
 DRAMA_PILOT_READY, and serves the native server's speech contract on loopback until SIGTERM.
 
 The contract follows plotarmordev/drama-tensorfold at 1a53b8a (Apache-2.0): POST /v1/audio/speech with model, input,
@@ -39,6 +42,7 @@ def main():
     p.add_argument("--evidence-dir", required=True)
     p.add_argument("--port", type=int, default=18793)
     p.add_argument("--ready-timeout", type=float, default=900)
+    p.add_argument("--external-admission", action="store_true")
     p.add_argument("serve_args", nargs="*")
     args = p.parse_args()
     os.makedirs(args.evidence_dir, exist_ok=False)
@@ -52,6 +56,9 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             p.error("Another workload owns the GPU slot; no model was started")
+        available = float(os.environ.get("DRAMA3_FAKE_MEMAVAILABLE_GIB", "83"))
+        if not args.external_admission and available < 88:
+            p.error(f"Need 88.00 GiB available, have {available:.2f}; no model was started")
         unit = f"drama3-pilot-{os.getpid()}-{time.time_ns()}.service"
         with open(os.path.join(args.evidence_dir, "session.json"), "w") as f:
             json.dump({"argv": sys.argv[1:], "unit": unit}, f)
