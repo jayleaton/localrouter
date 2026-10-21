@@ -51,9 +51,14 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
   `MemAvailable` is at least 88 GiB, and kills the unit if `MemAvailable` falls below 34 GiB), which cannot pass on a
   box that keeps chat and Whisper warm (DGX-01 had 83 GiB free with chat, Whisper and Kitten loaded) and would fight
   the scheduler. The launcher has no option to turn it off, so LocalRouter runs it with a pinned patch,
-  `tools/speech/drama3/patches/pilot-external-admission.patch` (sha256 `57d1fdde…`): `--external-admission` skips
-  both checks and keeps everything else, its 54 GiB cgroup cap, the server's 54 GiB allocator cap and its lock.
-  `fetch.sh` writes the patched launcher to `ROOT/launcher/pilot.py` (sha256 `40efba1d…`, pinned) and leaves the
+  `tools/speech/drama3/patches/pilot-external-admission.patch` (sha256 `8b6304cd…`): `--external-admission` skips
+  both checks, and gives the engine its least memory reserve (`TENSORFOLD_MEMORY_RESERVE_GIB=2`, not 34). The engine
+  admits its own allocations against `MemAvailable` less that reserve, so with 34 it refused a load the scheduler had
+  admitted whenever less than about 73 GiB was free: on DGX-01, with 70.5 GiB free (another process holding 22 GiB),
+  every reload failed with `OutOfDeviceMemory`. Its footprint is set by its flags (`--parallel 1`,
+  `--prompt-cache-gib 0`, `--max-frames`), not by the reserve. Everything else stays: the 54 GiB cgroup cap, the
+  server's 54 GiB allocator cap and the lock.
+  `fetch.sh` writes the patched launcher to `ROOT/launcher/pilot.py` (sha256 `e0ce7087…`, pinned) and leaves the
   upstream checkout clean. `options.admission: "launcher"` restores upstream's checks for a launch with no
   scheduler.
 - **Load.** The worker checks the qualification marker, the pinned launcher and the checkpoint files (`verify`), then
@@ -62,10 +67,10 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
   shared for every LocalRouter model ([the host's GPU lock](../ARCHITECTURE.md#the-hosts-gpu-lock)). The launcher
   starts the server as a transient `systemd --user` unit capped at 54 GiB with swap off. The worker is ready when the
   launcher prints `DRAMA_PILOT_READY`; then every voice the config lists must be one the server loaded.
-- **Memory.** `resident_bytes` is 51,921,231,872 bytes (48.36 GiB): the peak measured on DGX-01, 43,331,297,280
-  bytes (40.36 GiB, the drop in `MemAvailable` from before the load, with the chat model warm; 39.84 GiB alone), plus
-  8 GiB, below the launcher's 54 GiB cap. GB10's CUDA memory does not show in the server's cgroup (its own peak was
-  1.1 GB), so the drop is the measure. The worker reports no size, so the scheduler holds 48.36 GiB for it while it is
+- **Memory.** `resident_bytes` is 52,023,975,936 bytes (48.45 GiB): the largest peak measured on DGX-01,
+  43,434,041,344 bytes (40.45 GiB, the drop in `MemAvailable` from before the load, `run3`; 39.84 GiB in `run1`, 40.36
+  GiB beside the warm chat model in `run2`), plus 8 GiB, below the launcher's 54 GiB cap. GB10's CUDA memory does not show in the server's cgroup (its own peak was
+  1.1 GB), so the drop is the measure. The worker reports no size, so the scheduler holds 48.45 GiB for it while it is
   loaded. With chat (24 GiB) and Whisper (about 4 GiB) that is 76 of DGX-01's 106 usable GiB (114 free less the 8
   reserved): the three stay warm together, and an image or video job beside them evicts Whisper, then Drama 3 (lower
   priorities first), and they come back by themselves (`tests/drama3.zig`).
@@ -75,6 +80,13 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
 - **Unload** (idle TTL, `POST /v1/tools/fishaudio/drama-3/unload`, eviction): the worker sends the launcher SIGTERM; it
   stops the unit, waits until systemd reports it inactive, then releases the lock. The worker keeps the daemon waiting
   with progress lines until then, so nothing else loads into memory the server still holds.
+- **Soft cancel.** The worker's load reply declares `"cancel": "signal"`: SIGUSR1 during a generate closes its
+  connection to the server, which cancels the synthesis, and replies `{"ok": false, "type": "cancelled"}` with the
+  model still loaded, so the next request needs no reload. The server takes one synthesis at a time and refuses another
+  with a 503 "busy" until the cancelled one is dropped (its `/health` does not count speech, so the worker cannot wait
+  for that up front), so the worker retries a busy reply every 50 ms for up to 10 s: the daemon sends one request at a
+  time, so busy can only mean a synthesis being dropped. Without the signal a generate is unchanged. A daemon that sends the signal (barge-in) and its hard-abort
+  fallback are #15's.
 - **Cancel and deadlines** kill the worker's process group. The launcher runs in its own session with a parent-death
   signal, so it still gets SIGTERM and stops the unit. A launcher that is itself killed outright leaves its unit's name
   in `runtime/localrouter-drama3.unit`, and the next load stops that unit first.
@@ -199,7 +211,8 @@ HEAD). The checkpoint files were the ones already on the host, each checked agai
 
 **Qualification (`run1`: nothing else on the GPU).** assets 12/12, e2e 15/15, bench 14/14, accuracy evidence valid,
 `--accept-native-numerics`: qualified. Marker sha256 `0b5399f672c3124afb100ae0823d722bc00237d738bddca4faab9c66d85ecbdf`;
-the run's manifest (`SHA256SUMS`, 399 files) sha256 `090cf1bb…`.
+the run's manifest (`SHA256SUMS`, 399 files) sha256 `090cf1bb…`. That marker was superseded by `run3` below, when the launcher
+patch changed the pins.
 
 | Upstream's own client and corpus (`bench/drama_bench.py`, 24 texts, 3 warm passes) | DGX-01 | Upstream's claim | Gate |
 | --- | ---: | ---: | --- |
@@ -241,6 +254,26 @@ recorded in the marker, none required:
   fall from 1.0 at layer 0 to 0.71 at layer 12, so random inputs amplify rounding differences through the 13 layers.
   Upstream's passing tower result was on real hidden states (`--input-hidden`, its R6c), which its repository does not
   ship. The failure is recorded as measured; nothing was loosened.
+
+**Requalified (`run3`, LocalRouter `738f84d`: the launcher patch now lowers the engine's reserve, so the pins changed).**
+assets, e2e, bench and accuracy all passed again: first audio p50 0.142 s, warm RTF p50 0.663, peak 40.45 GiB. Marker
+sha256 `a860364dd152537e98f67f818e768444df84ce8c6cab4b23125889e5d2d55db4` (`pins_sha256` `e30d5396…`); manifest sha256
+`37c314ca…`. The later worker change (`adbf05a`: a busy reply after a cancel is retried) changes no pin and leaves
+that marker valid.
+
+**LocalRouter's admission is the only one (through the daemon, `verify/` on the node).** Ballasts held by a bounded
+`systemd-run` unit, Drama 3 loaded on demand by a `localrouter serve` built from this branch:
+
+| Free at load | Launcher | Result |
+| --- | --- | --- |
+| 70.7 GiB (44 GiB held) | before: engine reserve 34 GiB | load fails, `OutOfDeviceMemory` (as in the voice e2e run `eca23de7`), 503 |
+| 70.7 GiB (44 GiB held) | now: reserve 2 GiB | loads (cold, 8.3 s), whole reply 200 `stop`; lowest `MemAvailable` 31.1 GiB |
+| 93.4 GiB (22 GiB held) | now | loads (8.1 s), 200 `stop` |
+
+**Soft cancel, through the daemon.** SIGUSR1 to the worker 1 s into a streamed reply: the stream ends without its
+last chunk (curl exit 18), the worker logs the cancel, and the next request is served by the same worker and unit (no
+reload) in 1.72 s, byte-identical to the first reply. Before the busy retry, that next request was refused 503 "the
+engine is busy" 3.7 ms in, while the server was still dropping the cancelled synthesis.
 
 ## What was taken from upstream
 

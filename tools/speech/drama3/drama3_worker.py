@@ -57,6 +57,7 @@ PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.json")
 MODEL = "fishaudio/drama-3"  # the name the launcher serves the model under
 UNIT_FILE = "localrouter-drama3.unit"  # in the runtime directory: the launcher's unit while this worker runs it
 READY = "DRAMA_PILOT_READY"
+BUSY_WAIT_S = 10  # how long a request waits while the server drops a cancelled synthesis (`Worker._post`)
 PR_SET_PDEATHSIG = 1
 _prctl = ctypes.CDLL(None, use_errno=True).prctl  # resolved before any fork, so the child only calls it
 
@@ -281,7 +282,8 @@ class Worker:
     def load(self):
         try:
             self._load()
-            return {"ok": True, "resident": 0, "cancel": "signal"}  # SIGUSR1 ends a generate early (on_cancel); the launcher's cap and admission bound it: the config's estimate stands
+            # The launcher's caps bound it: the config's estimate stands. SIGUSR1 ends a generate early (`generate`).
+            return {"ok": True, "resident": 0, "cancel": "signal"}
         except Exception as e:  # noqa: BLE001 - every failure is the reply's reason
             self._stop()
             why = str(e) or type(e).__name__
@@ -445,7 +447,7 @@ class Worker:
                 body["references"] = json.load(f)
         if stream:
             body["stream"] = True
-        res = Http(self.opts.port, "POST", "/v1/audio/speech", json.dumps(body).encode())
+        res = self._post(json.dumps(body).encode())
         try:
             if res.status != 200:
                 why = res.error_message()
@@ -468,6 +470,19 @@ class Worker:
             return fields.get("x-finish-reason", "stop"), fields.get("x-long-form-segments", "")
         finally:
             res.close()
+
+    def _post(self, body):
+        """POST /v1/audio/speech. The server takes one synthesis at a time and the daemon sends one request at a time,
+        so a 503 "busy" means a synthesis the worker cancelled is still being dropped: retried every 50 ms for up to
+        BUSY_WAIT_S, then returned as it is."""
+        deadline = time.monotonic() + BUSY_WAIT_S
+        while True:
+            res = Http(self.opts.port, "POST", "/v1/audio/speech", body)
+            if res.status != 503 or time.monotonic() >= deadline:
+                return res
+            res.body()
+            res.close()
+            time.sleep(0.05)
 
     @staticmethod
     def _stream_to(res, out):
@@ -563,14 +578,18 @@ def watch_parent(worker):
 
 
 def generate(worker, cmd):
+    """A generate that SIGUSR1 can end early: the connection to the server is closed, so the server cancels the
+    synthesis, and the model stays loaded. Without a signal it is exactly Worker.generate."""
     global GENERATING
     try:
-        GENERATING = True  # inside the try: a signal right after it is still caught
-        return worker.generate(cmd)
+        try:
+            GENERATING = True  # inside the try: a signal right after it is still caught
+            return worker.generate(cmd)
+        finally:
+            GENERATING = False
     except Cancelled:
+        log("generate cancelled; the server drops the synthesis (the next request waits while it is busy)")
         return {"ok": False, "type": "cancelled", "error": "cancelled"}
-    finally:
-        GENERATING = False
 
 
 def main():

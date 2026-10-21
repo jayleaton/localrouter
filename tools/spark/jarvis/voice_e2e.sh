@@ -119,7 +119,7 @@ run() {
   # video models below them with short TTLs (#16), so a generation job never keeps the voice down.
   local R=$src W=$J/lr/weights
   jq -n --argjson chat "$chat" --argjson drama "$drama" --arg J "$J" --arg R "$R" --arg W "$W" --arg rev "$whisper_rev" \
-    --arg lock "$gpu_lock" --argjson kitten "$kitten" '
+    --arg lock "$gpu_lock" --argjson kitten "$kitten" --argjson drama_resident "$(jq '.tools[0].resident_bytes // null' "$R/tools/speech/drama3/config.example.json")" '
     {machine: "dgx-01", reserve_bytes: 8589934592}
     + (if $lock == "" then {} else {gpu_lock: $lock} end)
     + {defaults: {chat_completion: $chat.id, text_to_speech: $drama.id, speech_to_text: "whisper-large-v3-turbo",
@@ -128,7 +128,7 @@ run() {
                speech_models: ([$drama.id] + (if $kitten == 1 then ["kitten-tts-2"] else [] end)), tool_wait_s: 900},
        tools: ([
          ($chat + {keep_loaded: true, priority: 100}),
-         ($drama + {keep_loaded: true, priority: 90, lane: "realtime"}
+         ($drama + {keep_loaded: true, priority: 90, lane: "realtime", resident_bytes: ($drama_resident // $drama.resident_bytes)}
            + (if ($drama.cmd // [] | length) == 3 then {cmd: [$drama.cmd[0], $drama.cmd[1], ($R + "/tools/speech/drama3/drama3_worker.py")]} else {} end)),
          {id: "whisper-large-v3-turbo", kind: "transcription", name: "Whisper large-v3-turbo",
           cmd: [($J + "/venvs/whisper/bin/python"), ($R + "/tools/speech/whisper/worker.py")],

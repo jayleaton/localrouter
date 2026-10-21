@@ -392,10 +392,11 @@ def release(p):
 def video_phase(args, name, results, checks, squeeze):
     """A 1 s video; which of chat, STT and TTS it unloaded; how long each takes to be ready again after it. With
     `squeeze`, idle tools outside the voice set are unloaded first and a ballast leaves only `--eviction-free-gib`
-    available while the video runs, so it can be admitted only by unloading part of the voice set; the ballast leaves
-    when the clip is done (Drama 3's launcher keeps a 30 GiB headroom floor of its own, so it cannot start beside it)."""
+    available while the video runs and while the voice set reloads after it, so the video can be admitted only by
+    unloading part of the voice set and the reload must make room by LocalRouter's own admission (evicting the idle
+    video), beside the other tenant."""
     voice = (args.chat, args.stt, args.tts)
-    held, ballast_gib, guard_tripped = None, 0, False
+    held, ballast_gib, guard_tripped, held_through = None, 0, False, False
     if squeeze:
         _, _, body = http(f"{args.url}/v1/tools", timeout=30)
         for t in json.loads(body)["data"]:
@@ -419,10 +420,6 @@ def video_phase(args, name, results, checks, squeeze):
                 break
             time.sleep(0.5)
         video_s = time.monotonic() - t0
-        if held:  # the other tenant leaves with the job: what is measured next is our recovery
-            guard_tripped = held.poll() is not None
-            release(held)
-            held = None
         t1 = time.monotonic()
         while time.monotonic() - t1 < 600 and len(back) < 3:
             _, _, body = http(f"{args.url}/v1/tools", timeout=30)
@@ -433,19 +430,21 @@ def video_phase(args, name, results, checks, squeeze):
                     down.add(t["id"])
             time.sleep(0.5)
         mem_low = mem_available_gib()
+        held_through = held is not None and held.poll() is None  # the other tenant still holds its memory
     finally:
         if held:
             guard_tripped = held.poll() is not None
             release(held)
     results[name] = {"video_status": v["status"], "video_s": round(video_s, 1), "unloaded_by_video": sorted(down),
                      "ready_after_video_s": back, "ballast_gib": ballast_gib, "mem_available_before_gib": mem_before,
-                     "mem_available_after_recovery_gib": mem_low, "ballast_guard_tripped": guard_tripped, "video_error": v.get("error")}
+                     "mem_available_after_recovery_gib": mem_low, "ballast_guard_tripped": guard_tripped, "ballast_held_through_recovery": held_through, "video_error": v.get("error")}
     log(f"{name}:", results[name])
     checks.append({"check": f"{name}: the clip completed", "ok": v["status"] == "completed", "detail": v.get("error")})
     checks.append({"check": f"{name}: chat, speech to text and text to speech are ready again", "ok": len(back) == 3, "detail": back})
     if squeeze:
         checks.append({"check": f"{name}: the video had to unload part of the voice set", "ok": bool(down), "detail": sorted(down)})
         checks.append({"check": f"{name}: memory never neared the OOM killer (the ballast's guard held)", "ok": not guard_tripped, "detail": mem_low})
+        checks.append({"check": f"{name}: every model came back with the ballast still held (admission alone governs the reload)", "ok": held_through and len(back) == 3, "detail": back})
 
 
 def main():

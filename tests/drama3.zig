@@ -129,6 +129,42 @@ fn qualify(io: Io, a: std.mem.Allocator) !void {
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = try std.fmt.allocPrint(a, "{{\"qualified\": true, \"host\": \"{s}\", \"pins_sha256\": \"{s}\", \"native_sha256\": \"{s}\"}}", .{ host, &pins_sha, &bin_sha }) });
 }
 
+/// The Drama 3 worker the daemon started (a python3 child running drama3_worker.py).
+fn workerPid(d: *Daemon, a: std.mem.Allocator) !i32 {
+    var proc = try Io.Dir.cwd().openDir(d.io, "/proc", .{ .iterate = true });
+    defer proc.close(d.io);
+    var it = proc.iterate();
+    while (try it.next(d.io)) |e| {
+        const pid = std.fmt.parseInt(i32, e.name, 10) catch continue;
+        var buf: [4096]u8 = undefined;
+        const cmdline = harness.readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/cmdline", .{pid}, 0), &buf) orelse continue;
+        if (std.mem.indexOf(u8, cmdline, "drama3_worker.py") == null) continue;
+        const status = harness.readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/status", .{pid}, 0), &buf) orelse continue;
+        const at = std.mem.indexOf(u8, status, "PPid:\t") orelse continue;
+        const end = std.mem.indexOfScalarPos(u8, status, at, '\n') orelse continue;
+        if ((std.fmt.parseInt(i32, status[at + 6 .. end], 10) catch continue) == d.child.id.?) return pid;
+    }
+    return error.NoWorker;
+}
+
+/// A slow streamed request on its own thread, so the test can signal the worker while it runs.
+const Bg = struct {
+    d: *Daemon,
+    arena: std.heap.ArenaAllocator,
+    raw: ?Raw = null,
+    err: ?anyerror = null,
+
+    fn run(b: *Bg) void {
+        const body = "{\"model\":\"fishaudio/drama-3\",\"input\":\"" ++
+            "This reply is long enough to stream for about two seconds, a chunk every tenth of a second, " ++
+            "and it is cut off in the middle by a cancel from the daemon's side. [slow]\",\"response_format\":\"pcm\",\"stream\":true}";
+        b.raw = speak(b.d, b.arena.allocator(), body) catch |e| {
+            b.err = e;
+            return;
+        };
+    }
+};
+
 /// A free loopback port for the stand-in server.
 fn freePort(io: Io) !u16 {
     const addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -245,6 +281,21 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expect(!res.object.get("isError").?.bool);
     try testing.expectEqualStrings("audio/wav", res.object.get("content").?.array.items[0].object.get("mimeType").?.string);
     try testing.expectEqualStrings("stop", (try mcpText(a, res)).object.get("finish_reason").?.string);
+
+    // SIGUSR1 ends a generate early (the worker's "cancel":"signal"): that request ends, and the same worker, still
+    // loaded, serves the next one. This daemon does not send the signal itself yet; the test sends it.
+    const pid = try workerPid(&d, a);
+    var bg: Bg = .{ .d = &d, .arena = .init(std.heap.page_allocator) };
+    defer bg.arena.deinit();
+    const t = try std.Thread.spawn(.{}, Bg.run, .{&bg});
+    sleepMs(io, 600); // the stream is under way: a chunk every 0.1 s for about 2 s
+    _ = std.posix.system.kill(pid, std.posix.SIG.USR1);
+    t.join();
+    const cut = bg.raw orelse return bg.err.?;
+    if (cut.status == 200) try testing.expect(!cut.complete) else try expectHas(cut.body, &.{"cancelled"});
+    try expectStatus(try speak(&d, a, say), 200, &.{"RIFF"});
+    try testing.expectEqual(pid, try workerPid(&d, a));
+    try testing.expectEqualStrings("ready", try d.toolState(a, model));
 
     // A server that dies takes the worker with it: that job is a 503, and the next request starts it again.
     try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Down [crash]\"}"), 503, &.{"worker exited"});
