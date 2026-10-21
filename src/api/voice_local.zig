@@ -96,6 +96,11 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     if (j.status != .completed) return failed(why, j.error_message);
     if (o.worker_ms) |p| p.* = j.ms;
     const t = speech.readTranscript(app, a, j, &ref) orelse return failed(why, ref.message);
+    if (o.detected) |p| {
+        if (t.get("language")) |l| {
+            if (l == .string) p.* = try a.dupe(u8, l.string);
+        }
+    }
     const text = t.get("text") orelse return "";
     return if (text == .string) try a.dupe(u8, text.string) else "";
 }

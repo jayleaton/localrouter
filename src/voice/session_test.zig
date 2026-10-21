@@ -16,6 +16,7 @@ const Fake = struct {
     mutex: Io.Mutex = .init,
     arena: std.heap.ArenaAllocator,
     heard: []const u8 = "hello there",
+    hears: u32 = 0, // transcriptions made
     delta_ms: u32 = 2,
     speak_ms: u32 = 1,
     requests: std.ArrayList([]const u8) = .empty, // chat request bodies
@@ -53,6 +54,7 @@ const Fake = struct {
         if (pcm.len == 0) return "";
         f.mutex.lockUncancelable(f.io);
         defer f.mutex.unlock(f.io);
+        f.hears += 1;
         return a.dupe(u8, f.heard);
     }
 
@@ -286,6 +288,34 @@ test "a spoken turn: VAD boundaries, the transcript, a streamed reply in sentenc
     }
     try testing.expect(contains(second, "\"name\":\"generate_image\""));
     try testing.expect(!contains(second, "generate_video")); // no video model here
+}
+
+test "a pause starts a draft transcript: one ending a sentence ends the turn early, and the final transcript reuses it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{});
+    defer rig.stop();
+    rig.heard("What is two plus two?");
+    try rig.audio(300, false);
+    try rig.audio(600, true);
+    try rig.audio(400, false); // under silence_duration_ms (500): only the draft's sentence end can end this turn
+    _ = try rig.rec.wait("response.done", 0);
+    const stopped = try rig.rec.get(a, try rig.rec.wait("input_audio_buffer.speech_stopped", 0));
+    const end = stopped.object.get("audio_end_ms").?.integer;
+    try testing.expect(end >= 900 + 300 and end <= 1300); // speech ends at 900; early_end_ms 300
+    const heard = try rig.rec.get(a, try rig.rec.wait("conversation.item.input_audio_transcription.completed", 0));
+    try testing.expectEqualStrings("What is two plus two?", heard.object.get("transcript").?.string);
+    try testing.expectEqual(@as(u32, 1), rig.fake.hears); // the draft only
+
+    rig.heard("and once more"); // no sentence end: the turn waits for silence_duration_ms, then reuses the draft
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 1);
+    const second = try rig.rec.get(a, try rig.rec.wait("input_audio_buffer.speech_stopped", 1));
+    try testing.expect(@abs(second.object.get("audio_end_ms").?.integer - (1300 + 600 + 500)) <= 40);
+    try testing.expectEqual(@as(u32, 2), rig.fake.hears);
 }
 
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {

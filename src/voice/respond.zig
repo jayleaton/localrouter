@@ -51,8 +51,9 @@ pub fn work(s: *Session) void {
         s.mutex.unlock(s.io);
         defer t.free(s.gpa);
         switch (t) {
-            .partial => |h| hear(s, h, false),
-            .final => |h| hear(s, h, true),
+            .partial => |h| hear(s, h, .partial),
+            .draft => |h| hear(s, h, .draft),
+            .final => |h| hear(s, h, .final),
             .respond => |ask| run(s, ask),
         }
     }
@@ -60,23 +61,36 @@ pub fn work(s: *Session) void {
 
 // ---------------------------------------------------------------- transcription
 
-fn hear(s: *Session, h: Task.Hearing, final: bool) void {
+const Pass = enum { partial, draft, final };
+
+fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
     const a = tmp.allocator();
+    var why: backend.Why = .{};
     s.mutex.lockUncancelable(s.io);
-    if (!final and s.find(h.item_id) != null) { // committed meanwhile: the final transcript is coming
+    if (pass == .partial and s.find(h.item_id) != null) { // committed meanwhile: the final transcript is coming
         s.partial_busy = false;
         s.mutex.unlock(s.io);
         return;
     }
+    if (pass == .draft and !s.draftWanted(h)) return s.mutex.unlock(s.io); // superseded, or the speaker went on
+    if (pass == .final) {
+        if (s.reuseDraft(a, h)) |text| { // the turn ended on the pause its draft began at
+            defer s.mutex.unlock(s.io);
+            s.stt_draft = true;
+            return completed(s, a, h.item_id, text, &why);
+        }
+    }
     const st = &s.settings;
-    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, st.language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "" };
+    const language = if (st.language.len > 0) st.language else s.heardLanguage(); // no detection pass on each turn
+    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "" };
     s.mutex.unlock(s.io);
-    var why: backend.Why = .{};
     var worker_ms: u64 = 0;
+    var detected: []const u8 = "";
     var heard = o;
     heard.worker_ms = &worker_ms;
+    heard.detected = &detected;
     const began = s.clock();
     const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
         s.backend.transcribe(a, pcm16, heard, &s.close_stop, &why)
@@ -84,19 +98,28 @@ fn hear(s: *Session, h: Task.Hearing, final: bool) void {
         error.OutOfMemory;
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
-    if (final) {
-        s.stt_start_ns = began;
-        s.stt_end_ns = s.clock();
-        s.stt_worker_ms = worker_ms;
+    s.noteLanguage(detected);
+    switch (pass) {
+        .partial => {
+            s.partial_busy = false;
+            const t = text catch return;
+            const turn = s.turn orelse return;
+            if (std.mem.eql(u8, turn.item_id, h.item_id)) s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = std.mem.trim(u8, t, " \t\r\n") });
+        },
+        .draft => if (text) |t| s.drafted(a, h, t, began, worker_ms) else |_| {},
+        .final => {
+            s.stt_start_ns = began;
+            s.stt_end_ns = s.clock();
+            s.stt_worker_ms = worker_ms;
+            s.stt_draft = false;
+            completed(s, a, h.item_id, text, &why);
+        },
     }
-    if (!final) {
-        s.partial_busy = false;
-        const t = text catch return;
-        const turn = s.turn orelse return;
-        if (std.mem.eql(u8, turn.item_id, h.item_id)) s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = std.mem.trim(u8, t, " \t\r\n") });
-        return;
-    }
-    const it = s.find(h.item_id) orelse return; // deleted meanwhile
+}
+
+/// Under the lock: the final transcript of user item `item_id` (deleted meanwhile: nothing).
+fn completed(s: *Session, a: std.mem.Allocator, item_id: []const u8, text: backend.Error![]const u8, why: *const backend.Why) void {
+    const it = s.find(item_id) orelse return;
     it.pending = false;
     if (text) |t| {
         it.text = it.arena.allocator().dupe(u8, std.mem.trim(u8, t, " \t\r\n")) catch "";
@@ -151,6 +174,8 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
         r.marks.stt_start = s.stt_start_ns;
         r.marks.stt_end = s.stt_end_ns;
         r.marks.stt_worker_ms = s.stt_worker_ms;
+        r.marks.stt_draft = s.stt_draft;
+        r.marks.early_end = s.early_end;
     }
     s.stop_ns = 0;
     r.id = s.newId(a, "resp") catch return false;
