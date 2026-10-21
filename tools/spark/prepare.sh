@@ -53,10 +53,14 @@ for p in ${PRECISIONS:-fp8s}; do
 done
 if wantimg qwen-image-2.1-turbo; then
     TW=$STK/models/Qwen-Image-2.1-Turbo; TURBO_REV=d65dbc9a7e8f6b5479e33dee6030eaab2a906509
-    if [[ ! -f $TW/.complete ]]; then
+    # one --include per pattern: hf takes further positional arguments as file names and then ignores --include,
+    # which fetched no transformer; a .complete without transformer weights (left by that) is downloaded again
+    if [[ ! -f $TW/.complete ]] || ! compgen -G "$TW/transformer/*.safetensors" > /dev/null; then
         step "download Qwen-Image-2.1-Turbo (its own files, about 14 GB)"
-        hf download Qwen/Qwen-Image-2.1-Turbo --revision $TURBO_REV --include "transformer/*" "scheduler/*" model_index.json LICENSE README.md \
-            --local-dir $TW --max-workers 16 > /dev/null && touch $TW/.complete
+        hf download Qwen/Qwen-Image-2.1-Turbo --revision $TURBO_REV --include "transformer/*" --include "scheduler/*" \
+            --include model_index.json --include LICENSE --include README.md --local-dir $TW --max-workers 16 > /dev/null
+        compgen -G "$TW/transformer/*.safetensors" > /dev/null || { echo "prepare: Qwen-Image-2.1-Turbo has no transformer weights" >&2; exit 1; }
+        touch $TW/.complete
     fi
     for d in text_encoder processor vae; do [[ -e $TW/$d ]] || ln -s ../Qwen-Image-2.1/$d $TW/$d; done
     for p in ${PRECISIONS:-fp8s}; do
