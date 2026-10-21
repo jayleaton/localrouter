@@ -280,7 +280,7 @@ test "normalize: an exact WAV is copied, others decode through ffmpeg, refusals 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const tmp = "/tmp/localrouter-audio-test";
+    const tmp = try testTmp(io, a);
     defer Io.Dir.cwd().deleteTree(io, tmp) catch {};
     var why: []const u8 = "";
 
@@ -323,10 +323,18 @@ test "encode: wav as is, pcm raw, flac through ffmpeg" {
     const pcm = try a.alloc(u8, 24_000 * 2);
     for (0..24_000) |i| std.mem.writeInt(i16, pcm[i * 2 ..][0..2], @intFromFloat(8000 * @sin(@as(f32, @floatFromInt(i)) * 0.1)), .little);
     const w = try wav(a, 24_000, 1, pcm);
-    try std.testing.expectEqualSlices(u8, w, try encode(io, gpa, a, "/tmp/localrouter-audio-test", w, .wav, .{}));
-    try std.testing.expectEqualSlices(u8, pcm, try encode(io, gpa, a, "/tmp/localrouter-audio-test", w, .pcm, .{}));
-    const flac = try encode(io, gpa, a, "/tmp/localrouter-audio-test", w, .flac, .{});
+    const tmp = try testTmp(io, a);
+    defer Io.Dir.cwd().deleteTree(io, tmp) catch {};
+    try std.testing.expectEqualSlices(u8, w, try encode(io, gpa, a, tmp, w, .wav, .{}));
+    try std.testing.expectEqualSlices(u8, pcm, try encode(io, gpa, a, tmp, w, .pcm, .{}));
+    const flac = try encode(io, gpa, a, tmp, w, .flac, .{});
     try std.testing.expect(std.mem.startsWith(u8, flac, "fLaC"));
-    try std.testing.expectError(error.BadWav, encode(io, gpa, a, "/tmp/localrouter-audio-test", "nope", .mp3, .{}));
-    Io.Dir.cwd().deleteTree(io, "/tmp/localrouter-audio-test") catch {};
+    try std.testing.expectError(error.BadWav, encode(io, gpa, a, tmp, "nope", .mp3, .{}));
+}
+
+/// A scratch directory path unique to this run, so another user's leftovers or a parallel run cannot collide with it.
+fn testTmp(io: Io, a: std.mem.Allocator) ![]u8 {
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    return std.fmt.allocPrint(a, "/tmp/localrouter-audio-test-{x:0>16}", .{std.mem.readInt(u64, &rnd, .little)});
 }

@@ -17,8 +17,10 @@ pub const Daemon = struct {
     client: std.http.Client,
 
     pub fn start(gpa: std.mem.Allocator, io: Io, name: []const u8, cfg_json: []const u8) !Daemon {
-        const dir = try std.fmt.allocPrint(gpa, "/tmp/localrouter-it-{s}", .{name});
-        Io.Dir.cwd().deleteTree(io, dir) catch {};
+        var rnd: [8]u8 = undefined; // unique per run: another user's leftovers or a parallel run cannot collide
+        io.random(&rnd);
+        const dir = try std.fmt.allocPrint(gpa, "/tmp/localrouter-it-{s}-{x:0>16}", .{ name, std.mem.readInt(u64, &rnd, .little) });
+        errdefer gpa.free(dir);
         try Io.Dir.cwd().createDirPath(io, dir);
         const cfg_path = try std.fmt.allocPrint(gpa, "{s}/config.json", .{dir});
         defer gpa.free(cfg_path);

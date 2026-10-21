@@ -17,6 +17,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cuda = @import("cuda");
 const abi = cuda.abi;
+const testdir = @import("testdir.zig");
 
 pub const Caps = struct {
     device: u64 = std.math.maxInt(u64),
@@ -500,9 +501,13 @@ test "caps from the environment: absent is off; an unparsable value is 0, so it 
 }
 
 test "the receipt: caps as read back, current, peak and counts; rewritten after a refusal" {
-    const path = "/tmp/localrouter-memcap-receipt-test.json";
+    var tmp: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer tmp.deinit();
+    const dir = try testdir.make(std.testing.io, tmp.allocator(), "/tmp", "localrouter-memcap-receipt-test");
+    const path = try testdir.file(tmp.allocator(), dir, "receipt.json");
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1050 });
-    configure(.{ .device = 1000, .host = 100, .total = 1050 }, path);
+    configure(.{ .device = 1000, .host = 100, .total = 1050 }, path.ptr);
     defer configure(.{}, null);
     var a = try cuda.DeviceBuffer.alloc(&d, 600);
     defer a.free();
@@ -581,9 +586,13 @@ test "tracking fails and the give-back fails: the bytes stay counted and no furt
 }
 
 test "a registered range whose give-back fails latches too, and the receipt says so" {
-    const path = "/tmp/localrouter-memcap-rollback-test.json";
+    var tmp: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer tmp.deinit();
+    const dir = try testdir.make(std.testing.io, tmp.allocator(), "/tmp", "localrouter-memcap-rollback-test");
+    const path = try testdir.file(tmp.allocator(), dir, "receipt.json");
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1100 });
-    configure(.{ .device = 1000, .host = 100, .total = 1100 }, path);
+    configure(.{ .device = 1000, .host = 100, .total = 1100 }, path.ptr);
     defer configure(.{}, null);
     fail_track_for_test = true;
     Fake.fail_undo = true;
