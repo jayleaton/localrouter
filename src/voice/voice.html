@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalRouter voice</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f5; --fg: #1d1d1f; --muted: #6e6e73; --panel: #fff; --line: #d8d8dc;
+          --user: #e3ecf8; --bot: #ececee; --accent: #2d6cdf; --err: #c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161618; --fg: #e8e8ea; --muted: #9a9aa0; --panel: #1f1f22; --line: #343438;
+            --user: #22344f; --bot: #2a2a2e; --accent: #6b9cff; --err: #ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+         height: 100vh; }
+  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 auto 0 0; }
+  #status { color: var(--muted); }
+  #status::before { content: "\25CF"; margin-right: 6px; color: var(--line); }
+  #status[data-s="listening"]::before { color: #2e9e5b; }
+  #status[data-s="user speaking"]::before { color: var(--accent); }
+  #status[data-s="thinking"]::before { color: #d49b1f; }
+  #status[data-s="speaking"]::before { color: #b05ad6; }
+  button, input, select, textarea { font: inherit; color: inherit; background: var(--panel);
+                                    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .note { border: 1px solid var(--err); color: var(--err); border-radius: 8px; padding: 8px 12px; }
+  details { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  label.wide { grid-column: 1 / -1; }
+  textarea { min-height: 60px; resize: vertical; }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px; }
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .user { align-self: flex-end; background: var(--user); }
+  .assistant { align-self: flex-start; background: var(--bot); }
+  .partial { color: var(--muted); font-style: italic; }
+  .tag { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .sys { align-self: center; color: var(--muted); font-size: 13px; text-align: center; }
+  .sys.error { color: var(--err); }
+  .media { align-self: flex-start; display: flex; gap: 8px; flex-wrap: wrap; }
+  .media img { width: 160px; height: 160px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+  .media video { max-width: 360px; border-radius: 8px; }
+  form { display: flex; gap: 8px; }
+  form input { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>LocalRouter voice</h1>
+    <span id="status" data-s="disconnected">disconnected</span>
+    <button id="mute" disabled>Mute</button>
+    <button id="start" class="primary">Start</button>
+  </header>
+  <div id="insecure" class="note" hidden>This page is not a secure context, so the browser will not open the
+    microphone. Use https, or open it as http://127.0.0.1 on this machine.</div>
+  <details id="settings">
+    <summary>Settings</summary>
+    <div class="grid">
+      <label>Speech model <select id="speech"><option value="">default</option></select></label>
+      <label>Voice <select id="voice"><option value="">default</option></select></label>
+      <label>Chat model <input id="model" list="chats" placeholder="default"><datalist id="chats"></datalist></label>
+      <label>Silence before reply (ms) <input id="silence" type="number" min="100" max="5000" step="50" value="500"></label>
+      <label>VAD threshold <span id="thresholdv">0.5</span>
+        <input id="threshold" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+      <label class="wide">Instructions <textarea id="instructions" placeholder="the daemon's default"></textarea></label>
+    </div>
+  </details>
+  <div id="log" aria-live="polite"></div>
+  <form id="typed">
+    <input id="text" placeholder="Type a message" autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const RATE = 24000;
+
+const WORKLET = `
+class Pcm24k extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.step = sampleRate / ${RATE};
+    this.pos = 0;
+    this.last = 0;
+    this.fresh();
+  }
+  fresh() {
+    this.buf = new ArrayBuffer(1920);
+    this.view = new DataView(this.buf);
+    this.n = 0;
+  }
+  process(inputs) {
+    const chans = inputs[0];
+    if (!chans || !chans.length) return true;
+    const len = chans[0].length;
+    const mono = new Float32Array(len);
+    for (const c of chans) for (let i = 0; i < len; i++) mono[i] += c[i] / chans.length;
+    // positions index [last, mono[0], ..., mono[len-1]]
+    while (this.pos < len) {
+      const i = Math.floor(this.pos);
+      const a = i === 0 ? this.last : mono[i - 1];
+      const v = Math.max(-1, Math.min(1, a + (mono[i] - a) * (this.pos - i)));
+      this.view.setInt16(this.n * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      if (++this.n === 960) {
+        this.port.postMessage(this.buf, [this.buf]);
+        this.fresh();
+      }
+      this.pos += this.step;
+    }
+    this.pos -= len;
+    this.last = mono[len - 1];
+    return true;
+  }
+}
+registerProcessor('pcm24k', Pcm24k);
+`;
+
+let ws = null, ctx = null, mic = null, run = 0, muted = false;
+let userSpeaking = false, thinking = false;
+let live = [], nextTime = 0;
+const doneMs = new Map(), cut = new Set(), bubbles = new Map();
+let speechModels = [];
+let lastAssistant = null;
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function toB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function fromB64(s) {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function render() {
+  let s = 'listening';
+  if (!ws) s = 'disconnected';
+  else if (ws.readyState === WebSocket.CONNECTING) s = 'connecting';
+  else if (userSpeaking) s = 'user speaking';
+  else if (live.length) s = 'speaking';
+  else if (thinking) s = 'thinking';
+  $('status').textContent = s;
+  $('status').dataset.s = s;
+  $('start').textContent = ws ? 'Stop' : 'Start';
+  $('mute').disabled = !mic;
+  $('mute').textContent = muted ? 'Unmute' : 'Mute';
+}
+
+function add(el) {
+  const log = $('log');
+  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.append(el);
+  if (stick) log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function sys(text, error) {
+  return add(Object.assign(document.createElement('div'), { className: error ? 'sys error' : 'sys', textContent: text }));
+}
+
+function bubble(id, role) {
+  let b = id ? bubbles.get(id) : null;
+  if (!b) {
+    b = document.createElement('div');
+    b.className = 'msg ' + role;
+    b.text = b.appendChild(document.createElement('span'));
+    add(b);
+    if (id) bubbles.set(id, b);
+  }
+  return b;
+}
+
+function appendText(id, delta) {
+  if (!delta) return;
+  const b = bubble(id, 'assistant');
+  b.text.textContent += delta;
+  lastAssistant = id;
+  const log = $('log');
+  log.scrollTop = log.scrollHeight;
+}
+
+function interrupted(id) {
+  const b = id && bubbles.get(id);
+  if (!b || b.querySelector('.tag')) return;
+  b.append(Object.assign(document.createElement('span'), { className: 'tag', textContent: '(interrupted)' }));
+}
+
+function safeUrl(u) {
+  try {
+    const url = new URL(u, location.href);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function jobDone(ev) {
+  if (ev.status !== 'completed') {
+    sys(`${ev.kind || 'job'} ${ev.status || 'failed'}: ${ev.error || 'no reason given'}`, true);
+    return;
+  }
+  const box = Object.assign(document.createElement('div'), { className: 'media' });
+  for (const u of ev.urls || []) {
+    const href = safeUrl(u);
+    if (!href) continue;
+    if (ev.kind === 'video') {
+      const v = box.appendChild(document.createElement('video'));
+      v.controls = true;
+      v.src = href;
+    } else {
+      const a = box.appendChild(Object.assign(document.createElement('a'), { href, target: '_blank', rel: 'noopener' }));
+      a.append(Object.assign(document.createElement('img'), { src: href, alt: 'generated image' }));
+    }
+  }
+  add(box);
+}
+
+function playedMs(item, now) {
+  let ms = doneMs.get(item) || 0;
+  for (const e of live) if (e.item === item) ms += Math.min(Math.max(now - e.start, 0), e.dur) * 1000;
+  return ms;
+}
+
+function silence() {
+  for (const e of live) {
+    e.src.onended = null;
+    try { e.src.stop(); } catch {}
+  }
+  live = [];
+  nextTime = 0;
+}
+
+function play(item, b64) {
+  if (!ctx || cut.has(item)) return;
+  const bytes = fromB64(b64);
+  const n = bytes.length >> 1;
+  if (!n) return;
+  const view = new DataView(bytes.buffer);
+  const buf = ctx.createBuffer(1, n, RATE);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  const start = Math.max(ctx.currentTime + 0.05, nextTime);
+  src.start(start);
+  nextTime = start + buf.duration;
+  const e = { src, item, start, dur: buf.duration };
+  live.push(e);
+  src.onended = () => {
+    const i = live.indexOf(e);
+    if (i >= 0) live.splice(i, 1);
+    doneMs.set(item, (doneMs.get(item) || 0) + e.dur * 1000);
+    render();
+  };
+}
+
+function bargeIn() {
+  if (!live.length) return;
+  const now = ctx.currentTime;
+  const item = (live.find(e => e.start <= now) || live[0]).item;
+  const ms = Math.floor(playedMs(item, now));
+  silence();
+  cut.add(item);
+  send({ type: 'conversation.item.truncate', item_id: item, content_index: 0, audio_end_ms: ms });
+}
+
+function handle(ev) {
+  switch (ev.type) {
+    case 'input_audio_buffer.speech_started':
+      userSpeaking = true;
+      bargeIn();
+      break;
+    case 'input_audio_buffer.speech_stopped':
+      userSpeaking = false;
+      break;
+    case 'input_audio_buffer.committed':
+      thinking = true;
+      break;
+    case 'localrouter.transcription.partial': {
+      const b = bubble(ev.item_id, 'user');
+      if (!b.final) {
+        b.text.textContent = ev.transcript || '';
+        b.classList.add('partial');
+      }
+      break;
+    }
+    case 'conversation.item.input_audio_transcription.completed': {
+      const b = bubble(ev.item_id, 'user');
+      b.final = true;
+      b.text.textContent = ev.transcript || '';
+      b.classList.remove('partial');
+      b.hidden = !ev.transcript;
+      break;
+    }
+    case 'response.audio_transcript.delta':
+    case 'response.text.delta':
+      thinking = false;
+      appendText(ev.item_id, ev.delta);
+      break;
+    case 'response.audio.delta':
+      thinking = false;
+      play(ev.item_id, ev.delta);
+      break;
+    case 'response.output_item.done':
+      if (ev.item && ev.item.type === 'function_call') sys(`calling ${ev.item.name}(${ev.item.arguments || ''})`);
+      break;
+    case 'response.done': {
+      thinking = false;
+      const r = ev.response || {};
+      if (r.status === 'cancelled') {
+        const ids = (r.output || []).filter(o => o.type === 'message').map(o => o.id);
+        (ids.length ? ids : [lastAssistant]).forEach(interrupted);
+      }
+      break;
+    }
+    case 'error':
+      sys((ev.error && ev.error.message) || 'error', true);
+      break;
+    case 'localrouter.job.done':
+      jobDone(ev);
+      break;
+  }
+  render();
+}
+
+function sessionUpdate() {
+  const s = {
+    modalities: ['audio', 'text'],
+    turn_detection: { type: 'server_vad', threshold: Number($('threshold').value),
+                      silence_duration_ms: Number($('silence').value) || 500, prefix_padding_ms: 300 },
+  };
+  if ($('voice').value) s.voice = $('voice').value;
+  if ($('speech').value) s.speech_model = $('speech').value;
+  const instructions = $('instructions').value.trim();
+  if (instructions) s.instructions = instructions;
+  const model = $('model').value.trim();
+  if (model) s.model = model;
+  send({ type: 'session.update', session: s });
+}
+
+async function openMic(my) {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (my !== run) return stream.getTracks().forEach(t => t.stop());
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+    try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+    if (my !== run) return stream.getTracks().forEach(t => t.stop());
+    const node = new AudioWorkletNode(ctx, 'pcm24k', { numberOfInputs: 1, numberOfOutputs: 1 });
+    node.port.onmessage = e => { if (!muted) send({ type: 'input_audio_buffer.append', audio: toB64(new Uint8Array(e.data)) }); };
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    ctx.createMediaStreamSource(stream).connect(node);
+    node.connect(sink).connect(ctx.destination);
+    mic = stream;
+  } catch (err) {
+    if (my === run) sys(`microphone unavailable (${err.message}); typed messages still work`, true);
+  }
+}
+
+function start() {
+  const my = ++run;
+  ctx = new AudioContext();
+  ctx.resume();
+  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/realtime', ['realtime']);
+  ws = sock;
+  sock.onopen = () => { sessionUpdate(); render(); };
+  sock.onmessage = e => { if (ws === sock) handle(JSON.parse(e.data)); };
+  sock.onclose = e => {
+    if (ws !== sock) return;
+    sys(`connection closed${e.reason ? ': ' + e.reason : ''}`, e.code !== 1000);
+    stop();
+  };
+  openMic(my).then(render);
+  render();
+}
+
+function stop() {
+  run++;
+  if (ws) {
+    const sock = ws;
+    ws = null;
+    sock.onclose = null;
+    sock.close();
+  }
+  silence();
+  if (mic) mic.getTracks().forEach(t => t.stop());
+  mic = null;
+  if (ctx) ctx.close();
+  ctx = null;
+  userSpeaking = thinking = false;
+  render();
+}
+
+function fill(sel, pairs, chosen) {
+  sel.replaceChildren(...pairs.map(([value, label]) => {
+    return Object.assign(document.createElement('option'), { value, textContent: label, selected: value === chosen });
+  }));
+}
+
+function fillVoices() {
+  const id = $('speech').value;
+  const m = speechModels.find(x => x.id === id) || speechModels.find(x => (x.default_for || []).length) || speechModels[0];
+  const voices = ((m && m.voices) || []).map(v => (typeof v === 'string' ? v : v && (v.id || v.name))).filter(Boolean);
+  fill($('voice'), [['', 'default'], ...voices.map(v => [v, v])], (m && m.default_voice) || '');
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch('/v1/models');
+    const list = (await r.json()).data || [];
+    speechModels = list.filter(m => m.kind === 'speech');
+    fill($('speech'), [['', 'default'], ...speechModels.map(m => [m.id, m.name || m.id])], '');
+    fill($('chats'), list.filter(m => m.kind === 'chat').map(m => [m.id, m.name || m.id]));
+    fillVoices();
+  } catch (err) {
+    sys(`could not list models: ${err.message}`, true);
+  }
+}
+
+$('start').onclick = () => (ws ? stop() : start());
+$('mute').onclick = () => { muted = !muted; render(); };
+$('threshold').oninput = () => { $('thresholdv').textContent = $('threshold').value; };
+$('settings').addEventListener('change', e => {
+  if (e.target.id === 'speech') fillVoices();
+  sessionUpdate();
+});
+$('typed').onsubmit = e => {
+  e.preventDefault();
+  const text = $('text').value.trim();
+  if (!text) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return sys('press Start first', true);
+  bubble(null, 'user').text.textContent = text;
+  send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  send({ type: 'response.create' });
+  thinking = true;
+  $('text').value = '';
+  render();
+};
+$('insecure').hidden = window.isSecureContext;
+loadModels();
+render();
+</script>
+</body>
+</html>

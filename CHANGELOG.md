@@ -26,6 +26,19 @@
   trailers; a stream that fails after it started ends without its last chunk. `references` (voice references) for
   models that take them, over HTTP and MCP. Workers may refuse with `service_unavailable` (503) and report
   `finish_reason` and `segments`.
+
+- Voice: a full-duplex conversation on `GET /v1/realtime`, a WebSocket speaking the OpenAI Realtime API's events
+  (pcm16 24 kHz in and out), and a built-in browser client at `/voice`. Server VAD ends each turn; the turn is
+  transcribed (partials while speaking), sent with the session's history to the chat model (OpenAI streaming
+  `/v1/chat/completions` at `voice.chat_url`, this daemon's own by default), and spoken back sentence by sentence.
+  Talking over the assistant stops its audio within the chunk that crossed the threshold and cancels the chat stream.
+  The chat model can call `generate_image` and `generate_video`; the job's file URLs come back as
+  `localrouter.job.done` and the assistant confirms aloud. Loopback peers only unless `voice.remote`
+  (docs/dev/VOICE.md).
+- Scheduler lanes: a second executor, `realtime`, runs speech and transcription tools (by default; `lane` in a tool's
+  config) beside image, video and chat jobs, so a TTS sentence never waits for a whole reply or a video. Residency
+  changes stay serialized across lanes and admitted-but-unallocated memory is held back from MemAvailable.
+  `/v1/tools` lists each tool's `lane`.
 - Speech: two new kinds, `speech` (`text_to_speech`) and `transcription` (`speech_to_text`), behind OpenAI's
   `POST /v1/audio/speech` (wav, pcm, flac, mp3, opus, aac) and `POST /v1/audio/transcriptions` (json, text,
   verbose_json, srt, vtt; segment and word timestamps), and the MCP tools `synthesize_speech` and `transcribe_audio`.
