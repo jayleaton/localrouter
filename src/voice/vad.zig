@@ -8,11 +8,12 @@ pub const Config = struct {
     prefix_padding_ms: u32 = 300, // speech_started reports the onset this much earlier
     silence_duration_ms: u32 = 500, // quiet after speech that ends the turn
     min_speech_ms: u32 = 60, // loud audio in a row before speech starts
+    pause_ms: u32 = 0, // quiet after speech that reports speech_paused, once a quiet run (a draft transcript); 0: never
 };
 
-pub const Kind = enum { speech_started, speech_stopped };
+pub const Kind = enum { speech_started, speech_paused, speech_stopped };
 
-/// A turn boundary at `ms` into the audio fed so far.
+/// A turn boundary at `ms` into the audio fed so far (speech_paused: where the quiet began).
 pub const Event = struct { kind: Kind, ms: u64 };
 
 const frame_ms = 20;
@@ -30,6 +31,7 @@ pub const Vad = struct {
     margin: f32, // dB over the floor for a loud frame
     speech_frames: u32, // loud frames in a row that start speech
     silence_frames: u32, // quiet frames in a row that stop it
+    pause_frames: u32, // quiet frames in a row that report a pause; 0: none
     floor: f32 = floor_start,
     fed: u64 = 0, // samples fed
     acc: u64 = 0, // sum of squares of the partial frame
@@ -50,6 +52,7 @@ pub const Vad = struct {
             .margin = 6 + 24 * t,
             .speech_frames = @max((cfg.min_speech_ms + frame_ms - 1) / frame_ms, 1),
             .silence_frames = @max((cfg.silence_duration_ms + frame_ms - 1) / frame_ms, 1),
+            .pause_frames = (cfg.pause_ms + frame_ms - 1) / frame_ms,
         };
     }
 
@@ -74,6 +77,17 @@ pub const Vad = struct {
         return v.active;
     }
 
+    /// Where the current quiet run began (ms into the audio fed), while a turn is in progress and quiet.
+    pub fn quietSince(v: *const Vad) ?u64 {
+        if (!v.active or v.quiet_run == 0) return null;
+        return v.msAtFrame(v.frames - v.quiet_run);
+    }
+
+    /// The quiet that ends a turn, in ms.
+    pub fn silenceMs(v: *const Vad) u64 {
+        return v.msAtFrame(v.silence_frames);
+    }
+
     /// Back to silence (after input_audio_buffer.clear or a manual commit); the noise floor is kept.
     pub fn reset(v: *Vad) void {
         v.active = false;
@@ -95,6 +109,7 @@ pub const Vad = struct {
         v.frames += 1;
         if (v.active) {
             v.quiet_run = if (loud) 0 else v.quiet_run + 1;
+            if (v.pause_frames > 0 and v.quiet_run == v.pause_frames and v.pause_frames < v.silence_frames) try out.append(gpa, .{ .kind = .speech_paused, .ms = v.msAtFrame(v.frames - v.quiet_run) });
             if (v.quiet_run >= v.silence_frames) {
                 v.reset();
                 try out.append(gpa, .{ .kind = .speech_stopped, .ms = v.msAtFrame(v.frames) });
@@ -176,6 +191,25 @@ test "a tone then silence is one turn; odd chunk sizes give the same events" {
     defer b.deinit(gpa);
     try run(buf.items, 37, &b);
     try std.testing.expectEqualSlices(Event, a.items, b.items);
+}
+
+test "pause_ms reports each quiet run once, at where it began; quietSince follows it" {
+    const gpa = std.testing.allocator;
+    var buf: std.ArrayList(i16) = .empty;
+    defer buf.deinit(gpa);
+    try tone(&buf, 600, null);
+    try quiet(&buf, 200, null); // a pause, then more speech
+    try tone(&buf, 400, null);
+    try quiet(&buf, 800, null);
+    var v: Vad = .init(.{ .pause_ms = 150 }, test_rate);
+    var ev: std.ArrayList(Event) = .empty;
+    defer ev.deinit(gpa);
+    try v.feed(gpa, buf.items[0 .. 700 * test_rate / 1000], &ev);
+    try std.testing.expect(@max(v.quietSince().?, 600) - @min(v.quietSince().?, 600) <= 20);
+    try v.feed(gpa, buf.items[700 * test_rate / 1000 ..], &ev);
+    try std.testing.expectEqual(@as(?u64, null), v.quietSince());
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_paused, .ms = 600 }, .{ .kind = .speech_paused, .ms = 1200 }, .{ .kind = .speech_stopped, .ms = 1700 } }, ev.items);
+    try std.testing.expectEqual(@as(u64, 500), v.silenceMs());
 }
 
 test "a click shorter than min_speech_ms is ignored" {

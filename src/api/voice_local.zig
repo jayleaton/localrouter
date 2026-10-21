@@ -89,12 +89,18 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     const tool = routes.resolve(app, named(o.model, app.cfg.voice.transcription_model), .speech_to_text, &ref) orelse return failed(why, ref.message);
     const wav = audio.wav(a, 16_000, 1, try resample.toLe(a, pcm16k)) catch return error.OutOfMemory;
     const lang = try std.ascii.allocLowerString(a, std.mem.trim(u8, o.language, " "));
-    const r: request.Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = pcm16k.len / 16, .language = lang, .prompt = o.prompt, .seed = routes.randomSeed(app.io) } };
+    const r: request.Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = pcm16k.len / 16, .language = lang, .prompt = o.prompt, .seed = routes.randomSeed(app.io), .decode = if (o.greedy) .greedy else null } };
     const j = routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = wav }}, &ref) orelse return failed(why, ref.message);
     try wait(app, j, stop);
     defer forget(app, j);
     if (j.status != .completed) return failed(why, j.error_message);
+    if (o.worker_ms) |p| p.* = j.ms;
     const t = speech.readTranscript(app, a, j, &ref) orelse return failed(why, ref.message);
+    if (o.detected) |p| {
+        if (t.get("language")) |found| {
+            if (found == .string) p.* = try a.dupe(u8, found.string);
+        }
+    }
     const text = t.get("text") orelse return "";
     return if (text == .string) try a.dupe(u8, text.string) else "";
 }

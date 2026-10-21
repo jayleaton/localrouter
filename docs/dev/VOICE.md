@@ -32,10 +32,10 @@ When the user starts talking over the assistant, playback stops and the chat gen
 | VAD | Energy based, in the daemon, per 20 ms frame against an adaptive noise floor. `threshold` (0 to 1) sets the margin over the floor (6 + 24 x threshold dB); `prefix_padding_ms` and `silence_duration_ms` as OpenAI's `server_vad`. `turn_detection: null` is push-to-talk (`input_audio_buffer.commit`) | Runs on the reader thread in microseconds, so barge-in needs no model and no GPU. Whisper's own Silero gate still drops non-speech from transcripts. Echo is the browser's job (`echoCancellation`) |
 | Barge-in | On `speech_started` during a response, on the reader thread: the response is marked cancelled, the chat stream's socket is shut down, queued TTS jobs are dropped, the speech job in progress is ended in its worker when the worker offers the soft cancel (`"cancel":"signal"` in its load reply: SIGUSR1, no reload), and no further audio is sent. `response.done` reports `cancelled` / `turn_detected` | Within the audio chunk that crossed the threshold. A TTS job already running finishes and is discarded: killing its worker would cost a reload on the next turn |
 | History | Per session: the system `instructions`, then user, assistant, tool-call and tool-result messages. An interrupted reply keeps only the sentences whose audio was sent, and `conversation.item.truncate` cuts it to what was played. The oldest turns are dropped past `max_history_chars` | The model sees what the user actually heard |
-| STT | The final transcript runs on the whole turn when VAD commits it. While the user speaks, a partial can run every `partial_interval_ms` of new speech (default 0, off: on one Whisper a partial in flight holds the final back by a whole decode), never more than one at a time, reported as `localrouter.transcription.partial` | Whisper is not a streaming model; re-running it on the growing turn is the standard way to get partials. Partials replace each other, so they are not OpenAI's append-only `delta` |
-| Chat | OpenAI `/v1/chat/completions` with `stream: true`, behind `voice.Chat` (`src/voice/chat.zig`). `voice.chat_url` defaults to this daemon's own `/v1`, so the chat tool works the day it lands; any OpenAI-compatible server works too | One contract, no coupling to how the chat model is served |
+| STT | The final transcript runs on the whole turn when VAD commits it. When the speaker has been quiet for `voice.draft_after_ms` (100), a draft transcript of the turn so far starts; if the turn ends on that same pause, the draft is the final transcript (no second decode), and a draft that ends a sentence (. ! ?) ends the turn after `voice.early_end_ms` (300) of quiet instead of `silence_duration_ms`. A session that sets no `language` transcribes in the language its last transcript was in, so only its first turn pays Whisper's detection pass. Voice turns decode in one greedy pass (`voice.greedy_transcripts`, the worker's request `decode: "greedy"`: the same model, precision, timestamps and Silero gate, without the temperature fallback's bookkeeping); the HTTP API keeps the model card's recipe. On DGX-01 the two gave identical transcripts on every qualify fixture and e2e prompt, in both auto and fixed language, and greedy was about 135 ms faster on a voice turn. The Whisper worker decodes a second of silence once after loading, so the first turn after a reload is not cold (1.1 s cold, 0.36 s warm); and when the session's STT has been idle for 20 s (another model's job may have run meanwhile: the first decode after a video took 1.7 s), the session transcribes a second of silence as soon as someone starts speaking, while they talk. While the user speaks, a partial can run every `partial_interval_ms` of new speech (default 0, off: on one Whisper a partial in flight holds the final back by a whole decode), never more than one at a time, reported as `localrouter.transcription.partial` | Whisper is not a streaming model; re-running it on the growing turn is the standard way to get partials. Partials replace each other, so they are not OpenAI's append-only `delta`. The draft hides the decode behind the hangover; the sentence-end rule shortens the hangover only where cutting in is unlikely, and a pause between two sentences of one request still has to outlast the decode |
+| Chat | OpenAI `/v1/chat/completions` with `stream: true`, behind `voice.Chat` (`src/voice/chat.zig`). `voice.chat_url` defaults to this daemon's own `/v1`, so the chat tool works the day it lands; any OpenAI-compatible server works too. At the session's start and after each response the session primes the chat server (`voice.prime_chat`): the conversation as the next turn's request will begin it, with `max_tokens` 1 and the reply discarded, so that request finds it in the server's prefix cache | One contract, no coupling to how the chat model is served. Priming keeps the first token of the next turn from paying for the history after a new assistant message or a barge-in |
 | TTS | A sentence chunker over the streamed text; one speech job a chunk; the first chunk may end at a clause (a comma after 24 characters). Within a sentence the audio is streamed: the session tails the job's `speech.wav` as the model writes it, resamples it piece by piece (`resample.Stream`, the same samples as the whole) and sends 40 to 100 ms deltas | First audio when the model's first audio exists, not after the whole reply or sentence |
-| Leaked reasoning | `<think>…</think>` spans are dropped from the stream (`chunker.ThinkFilter`). A reply's start is also held (`chunker.Lead`) until its first sentence has 24 characters after it: a `</think>` that was never opened (a model writing its reasoning as plain text) drops everything before it, and later stray tags are removed. Send the server's own switch too (`voice.chat_extra`, e.g. `{"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}` for TensorFold's Qwen) | Measured on DGX-01: with thinking off, Qwen3.8-27B still answered "The capital of France is Paris.\n</think>\n\nThe capital of France is Paris." once; the voice must neither say the tag nor the answer twice |
+| Leaked reasoning | `<think>…</think>` spans are dropped from the stream (`chunker.ThinkFilter`). A reply's start is also held (`chunker.Lead`) until text follows its first sentence end, or a clause mark 24 or more characters in (where the chunker may end the first chunk), that is not and cannot become `</think>` (about one token): a `</think>` that was never opened (a model writing its reasoning as plain text) drops everything before it, and later stray tags are removed. Send the server's own switch too (`voice.chat_extra`, e.g. `{"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}` for TensorFold's Qwen) | Measured on DGX-01: with thinking off, Qwen3.8-27B still answered "The capital of France is Paris.\n</think>\n\nThe capital of France is Paris." once; the voice must neither say the tag nor the answer twice |
 | Lanes | The scheduler gets more executors: `realtime` for speech and `listen` for transcription (a tool's `lane` overrides its kind's default; with the chat kind of #14, chat gets its own). Residency changes (admission, eviction, loads) are serialized across lanes; memory admitted but not yet visible in MemAvailable is held back | With one executor a streaming chat job would hold the GPU queue, and sentence 1's TTS would wait for the whole reply. A turn's transcript must not wait behind a sentence of speech either (measured on DGX-01: the barge-in turn's transcript 6.1 s after speech end on a shared lane, 2.3 s on its own) |
 | Tools | The chat model is offered `generate_image` and `generate_video` (when such models exist; `voice.tools`). A call queues a normal LocalRouter job; the session waits for it in the background, sends `localrouter.job.done` with the file URLs, adds the result to the history and creates a response so the assistant confirms it aloud. Client-defined `tools` follow OpenAI's flow (the client returns `function_call_output`) | The conversation continues while the job runs; files are ordinary `/v1/files/...` outputs |
 | Client | `/voice`: one HTML file with inline JS, embedded in the binary. Mic through an AudioWorklet at 24 kHz, playback scheduled gap-free, flushed on `speech_started` | No build step. `getUserMedia` needs a secure context: `http://127.0.0.1` is one; remote use needs HTTPS in front |
@@ -55,7 +55,7 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 ```json
 {"voice": {"remote": false, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
            "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
-           "partial_interval_ms": 0, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
+           "partial_interval_ms": 0, "draft_after_ms": 100, "early_end_ms": 300, "prime_chat": true, "greedy_transcripts": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
 ```
 
 A Jarvis box keeps the three voice models warm above the image and video models, so a picture or a clip evicts
@@ -170,6 +170,41 @@ voiced sample. The table covers seven turns, with the warm-up left out of the st
   - **Did the server switch alone fix it?** Unknown. The leak did not reproduce in 20 + 20 streamed requests, with
     thinking off only and with `reasoning_effort: none` added. Those probe requests carried no tools, while the one
     observed leak happened in a voice request that did. The hold stays as the guard.
+
+### First spoken word under 1 s (DGX-01, 2026-10-21)
+
+Times run from the end of the user's speech to the first non-silent reply audio, as heard by the client. They are
+the median over the six turns after the warm-up, and the p90 over the five turns without a tool call. The models,
+precision and transcripts are unchanged from the baseline; every transcript in the after run was byte-identical
+to the before run's.
+
+| | before (`4011b7e0`) | after (`369808d8`) |
+| --- | ---: | ---: |
+| **first non-silent audio, median** | **2172 ms** | **961 ms** |
+| **p90, turns without a tool call** | **2389 ms** | **981 ms** |
+| checks | 31 of 33 (both latency checks failed) | 33 of 33 |
+
+Stage medians in ms; a negative `stt_wait` means the transcript was started before the turn ended:
+
+| stage | before | after | what changed |
+| --- | ---: | ---: | --- |
+| VAD end of turn | 484 | 349 | the draft's sentence end ends the turn after 300 ms of quiet, not 500 |
+| STT wait | 0 | -263 | the draft starts after 100 ms of quiet and becomes the final transcript |
+| STT | 888 | 252 | fixed or sticky language (no detection pass), 4 CPU threads, greedy decode, Silero run alongside generate(), memoized resampler |
+| chat first token | 182 | 184 | (cold turns: the prime cut the warm-up's 716 to 164, the capital turn stayed 388) |
+| to first text for TTS | 286 | 183 | the lead hold releases one token past the first clause or sentence |
+| TTS first samples | 128 | 131 | |
+| delivery and leading silence | 2 + 15 | 2 + 9 | |
+
+Barge-in still cancelled the answer 41 ms after `speech_started`, with no audio after it. The eviction case
+passed: Drama 3 was back 8.0 s after the clip, with the ballast held. The leak checks (no `think>`, no repeated
+first sentence) passed.
+
+Card recipe against greedy, on the same loaded model: identical transcripts on all 21 qualify fixtures that hold
+speech or silence, including the codec variants, and on the 8 e2e prompts, each in auto and fixed language
+(56 pairs; silence and noise in auto only). The median e2e prompt took 362 ms with the recipe and 265 ms greedy. drama-tensorfold's 0.14 s figure is
+TTS alone: request start to the first streamed codec frame, warm (`bench/drama_bench.py --stream`). Here that stage
+is `TTS first samples`, about 130 ms.
 
 ## Tests
 

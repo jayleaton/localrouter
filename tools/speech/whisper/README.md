@@ -79,6 +79,14 @@ gen_kwargs = {
   on it; it is left unset so the generation config's `max_length` (448 tokens in all) bounds each window.
 * `temperature` 0 (the default) uses the fallback tuple, as OpenAI's transcription API documents for 0; a request
   temperature above 0 samples at that one temperature. Sampling is seeded with `torch.manual_seed(seed)`.
+* `decode: "greedy"` (opt-in; the voice loop sends it, the HTTP API does not) decodes once at temperature 0 without
+  the fallback's thresholds, so no per-step scores are kept; the rest of the recipe, the timestamps and the gate are
+  the same. On GB10 it gave the same transcripts as the recipe on every fixture here and on the voice e2e prompts,
+  about 135 ms sooner on a voice turn. It refuses `temperature` above 0 and `debug`.
+* After loading, the worker decodes a second of silence once and discards it: the first request would otherwise pay
+  the first-call CUDA setup (on GB10, 1.1 s against 0.36 s warm).
+* The gate's Silero intervals are computed in a thread while `generate()` runs on the GPU (they depend on the samples
+  only), so the gate adds about 50 ms less to a request; the transcript is the same.
 * `return_timestamps=True` always (one decode whatever the response format), so `segments` are always written;
   `timestamps: "word"` adds `return_token_timestamps=True` (the ASR pipeline's `return_timestamps="word"` mechanism,
   cross-attention DTW over the generation config's `alignment_heads`) and groups tokens into words the way the

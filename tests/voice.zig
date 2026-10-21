@@ -169,7 +169,7 @@ fn countType(seen: []const std.json.Value, typ: []const u8) usize {
 }
 
 fn config(a: std.mem.Allocator, chat_port: u16) ![]const u8 {
-    return std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"voice\": {{\"chat_url\": \"http://127.0.0.1:{d}/v1\", \"partial_interval_ms\": 0}}, \"tools\": [" ++
+    return std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"voice\": {{\"chat_url\": \"http://127.0.0.1:{d}/v1\", \"partial_interval_ms\": 0, \"prime_chat\": false}}, \"tools\": [" ++
         "{{\"id\": \"ears\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50," ++
         " \"options\": {{\"phrases\": [{{\"hz\": 440, \"text\": \"hello there\"}}, {{\"hz\": 660, \"text\": \"tell me something slow\"}}, {{\"hz\": 880, \"text\": \"make me a picture of a fox\"}}]}}}}," ++
         "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50, \"options\": {{\"voices\": [\"plain\", \"bright\"], \"default_voice\": \"plain\", \"speak_ms\": 300}}}}," ++

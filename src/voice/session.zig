@@ -18,6 +18,7 @@ const Value = std.json.Value;
 pub const rate: u32 = 24_000; // pcm16 in and out
 const keep_silence_ms: u64 = 500; // audio kept before an onset beyond prefix_padding_ms, while nobody speaks
 const max_buffer_ms: u64 = 10 * 60 * 1000; // a manual turn longer than this is refused
+const warm_idle_ns: i96 = 20 * std.time.ns_per_s; // STT idle this long: warm it when someone starts speaking
 
 pub const Kind = enum { user, assistant, system, function_call, function_call_output };
 
@@ -40,24 +41,44 @@ pub const Item = struct {
 
 pub const Task = union(enum) {
     partial: Hearing,
+    draft: Hearing,
     final: Hearing,
     respond: Ask,
+    warm: void, // a throwaway transcription of silence: speech started after the STT model sat idle
 
-    pub const Hearing = struct { item_id: []u8, pcm: []i16 };
+    /// key: the draft's quiet run (session ms where it began); for a final, the draft it may reuse (0: none).
+    pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
     pub const Ask = struct { auto: bool, instructions: ?[]u8 = null, audio: ?bool = null };
 
     pub fn free(t: Task, gpa: std.mem.Allocator) void {
         switch (t) {
-            .partial, .final => |h| {
+            .partial, .draft, .final => |h| {
                 gpa.free(h.item_id);
                 gpa.free(h.pcm);
             },
             .respond => |r| if (r.instructions) |i| gpa.free(i),
+            .warm => {},
         }
     }
 };
 
 const Turn = struct { item_id: []u8, start_ms: u64, partial_ms: u64 };
+
+/// A transcript of the turn so far, made when the speaker paused: if the pause is the turn's end, the turn's final
+/// transcript is this one, already done, and one that ends a sentence ends the turn early.
+pub const Draft = struct {
+    item_id: []u8,
+    key: u64, // session ms where the pause began
+    text: ?[]u8 = null, // null while being transcribed, or if that failed
+    start_ns: i96 = 0,
+    end_ns: i96 = 0,
+    worker_ms: u64 = 0,
+
+    fn free(d: Draft, gpa: std.mem.Allocator) void {
+        gpa.free(d.item_id);
+        if (d.text) |t| gpa.free(t);
+    }
+};
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -86,6 +107,19 @@ pub const Session = struct {
     fresh: bool = false, // something to answer arrived since the last response
     waiters: std.ArrayList(std.Thread) = .empty,
     close_stop: Stop = .{}, // set when the session closes: ends transcriptions and tool waits
+    // The last spoken turn's marks (awake-clock ns; 0: none), for the timing of the response that answers it.
+    stop_ns: i96 = 0, // VAD ended the turn
+    stt_start_ns: i96 = 0,
+    stt_end_ns: i96 = 0,
+    stt_worker_ms: u64 = 0, // the transcription as the worker timed it
+    early_end: bool = false, // the turn ended on its draft's sentence end
+    stt_draft: bool = false, // its final transcript is the draft made when the speaker paused
+    last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
+    primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
+    priming: bool = false,
+    draft: ?Draft = null,
+    language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
+    language_len: usize = 0,
 
     /// A session; it sends session.created and starts its worker.
     pub fn create(gpa: std.mem.Allocator, io: Io, b: backend.Backend, out: backend.Out, voice: config.Voice, chat_model: []const u8) !*Session {
@@ -105,6 +139,9 @@ pub const Session = struct {
         defer tmp.deinit();
         s.emit.send(tmp.allocator(), "session.created", .{ .session = try events.sessionObject(tmp.allocator(), s.id, &s.settings) });
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
+        s.mutex.lockUncancelable(io);
+        respond.prime(s); // the system prompt and tools, before the first turn needs them
+        s.mutex.unlock(io);
         return s;
     }
 
@@ -117,6 +154,7 @@ pub const Session = struct {
         s.mutex.unlock(s.io);
         s.close_stop.set(s.io);
         if (s.worker) |t| t.join();
+        if (s.primer) |t| t.join(); // the worker has finished: no response can start another
         for (s.waiters.items) |t| t.join();
         s.waiters.deinit(s.gpa);
         for (s.tasks.items) |t| t.free(s.gpa);
@@ -125,6 +163,7 @@ pub const Session = struct {
         s.items.deinit(s.gpa);
         s.input.deinit(s.gpa);
         if (s.turn) |t| s.gpa.free(t.item_id);
+        s.dropDraft();
         s.settings_arena.deinit();
         s.gpa.free(s.id);
         s.gpa.destroy(s);
@@ -161,6 +200,7 @@ pub const Session = struct {
             s.input.clearRetainingCapacity();
             s.input_start_ms = s.nowMs();
             s.endTurn();
+            s.dropDraft();
             if (s.detector) |*d| d.reset();
             return s.emit.send(a, "input_audio_buffer.cleared", .{});
         }
@@ -205,7 +245,7 @@ pub const Session = struct {
     }
 
     fn resetDetector(s: *Session) void {
-        s.detector = if (s.settings.vad) |c| vad.Vad.init(c, rate) else null;
+        s.detector = if (s.settings.vad) |c| vad.Vad.init(withPause(c, s.voice.draft_after_ms), rate) else null;
         s.detector_ms = s.nowMs();
     }
 
@@ -231,10 +271,17 @@ pub const Session = struct {
         try s.detector.?.feed(a, pcm, &evs);
         for (evs.items) |e| switch (e.kind) {
             .speech_started => try s.speechStarted(a, s.detector_ms + e.ms),
-            .speech_stopped => try s.speechStopped(a, s.detector_ms + e.ms),
+            .speech_paused => try s.speechPaused(s.detector_ms + e.ms),
+            .speech_stopped => try s.speechStopped(a, s.detector_ms + e.ms, s.reusable(s.detector_ms + e.ms), false),
         };
         if (s.turn == null and !s.detector.?.speaking()) s.trimSilence();
         try s.maybePartial();
+        try s.maybeEndEarly(a);
+    }
+
+    /// The awake clock, in ns (stage timings).
+    pub fn clock(s: *const Session) i96 {
+        return Io.Clock.awake.now(s.io).toNanoseconds();
     }
 
     /// Session milliseconds of audio received so far.
@@ -271,6 +318,11 @@ pub const Session = struct {
         const id = try s.newId(s.gpa, "item");
         s.turn = .{ .item_id = id, .start_ms = @max(ms, s.input_start_ms), .partial_ms = ms };
         s.emit.send(a, "input_audio_buffer.speech_started", .{ .audio_start_ms = ms, .item_id = id });
+        if (s.last_heard_ns == 0 or s.clock() - s.last_heard_ns > warm_idle_ns) { // on GB10 the first decode after
+            // a load or another model's job took 1.1 to 1.7 s, against 0.3 s warm: pay it while the user still talks
+            s.last_heard_ns = s.clock();
+            try s.push(.warm);
+        }
         if (!s.settings.interrupt_response) return;
         if (s.resp != null) s.cancelResponse("turn_detected");
         var i: usize = 0;
@@ -281,12 +333,102 @@ pub const Session = struct {
         }
     }
 
-    fn speechStopped(s: *Session, a: std.mem.Allocator, ms: u64) !void {
+    /// The turn ends at `ms`; its final transcript is the draft `key` (0: none), `early` on that draft's sentence end.
+    fn speechStopped(s: *Session, a: std.mem.Allocator, ms: u64, key: u64, early: bool) !void {
         const t = s.turn orelse return;
+        if (key == 0) s.dropDraft();
         s.emit.send(a, "input_audio_buffer.speech_stopped", .{ .audio_end_ms = ms, .item_id = t.item_id });
-        try s.commit(a, t.item_id, t.start_ms, ms);
+        s.stop_ns = s.clock();
+        s.early_end = early;
+        try s.commit(a, t.item_id, t.start_ms, ms, key);
         s.endTurn();
         if (s.settings.create_response) try s.push(.{ .respond = .{ .auto = true } });
+    }
+
+    /// The speaker paused: a draft transcript of the turn so far, on the worker.
+    fn speechPaused(s: *Session, ms: u64) !void {
+        const t = s.turn orelse return;
+        s.dropDraft();
+        const pcm = try s.gpa.dupe(i16, s.span(t.start_ms, s.nowMs()));
+        errdefer s.gpa.free(pcm);
+        const id = try s.gpa.dupe(u8, t.item_id);
+        errdefer s.gpa.free(id);
+        const mine = try s.gpa.dupe(u8, t.item_id);
+        errdefer s.gpa.free(mine);
+        try s.push(.{ .draft = .{ .item_id = id, .pcm = pcm, .key = ms } });
+        s.draft = .{ .item_id = mine, .key = ms };
+    }
+
+    /// Whether the draft `d` is of the open turn and nobody spoke since it began.
+    fn holds(s: *Session, d: Draft) bool {
+        const t = s.turn orelse return false;
+        const since = (s.detector orelse return false).quietSince() orelse return false;
+        return eql(t.item_id, d.item_id) and s.detector_ms + since == d.key;
+    }
+
+    /// The draft the turn ending at `stop_ms` (VAD) can reuse: one whose quiet run is the one that ended it; 0: none.
+    fn reusable(s: *Session, stop_ms: u64) u64 {
+        const d = s.draft orelse return 0;
+        const t = s.turn orelse return 0;
+        const silence = (s.detector orelse return 0).silenceMs();
+        return if (eql(t.item_id, d.item_id) and d.key + silence == stop_ms) d.key else 0;
+    }
+
+    /// Ends the turn now if its draft is in, ends a sentence, and `early_end_ms` of quiet have followed (the worker
+    /// calls this too, when a draft comes in after that).
+    pub fn maybeEndEarly(s: *Session, a: std.mem.Allocator) !void {
+        const d = s.draft orelse return;
+        const text = d.text orelse return;
+        if (s.voice.early_end_ms == 0 or !endsSentence(text) or !s.holds(d) or s.nowMs() < d.key + s.voice.early_end_ms) return;
+        s.detector.?.reset();
+        try s.speechStopped(a, s.nowMs(), d.key, true);
+    }
+
+    /// Under the lock, for the worker: whether draft task `h` is still worth transcribing.
+    pub fn draftWanted(s: *Session, h: Task.Hearing) bool {
+        const d = s.draft orelse return false;
+        if (d.key != h.key or !eql(d.item_id, h.item_id)) return false; // superseded
+        const t = s.turn orelse return true; // the turn ended on this pause: its final reuses the draft
+        return !eql(t.item_id, h.item_id) or s.holds(d);
+    }
+
+    /// Under the lock, for the worker: draft `h`'s transcript is in.
+    pub fn drafted(s: *Session, a: std.mem.Allocator, h: Task.Hearing, text: []const u8, began: i96, worker_ms: u64) void {
+        const d = if (s.draft) |*x| x else return;
+        if (d.key != h.key or !eql(d.item_id, h.item_id)) return;
+        d.text = s.gpa.dupe(u8, std.mem.trim(u8, text, " \t\r\n")) catch return;
+        d.start_ns = began;
+        d.end_ns = s.clock();
+        d.worker_ms = worker_ms;
+        s.maybeEndEarly(a) catch {};
+    }
+
+    /// Under the lock, for the worker: final task `h`'s transcript from its draft (in `a`), or null to transcribe it.
+    pub fn reuseDraft(s: *Session, a: std.mem.Allocator, h: Task.Hearing) ?[]const u8 {
+        const d = s.draft orelse return null;
+        if (h.key == 0 or d.key != h.key or !eql(d.item_id, h.item_id)) return null;
+        defer s.dropDraft();
+        const text = a.dupe(u8, d.text orelse return null) catch return null;
+        s.stt_start_ns = d.start_ns;
+        s.stt_end_ns = d.end_ns;
+        s.stt_worker_ms = d.worker_ms;
+        return text;
+    }
+
+    fn dropDraft(s: *Session) void {
+        if (s.draft) |d| d.free(s.gpa);
+        s.draft = null;
+    }
+
+    /// The language to transcribe in when the session sets none: the one the last transcript was in.
+    pub fn heardLanguage(s: *const Session) []const u8 {
+        return s.language_buf[0..s.language_len];
+    }
+
+    pub fn noteLanguage(s: *Session, language: []const u8) void {
+        if (language.len == 0 or language.len > s.language_buf.len) return;
+        @memcpy(s.language_buf[0..language.len], language);
+        s.language_len = language.len;
     }
 
     fn endTurn(s: *Session) void {
@@ -301,11 +443,12 @@ pub const Session = struct {
         defer s.gpa.free(id);
         s.endTurn();
         if (s.detector) |*d| d.reset();
-        try s.commit(a, id, from, s.nowMs());
+        s.dropDraft();
+        try s.commit(a, id, from, s.nowMs(), 0);
     }
 
     /// The turn [from_ms, to_ms) becomes a user item, transcribed on the worker.
-    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64) !void {
+    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64, key: u64) !void {
         const pcm = try s.gpa.dupe(i16, s.span(from_ms, to_ms));
         errdefer s.gpa.free(pcm);
         s.consume(to_ms);
@@ -317,7 +460,7 @@ pub const Session = struct {
         s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = try itemValue(a, it, s.settings.audio) });
         const owned = try s.gpa.dupe(u8, item_id);
         errdefer s.gpa.free(owned);
-        try s.push(.{ .final = .{ .item_id = owned, .pcm = pcm } });
+        try s.push(.{ .final = .{ .item_id = owned, .pcm = pcm, .key = key } });
     }
 
     fn maybePartial(s: *Session) !void {
@@ -474,6 +617,30 @@ pub fn freeItem(gpa: std.mem.Allocator, it: *Item) void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+fn withPause(c: vad.Config, pause_ms: u32) vad.Config {
+    var out = c;
+    out.pause_ms = pause_ms;
+    return out;
+}
+
+/// Whether a transcript ends a sentence: . ! ? (or a CJK mark), then perhaps closing quotes; not a trailing "...".
+pub fn endsSentence(text: []const u8) bool {
+    const t = std.mem.trimEnd(u8, text, " \t\r\n\"')]");
+    for ([_][]const u8{ "。", "！", "？" }) |m| if (std.mem.endsWith(u8, t, m)) return true;
+    if (t.len == 0 or std.mem.endsWith(u8, t, "..") or std.mem.endsWith(u8, t, "…")) return false;
+    return t[t.len - 1] == '.' or t[t.len - 1] == '!' or t[t.len - 1] == '?';
+}
+
+test "a transcript ends a sentence at . ! ? but not at a comma or a trailing ellipsis" {
+    try std.testing.expect(endsSentence("What is the capital of France?"));
+    try std.testing.expect(endsSentence("He said \"stop.\" "));
+    try std.testing.expect(endsSentence("東京はどこですか？"));
+    try std.testing.expect(!endsSentence("Tell me a story about"));
+    try std.testing.expect(!endsSentence("Well,"));
+    try std.testing.expect(!endsSentence("So..."));
+    try std.testing.expect(!endsSentence(""));
 }
 
 /// The Realtime API's item object.

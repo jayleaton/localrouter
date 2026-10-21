@@ -65,6 +65,8 @@ pub const Speech = struct {
 };
 
 pub const Timestamps = enum { none, segment, word };
+/// How a Whisper-style worker decodes: its model card's recipe (temperature fallback), or one greedy pass.
+pub const Decode = enum { card, greedy };
 
 /// Speech to text. `audio` names `audio.wav` in the job directory, written by the daemon as 16 kHz mono 16-bit PCM
 /// whatever was uploaded (`media/audio.zig`). The tool writes `transcript.json` (`Transcript`).
@@ -76,6 +78,7 @@ pub const Transcription = struct {
     temperature: f32 = 0,
     timestamps: Timestamps = .none,
     seed: u64 = 0,
+    decode: ?Decode = null, // null: the worker's default (sent only when set)
 };
 
 /// What a speech_to_text tool writes: the text, the language it heard, and segments (words when asked for).
