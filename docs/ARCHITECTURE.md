@@ -143,7 +143,7 @@ Some models ship their own OpenAI-compatible server (TensorFold's `serve`, a lla
 answers 200, and replies `{"ok":true,"resident":0,"port":N}`. Any `cmd` worker may name a `port` the same way.
 
 ```
-{"id": "qwen3.8-27b", "kind": "chat", "engine": "openai_server", "resident_bytes": 51539607552,
+{"id": "qwen3.8-27b", "kind": "chat", "engine": "openai_server", "resident_bytes": 25769803776,
  "options": {"server": ["tensorfold-native", "serve", "TensorFold/Qwen3.8-27B-MLX-4bit", "--host", "127.0.0.1",
                         "--port", "{port}", "--name", "{id}"], "env": {"HF_HUB_OFFLINE": "1"}}}
 ```

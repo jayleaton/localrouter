@@ -1,7 +1,7 @@
 {
   "notes": [
     "TensorFold qualifies Qwen3.8-27B upstream only on Metal (M5 Max, M3 Ultra) and CUDA on an RTX 4090 (Windows); GB10 (linux-aarch64 CUDA) is unproven upstream. qualify.sh establishes it on this host.",
-    "resident_bytes in config.example.json (48 GiB) is an estimate pending the DGX-01 bring-up: qualify.sh reports the measured MemAvailable drop in OUT/report.json.",
+    "resident_bytes in config.example.json is 24 GiB, from the DGX-01 bring-up (docs/dev/JARVIS-BRINGUP.md): 21.1 GiB peak with a 30k prompt at --parallel 1 --prompt-cache-gib 2, plus room for the 4 GiB prompt cache. qualify.sh reports the MemAvailable drop of each run in OUT/report.json.",
     "top_dir is the archive top-level directory, from TensorFold tools/release/package.sh at the pinned commit (tensorfold-VERSION-PLATFORM); fetch.sh checks it and installs it as dir.",
     "Small files are pinned by git blob sha1 (sha1 of \"blob SIZE\\0\" + bytes), LFS files by sha256, as the Hugging Face API reports them. README files and images are not fetched."
   ],

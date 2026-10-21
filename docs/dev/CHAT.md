@@ -55,20 +55,32 @@ The server reads the checkpoint and drafter from the Hugging Face cache that `fe
 
 | | |
 | --- | --- |
-| `resident_bytes` | **51,539,607,552 (48 GiB): a placeholder, not a measurement.** 40 GiB estimated (weights 14.95 GiB, the 4-bit drafter, an 8 GiB prompt cache, the 32,768-token context's KV, the CUDA runtime) plus 8 GiB for unmeasured GB10 overhead |
+| `resident_bytes` | **25,769,803,776 (24 GiB)**: the measured 21.1 GiB peak plus room for the 4 GiB prompt cache |
 | `working_bytes` | 0: the server sizes its KV and prompt cache at start, inside the resident figure |
-| Source of the real figure | the DGX-01 bring-up (in progress). Replace `resident_bytes` with its measured peak (MemAvailable drop from before load to the end of the longest qualify prompt, plus margin) and drop the `memory` note in the tool's options |
+| Server flags | `--parallel 1 --prompt-cache-gib 4 --context 32768`, drafter on: one user at a time, as LocalRouter runs one job at a time |
+
+Measured on DGX-01 (GB10) by the bring-up, `docs/dev/JARVIS-BRINGUP.md` (PR #16), TensorFold 1.1.1 at the pinned
+archive:
+
+| Setting | Resident | Speed |
+| --- | --- | --- |
+| `--parallel 1 --prompt-cache-gib 2`, drafter | 19.2 GiB; 21.1 GiB with a 30k-token prompt | 29.9 s cold load; about 40 tok/s chat, 75 tok/s code; 1.5 s to first token at 1k tokens |
+| TensorFold's defaults (8 parallel, 8 GiB prompt cache), drafter | 38.4 GiB | the same speed |
+| `--parallel 1`, no drafter | 35.6 GiB | 13.3 tok/s |
+
+A 30k-token prompt takes 120 s to its first token; a cached 20k-token conversation's next turn 0.61 s, and a 30k
+conversation needs about 2 GiB of the prompt cache, so 4 GiB keeps one long conversation and its neighbours warm.
 
 The scheduler cannot see a model server's memory: it plans with `resident_bytes` while the tool is loaded, so the
 figure must cover the server's peak. TensorFold's CUDA server also sizes its window from `MemAvailable` less a reserve;
-`--context 32768` and `--prompt-cache-gib 8` bound it. `qualify.sh` samples `MemAvailable` every 0.5 s during both of
-its server runs and reports the largest drop, which is the candidate for the measured figure.
+`--context 32768`, `--parallel 1` and `--prompt-cache-gib 4` bound it. `qualify.sh` samples `MemAvailable` every 0.5 s
+during both of its server runs and reports the largest drop in `report.json`.
 
 ## Priority and eviction
 
 A chat tool defaults to `keep_loaded: true` and `priority: 100` (every other tool defaults to 0): it is loaded when the
 daemon starts, never unloaded for idleness, unloaded last when a request needs memory, and loaded again on its own once
-the memory is free. With the placeholder 48 GiB, the chat model and the FP8 image model (about 40 GiB) fit side by side
+the memory is free. At its measured 24 GiB, the chat model and the FP8 image model (about 40 GiB) fit side by side
 in GB10's 128 GB with the default 8 GiB reserve; a MiniMax H3 video job, which needs most of the machine, evicts the
 image model first and then the chat model, and the chat model comes back after the video model idles out.
 
