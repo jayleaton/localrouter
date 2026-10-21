@@ -20,11 +20,12 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 
 | Tool | Does |
 | --- | --- |
-| `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, and whether each is loaded |
+| `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, whether each is loaded, and `qualified` for a model gated on this machine's GPU |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `generate_video` | `prompt`, `size`, `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
 | `transcribe_audio` | `audio` (base64, data URL or URL), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`: the audio inline (WAV by default) and as a URL |
+| `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
 | `release_models` | unloads every model now |
@@ -40,9 +41,9 @@ agents is `skill/localrouter/SKILL.md`. The HTTP API below is the same jobs with
 curl -s $BASE/models | jq '.data[] | {id, kind, running}'
 ```
 
-`kind` is `image`, `video`, `speech` or `transcription`. `running: true` means it is loaded now. `capabilities` lists
+`kind` is `image`, `video`, `speech`, `transcription` or `chat`. `running: true` means it is loaded now. `capabilities` lists
 what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`,
-`speech_to_text`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take) and
+`speech_to_text`, `chat_completion`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take) and
 `max_input_chars`; transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
 Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
@@ -144,6 +145,37 @@ rather than half transcribed. The
 request waits for the transcript; for long files over MCP use `transcribe_audio` with `wait_s` and `get_job`, which
 also lets you `cancel_job` it.
 
+## Chat (OpenAI Chat Completions API)
+
+```bash
+curl -s $BASE/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Summarise the plan in three bullets."}], "temperature": 0
+}' | jq -r '.choices[0].message.content'
+curl -sN $BASE/chat/completions -H 'content-type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Hi"}], "stream": true}'     # server-sent events, then data: [DONE]
+```
+
+The chat model is the machine's default and stays loaded (`keep_loaded`, priority 100), so a reply starts at once; it
+gives way only when a job needs its memory (a video job that needs the whole machine) and comes back by itself after.
+The body is the model's own: LocalRouter checks only that it is a JSON object with a non-empty `messages` array, sets
+`model` to the model it routes to, and passes every other field through to the model's server, which refuses what it
+does not take (that refusal is a 400 with the server's message). For the Qwen3.8 27B tool (TensorFold):
+
+| Field | Notes |
+| --- | --- |
+| `messages` | `system`, `user`, `assistant` (with `tool_calls`) and `tool` (`tool_call_id`) messages; text only (images, audio are a 400) |
+| `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function calling; `tool_choice` `none`, `auto`, `required` or a named function |
+| `temperature`, `top_p`, `top_k`, `min_p`, `seed` | `temperature: 0` is greedy: the same request gives the same tokens |
+| `max_tokens` / `max_completion_tokens`, `stop` | the reply's limit (the server's default is 4096) and stop strings |
+| `response_format` | `json_object` or `json_schema` (structured output) |
+| `reasoning_effort`, `chat_template_kwargs.enable_thinking` | reasoning on or off: `"reasoning_effort": "none"` or `"chat_template_kwargs": {"enable_thinking": false}` answers without thinking; the reasoning arrives in `reasoning_content` (`delta.reasoning_content` when streaming) |
+| `stream`, `stream_options.include_usage` | server-sent events; with `include_usage` a last event carries `usage` (`"choices": []`) |
+| `n` | 1 only (else 400) |
+
+A streamed request the model refuses gets an ordinary JSON error, not a stream. If a stream breaks off after it began,
+it ends with `data: {"error": {...}}` and `data: [DONE]`. Closing the connection cancels the request; the model stays
+loaded. A model that is not yet qualified on this machine (`"qualified": false` in `/models`) is refused with a 503.
+
 ## Input URLs
 
 A URL in `image`, `images`, `input_reference` or `file` (HTTP) or `images` / `image` / `audio` (MCP) is fetched by the daemon, so by default
@@ -181,7 +213,8 @@ The URL defaults to `$LOCALROUTER_URL`, else `http://127.0.0.1:8190`.
 
 ## Priority and keep_loaded (operators)
 
-Per tool in the config: `priority` (integer, default 0; higher is kept longer) and `keep_loaded` (default false).
+Per tool in the config: `priority` (integer, default 0, a chat model 100; higher is kept longer) and `keep_loaded`
+(default false, a chat model true).
 When a request needs memory, idle tools are unloaded lowest priority first, then least recently used, until it fits;
 a tool that is loading or running is never unloaded. Priority only orders the victims: a request is never refused while
 unloading idle tools, of any priority, would make room. A `keep_loaded` tool is loaded when the daemon starts if it
@@ -196,10 +229,11 @@ Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
 
 | Status | Meaning | Do |
 | --- | --- | --- |
-| 400 | Invalid request (size, n, prompt, input images or audio, a capability the model lacks, a model of another kind, a size, step count, voice, speed, preset or audio length the model does not take) | Fix the request |
+| 400 | Invalid request (size, n, prompt, input images or audio, a capability the model lacks, a model of another kind, a size, step count, voice, speed, preset or audio length the model does not take; a chat request the model's server refuses) | Fix the request |
 | 404 | Unknown model (the message lists the models that can do it) or route | Re-check `GET /models` |
 | 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority) | Retry later; don't loop |
-| 503 `server_error` | The tool failed to load or its worker died; the message has the log tail | Report it |
+| 503 `server_error` | The tool failed to load, its worker or server died, its server is busy, or it is not yet qualified on this machine; the message says which | Retry once; report it if it repeats |
+| 500 `server_error` | The model failed on this request | Report it |
 | 504 | A deadline passed | Retry once, then report |
 
 ## Being considerate

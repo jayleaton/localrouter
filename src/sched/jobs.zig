@@ -70,6 +70,7 @@ pub const Table = struct {
             .video => "video",
             .speech => "speech",
             .transcription => "transcription",
+            .chat => "chat",
         };
         j.id = try std.fmt.allocPrint(a, "{s}_{x}", .{ prefix, std.mem.readInt(u64, &rnd, .little) });
         j.request = try dupeRequest(a, req);
@@ -147,6 +148,11 @@ pub fn dupeRequest(a: std.mem.Allocator, req: Request) !Request {
             c.language = try a.dupe(u8, v.language);
             c.prompt = try a.dupe(u8, v.prompt);
             return .{ .transcription = c };
+        },
+        .chat => |v| {
+            var c = v;
+            c.body = try a.dupe(u8, v.body);
+            return .{ .chat = c };
         },
     }
 }

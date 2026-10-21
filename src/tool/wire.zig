@@ -21,6 +21,7 @@ pub const Reply = struct {
     ok: ?bool = null,
     progress: ?Progress = null,
     resident: u64 = 0,
+    port: u16 = 0, // load: the loopback port of the worker's own HTTP server, which the daemon proxies chat requests to
     files: []const []const u8 = &.{},
     seed: u64 = 0,
     ms: u64 = 0,

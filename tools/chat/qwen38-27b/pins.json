@@ -1,0 +1,127 @@
+{
+  "notes": [
+    "TensorFold qualifies Qwen3.8-27B upstream only on Metal (M5 Max, M3 Ultra) and CUDA on an RTX 4090 (Windows); GB10 (linux-aarch64 CUDA) is unproven upstream. qualify.sh establishes it on this host.",
+    "resident_bytes in config.example.json is 24 GiB, from the DGX-01 bring-up (docs/dev/JARVIS-BRINGUP.md): 21.1 GiB peak with a 30k prompt at --parallel 1 --prompt-cache-gib 2, plus room for the 4 GiB prompt cache. qualify.sh reports the MemAvailable drop of each run in OUT/report.json.",
+    "top_dir is the archive top-level directory, from TensorFold tools/release/package.sh at the pinned commit (tensorfold-VERSION-PLATFORM); fetch.sh checks it and installs it as dir.",
+    "Small files are pinned by git blob sha1 (sha1 of \"blob SIZE\\0\" + bytes), LFS files by sha256, as the Hugging Face API reports them. README files and images are not fetched."
+  ],
+  "tensorfold": {
+    "version": "1.1.1",
+    "repo": "https://github.com/ashhart/TensorFold",
+    "licence": "Apache-2.0",
+    "tag": "v1.1.1",
+    "tag_object": "92d71a3cf4fd1d566d71f443874cf5345a226aba",
+    "commit": "b10231b94f8adf3d4132acebdc0a1ac87e53a838",
+    "dir": "tensorfold-1.1.1",
+    "binary": "bin/tensorfold-native",
+    "grammar_lib": "lib/libtfgrammar.so",
+    "archives": {
+      "linux-aarch64": {
+        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-linux-aarch64.tar.gz",
+        "size": 23309618,
+        "sha256": "2e0103a544e64354bfec65bd8a052ede17aa9be1f6a56d8e37c868af9139cb39",
+        "top_dir": "tensorfold-1.1.1-linux-aarch64"
+      },
+      "linux-x86_64": {
+        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-linux-x86_64.tar.gz",
+        "size": 23665043,
+        "sha256": "e1785e32119a3869765b712be30daaa4ef7be2297054838e79f81f766185fbdf",
+        "top_dir": "tensorfold-1.1.1-linux-x86_64"
+      }
+    }
+  },
+  "checkpoint": {
+    "repo": "TensorFold/Qwen3.8-27B-MLX-4bit",
+    "revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+    "licence": "apache-2.0",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 11544,
+        "git_sha1": "f938136e3adacfd92be087f6e113b5d6d97f678f"
+      },
+      {
+        "path": "chat_template.jinja",
+        "size": 8952,
+        "git_sha1": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3"
+      },
+      {
+        "path": "config.json",
+        "size": 4932,
+        "git_sha1": "3fb03e916f494e6745aa23df751da26f79e06470"
+      },
+      {
+        "path": "generation_config.json",
+        "size": 202,
+        "git_sha1": "023756cfadf88e5bf69eefeee3e172f38c448d64"
+      },
+      {
+        "path": "model-00001-of-00003.safetensors",
+        "size": 5343268662,
+        "sha256": "6cc1508e96fb5d0865dfd5753a79f4ec60651bf3e2a82844a7e8ae9c60528c0d"
+      },
+      {
+        "path": "model-00002-of-00003.safetensors",
+        "size": 5354185130,
+        "sha256": "83f2a20ca8058f486a3634a27faf99587f4cd3c156a83dee34fb99e6ac178670"
+      },
+      {
+        "path": "model-00003-of-00003.safetensors",
+        "size": 5357087557,
+        "sha256": "31b8c91ef899f79efaaa69e3d2c096f6e2ebeb2ff20e29222abbd9ebc79e560a"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size": 218281,
+        "git_sha1": "05a3a3a17368d54d2887783e96b3a8191e9655f0"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size": 390,
+        "git_sha1": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64"
+      },
+      {
+        "path": "processor_config.json",
+        "size": 991,
+        "git_sha1": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40"
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 19989325,
+        "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 1165,
+        "git_sha1": "1d134cd298be1e3be25db393d93a1cefe80e3214"
+      },
+      {
+        "path": "video_preprocessor_config.json",
+        "size": 385,
+        "git_sha1": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe"
+      },
+      {
+        "path": "vocab.json",
+        "size": 6722759,
+        "git_sha1": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"
+      }
+    ]
+  },
+  "drafter": {
+    "repo": "z-lab/Qwen3.8-27B-DFlash2",
+    "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "licence": "apache-2.0",
+    "files": [
+      {
+        "path": "config.json",
+        "size": 1239,
+        "git_sha1": "79279cc5665bced6f3cdaa2095a2ffe819497b2e"
+      },
+      {
+        "path": "model.safetensors",
+        "size": 3848817896,
+        "sha256": "67fc76d68dc5a9415511a4f394ef744d67510cd20e93b37cc2cc7d28e4bab65c"
+      }
+    ]
+  }
+}

@@ -6,8 +6,13 @@
 //! (whatever their priority) would make room; a loading or busy tool is never a victim. `keep_loaded` tools are
 //! loaded at start when they fit, skip the idle TTL, and come back by themselves (without evicting anything) once
 //! the scheduler has been idle for a moment and they fit again, unless they were unloaded on request through the API.
+//!
+//! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
+//! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
+//! and releases it when none is. Co-residency is decided by the memory budget alone; a tool never takes the lock itself.
 
 const std = @import("std");
+const posix = std.posix;
 const Io = std.Io;
 const tool_mod = @import("../tool/tool.zig");
 const Tool = tool_mod.Tool;
@@ -52,9 +57,57 @@ pub const Scheduler = struct {
     running: ?*jobs.Job = null,
     stopping: bool = false,
     idle_since_ns: i96 = 0, // when the executor last finished an item
+    gpu_lock_fd: posix.fd_t = -1, // the host's GPU lock while any tool is loaded (`holdGpuLock`)
+    lock_msg: [512]u8 = undefined,
+    lock_len: usize = 0,
 
     pub fn deinit(s: *Scheduler) void {
+        s.releaseGpuLock();
         s.queue.deinit(s.gpa);
+    }
+
+    /// Takes the host's GPU lock for LocalRouter (shared, without waiting) if it is configured and not yet held; false,
+    /// with `lock_msg` set, when a GPU user outside LocalRouter holds it.
+    fn holdGpuLock(s: *Scheduler) bool {
+        const path = s.cfg.gpu_lock;
+        if (path.len == 0 or s.gpu_lock_fd >= 0) return true;
+        const fd = posix.openat(posix.AT.FDCWD, path, .{ .CLOEXEC = true }, 0) catch |err| {
+            s.lockRefusal("the GPU lock {s} cannot be opened: {s}", .{ path, @errorName(err) });
+            return false;
+        };
+        if (std.c.flock(fd, posix.LOCK.SH | posix.LOCK.NB) != 0) {
+            _ = std.c.close(fd);
+            s.lockRefusal("the GPU lock {s} is held by another job outside LocalRouter; nothing loads until it is free", .{path});
+            return false;
+        }
+        s.gpu_lock_fd = fd;
+        return true;
+    }
+
+    fn lockRefusal(s: *Scheduler, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.bufPrint(&s.lock_msg, fmt, args) catch {
+            s.lock_len = 0;
+            return;
+        };
+        s.lock_len = msg.len;
+        std.log.warn("{s}", .{msg});
+    }
+
+    fn lockMessage(s: *Scheduler) []const u8 {
+        return if (s.lock_len > 0) s.lock_msg[0..s.lock_len] else "the host's GPU lock is held by another job outside LocalRouter";
+    }
+
+    /// Releases the GPU lock once no tool is loaded (or loading), so GPU users outside LocalRouter may run.
+    fn releaseIdleGpuLock(s: *Scheduler) void {
+        if (s.gpu_lock_fd < 0) return;
+        for (s.slots) |slot| if (slot.tool.state() != .unloaded) return;
+        s.releaseGpuLock();
+    }
+
+    fn releaseGpuLock(s: *Scheduler) void {
+        if (s.gpu_lock_fd < 0) return;
+        _ = std.c.close(s.gpu_lock_fd); // closing the descriptor releases the lock
+        s.gpu_lock_fd = -1;
     }
 
     /// Queues a job; `error.QueueFull` past `max_queue` waiting jobs.
@@ -95,7 +148,10 @@ pub const Scheduler = struct {
 
     /// The executor loop; returns after `stop`, with every tool unloaded.
     pub fn run(s: *Scheduler) void {
-        defer for (s.slots) |*slot| s.unloadSlot(slot);
+        defer {
+            for (s.slots) |*slot| s.unloadSlot(slot);
+            s.releaseGpuLock();
+        }
         s.loadKept(false);
         while (true) {
             const item = s.next() orelse return;
@@ -107,6 +163,7 @@ pub const Scheduler = struct {
             s.running = null;
             s.mutex.unlock(s.io);
             s.idle_since_ns = nowNs(s.io);
+            s.releaseIdleGpuLock();
         }
     }
 
@@ -132,6 +189,7 @@ pub const Scheduler = struct {
             s.mutex.unlock(s.io);
             s.unloadIdle();
             s.loadKept(true);
+            s.releaseIdleGpuLock();
             s.table.expire(s.io, nowUnix(s.io), s.cfg.keep_outputs_s);
         }
     }
@@ -179,8 +237,8 @@ pub const Scheduler = struct {
                 if (!wait_idle) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
                 continue;
             }
-            s.loadSlot(slot) catch {
-                std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, slot.tool.failure().message });
+            s.loadSlot(slot) catch |err| {
+                std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message });
                 slot.retry_ns = nowNs(s.io) + reload_backoff_ns;
                 continue;
             };
@@ -201,10 +259,14 @@ pub const Scheduler = struct {
             .unload => {
                 s.slots[c.tool].released = true;
                 s.unloadSlot(&s.slots[c.tool]);
+                s.releaseIdleGpuLock(); // before `done`: the caller sees the lock free once nothing is loaded
             },
-            .release => for (s.slots) |*slot| {
-                slot.released = true;
-                s.unloadSlot(slot);
+            .release => {
+                for (s.slots) |*slot| {
+                    slot.released = true;
+                    s.unloadSlot(slot);
+                }
+                s.releaseIdleGpuLock();
             },
             .load => {
                 const slot = &s.slots[c.tool];
@@ -215,16 +277,22 @@ pub const Scheduler = struct {
                     c.message = "insufficient memory to load this tool";
                     return;
                 }
-                s.loadSlot(slot) catch {
+                s.loadSlot(slot) catch |err| {
                     c.failed = true;
-                    c.message = slot.tool.failure().message;
+                    c.message = if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message;
                 };
             },
         }
     }
 
-    fn loadSlot(s: *Scheduler, slot: *Slot) !void {
-        const measured = try slot.tool.load();
+    /// Loads a tool while LocalRouter holds the host's GPU lock; `error.GpuLockHeld` (why: `lockMessage`) when a GPU
+    /// user outside LocalRouter holds it.
+    fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
+        if (!s.holdGpuLock()) return error.GpuLockHeld;
+        const measured = slot.tool.load() catch |err| {
+            s.releaseIdleGpuLock();
+            return err;
+        };
         const estimate = slot.tool.needs(&placeholder(slot.tool.config().kind)).resident;
         slot.resident = if (measured > 0) measured else estimate;
         slot.last_used_ns = nowNs(s.io);
@@ -243,7 +311,10 @@ pub const Scheduler = struct {
         }
         if (slot.tool.state() != .ready) {
             s.setPhase(j, "load");
-            s.loadSlot(slot) catch |err| return s.finishError(j, slot, err);
+            s.loadSlot(slot) catch |err| {
+                if (err == error.GpuLockHeld) return s.finish(j, .failed, 503, "server_error", s.lockMessage(), null);
+                return s.finishError(j, slot, @errorCast(err));
+            };
         }
         var arena: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena.deinit();
@@ -293,6 +364,8 @@ pub const Scheduler = struct {
             error.Timeout => s.finish(j, .failed, 504, "timeout", f.message, null),
             error.GenerateFailed => if (std.mem.eql(u8, f.type, "invalid_request_error"))
                 s.finish(j, .failed, 400, f.type, f.message, null)
+            else if (std.mem.eql(u8, f.type, "service_unavailable")) // the model's own server is busy or not ready: retry later
+                s.finish(j, .failed, 503, "server_error", f.message, null)
             else
                 s.finish(j, .failed, 500, "server_error", f.message, null),
             error.OutOfMemory => s.finish(j, .failed, 503, "insufficient_memory", "out of memory", null),
@@ -369,6 +442,7 @@ fn placeholder(kind: @import("../tool/request.zig").Kind) @import("../tool/reque
         .video => .{ .video = .{ .prompt = "" } },
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
+        .chat => .{ .chat = .{ .body = "" } },
     };
 }
 
