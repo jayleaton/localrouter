@@ -447,6 +447,49 @@ def video_phase(args, name, results, checks, squeeze):
         checks.append({"check": f"{name}: every model came back with the ballast still held (admission alone governs the reload)", "ok": held_through and len(back) == 3, "detail": back})
 
 
+VOICE_INSTRUCTIONS = ("You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken "
+                      "sentences without markdown, lists or emoji.")  # the daemon's default `voice.instructions`
+
+
+def repeats_first(text):
+    """Whether a reply says its own first sentence again (leaked reasoning followed by the answer)."""
+    m = re.match(r"\s*(.+?[.!?])(\s|$)", text, re.S)
+    if not m:
+        return False
+    first = " ".join(words(m.group(1)))
+    return len(first) >= 8 and first in " ".join(words(text[m.end():]))
+
+
+def leak_probe(args, extra, n):
+    """`n` streamed chat requests as the voice loop sends them, with `extra` in the body: how many replies carry a
+    `think>` tag in their content (reasoning leaked into the answer)."""
+    prompts = [PROMPTS[k] for k in ("capital", "tips", "after_video", "after_eviction")]
+    leaks, samples = 0, []
+    for i in range(n):
+        body = {"model": args.chat, "stream": True, "messages": [{"role": "system", "content": VOICE_INSTRUCTIONS},
+                                                                   {"role": "user", "content": prompts[i % len(prompts)]}]}
+        body.update(extra)
+        req = urllib.request.Request(f"{args.url}/v1/chat/completions", data=json.dumps(body).encode(), headers={"content-type": "application/json"})
+        parts = []
+        with urllib.request.urlopen(req, timeout=180) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                for ch in json.loads(data).get("choices", []):
+                    t = (ch.get("delta") or {}).get("content")
+                    if t:
+                        parts.append(t)
+        text = "".join(parts)
+        if "think>" in text:
+            leaks += 1
+            samples.append(text[:200])
+    return {"requests": n, "leaks": leaks, "samples": samples[:3], "extra": extra}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
@@ -460,6 +503,7 @@ def main():
     ap.add_argument("--ballast-floor-gib", type=int, default=6, help="the ballast lets go if MemAvailable falls below this")
     ap.add_argument("--max-median-ms", type=int, default=2500)
     ap.add_argument("--max-barge-ms", type=int, default=4000)
+    ap.add_argument("--leak-probe", type=int, default=20, help="streamed chat requests per variant in the reasoning-leak probe (0: none)")
     args = ap.parse_args()
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
     os.makedirs(f"{args.out}/replies", exist_ok=True)
@@ -565,6 +609,19 @@ def main():
         checks.append({"check": f"latency: median speech end to first audio <= {args.max_median_ms} ms", "ok": pct(lat, 50) <= args.max_median_ms, "detail": pct(lat, 50)})
     barge = turns.get("interrupt", {}).get("speech_end_to_first_audio_ms")
     checks.append({"check": f"latency: the barge-in turn's first audio <= {args.max_barge_ms} ms", "ok": barge is not None and barge <= args.max_barge_ms, "detail": barge})
+    replies = {n: t["reply"] for n, t in turns.items()}
+    if "tool" in results:
+        replies["picture confirmation"] = results["tool"].get("confirmation", "")
+    tagged = {n: r[:160] for n, r in replies.items() if "think>" in r}
+    checks.append({"check": "replies: none contains a think> tag", "ok": not tagged, "detail": tagged})
+    again = {n: r[:160] for n, r in replies.items() if repeats_first(r)}
+    checks.append({"check": "replies: none repeats its own first sentence", "ok": not again, "detail": again})
+    if args.leak_probe:  # does the request alone keep reasoning out of the answer? (informational)
+        results["leak_probe"] = {
+            "thinking_off_only": leak_probe(args, {"chat_template_kwargs": {"enable_thinking": False}}, args.leak_probe),
+            "with_reasoning_effort_none": leak_probe(args, {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}, args.leak_probe),
+        }
+        log("leak probe:", {k: (v["leaks"], v["requests"]) for k, v in results["leak_probe"].items()})
     results["checks"] = checks
     results["passed"] = all(c["ok"] for c in checks) and bool(lat)
     with open(f"{args.out}/results.json", "w") as f:

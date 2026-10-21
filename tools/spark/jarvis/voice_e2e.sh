@@ -124,7 +124,7 @@ run() {
     + (if $lock == "" then {} else {gpu_lock: $lock} end)
     + {defaults: {chat_completion: $chat.id, text_to_speech: $drama.id, speech_to_text: "whisper-large-v3-turbo",
                   text_to_image: "qwen-image-2.1-turbo", text_to_video: "minimax-h3"},
-       voice: {chat_extra: {chat_template_kwargs: {enable_thinking: false}},
+       voice: {chat_extra: {chat_template_kwargs: {enable_thinking: false}, reasoning_effort: "none"},
                speech_models: ([$drama.id] + (if $kitten == 1 then ["kitten-tts-2"] else [] end)), tool_wait_s: 900},
        tools: ([
          ($chat + {keep_loaded: true, priority: 100}),
