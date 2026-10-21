@@ -1,0 +1,223 @@
+"""A stand-in for drama-tensorfold's launcher (recipe/pilot.py) and the server it starts, for the integration tests of
+tools/speech/drama3/drama3_worker.py. Plain Python, no dependencies, no GPU: it takes the launcher's arguments (with
+LocalRouter's patched --external-admission), takes the lock it is given without blocking (refusing as the launcher
+does when it is held), refuses as the launcher's own admission does when MemAvailable is under 88 GiB unless
+--external-admission is given (MemAvailable is DRAMA3_FAKE_MEMAVAILABLE_GIB, default 83: what DGX-01 had free with
+chat, Whisper and Kitten warm), prints the session line and
+DRAMA_PILOT_READY, and serves the native server's speech contract on loopback until SIGTERM.
+
+The contract follows plotarmordev/drama-tensorfold at 1a53b8a (Apache-2.0): POST /v1/audio/speech with model, input,
+voice, references, response_format (wav or pcm) and stream (pcm only); a whole reply with Content-Length and
+X-Finish-Reason; a stream of chunked 16-bit mono 44.1 kHz PCM whose trailers carry X-Finish-Reason when the audio was
+cut short, and X-Long-Form-Segments too for a long-form reply; GET /v1/voices; 400, 503 and 500 errors in OpenAI's shape.
+
+The audio is a constant level, 441 samples (10 ms) a character of input: 1000 for the default voice, 2000 for a named
+one, plus 300 a reference. Test hooks in the input: [length] and [silence] end the audio with that finish reason,
+[busy] is a 503, [fault] a 500, [break] a stream (or reply) that stops after its first chunk, [crash] ends the
+launcher and its server at once.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import signal
+import struct
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+RATE = 44100
+MODEL = "fishaudio/drama-3"
+FIELDS = {"model", "input", "voice", "speaker", "response_format", "stream", "stream_format", "references"}
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--native-bin", required=True)
+    p.add_argument("--runtime-dir", required=True)
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--gpu-lock", required=True)
+    p.add_argument("--evidence-dir", required=True)
+    p.add_argument("--port", type=int, default=18793)
+    p.add_argument("--ready-timeout", type=float, default=900)
+    p.add_argument("--external-admission", action="store_true")
+    p.add_argument("serve_args", nargs="*")
+    args = p.parse_args()
+    os.makedirs(args.evidence_dir, exist_ok=False)
+    if not (os.path.isfile(args.native_bin) and os.access(args.native_bin, os.X_OK)):
+        p.error(f"Missing executable server: {args.native_bin}")
+    if not os.path.isfile(args.gpu_lock):
+        p.error("The operator-specified shared GPU lock must already exist")
+    serve = Serve(args.serve_args)
+    with open(args.gpu_lock, "r+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            p.error("Another workload owns the GPU slot; no model was started")
+        available = float(os.environ.get("DRAMA3_FAKE_MEMAVAILABLE_GIB", "83"))
+        if not args.external_admission and available < 88:
+            p.error(f"Need 88.00 GiB available, have {available:.2f}; no model was started")
+        unit = f"drama3-pilot-{os.getpid()}-{time.time_ns()}.service"
+        with open(os.path.join(args.evidence_dir, "session.json"), "w") as f:
+            json.dump({"argv": sys.argv[1:], "unit": unit}, f)
+        print(json.dumps({"backend": "native", "unit": unit}), flush=True)
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server.serve = serve
+        stop = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print("DRAMA_PILOT_READY", flush=True)
+        while not stop.wait(0.2):
+            pass
+        server.shutdown()
+        server.server_close()
+        with open(os.path.join(args.evidence_dir, "completion.json"), "w") as f:
+            json.dump({"ready": True, "failures": []}, f)
+    print(json.dumps({"ready": True, "failures": []}), flush=True)
+
+
+class Serve:
+    """The server flags the launcher passes on after --."""
+
+    def __init__(self, argv):
+        self.voices, self.default_voice, self.long_form, self.long_form_chars = {}, None, False, 500
+        it = iter(argv)
+        for flag in it:
+            if flag == "--voices":
+                d = next(it)
+                for name in sorted(os.listdir(d)):
+                    if name.endswith(".json") and not name.startswith("."):
+                        self.voices[name[:-5]] = json.load(open(os.path.join(d, name)))
+            elif flag == "--default-voice":
+                self.default_voice = next(it)
+            elif flag == "--long-form":
+                self.long_form = True
+            elif flag == "--long-form-chars":
+                self.long_form_chars = int(next(it))
+            elif flag in ("--max-frames", "--long-form-history"):
+                next(it)
+            else:
+                raise SystemExit(f"unknown serve flag {flag}")
+        if self.default_voice is not None and self.default_voice not in self.voices:
+            raise SystemExit(f"--default-voice {self.default_voice} is not a loaded voice")
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("fake drama3: " + (fmt % args) + "\n")
+
+    def reply(self, status, body, ctype="application/json", headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def error(self, status, message):
+        typ = {400: "invalid_request_error", 503: "server_error"}.get(status, "server_error")
+        self.reply(status, json.dumps({"error": {"message": message, "type": typ, "param": None, "code": None}}).encode())
+
+    def do_GET(self):
+        serve = self.server.serve
+        if self.path == "/health":
+            return self.reply(200, b'{"status":"ok"}')
+        if self.path == "/v1/voices":
+            data = [{"object": "voice", "name": n, "references": 1} for n in serve.voices]
+            return self.reply(200, json.dumps({"object": "list", "data": data}).encode())
+        self.error(404, "no such route")
+
+    def do_POST(self):
+        serve = self.server.serve
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path != "/v1/audio/speech":
+            return self.error(404, "no such route")
+        try:
+            b = json.loads(raw)
+        except ValueError:
+            return self.error(400, "speech request body must be a JSON object")
+        for k in b:
+            if k not in FIELDS:
+                return self.error(400, f"unknown speech request field: {k}")
+        if b.get("model") != MODEL:
+            return self.error(400, f"model {b.get('model')!r} is not served here: send {MODEL}")
+        text = b.get("input")
+        if not isinstance(text, str) or not text.strip():
+            return self.error(400, "input must be a non-empty string")
+        fmt = b.get("response_format", "wav")
+        if fmt not in ("wav", "pcm"):
+            return self.error(400, "response_format must be one of: pcm, wav")
+        stream = b.get("stream") is True
+        if stream and fmt != "pcm":
+            return self.error(400, "stream=true requires response_format='pcm'")
+        voice = b.get("voice") or "default"
+        level = 1000
+        if voice == "default" and serve.default_voice:
+            voice = serve.default_voice
+        if voice != "default":
+            if voice not in serve.voices:
+                hint = "only the default voice is supported" if not serve.voices else "use default or a voice the server loaded with --voices"
+                return self.error(400, f"Drama 3 request: unknown voice {voice!r}; {hint}")
+            level = 2000
+        refs = b.get("references") or []
+        for i, ref in enumerate(refs):
+            codes = ref.get("vq_codes") if isinstance(ref, dict) else None
+            if not isinstance(codes, list) or len(codes) != 10 or len({len(row) for row in codes}) != 1:
+                return self.error(400, f"Drama 3 request: references[{i}].vq_codes must be 10 rows of equal length")
+        level += 300 * len(refs)
+        if "[busy]" in text:
+            return self.error(503, "the engine is busy; retry shortly")
+        if "[fault]" in text:
+            return self.error(500, "speech synthesis failed")
+        if "[crash]" in text:
+            os._exit(3)
+        finish = "length" if "[length]" in text else "silence" if "[silence]" in text else "stop"
+        n = 441 * len(text)
+        pcm = struct.pack(f"<{n}h", *([level] * n))
+        segments = ""
+        if serve.long_form and len(text) > serve.long_form_chars:
+            segments = f"2;{441 * (len(text) // 2)}"
+        if not stream:
+            if "[break]" in text:
+                return self.error(500, "the engine finished without complete audio")
+            headers = [("X-Finish-Reason", finish)] + ([("X-Long-Form-Segments", segments)] if segments else [])
+            if fmt == "pcm":
+                return self.reply(200, pcm, "audio/pcm", headers)
+            head = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(pcm), b"WAVE", b"fmt ", 16, 1, 1, RATE, RATE * 2,
+                               2, 16, b"data", len(pcm))
+            return self.reply(200, head + pcm, "audio/wav", headers)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/pcm")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("X-Sample-Rate", str(RATE))
+        self.send_header("X-Channels", "1")
+        self.send_header("X-Bit-Depth", "16")
+        self.send_header("Trailer", "X-Finish-Reason, X-Long-Form-Segments" if segments else "X-Finish-Reason")
+        self.end_headers()
+        step = 2 * 4410
+        for at in range(0, len(pcm), step):
+            part = pcm[at:at + step]
+            self.wfile.write(b"%x\r\n" % len(part) + part + b"\r\n")
+            self.wfile.flush()
+            if "[break]" in text:  # held a moment, so the daemon has begun its own stream before this one breaks
+                time.sleep(0.5)
+                self.close_connection = True
+                return
+            time.sleep(0.005)
+        trailers = ""
+        if segments:
+            trailers = f"X-Finish-Reason: {finish}\r\nX-Long-Form-Segments: {segments}\r\n"
+        elif finish != "stop":
+            trailers = f"X-Finish-Reason: {finish}\r\n"
+        self.wfile.write(f"0\r\n{trailers}\r\n".encode())
+        self.wfile.flush()
+
+
+if __name__ == "__main__":
+    main()

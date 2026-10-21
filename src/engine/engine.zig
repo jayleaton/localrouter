@@ -97,8 +97,9 @@ pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) b
 
 /// A speech tool's own limits, from its options, checked before it loads (so nothing is resampled or ignored quietly):
 /// `max_input_chars` (at most 4096), `min_speed` and `max_speed` (1 and 1 for a model without a speed control),
-/// `voices` (the ids it has; `default_voice` fills an empty voice, see `speechDefaults`) and `presets` (the
-/// model-native styles a request's `preset` may name; none listed: no preset is taken).
+/// `voices` (the ids it has; `default_voice` fills an empty voice, see `speechDefaults`), `presets` (the model-native
+/// styles a request's `preset` may name; none listed: no preset is taken), and `stream` and `references` (true: the
+/// tool streams its audio as it writes it, and takes voice references; absent: it does not).
 pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Writer) bool {
     const max_chars = optionInt(cfg, "max_input_chars", 4096);
     if ((std.unicode.utf8CountCodepoints(v.input) catch v.input.len) > max_chars) {
@@ -124,6 +125,14 @@ pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Write
             return false;
         }
     }
+    if (v.stream and !optionBool(cfg, "stream", false)) {
+        why.print("model '{s}' does not stream its audio: leave stream unset for the whole reply", .{cfg.id}) catch {};
+        return false;
+    }
+    if (v.references.len > 0 and !optionBool(cfg, "references", false)) {
+        why.print("model '{s}' takes no voice references", .{cfg.id}) catch {};
+        return false;
+    }
     return true;
 }
 
@@ -135,6 +144,8 @@ pub const AudioInfo = struct {
     presets: ?[]const std.json.Value = null,
     speed: ?[2]f32 = null,
     max_input_chars: ?u64 = null,
+    stream: ?bool = null,
+    references: ?bool = null,
     max_audio_s: ?u64 = null,
 };
 
@@ -146,6 +157,8 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .presets = optionList(cfg, "presets") orelse &.{},
             .speed = .{ optionFloat(cfg, "min_speed", 0.25), optionFloat(cfg, "max_speed", 4) },
             .max_input_chars = optionInt(cfg, "max_input_chars", 4096),
+            .stream = optionBool(cfg, "stream", false),
+            .references = optionBool(cfg, "references", false),
         },
         .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60) },
         else => .{},
@@ -387,4 +400,24 @@ test "a qualification file gates a tool until it says qualified" {
     explain("the GPU lock {s} is held by another job", .{"/x"});
     try std.testing.expectEqualStrings("the GPU lock /x is held by another job", explained());
     try std.testing.expectEqualStrings("", explained());
+}
+
+test "stream and references need the speech tool to offer them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "gated", "kind": "speech", "cmd": ["x"], "options": {"stream": true}},
+        \\           {"id": "plain", "kind": "speech", "cmd": ["y"]}]}
+    );
+    const gated = c.tool("gated").?;
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(check(gated, &.{ .speech = .{ .input = "hi", .stream = true } }, &w));
+    try std.testing.expect(!check(c.tool("plain").?, &.{ .speech = .{ .input = "hi", .stream = true } }, &w));
+    try std.testing.expectEqualStrings("model 'plain' does not stream its audio: leave stream unset for the whole reply", w.buffered());
+    w = .fixed(&buf);
+    try std.testing.expect(!check(gated, &.{ .speech = .{ .input = "hi", .references = "references.json" } }, &w));
+    try std.testing.expectEqualStrings("model 'gated' takes no voice references", w.buffered());
+    try std.testing.expectEqual(@as(?bool, true), audioInfo(gated).stream);
+    try std.testing.expectEqual(@as(?bool, false), audioInfo(c.tool("plain").?).references);
 }

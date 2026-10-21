@@ -133,7 +133,30 @@ the model: input decoding, response encodings, and the limits checked before a t
   model-native styles `preset` may name; none: every preset is refused), `min_speed` / `max_speed` (1 and 1 for a
   model without a speed control), `max_input_chars` (at most 4096) and, for transcription, `max_audio_s`. `/v1/models`
   and `list_models` show them.
-- Not offered by the API, and refused with a reason: translation, streamed responses, speech `instructions`.
+- A reply may say why the audio ended and where long-form segments start: `{"ok":true,"files":["speech.wav"],
+  "finish_reason":"length","segments":"2;220500"}`. `/v1/audio/speech` sends them as `x-finish-reason` and
+  `x-long-form-segments` (printable ASCII only; anything else is dropped).
+- Streaming: a tool whose options say `"stream": true` gets `"stream": true` in the request when a client asks for a
+  stream, and writes `speech.wav` as the audio comes: a canonical 44-byte header first (its sizes may be placeholders),
+  then the samples, then the real sizes before it replies. The daemon sends each new run of samples on as an HTTP/1.1
+  chunk; when the job fails after the first chunk, the connection ends without the last chunk.
+- References: a tool whose options say `"references": true` gets the request's voice references as
+  `references.json` in the job directory (`"references": "references.json"`), a list of `{text, vq_codes}` whose shape
+  the daemon has checked.
+- A refusal's `type` is `invalid_request_error` (400), `service_unavailable` (503: the model's own server is busy or
+  not ready, retry later) or anything else (500).
+- Not offered by the API, and refused with a reason: translation, SSE streams, speech `instructions`.
+
+### Models that wrap their own server
+
+A `cmd` worker can run a model's own server rather than load the model itself (`tools/speech/drama3`). It starts the
+server on load (on loopback; a launcher that insists on a lock gets the worker's private `LOCALROUTER_GPU_LOCK`, see
+[the host's GPU lock](#the-hosts-gpu-lock)), is its client for each request, and stops it on `exit`, keeping the
+daemon waiting with progress lines until the server is down, so nothing else loads into memory that is still held. A
+launcher's own memory admission is turned off: the scheduler, from the tool's `resident_bytes`, is the only admission
+authority. A server that dies takes the worker with it (no reply), so the job fails with a 503 and the next request
+starts the model again. Its worker may check more than the [qualification](#qualification) file (Drama 3's binds it
+to the host, its pins and its engine binary).
 
 ### A model's own server (`openai_server`)
 

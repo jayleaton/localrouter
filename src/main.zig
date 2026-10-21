@@ -63,6 +63,7 @@ test {
     _ = @import("sched/memory.zig");
     _ = @import("sched/jobs.zig");
     _ = @import("sched/scheduler.zig");
+    _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
     _ = @import("media/png.zig");
     _ = @import("media/mp4.zig");
