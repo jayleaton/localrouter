@@ -14,6 +14,7 @@ const mcp = @import("mcp.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
+const realtime = @import("realtime.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -24,6 +25,7 @@ pub const App = struct {
     jobs_dir: []const u8,
     self_addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) }, // where this daemon listens, for fetching its own output URLs
     decode_mutex: Io.Mutex = .init, // audio uploads decode one at a time (`speech.startTranscription`)
+    voice: realtime.Registry = .{}, // open voice sessions, closed at shutdown
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -31,7 +33,7 @@ pub const App = struct {
     }
 };
 
-pub fn handle(app: *App, req: *h.Request) !void {
+pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     var arena: std.heap.ArenaAllocator = .init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -41,6 +43,8 @@ pub fn handle(app: *App, req: *h.Request) !void {
     const ctype = try a.dupe(u8, req.head.content_type orelse "");
     if (m == .GET and std.mem.eql(u8, p, "/health")) return h.json(req, .ok, "{\"ok\":true}");
     if (eql(p, "/mcp")) return mcp.handle(app, req, a, host);
+    if (m == .GET and eql(p, "/v1/realtime")) return realtime.serve(app, conn, req, a);
+    if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models"))) return models(app, req, a);
     if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, ctype, false);
     if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, ctype, true);
@@ -75,11 +79,11 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
 }
 
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, capabilities: []const engine.Capability, last_error: []const u8 };
+    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8 };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
+        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes });

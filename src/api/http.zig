@@ -7,10 +7,13 @@ const http = std.http;
 
 pub const Request = http.Server.Request;
 
+/// The connection a request came on: its socket and the peer's address (`stream.socket.address`).
+pub const Conn = struct { stream: Io.net.Stream };
+
 pub const max_body: usize = 64 << 20; // edits upload up to 5 images
 
-/// Serves connections until `stop` is set; `handle(ctx, request)` runs once per request.
-pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *Request) anyerror!void) type {
+/// Serves connections until `stop` is set; `handle(ctx, conn, request)` runs once per request.
+pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *const Conn, *Request) anyerror!void) type {
     return struct {
         pub fn serve(io: Io, server: *Io.net.Server, ctx: *Ctx, stop: *std.atomic.Value(bool)) void {
             var group: Io.Group = .init;
@@ -34,9 +37,10 @@ pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *Request) anyerror!
             var reader = stream.reader(io, &recv);
             var writer = stream.writer(io, &send);
             var server = http.Server.init(&reader.interface, &writer.interface);
+            const conn: Conn = .{ .stream = stream };
             while (server.reader.state == .ready) {
                 var req = server.receiveHead() catch return;
-                handle(ctx, &req) catch |err| {
+                handle(ctx, &conn, &req) catch |err| {
                     std.log.warn("{s} {s}: {s}", .{ @tagName(req.head.method), req.head.target, @errorName(err) });
                     return;
                 };

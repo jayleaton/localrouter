@@ -26,6 +26,7 @@ pub const Job = struct {
     error_type: []const u8 = "",
     http_status: u16 = 200,
     completed_at: i64 = 0,
+    keep_s: ?u32 = null, // overrides keep_outputs_s (the voice loop: its audio is gone at the next expiry tick)
     cancel: std.atomic.Value(bool) = .init(false),
     done: Io.Event = .unset,
 
@@ -95,7 +96,7 @@ pub const Table = struct {
         var it = t.map.iterator();
         while (it.next()) |e| {
             const j = e.value_ptr.*;
-            if (!j.finished() or now - j.completed_at < keep_s) continue;
+            if (!j.finished() or now - j.completed_at < (j.keep_s orelse keep_s)) continue;
             Io.Dir.cwd().deleteTree(io, j.dir) catch {};
             t.map.removeByPtr(e.key_ptr);
             destroy(t.gpa, j);

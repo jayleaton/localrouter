@@ -25,6 +25,33 @@ pub const ToolConfig = struct {
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
     options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
+    lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech and transcription, else main
+};
+
+/// The scheduler's executors: one job at a time on each. Small speech models run beside a chat or image job.
+pub const Lane = enum { main, realtime };
+
+pub fn laneOf(t: *const ToolConfig) Lane {
+    return t.lane orelse switch (t.kind) {
+        .speech, .transcription => .realtime,
+        .image, .video => .main,
+    };
+}
+
+/// The voice loop (`/voice`, `/v1/realtime`, docs/dev/VOICE.md): where the chat model is and the session defaults.
+pub const Voice = struct {
+    remote: bool = false, // serve /voice and /v1/realtime to non-loopback peers too
+    chat_url: []const u8 = "", // an OpenAI-compatible base URL ending in /v1; "": this daemon
+    chat_api_key: []const u8 = "", // sent as a bearer token to chat_url
+    chat_model: []const u8 = "", // "": the chat server's default
+    speech_model: []const u8 = "", // "": the text_to_speech default
+    transcription_model: []const u8 = "", // "": the speech_to_text default
+    voice: []const u8 = "", // "": the speech model's default voice
+    instructions: []const u8 = "You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
+    partial_interval_ms: u32 = 1000, // a partial transcript per this much new speech; 0: none
+    max_history_chars: u32 = 24000, // older turns are dropped past this
+    tools: bool = true, // offer generate_image and generate_video to the chat model
+    tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
 };
 
 pub const Config = struct {
@@ -38,6 +65,7 @@ pub const Config = struct {
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
+    voice: Voice = .{},
     tools: []const ToolConfig = &default_tools,
 
     pub fn tool(c: *const Config, id: []const u8) ?*const ToolConfig {
@@ -109,6 +137,22 @@ test "defaults name a model per capability; unknown capabilities are rejected" {
     try std.testing.expectEqualStrings("whisper", s.defaults.get(.speech_to_text).?);
     try std.testing.expectEqualStrings("kitten", s.defaults.get(.text_to_speech).?);
     try std.testing.expectEqual(Kind.transcription, s.tool("whisper").?.kind);
+}
+
+test "lanes: speech kinds default to realtime, a tool may name its lane; voice settings parse" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try parse(arena.allocator(),
+        \\{"voice": {"chat_url": "http://127.0.0.1:9/v1", "partial_interval_ms": 0}, "tools": [
+        \\  {"id": "tts", "kind": "speech", "cmd": ["x"]}, {"id": "img", "kind": "image", "engine": "testpattern"},
+        \\  {"id": "stt", "kind": "transcription", "cmd": ["x"], "lane": "main"}]}
+    );
+    try std.testing.expectEqual(Lane.realtime, laneOf(c.tool("tts").?));
+    try std.testing.expectEqual(Lane.main, laneOf(c.tool("img").?));
+    try std.testing.expectEqual(Lane.main, laneOf(c.tool("stt").?));
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/v1", c.voice.chat_url);
+    try std.testing.expectEqual(@as(u32, 0), c.voice.partial_interval_ms);
+    try std.testing.expect(!c.voice.remote);
 }
 
 test "the default host is loopback; host accepts the keywords" {
