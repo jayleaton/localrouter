@@ -156,7 +156,7 @@ pub const Client = struct {
 
     /// Streams `r`; text deltas go to `sink`. `error.Cancelled` once `stop` is set, `error.Failed` with `why`.
     pub fn stream(c: *const Client, a: std.mem.Allocator, r: *const Request, sink: Sink, stop: *Stop, why: *Why) Error!Result {
-        const payload = try body(a, r);
+        const payload = body(a, r) catch return error.OutOfMemory; // a re-parse of our own JSON cannot fail otherwise
         const url = try std.fmt.allocPrint(a, "{s}/chat/completions", .{std.mem.trimEnd(u8, c.base_url, "/")});
         const uri = std.Uri.parse(url) catch {
             why.set("the chat URL {s} is not a URL", .{url});
