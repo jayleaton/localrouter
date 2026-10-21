@@ -74,17 +74,20 @@ image model first and then the chat model, and the chat model comes back after t
 ## Setup
 
 ```sh
-tools/chat/qwen38-27b/fetch.sh /data/models/chat        # TensorFold 1.1.1 for this arch, the checkpoint and the drafter
-tools/chat/qwen38-27b/setup.sh /data/models/chat        # runs the binary here: --version, capabilities, info
+tools/chat/qwen38-27b/fetch.sh /opt/localrouter/chat --hf /data/models/chat/hf   # TensorFold 1.1.1, checkpoint, drafter (~20 GB)
+tools/chat/qwen38-27b/setup.sh /opt/localrouter/chat --hf /data/models/chat/hf   # runs the binary here; prints the tool config
 ```
 
-Then add the tool from `tools/chat/qwen38-27b/config.example.json` to the daemon's config, with `gpu_lock` set to the
-lock every GPU job on the host already takes, and run the qualify step on the GB10:
+Then merge the printed tool (as in `tools/chat/qwen38-27b/config.example.json`) into the daemon's config, with
+`gpu_lock` set to the lock every GPU job on the host already takes, stop the daemon, and run the qualify step on the
+GB10 (it refuses another host, a server already running, or under 64 GiB `MemAvailable`):
 
 ```sh
-tools/chat/qwen38-27b/qualify.sh /data/models/chat /usr/local/bin/localrouter /data/qualify/chat-$(date +%s) \
+tools/chat/qwen38-27b/qualify.sh /opt/localrouter/chat /opt/localrouter/bin/localrouter /tmp/qwen38-qualify-1 \
   /data/models/chat/qwen38-27b-qualification.json
 ```
+
+Restart the daemon: the tool is served once the marker says `"qualified": true`. See `tools/chat/qwen38-27b/README.md`.
 
 ## Qualification
 

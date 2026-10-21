@@ -1,0 +1,31 @@
+{
+  "gpu_lock": "/var/lock/gpu.lock",
+  "defaults": {"chat_completion": "qwen3.8-27b"},
+  "tools": [
+    {
+      "id": "qwen3.8-27b",
+      "kind": "chat",
+      "name": "Qwen3.8 27B (TensorFold 1.1.1, MLX 4-bit + DFlash2 drafter)",
+      "engine": "openai_server",
+      "weights": "/data/models/chat/hf",
+      "resident_bytes": 51539607552,
+      "working_bytes": 0,
+      "keep_loaded": true,
+      "priority": 100,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 900,
+      "generate_timeout_s": 600,
+      "qualification": "/data/models/chat/qwen38-27b-qualification.json",
+      "options": {
+        "server": ["/opt/localrouter/chat/tensorfold-1.1.1/bin/tensorfold-native", "serve",
+                   "TensorFold/Qwen3.8-27B-MLX-4bit", "--drafter", "z-lab/Qwen3.8-27B-DFlash2",
+                   "--host", "127.0.0.1", "--port", "{port}", "--name", "{id}", "--context", "32768",
+                   "--prompt-cache-gib", "8", "--parallel", "1", "--no-update-check"],
+        "env": {"HF_HUB_CACHE": "/data/models/chat/hf", "HF_HUB_OFFLINE": "1", "TENSORFOLD_NO_UPDATE_CHECK": "1",
+                "TF_DRAIN_S": "5"},
+        "health": "/health",
+        "memory": "PLACEHOLDER: 48 GiB = 40 GiB estimate (weights 15 GiB, 4-bit drafter, 8 GiB prompt cache, 32k KV, runtime) + 8 GiB unmeasured GB10 overhead; replace with the DGX-01 bring-up's measured peak"
+      }
+    }
+  ]
+}

@@ -1,0 +1,300 @@
+{
+  "note": "The qualification prompt set: every body is sent as is, with model set to the tool id. temperature 0 and seed 7 everywhere; P2 reasoning on, P3 reasoning off the way MCP chat sends it, P1 the template default, the rest enable_thinking false. expect: structural checks on each reply (compare).",
+  "prompts": [
+    {
+      "id": "P1",
+      "what": "short factual question, template default thinking",
+      "expect": {
+        "content_or_length": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the capital of Australia? Answer in one sentence."
+          }
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 1024
+      }
+    },
+    {
+      "id": "P2",
+      "what": "reasoning on",
+      "expect": {
+        "reasoning": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "A train leaves at 09:40 and arrives at 13:15 the same day. How long is the trip in minutes? Give the number only."
+          }
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 1024,
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        }
+      }
+    },
+    {
+      "id": "P3",
+      "what": "reasoning off (reasoning_effort none and enable_thinking false)",
+      "expect": {
+        "no_reasoning": true,
+        "content": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Name three primary colours of light, comma separated."
+          }
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 256,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "id": "P4",
+      "what": "tool call, tool_choice required (libtfgrammar)",
+      "expect": {
+        "tool_call": "get_weather",
+        "json_arguments": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather like in Lisbon right now?"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "The current weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "The city name"
+                  },
+                  "unit": {
+                    "type": "string",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ]
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "required",
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 512,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "id": "P5",
+      "what": "tool result round trip",
+      "expect": {
+        "content_or_length": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is the weather like in Paris right now?"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_0",
+                "type": "function",
+                "function": {
+                  "name": "get_weather",
+                  "arguments": "{\"city\": \"Paris\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_0",
+            "content": "{\"city\": \"Paris\", \"temperature_c\": 18, \"conditions\": \"light rain\"}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "The current weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string",
+                    "description": "The city name"
+                  },
+                  "unit": {
+                    "type": "string",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ]
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 256,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "id": "P6",
+      "what": "response_format json_schema (libtfgrammar)",
+      "expect": {
+        "json_keys": [
+          "city",
+          "country",
+          "population_millions"
+        ]
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Give the most populous city of Japan, its country and its population in millions."
+          }
+        ],
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "city",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "country": {
+                  "type": "string"
+                },
+                "population_millions": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "city",
+                "country",
+                "population_millions"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 256,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "id": "P7",
+      "what": "stop sequence and max_tokens 64",
+      "expect": {
+        "finish_reason": [
+          "stop",
+          "length"
+        ],
+        "max_completion_tokens": 64,
+        "stop_text_absent": "12"
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Count from 1 to 100 in digits, separated by commas and spaces. Output only the numbers."
+          }
+        ],
+        "stop": [
+          "12"
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 64,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "id": "P8",
+      "what": "about 2k-token multi-turn prompt (prompt cache path)",
+      "expect": {
+        "content_or_length": true
+      },
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a careful warehouse assistant. Answer from the stock ledger only."
+          },
+          {
+            "role": "user",
+            "content": "Here is the first half of the stock ledger.\n\nRow 01: bin F-137, aisle 8, shelf 4: 63 units of nylon cable ties, last counted on day 12, supplier Kestrel.\nRow 02: bin C-174, aisle 3, shelf 1: 116 units of copper crimp lugs, last counted on day 23, supplier Halvard.\nRow 03: bin H-211, aisle 10, shelf 4: 169 units of spring washers, last counted on day 6, supplier Ossory.\nRow 04: bin E-248, aisle 5, shelf 1: 32 units of brass hinge pins, last counted on day 17, supplier Tremaine.\nRow 05: bin B-285, aisle 12, shelf 4: 85 units of rubber grommets, last counted on day 28, supplier Norbrook.\nRow 06: bin G-322, aisle 7, shelf 1: 138 units of aluminium rivets, last counted on day 11, supplier Kestrel.\nRow 07: bin D-359, aisle 2, shelf 4: 191 units of M8 flange nuts, last counted on day 22, supplier Halvard.\nRow 08: bin A-396, aisle 9, shelf 1: 54 units of steel shelf brackets, last counted on day 5, supplier Ossory.\nRow 09: bin F-433, aisle 4, shelf 4: 107 units of zinc wood screws, last counted on day 16, supplier Tremaine.\nRow 10: bin C-470, aisle 11, shelf 1: 160 units of M6 hex bolts, last counted on day 27, supplier Norbrook.\nRow 11: bin H-507, aisle 6, shelf 4: 23 units of nylon cable ties, last counted on day 10, supplier Kestrel.\nRow 12: bin E-544, aisle 1, shelf 1: 76 units of copper crimp lugs, last counted on day 21, supplier Halvard.\nRow 13: bin B-581, aisle 8, shelf 4: 129 units of spring washers, last counted on day 4, supplier Ossory.\nRow 14: bin G-618, aisle 3, shelf 1: 182 units of brass hinge pins, last counted on day 15, supplier Tremaine.\nRow 15: bin D-655, aisle 10, shelf 4: 45 units of rubber grommets, last counted on day 26, supplier Norbrook.\nRow 16: bin A-692, aisle 5, shelf 1: 98 units of aluminium rivets, last counted on day 9, supplier Kestrel.\nRow 17: bin F-729, aisle 12, shelf 4: 151 units of M8 flange nuts, last counted on day 20, supplier Halvard.\nRow 18: bin C-766, aisle 7, shelf 1: 14 units of steel shelf brackets, last counted on day 3, supplier Ossory.\nRow 19: bin H-803, aisle 2, shelf 4: 67 units of zinc wood screws, last counted on day 14, supplier Tremaine.\nRow 20: bin E-840, aisle 9, shelf 1: 120 units of M6 hex bolts, last counted on day 25, supplier Norbrook.\nRow 21: bin B-877, aisle 4, shelf 4: 173 units of nylon cable ties, last counted on day 8, supplier Kestrel.\nRow 22: bin G-914, aisle 11, shelf 1: 36 units of copper crimp lugs, last counted on day 19, supplier Halvard.\nRow 23: bin D-951, aisle 6, shelf 4: 89 units of spring washers, last counted on day 2, supplier Ossory.\nRow 24: bin A-988, aisle 1, shelf 1: 142 units of brass hinge pins, last counted on day 13, supplier Tremaine.\nRow 25: bin F-125, aisle 8, shelf 4: 195 units of rubber grommets, last counted on day 24, supplier Norbrook.\nRow 26: bin C-162, aisle 3, shelf 1: 58 units of aluminium rivets, last counted on day 7, supplier Kestrel.\nRow 27: bin H-199, aisle 10, shelf 4: 111 units of M8 flange nuts, last counted on day 18, supplier Halvard.\nRow 28: bin E-236, aisle 5, shelf 1: 164 units of steel shelf brackets, last counted on day 1, supplier Ossory.\nRow 29: bin B-273, aisle 12, shelf 4: 27 units of zinc wood screws, last counted on day 12, supplier Tremaine.\nRow 30: bin G-310, aisle 7, shelf 1: 80 units of M6 hex bolts, last counted on day 23, supplier Norbrook.\n\nHow many of these rows name the supplier Kestrel? Answer briefly."
+          },
+          {
+            "role": "assistant",
+            "content": "Rows 01, 06, 11, 16, 21 and 26 name Kestrel: six rows."
+          },
+          {
+            "role": "user",
+            "content": "Here is the second half of the ledger.\n\nRow 31: bin D-347, aisle 2, shelf 4: 133 units of nylon cable ties, last counted on day 6, supplier Kestrel.\nRow 32: bin A-384, aisle 9, shelf 1: 186 units of copper crimp lugs, last counted on day 17, supplier Halvard.\nRow 33: bin F-421, aisle 4, shelf 4: 49 units of spring washers, last counted on day 28, supplier Ossory.\nRow 34: bin C-458, aisle 11, shelf 1: 102 units of brass hinge pins, last counted on day 11, supplier Tremaine.\nRow 35: bin H-495, aisle 6, shelf 4: 155 units of rubber grommets, last counted on day 22, supplier Norbrook.\nRow 36: bin E-532, aisle 1, shelf 1: 18 units of aluminium rivets, last counted on day 5, supplier Kestrel.\nRow 37: bin B-569, aisle 8, shelf 4: 71 units of M8 flange nuts, last counted on day 16, supplier Halvard.\nRow 38: bin G-606, aisle 3, shelf 1: 124 units of steel shelf brackets, last counted on day 27, supplier Ossory.\nRow 39: bin D-643, aisle 10, shelf 4: 177 units of zinc wood screws, last counted on day 10, supplier Tremaine.\nRow 40: bin A-680, aisle 5, shelf 1: 40 units of M6 hex bolts, last counted on day 21, supplier Norbrook.\nRow 41: bin F-717, aisle 12, shelf 4: 93 units of nylon cable ties, last counted on day 4, supplier Kestrel.\nRow 42: bin C-754, aisle 7, shelf 1: 146 units of copper crimp lugs, last counted on day 15, supplier Halvard.\nRow 43: bin H-791, aisle 2, shelf 4: 199 units of spring washers, last counted on day 26, supplier Ossory.\nRow 44: bin E-828, aisle 9, shelf 1: 62 units of brass hinge pins, last counted on day 9, supplier Tremaine.\nRow 45: bin B-865, aisle 4, shelf 4: 115 units of rubber grommets, last counted on day 20, supplier Norbrook.\nRow 46: bin G-902, aisle 11, shelf 1: 168 units of aluminium rivets, last counted on day 3, supplier Kestrel.\nRow 47: bin D-939, aisle 6, shelf 4: 31 units of M8 flange nuts, last counted on day 14, supplier Halvard.\nRow 48: bin A-976, aisle 1, shelf 1: 84 units of steel shelf brackets, last counted on day 25, supplier Ossory.\nRow 49: bin F-113, aisle 8, shelf 4: 137 units of zinc wood screws, last counted on day 8, supplier Tremaine.\nRow 50: bin C-150, aisle 3, shelf 1: 190 units of M6 hex bolts, last counted on day 19, supplier Norbrook.\nRow 51: bin H-187, aisle 10, shelf 4: 53 units of nylon cable ties, last counted on day 2, supplier Kestrel.\nRow 52: bin E-224, aisle 5, shelf 1: 106 units of copper crimp lugs, last counted on day 13, supplier Halvard.\nRow 53: bin B-261, aisle 12, shelf 4: 159 units of spring washers, last counted on day 24, supplier Ossory.\nRow 54: bin G-298, aisle 7, shelf 1: 22 units of brass hinge pins, last counted on day 7, supplier Tremaine.\nRow 55: bin D-335, aisle 2, shelf 4: 75 units of rubber grommets, last counted on day 18, supplier Norbrook.\nRow 56: bin A-372, aisle 9, shelf 1: 128 units of aluminium rivets, last counted on day 1, supplier Kestrel.\nRow 57: bin F-409, aisle 4, shelf 4: 181 units of M8 flange nuts, last counted on day 12, supplier Halvard.\nRow 58: bin C-446, aisle 11, shelf 1: 44 units of steel shelf brackets, last counted on day 23, supplier Ossory.\nRow 59: bin H-483, aisle 6, shelf 4: 97 units of zinc wood screws, last counted on day 6, supplier Tremaine.\nRow 60: bin E-520, aisle 1, shelf 1: 150 units of M6 hex bolts, last counted on day 17, supplier Norbrook.\n\nWhich row in the whole ledger holds the most units, and how many units is that? Answer in one sentence."
+          }
+        ],
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": 256,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    }
+  ]
+}
