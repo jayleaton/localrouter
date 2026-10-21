@@ -86,6 +86,11 @@ pub const Session = struct {
     fresh: bool = false, // something to answer arrived since the last response
     waiters: std.ArrayList(std.Thread) = .empty,
     close_stop: Stop = .{}, // set when the session closes: ends transcriptions and tool waits
+    // The last spoken turn's marks (awake-clock ns; 0: none), for the timing of the response that answers it.
+    stop_ns: i96 = 0, // VAD ended the turn
+    stt_start_ns: i96 = 0,
+    stt_end_ns: i96 = 0,
+    stt_worker_ms: u64 = 0, // the transcription as the worker timed it
 
     /// A session; it sends session.created and starts its worker.
     pub fn create(gpa: std.mem.Allocator, io: Io, b: backend.Backend, out: backend.Out, voice: config.Voice, chat_model: []const u8) !*Session {
@@ -237,6 +242,11 @@ pub const Session = struct {
         try s.maybePartial();
     }
 
+    /// The awake clock, in ns (stage timings).
+    pub fn clock(s: *const Session) i96 {
+        return Io.Clock.awake.now(s.io).toNanoseconds();
+    }
+
     /// Session milliseconds of audio received so far.
     pub fn nowMs(s: *const Session) u64 {
         return s.heard * 1000 / rate;
@@ -284,6 +294,7 @@ pub const Session = struct {
     fn speechStopped(s: *Session, a: std.mem.Allocator, ms: u64) !void {
         const t = s.turn orelse return;
         s.emit.send(a, "input_audio_buffer.speech_stopped", .{ .audio_end_ms = ms, .item_id = t.item_id });
+        s.stop_ns = s.clock();
         try s.commit(a, t.item_id, t.start_ms, ms);
         s.endTurn();
         if (s.settings.create_response) try s.push(.{ .respond = .{ .auto = true } });

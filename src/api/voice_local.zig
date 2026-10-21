@@ -84,6 +84,7 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     try wait(app, j, stop);
     defer forget(app, j);
     if (j.status != .completed) return failed(why, j.error_message);
+    if (o.worker_ms) |p| p.* = j.ms;
     const t = speech.readTranscript(app, a, j, &ref) orelse return failed(why, ref.message);
     const text = t.get("text") orelse return "";
     return if (text == .string) try a.dupe(u8, text.string) else "";

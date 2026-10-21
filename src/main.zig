@@ -88,5 +88,7 @@ test {
     _ = @import("voice/events.zig");
     _ = @import("voice/session.zig");
     _ = @import("voice/respond.zig");
+    _ = @import("voice/tools.zig");
+    _ = @import("voice/timing.zig");
     _ = @import("voice/session_test.zig");
 }
