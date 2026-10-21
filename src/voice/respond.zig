@@ -11,7 +11,7 @@ const chat = @import("chat.zig");
 const chunker = @import("chunker.zig");
 const resample = @import("resample.zig");
 const Stop = @import("stop.zig").Stop;
-const tools = @import("tools.zig");
+const tool_calls = @import("tools.zig");
 const timing = @import("timing.zig");
 
 const Session = session.Session;
@@ -414,7 +414,7 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
         s.emit.send(a, "response.function_call_arguments.done", .{ .response_id = r.id, .item_id = it.id, .output_index = index, .call_id = it.call_id, .name = it.name, .arguments = it.arguments });
         s.emit.send(a, "response.output_item.done", .{ .response_id = r.id, .output_index = index, .item = item });
         outputs.append(a, item) catch {};
-        if (events.isBuiltin(it.name) and s.voice.tools) tools.start(s, it);
+        if (events.isBuiltin(it.name) and s.voice.tools) tool_calls.start(s, it);
     }
     s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
