@@ -332,11 +332,15 @@ pub const Scheduler = struct {
         s.releaseIdleGpuLock(); // a failed load or an unload may leave nothing loaded
     }
 
-    /// Under `gate`, or by the slot's own lane while it holds `in_use`.
-    fn unloadSlot(_: *Scheduler, slot: *Slot) void {
+    /// Under `gate`, or by the slot's own lane while it holds `in_use`. Every lane is woken: the tool's own lane may be
+    /// asleep until a TTL far off and must notice now that a kept tool is down (another lane evicted it).
+    fn unloadSlot(s: *Scheduler, slot: *Slot) void {
         if (slot.tool.state() == .unloaded and slot.resident == 0) return;
         slot.tool.unload();
         slot.resident = 0;
+        s.mutex.lockUncancelable(s.io); // lock order: gate, then mutex (nothing takes them the other way)
+        defer s.mutex.unlock(s.io);
+        for (&s.lanes) |*l| l.cond.signal(s.io);
     }
 
     /// Unloads `slot` now, or when its lane is done with it.
