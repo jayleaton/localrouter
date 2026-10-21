@@ -64,8 +64,10 @@ Consequences for the design:
    - **Defaults, this branch:** `install.sh` now writes `idle_ttl_s` 60 for image models and 30 for video
      (`IMAGE_IDLE_TTL_S`, `VIDEO_IDLE_TTL_S`; both were 300). `docker/tools.json` and the README example match.
      A reload costs 9.3 s (image) or 7.5 s (video), so a burst of jobs still reuses the loaded model.
-     `IMAGE_KEEP_WARM=0` stops the default image model being kept warm. A kept-warm model ignores its TTL, so
-     beside Drama 3 it would pin about 36 GiB. The default stays 1, as before.
+     `IMAGE_KEEP_WARM` now defaults to 0: the default image model loads on demand. Voice and chat come first on
+     this box, and chat (up to 24 GiB), Whisper (3.6), Drama 3 (up to 54) and Kitten (10.6) leave no room for a
+     resident 36 GiB image model, while an image reload costs only about 9 s. `IMAGE_KEEP_WARM=1` restores the old
+     behavior for an image-only box.
    - **PR #14 (chat as a tool) does not close this gap.** Its `loadKept` is main's: a kept-warm tool reloads only
      when `fits(resident)` without evicting anything (`src/sched/scheduler.zig:178` on main; the same check in #14).
      That holds for every kind, Whisper and Kitten included. So after a video, TTS comes back only once the video's
