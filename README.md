@@ -27,7 +27,7 @@ Speech comes as optional adapters that run a model's own implementation as a wor
 
 | Speech model | Can do | Status |
 | --- | --- | --- |
-| **Fish Audio Drama 3** (`fishaudio/drama-3`, [setup](docs/dev/DRAMA3.md)): plotarmordev's [drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) native server on TensorFold. Built with Fish Audio | text to 44.1 kHz speech, whole or streamed as it is made; voice files and inline voice references; long-form replies | **listed but refused until GPU-qualified** on the host (`tools/speech/drama3/qualify.sh` on a GB10); nothing is GPU-verified yet |
+| **Fish Audio Drama 3** (`fishaudio/drama-3`, [setup](docs/dev/DRAMA3.md)): plotarmordev's [drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) native server on TensorFold. Built with Fish Audio | text to 44.1 kHz speech, whole or streamed as it is made; voice files and inline voice references; long-form replies | qualified on DGX-01 (GB10): first audio 0.14 s streamed, RTF 0.66, 40.4 GiB, also beside the warm chat model; refused on any other host until `tools/speech/drama3/qualify.sh` passes there |
 | **Kitten TTS 2** ([setup](docs/dev/KITTEN-TTS2.md)) | text to 24 kHz speech, 47 voices | CPU checked bit for bit; GB10 CUDA not yet qualified |
 | **Whisper large-v3-turbo** | speech to text | checked against its recipe on GB10 |
 

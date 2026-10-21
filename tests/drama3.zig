@@ -317,12 +317,12 @@ test "Jarvis box: chat, Drama 3 and Whisper warm together under LocalRouter's ad
     defer Io.Dir.cwd().deleteTree(io, root) catch {};
     try qualify(io, a);
     // DGX-01 in MiB for GiB: 106 usable (MemAvailable 114 less the 8 reserved). Chat 24 (its resident_bytes; priority
-    // 100 and keep_loaded by default), Drama 3 54 (its launcher's cgroup cap; 50), Whisper 4 (10): 82 warm together.
+    // 100 and keep_loaded by default), Drama 3 48 (measured 40.4 + 8; 50), Whisper 4 (10): 76 warm together.
     // The launcher's own admission would refuse Drama 3 here (83 GiB free < 88); the worker turns it off.
     const cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", \"budget_bytes\": 111149056, \"gpu_lock\": \"{s}\", \"tools\": [" ++
         "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 25165824, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
         "{{\"id\": \"fishaudio/drama-3\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
-        " \"resident_bytes\": 56623104, \"keep_loaded\": true, \"priority\": 50, \"load_timeout_s\": 60, \"options\": {{" ++
+        " \"resident_bytes\": 50331648, \"keep_loaded\": true, \"priority\": 50, \"load_timeout_s\": 60, \"options\": {{" ++
         "\"voices\": [\"default\"], \"min_speed\": 1, \"max_speed\": 1, \"stream\": true, \"references\": true, \"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
         "{{\"id\": \"whisper\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 4194304, \"keep_loaded\": true, \"priority\": 10}}," ++
         "{{\"id\": \"img\", \"kind\": \"image\", \"engine\": \"testpattern\", \"idle_ttl_s\": 600, \"options\": {{\"resident_mb\": 39}}}}," ++
@@ -334,7 +334,7 @@ test "Jarvis box: chat, Drama 3 and Whisper warm together under LocalRouter's ad
     for (0..2) |_| try converse(&d, a); // alternating models: nothing reloads
     for (warm) |id| try expectState(&d, a, id, "ready");
 
-    // An image (39.4 MiB) beside the 82 MiB voice loop: Whisper (10) goes, then Drama 3 (50); chat (100) stays.
+    // An image (39.4 MiB) beside the 76 MiB voice loop: Whisper (10) goes, then Drama 3 (50); chat (100) stays.
     try testing.expectEqual(std.http.Status.ok, (try harness.image(&d, a, "img", "")).status);
     try expectState(&d, a, "whisper", "unloaded");
     try expectState(&d, a, "fishaudio/drama-3", "unloaded");
