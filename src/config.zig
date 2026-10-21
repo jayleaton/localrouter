@@ -58,6 +58,9 @@ pub const Voice = struct {
     instructions: []const u8 = "You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
     partial_interval_ms: u32 = 0, // a partial transcript per this much new speech; 0 (default): none, since a partial
     // on a non-streaming STT model (Whisper) can hold the turn's final transcript back by a whole decode
+    draft_after_ms: u32 = 150, // quiet after speech that starts a draft transcript, reused when the turn ends; 0: none
+    early_end_ms: u32 = 300, // a draft that ends a sentence ends the turn after this much quiet, not silence_duration_ms;
+    // 0: never
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job

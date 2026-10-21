@@ -15,7 +15,8 @@ pub const PcmSink = struct {
     write: *const fn (ctx: *anyopaque, samples: []const i16, rate: u32) void,
 };
 
-pub const Hear = struct { model: []const u8 = "", language: []const u8 = "", prompt: []const u8 = "", worker_ms: ?*u64 = null }; // worker_ms: the time the model itself took
+/// worker_ms: the time the model itself took; detected: the language it heard (in the call's allocator), when given.
+pub const Hear = struct { model: []const u8 = "", language: []const u8 = "", prompt: []const u8 = "", worker_ms: ?*u64 = null, detected: ?*[]const u8 = null };
 pub const Say = struct { model: []const u8 = "", voice: []const u8 = "" };
 
 pub const JobKind = enum { image, video };
