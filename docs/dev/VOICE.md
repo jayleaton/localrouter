@@ -171,6 +171,41 @@ voiced sample. The table covers seven turns, with the warm-up left out of the st
     thinking off only and with `reasoning_effort: none` added. Those probe requests carried no tools, while the one
     observed leak happened in a voice request that did. The hold stays as the guard.
 
+### First spoken word under 1 s (DGX-01, 2026-10-21)
+
+Times run from the end of the user's speech to the first non-silent reply audio, as heard by the client. They are
+the median over the six turns after the warm-up, and the p90 over the five turns without a tool call. The models,
+precision and transcripts are unchanged from the baseline; every transcript in the after run was byte-identical
+to the before run's.
+
+| | before (`4011b7e0`) | after (`369808d8`) |
+| --- | ---: | ---: |
+| **first non-silent audio, median** | **2172 ms** | **961 ms** |
+| **p90, turns without a tool call** | **2389 ms** | **981 ms** |
+| checks | 31 of 33 (both latency checks failed) | 33 of 33 |
+
+Stage medians in ms; a negative `stt_wait` means the transcript was started before the turn ended:
+
+| stage | before | after | what changed |
+| --- | ---: | ---: | --- |
+| VAD end of turn | 484 | 349 | the draft's sentence end ends the turn after 300 ms of quiet, not 500 |
+| STT wait | 0 | -263 | the draft starts after 100 ms of quiet and becomes the final transcript |
+| STT | 888 | 252 | fixed or sticky language (no detection pass), 4 CPU threads, greedy decode, Silero run alongside generate(), memoized resampler |
+| chat first token | 182 | 184 | (cold turns: the prime cut the warm-up's 716 to 164, the capital turn stayed 388) |
+| to first text for TTS | 286 | 183 | the lead hold releases one token past the first clause or sentence |
+| TTS first samples | 128 | 131 | |
+| delivery and leading silence | 2 + 15 | 2 + 9 | |
+
+Barge-in still cancelled the answer 41 ms after `speech_started`, with no audio after it. The eviction case
+passed: Drama 3 was back 8.0 s after the clip, with the ballast held. The leak checks (no `think>`, no repeated
+first sentence) passed.
+
+Card recipe against greedy, on the same loaded model: identical transcripts on all 21 qualify fixtures that hold
+speech or silence, including the codec variants, and on the 8 e2e prompts, each in auto and fixed language
+(56 pairs; silence and noise in auto only). The median e2e prompt took 362 ms with the recipe and 265 ms greedy. drama-tensorfold's 0.14 s figure is
+TTS alone: request start to the first streamed codec frame, warm (`bench/drama_bench.py --stream`). Here that stage
+is `TTS first samples`, about 130 ms.
+
 ## Tests
 
 - `src/voice/*.zig` unit tests: WebSocket framing (masking, fragments, control frames, size limits), VAD boundaries,
