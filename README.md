@@ -133,7 +133,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
 | `tools[].priority` | 0 (chat: 100) | higher is unloaded later when memory is needed |
-| `tools[].keep_loaded` | false (chat: true) | load at start, never unload for idleness, reload when memory frees |
+| `tools[].keep_loaded` | false (chat: true) | load at start, never unload for idleness, reload as soon as the scheduler is idle (unloading idle tools of lower priority) |
 | `tools[].qualification` | none | a file the model's qualify script writes on this machine. Until it exists and says `"qualified": true` the model is listed (`"qualified": false` in `/v1/models`) and refused with a 503 saying it is not GPU-qualified on this host |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |

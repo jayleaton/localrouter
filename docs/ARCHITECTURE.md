@@ -41,9 +41,9 @@ few MB and holds no GPU memory.
 working bytes for this request). The scheduler admits a job only if it fits under the budget (the machine's available
 memory minus `reserve_bytes`, or `budget_bytes`). If it does not fit, idle tools are unloaded: lowest `priority` first,
 then least recently used. Priority only orders the victims: a request is never refused while unloading idle tools would
-make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own once
-the memory is free again, so an operator can keep, say, an image model and a voice model warm side by side and still
-let a video job take the whole machine when it needs it.
+make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own as soon
+as the scheduler is idle, unloading idle tools of lower priority if they must, so an operator can keep, say, an image
+model and a voice model warm side by side and still let a video job take the whole machine when it needs it.
 
 ## Requests and capabilities
 
