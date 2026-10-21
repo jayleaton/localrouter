@@ -1,6 +1,9 @@
 //! ProcessTool: a Tool served by a worker process (`localrouter worker` for compiled-in engines, or the config's `cmd`).
 //! Unload is process exit, so every byte returns to the OS; abort and deadlines kill the worker's process group.
-//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL. Worker stderr is appended to `<data>/logs/<id>.log`.
+//! The tool's config reaches the worker as JSON in LOCALROUTER_TOOL, the host's GPU lock (`Config.gpu_lock`) as
+//! LOCALROUTER_GPU_LOCK. Worker stderr is appended to `<data>/logs/<id>.log`. A worker whose load reply names a `port`
+//! runs the model's own HTTP server there: chat requests are proxied to it (`proxy`), and cancelling one ends the request,
+//! not the worker.
 
 const std = @import("std");
 const posix = std.posix;
@@ -8,6 +11,7 @@ const Io = std.Io;
 const tool = @import("tool.zig");
 const wire = @import("wire.zig");
 const engine = @import("../engine/engine.zig");
+const upstream = @import("upstream.zig");
 const Request = @import("request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
@@ -17,6 +21,7 @@ pub const Setup = struct {
     self_exe: []const u8, // this binary, for `localrouter worker`
     environ: *const std.process.Environ.Map,
     log_dir: []const u8,
+    gpu_lock: []const u8 = "",
 };
 
 pub const ProcessTool = struct {
@@ -30,6 +35,9 @@ pub const ProcessTool = struct {
     st: std.atomic.Value(tool.State) = .init(.unloaded),
     fail_msg: [2048]u8 = undefined,
     fail: tool.Failure = .{},
+    port: u16 = 0, // the loopback port of the worker's own server (its load reply); 0: none
+    proxying: std.atomic.Value(bool) = .init(false), // a chat request is being proxied: abort ends it, not the worker
+    upstream_fd: std.atomic.Value(posix.fd_t) = .init(-1), // that request's connection
 
     pub fn init(setup: Setup, cfg: *const ToolConfig) !ProcessTool {
         return .{ .setup = setup, .cfg = cfg, .buf = try setup.gpa.alloc(u8, wire.max_line) };
@@ -75,9 +83,18 @@ pub const ProcessTool = struct {
         return self(ptr).fail;
     }
 
+    /// Ends the running load or generate: a proxied request loses its connection (the worker and its model stay
+    /// loaded); anything else kills the worker's group. An idle tool has nothing to end.
     fn abort(ptr: *anyopaque) void {
         const p = self(ptr);
-        p.aborted.store(true, .release);
+        p.aborted.store(true, .seq_cst);
+        if (p.proxying.load(.seq_cst)) {
+            const fd = p.upstream_fd.load(.seq_cst);
+            if (fd >= 0) _ = std.c.shutdown(fd, std.c.SHUT.RDWR); // else `proxy` sees `aborted` once it has connected
+            return;
+        }
+        const st = p.st.load(.acquire);
+        if (st != .loading and st != .busy) return;
         const pid = p.pid.load(.acquire);
         if (pid > 0) _ = posix.system.kill(-pid, posix.SIG.KILL);
     }
@@ -85,6 +102,14 @@ pub const ProcessTool = struct {
     fn load(ptr: *anyopaque) tool.Error!u64 {
         const p = self(ptr);
         if (p.child != null) return 0;
+        {
+            var arena: std.heap.ArenaAllocator = .init(p.setup.gpa);
+            defer arena.deinit();
+            if (engine.unqualified(p.setup.io, arena.allocator(), p.cfg, &p.fail_msg)) |why| {
+                p.fail = .{ .message = why, .type = "server_error" };
+                return tool.Error.LoadFailed;
+            }
+        }
         p.aborted.store(false, .release);
         p.st.store(.loading, .release);
         p.spawn() catch |err| return p.failed(.unloaded, tool.Error.LoadFailed, "could not start the worker: {s}", .{@errorName(err)});
@@ -95,6 +120,7 @@ pub const ProcessTool = struct {
             p.kill();
             return p.failed(.unloaded, tool.Error.LoadFailed, "load failed: {s}", .{r.value.@"error"});
         }
+        p.port = r.value.port;
         p.st.store(.ready, .release);
         return r.value.resident;
     }
@@ -102,6 +128,13 @@ pub const ProcessTool = struct {
     fn generate(ptr: *anyopaque, job: *const tool.Job, sink: tool.Sink, arena: std.mem.Allocator) tool.Error!tool.Output {
         const p = self(ptr);
         if (p.child == null) return tool.Error.WorkerDied;
+        if (job.request == .chat) {
+            p.aborted.store(false, .seq_cst); // before `proxying`: an abort from here on is seen (`abort`, `proxy`)
+            p.proxying.store(true, .seq_cst);
+            defer p.proxying.store(false, .seq_cst);
+            p.st.store(.busy, .release);
+            return p.proxy(job, arena);
+        }
         p.st.store(.busy, .release);
         const cmd: wire.Command = .{ .op = .generate, .id = job.id, .dir = job.dir, .request = job.request };
         wire.send(p.stdinFd(), p.setup.gpa, cmd) catch return p.died(tool.Error.WorkerDied);
@@ -117,6 +150,57 @@ pub const ProcessTool = struct {
         const files = arena.alloc([]const u8, r.value.files.len) catch return tool.Error.OutOfMemory;
         for (files, r.value.files) |*d, s| d.* = arena.dupe(u8, s) catch return tool.Error.OutOfMemory;
         return .{ .files = files, .seed = r.value.seed, .ms = r.value.ms };
+    }
+
+    /// A chat request, POSTed to the worker's own server on loopback; the reply goes into the job directory as it arrives:
+    /// `completion.json`, or the event stream in `completion.sse` (created once the server has accepted the request,
+    /// which is how the API knows to start streaming). The server's refusals keep its status: 4xx is the caller's (400),
+    /// 503 a busy server (503), anything else a failure (500). `generate_timeout_s` bounds each silence.
+    fn proxy(p: *ProcessTool, job: *const tool.Job, arena: std.mem.Allocator) tool.Error!tool.Output {
+        const c = job.request.chat;
+        if (p.port == 0) return p.failed(.ready, tool.Error.GenerateFailed, "model '{s}' has no server to send chat requests to: its worker's load reply named no port", .{p.cfg.id});
+        const start = Io.Clock.awake.now(p.setup.io);
+        const fd = upstream.connect(p.port) catch |err| return p.lost(err);
+        defer _ = std.c.close(fd);
+        p.upstream_fd.store(fd, .seq_cst);
+        defer p.upstream_fd.store(-1, .seq_cst); // runs before the close above
+        if (p.aborted.load(.seq_cst)) return p.lost(error.Closed);
+        upstream.send(fd, "POST", "/v1/chat/completions", c.body) catch |err| return p.lost(err);
+        const buf = arena.alloc(u8, 64 << 10) catch return tool.Error.OutOfMemory;
+        var r: upstream.Reader = .{ .fd = fd, .buf = buf, .timeout_ms = @intCast(@min(@as(u64, p.cfg.generate_timeout_s) * 1000, std.math.maxInt(i32))) };
+        const status = r.head() catch |err| return p.lost(err);
+        if (status != 200) {
+            const body = r.rest(arena, 64 << 10) catch "";
+            const typ = if (status >= 400 and status < 500 and status != 401 and status != 403) "invalid_request_error" else if (status == 503) "service_unavailable" else "server_error";
+            p.fail = .{ .message = p.copyMsg("{s}", .{upstream.errorMessage(arena, body)}), .type = typ };
+            p.st.store(.ready, .release);
+            return tool.Error.GenerateFailed;
+        }
+        const name = if (c.stream) "completion.sse" else "completion.json";
+        const path = std.fs.path.join(arena, &.{ job.dir, name }) catch return tool.Error.OutOfMemory;
+        const file = Io.Dir.cwd().createFile(p.setup.io, path, .{}) catch return p.failed(.ready, tool.Error.GenerateFailed, "could not write {s}", .{name});
+        defer file.close(p.setup.io);
+        while (r.next() catch |err| return p.lost(err)) |bytes| {
+            wire.writeAll(file.handle, bytes) catch return p.failed(.ready, tool.Error.GenerateFailed, "could not write {s}", .{name});
+        }
+        p.st.store(.ready, .release);
+        const files = arena.dupe([]const u8, &.{name}) catch return tool.Error.OutOfMemory;
+        return .{ .files = files, .seed = c.seed, .ms = @intCast(start.durationTo(Io.Clock.awake.now(p.setup.io)).toMilliseconds()) };
+    }
+
+    /// A proxied request that ended early: cancelled (the model stays loaded), a deadline, or a server that is gone
+    /// (both kill the worker, so the next request starts the model again).
+    fn lost(p: *ProcessTool, err: upstream.Error) tool.Error {
+        if (p.aborted.load(.seq_cst)) {
+            p.st.store(.ready, .release);
+            return tool.Error.Cancelled;
+        }
+        if (err == error.Timeout) return p.died(tool.Error.Timeout);
+        p.kill();
+        var tail_buf: [1024]u8 = undefined;
+        p.fail = .{ .message = p.copyMsg("the model's server is gone ({s}); log tail:\n{s}", .{ @errorName(err), p.logTail(&tail_buf) }), .type = "server_error" };
+        p.st.store(.unloaded, .release);
+        return tool.Error.WorkerDied;
     }
 
     /// Asks the worker to exit, then kills its group if it has not within 10 s.
@@ -153,6 +237,7 @@ pub const ProcessTool = struct {
         var it = p.setup.environ.iterator();
         while (it.next()) |kv| try env.put(kv.key_ptr.*, kv.value_ptr.*);
         try env.put("LOCALROUTER_TOOL", json);
+        if (p.setup.gpu_lock.len > 0) try env.put("LOCALROUTER_GPU_LOCK", p.setup.gpu_lock);
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
@@ -179,6 +264,7 @@ pub const ProcessTool = struct {
         _ = child.wait(p.setup.io) catch {};
         p.child = null;
         p.pid.store(0, .release);
+        p.port = 0;
     }
 
     /// The worker is gone or hung: kill it, record why with the log tail, and report `err`.

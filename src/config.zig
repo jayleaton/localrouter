@@ -25,6 +25,9 @@ pub const ToolConfig = struct {
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
     options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
+    // A file the model's qualify script writes on this machine. When set, the tool is listed but refused (503) until it
+    // exists and holds `"qualified": true` (`engine.unqualified`); unset: no gate.
+    qualification: []const u8 = "",
 };
 
 pub const Config = struct {
@@ -37,6 +40,7 @@ pub const Config = struct {
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
+    gpu_lock: []const u8 = "", // the host's shared GPU lock file, passed to workers as LOCALROUTER_GPU_LOCK (model servers take it while loaded)
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     tools: []const ToolConfig = &default_tools,
 
@@ -55,6 +59,7 @@ pub const Defaults = struct {
     image_to_video: ?[]const u8 = null,
     text_to_speech: ?[]const u8 = null,
     speech_to_text: ?[]const u8 = null,
+    chat_completion: ?[]const u8 = null,
 
     pub fn get(d: Defaults, cap: Capability) ?[]const u8 {
         return switch (cap) {
@@ -71,9 +76,50 @@ pub const default_tools = [_]ToolConfig{
     .{ .id = "testpattern-transcription", .kind = .transcription, .name = "Test transcription (self-test)", .engine = "testpattern", .idle_ttl_s = 30 },
 };
 
+/// A chat tool's priority when its config names none: above every other kind's default (0).
+pub const chat_priority: i32 = 100;
+
 /// Parses a JSON config; the result lives in `arena`.
 pub fn parse(arena: std.mem.Allocator, text: []const u8) !Config {
-    return std.json.parseFromSliceLeaky(Config, arena, text, .{ .ignore_unknown_fields = false, .allocate = .alloc_always });
+    var c = try std.json.parseFromSliceLeaky(Config, arena, text, .{ .ignore_unknown_fields = false, .allocate = .alloc_always });
+    try chatDefaults(arena, text, &c);
+    return c;
+}
+
+/// The chat model is the machine's always-warm default: a chat tool whose config does not say otherwise is
+/// `keep_loaded` with `chat_priority`, so it is unloaded last, only for a request that needs its memory.
+fn chatDefaults(arena: std.mem.Allocator, text: []const u8, c: *Config) !void {
+    for (c.tools) |t| {
+        if (t.kind == .chat) break;
+    } else return;
+    const raw = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
+    const list = raw.object.get("tools").?.array.items; // typed parsing succeeded: the list is there, one object a tool
+    const tools = try arena.dupe(ToolConfig, c.tools);
+    for (tools, list) |*t, v| {
+        if (t.kind != .chat) continue;
+        if (v.object.get("priority") == null) t.priority = chat_priority;
+        if (v.object.get("keep_loaded") == null) t.keep_loaded = true;
+    }
+    c.tools = tools;
+}
+
+test "a chat tool is kept loaded at the highest default priority unless its config says otherwise" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try parse(arena.allocator(),
+        \\{"defaults": {"chat_completion": "qwen"}, "tools": [
+        \\  {"id": "img", "kind": "image", "engine": "testpattern"},
+        \\  {"id": "qwen", "kind": "chat", "engine": "openai_server", "qualification": "/data/q.json"},
+        \\  {"id": "small", "kind": "chat", "engine": "openai_server", "priority": 5, "keep_loaded": false}]}
+    );
+    try std.testing.expectEqual(chat_priority, c.tool("qwen").?.priority);
+    try std.testing.expect(c.tool("qwen").?.keep_loaded);
+    try std.testing.expectEqualStrings("/data/q.json", c.tool("qwen").?.qualification);
+    try std.testing.expectEqual(@as(i32, 5), c.tool("small").?.priority);
+    try std.testing.expect(!c.tool("small").?.keep_loaded);
+    try std.testing.expectEqual(@as(i32, 0), c.tool("img").?.priority);
+    try std.testing.expect(!c.tool("img").?.keep_loaded);
+    try std.testing.expectEqualStrings("qwen", c.defaults.get(.chat_completion).?);
 }
 
 test "parse a config with an external tool" {

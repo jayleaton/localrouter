@@ -58,7 +58,7 @@ fn check(comptime v: Variant) fn (cfg: *const ToolConfig, req: *const Request, w
         fn f(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
             const img = switch (req.*) {
                 .image => |x| x,
-                .video, .speech, .transcription => return true, // the kind check refuses it
+                .video, .speech, .transcription, .chat => return true, // the kind check refuses it
             };
             if (@max(img.width, img.height) > maxSide(cfg)) {
                 why.print("model '{s}' takes sizes up to {d} pixels a side", .{ cfg.id, maxSide(cfg) }) catch {};
@@ -135,7 +135,7 @@ test "precision defaults to fp8s and its resident estimate follows the precision
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
         .image => |v| @as(u64, v.width) * v.height * 4 * 2, // the pixels on the host and the PNG's copy
-        .video, .speech, .transcription => 0,
+        .video, .speech, .transcription, .chat => 0,
     };
     return .{ .resident = residentMb(cfg) << 20, .working = working };
 }
@@ -172,7 +172,7 @@ const QwenImage = struct {
         const t: *QwenImage = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .image => |x| x,
-            .video, .speech, .transcription => return engine.Refused.Refused,
+            .video, .speech, .transcription, .chat => return engine.Refused.Refused,
         };
         if (v.references.len > 0) return engine.Refused.Refused; // edits are M6
         const p = t.p orelse return error.NotLoaded;
