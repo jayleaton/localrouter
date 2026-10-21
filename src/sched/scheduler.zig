@@ -4,8 +4,9 @@
 //! Eviction: when a request needs room, idle tools are unloaded lowest `priority` first, least recently used among
 //! equals, until it fits. Priority only orders the victims: a request is never refused while unloading idle tools
 //! (whatever their priority) would make room; a loading or busy tool is never a victim. `keep_loaded` tools are
-//! loaded at start when they fit, skip the idle TTL, and come back by themselves (without evicting anything) once
-//! the scheduler has been idle for a moment and they fit again, unless they were unloaded on request through the API.
+//! loaded at start when they fit, skip the idle TTL, and come back by themselves once the scheduler has been idle for a
+//! moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one of
+//! its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
 //!
 //! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
 //! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
@@ -217,23 +218,25 @@ pub const Scheduler = struct {
         }
     }
 
-    /// Loads the `keep_loaded` tools that are down, highest priority first, each only if it fits without unloading
-    /// anything. At start (`wait_idle` false) it logs the outcome; later it waits for `reload_grace_ns` of idleness.
+    /// Loads the `keep_loaded` tools that are down, highest priority first, each if it fits once idle tools of lower
+    /// priority are unloaded. At start (`wait_idle` false) it logs the outcome; later it waits for `reload_grace_ns` of
+    /// idleness.
     fn loadKept(s: *Scheduler, wait_idle: bool) void {
         if (wait_idle and nowNs(s.io) - s.idle_since_ns < reload_grace_ns) return;
         for (s.slots) |*slot| slot.visited = false;
         while (true) {
-            var best: ?*Slot = null;
-            for (s.slots) |*slot| {
+            var best: ?usize = null;
+            for (s.slots, 0..) |*slot, i| {
                 const c = slot.tool.config();
                 if (!c.keep_loaded or slot.visited or slot.released or slot.tool.state() != .unloaded) continue;
-                if (best == null or c.priority > best.?.tool.config().priority) best = slot;
+                if (best == null or c.priority > s.slots[best.?].tool.config().priority) best = i;
             }
-            const slot = best orelse return;
+            const i = best orelse return;
+            const slot = &s.slots[i];
             slot.visited = true;
             const c = slot.tool.config();
             if (nowNs(s.io) < slot.retry_ns) continue;
-            if (!s.fits(slot.tool.needs(&placeholder(c.kind)).resident)) {
+            if (!s.admit(i, slot.tool.needs(&placeholder(c.kind)).resident, c.priority)) {
                 if (!wait_idle) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
                 continue;
             }
@@ -272,7 +275,7 @@ pub const Scheduler = struct {
                 const slot = &s.slots[c.tool];
                 if (slot.tool.state() == .ready) return;
                 const n = slot.tool.needs(&placeholder(slot.tool.config().kind));
-                if (!s.admit(c.tool, n.resident)) {
+                if (!s.admit(c.tool, n.resident, null)) {
                     c.failed = true;
                     c.message = "insufficient memory to load this tool";
                     return;
@@ -304,7 +307,7 @@ pub const Scheduler = struct {
         s.setStatus(j, .in_progress);
         const n = slot.tool.needs(&j.request);
         const extra = n.working + if (slot.tool.state() == .ready) 0 else n.resident;
-        if (!s.admit(j.tool, extra)) {
+        if (!s.admit(j.tool, extra, null)) {
             var buf: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is free within the budget", .{extra >> 20}) catch "insufficient memory";
             return s.finish(j, .failed, 503, "insufficient_memory", msg, null);
@@ -331,12 +334,22 @@ pub const Scheduler = struct {
     }
 
     /// True when `extra` more bytes fit; unloads idle tools, lowest priority then least recently used first, until they do.
-    fn admit(s: *Scheduler, target: usize, extra: u64) bool {
+    /// With `below`, only tools of a lower priority than it are victims (a `keep_loaded` tool coming back), and nothing
+    /// is unloaded unless unloading all of them would make room: a reload that cannot happen costs no one their model.
+    fn admit(s: *Scheduler, target: usize, extra: u64, below: ?i32) bool {
+        if (below) |p| {
+            var freeable: u64 = 0;
+            for (s.slots, 0..) |slot, i| {
+                if (i != target and slot.tool.state() == .ready and slot.tool.config().priority < p) freeable += slot.resident;
+            }
+            if (!s.fits(extra -| freeable)) return false;
+        }
         while (true) {
             if (s.fits(extra)) return true;
             var victim: ?*Slot = null;
             for (s.slots, 0..) |*slot, i| {
                 if (i == target or slot.tool.state() != .ready) continue;
+                if (below) |p| if (slot.tool.config().priority >= p) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
             s.unloadSlot(victim orelse return false);

@@ -150,3 +150,47 @@ test "one box: a job that needs the machine evicts stt, then tts, then chat, and
     try useAll(&d, a);
     try testing.expect(!try lockFree(lock));
 }
+
+/// Budget 100 MiB: chat 66 MiB (priority 100), tts 8 MiB (50) and stt 8 MiB (10) warm together (82 MiB); a video tool of
+/// 35 MiB with a real idle TTL (600 s) needs 99.4 MiB for a 256x256 clip, so it runs alone. Afterwards chat does not
+/// fit beside the idle video (101 MiB): it has to unload it to come back.
+fn configLongTtl(a: std.mem.Allocator, lock: []const u8) ![]const u8 {
+    const template = "{{" ++ harness.reserve ++ ", \"budget_bytes\": 104857600, \"gpu_lock\": \"{s}\", \"tools\": [" ++
+        "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 69206016, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
+        "{{\"id\": \"tts\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50, \"options\": {{\"voices\": [\"plain\", \"bright\"]}}}}," ++
+        "{{\"id\": \"stt\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 10}}," ++
+        "{{\"id\": \"video\", \"kind\": \"video\", \"engine\": \"testpattern\", \"idle_ttl_s\": 600, \"options\": {{\"resident_mb\": 35}}}}]}}";
+    return std.fmt.allocPrint(a, template, .{ lock, opts.chat_server, opts.speech_worker, opts.speech_worker });
+}
+
+test "one box: after a video job, chat, tts and stt come back at once, unloading the idle video before its TTL" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rnd: [8]u8 = undefined;
+    testing.io.random(&rnd);
+    const lock = try std.fmt.allocPrint(a, "/tmp/localrouter-it-jarvis-ttl-gpu-{x:0>16}.lock", .{std.mem.readInt(u64, &rnd, .little)});
+    try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = lock, .data = "" });
+    defer Io.Dir.cwd().deleteFile(testing.io, lock) catch {};
+    var d = try Daemon.start(testing.allocator, testing.io, "jarvis-ttl", try configLongTtl(a, lock));
+    defer d.stop();
+    try waitWarm(&d, a);
+
+    // The clip unloads all three (it needs the machine alone).
+    const V = struct { id: []const u8, status: []const u8 };
+    const create = "{\"model\":\"video\",\"prompt\":\"bars\",\"size\":\"256x256\",\"seconds\":\"1\",\"steps\":1,\"audio\":false}";
+    const job = try std.json.parseFromSliceLeaky(V, a, (try d.call(a, .POST, "/v1/videos", create)).body, .{ .ignore_unknown_fields = true });
+    var status: []const u8 = "";
+    for (0..300) |_| {
+        status = (try std.json.parseFromSliceLeaky(V, a, (try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/videos/{s}", .{job.id}), null)).body, .{ .ignore_unknown_fields = true })).status;
+        if (std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "failed")) break;
+        sleepMs(d.io, 100);
+    }
+    try testing.expectEqualStrings("completed", status);
+    for ([_][]const u8{ "chat", "tts", "stt" }) |id| try expectState(&d, a, id, "unloaded");
+
+    // Within 20 s, not the video's 600 s TTL: chat unloads the idle video (priority 0 below its 100) and all three serve.
+    try waitWarm(&d, a);
+    try expectState(&d, a, "video", "unloaded");
+    try useAll(&d, a);
+}
