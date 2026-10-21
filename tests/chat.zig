@@ -324,12 +324,15 @@ test "chat qualification gate: unqualified refuses, is never loaded, and serves 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const q = "/tmp/localrouter-it-chat-qual/q.json"; // inside the daemon's directory (Daemon.start empties it)
-    var d = try start(a, "chat-qual", "", try chatTool(a, "chat", ", \"qualification\": \"" ++ q ++ "\"", ""));
+    var rnd: [8]u8 = undefined; // unique per run, like the daemon's own directory
+    io.random(&rnd);
+    const q = try std.fmt.allocPrint(a, "/tmp/localrouter-it-chat-qual-{x:0>16}.json", .{std.mem.readInt(u64, &rnd, .little)});
+    defer Io.Dir.cwd().deleteFile(io, q) catch {};
+    var d = try start(a, "chat-qual", "", try chatTool(a, "chat", try std.fmt.allocPrint(a, ", \"qualification\": \"{s}\"", .{q}), ""));
     defer d.stop();
 
     try expectStatus(try d.call(a, .GET, "/v1/models", null), .ok, &.{"\"qualified\":false"});
-    try expectStatus(try ask(&d, a, "hi", ""), .service_unavailable, &.{ "server_error", "model 'chat' is not GPU-qualified on this host: " ++ q ++ " does not exist" });
+    try expectStatus(try ask(&d, a, "hi", ""), .service_unavailable, &.{ "server_error", try std.fmt.allocPrint(a, "model 'chat' is not GPU-qualified on this host: {s} does not exist", .{q}) });
     sleepMs(io, 3000);
     try testing.expectEqualStrings("unloaded", try d.toolState(a, "chat")); // keep_loaded does not load it
     try expectStatus(try d.call(a, .POST, "/v1/tools/chat/load", ""), .service_unavailable, &.{"not GPU-qualified"});
