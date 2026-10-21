@@ -73,7 +73,7 @@ Consequences for the design:
      That holds for every kind, Whisper and Kitten included. So after a video, TTS comes back only once the video's
      TTL ends: with the new 30 s default, about 30 s + 2 s of grace + Kitten's 21 s load. #14's chat tool (priority
      100) waits the same way. #14's `tests/jarvis.zig` gives its video tool `idle_ttl_s: 1`, which hides this.
-   - **The fix belongs in the scheduler.** A kept-warm tool that does not fit should be allowed to evict idle tools
+   - **The fix belongs in the scheduler (PR #17, stacked on #14).** A kept-warm tool that does not fit may evict idle tools
      of lower priority, the way a request's admission does. #14 also checks resident bytes only when a kept-warm
      tool returns, not working bytes, so that tool's first job may have to evict again.
 3. **Admission does not hold the reserve after a load.** It checks the request's estimate against
