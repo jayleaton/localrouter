@@ -32,7 +32,8 @@ import wave
 
 SAMPLE_RATE = 24000
 OUTPUT = "speech.wav"
-PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+PINS = os.path.join(HERE, "pins.json")
 LOSSLESS_WEIGHTS = ("packed", "full")
 LOSSLESS_DECODERS = ("default",)
 # The voices named after a language: KittenML's guidance is to switch the English-tuned normalizer off for them.
@@ -90,6 +91,7 @@ class Options:
         # "inductor": torch.compile reduce-overhead (fused Triton kernels in CUDA graphs); "cudagraphs": the eager
         # kernels captured as they are (no Triton), the fallback where inductor cannot build for the GPU.
         self.graph_backend = o.get("graph_backend", "inductor")
+        self.qualification = tool.get("qualification") or ""  # the marker the daemon gates on; load() checks it
         if not self.allow_lossy and self.lm_weights not in LOSSLESS_WEIGHTS:
             raise ValueError(f"lm_weights {self.lm_weights!r} is lossy; set allow_lossy to serve it")
         if not self.allow_lossy and self.decoder not in LOSSLESS_DECODERS:
@@ -180,92 +182,40 @@ def host_memory(torch):
         pass
     with open("/proc/self/status") as f:
         rss = {k: int(v.split()[0]) >> 10 for k, v in (line.split(":", 1) for line in f) if k in ("RssAnon", "RssFile")}
-    sizes = sorted((t.numel() * t.element_size() for t in gc.get_objects()
-                    if isinstance(t, torch.Tensor) and t.device.type == "cpu"), reverse=True)
+    seen, sizes = set(), []
+    for o in gc.get_objects():  # issubclass(type(o)): isinstance would touch dead weakref proxies (Dynamo's)
+        try:
+            if not issubclass(type(o), torch.Tensor) or o.device.type != "cpu":
+                continue
+            storage = o.untyped_storage()
+            if storage.data_ptr() in seen:  # views and shared storages count once
+                continue
+            seen.add(storage.data_ptr())
+            sizes.append(storage.nbytes())
+        except Exception:  # fake, meta or lazy tensors, odd subclasses
+            continue
+    sizes.sort(reverse=True)
     return {"rss_anon_mib": rss.get("RssAnon"), "rss_file_mib": rss.get("RssFile"),
             "cpu_tensors_mib": sum(sizes) >> 20, "largest_cpu_tensors_mib": [s >> 20 for s in sizes[:5]]}
 
 
-def enable_graph_decode(tts, torch, opts):
-    """lm_decode "graphs": the language model's decode step as CUDA graphs over one static KV cache.
-
-    Eager decode is host-bound on GB10 (about 59 ms a token of which 25 ms are kernels: Python and launches). Here
-    transformers' generate compiles the decode step (`compile_config`) because the cache is a StaticCache, and:
-    - one cache serves every call (`reset()` zeroes it in place), so the graph's addresses never change and it is
-      recorded once, not per request;
-    - the speaker conditioning that kittenml's forward pre-hook adds at prefill is computed here, before generate,
-      with the hook's own ops, and the hook is left a no-op: its prefill test reads the cache length, a GPU tensor
-      with a StaticCache, which would sync and break the graph at every step;
-    - attention is SDPA (flash-attention's varlen path does not capture);
-    - the prefill stays eager (generate compiles only the decode step), so prompt lengths never recompile.
-    A chunk whose prompt plus budget exceeds the cache (`graph_tokens`) takes the eager path. Returns the cache bytes.
-    """
-    import types
-    from kittenml.kittentts2.logits import build_logits_processors
-    from kittenml.kittentts2.prompt import build_generation_prompt
-    from transformers import CompileConfig, StaticCache
-    m = tts.model
-    if getattr(m.config, "_attn_implementation", "sdpa") != "sdpa":
-        m.set_attn_implementation("sdpa")
-    cfg, length = m.config, opts.graph_tokens
-    cache = StaticCache(config=cfg, max_cache_len=length)
-    if hasattr(cache, "early_initialization"):  # the tensors now, so the first capture already sees their addresses
-        cache.early_initialization(batch_size=1, num_heads=cfg.num_key_value_heads, head_dim=cfg.head_dim,
-                                   dtype=tts.dtype, device=m.device)
-    if opts.graph_backend == "inductor":
-        compile_config = CompileConfig(fullgraph=True, dynamic=False, mode="reduce-overhead")
-    else:
-        compile_config = CompileConfig(backend="cudagraphs", mode="default", fullgraph=True, dynamic=False)
-    eager = tts._generate_tokens
-
-    def generate_tokens(self, reference, chunk, settings, max_new_tokens, use_reference_prompt, emotion_ids,
-                        advanced):
-        prompt = build_generation_prompt(
-            self.token_map, self.tokenizer.encode(chunk, add_special_tokens=False),
-            reference_prefix=reference["prefix"] if use_reference_prompt else None, emotion_ids=emotion_ids)
-        if len(prompt) + int(max_new_tokens) > length:
-            log(f"graphs: a {len(prompt)}-token prompt with a {max_new_tokens}-token budget exceeds graph_tokens "
-                f"{length}; this chunk decodes eagerly")
-            return eager(reference, chunk, settings, max_new_tokens, use_reference_prompt, emotion_ids, advanced)
-        # kittenml's model.py _generate_tokens, step for step, but for the speaker embedding and the cache
-        processors = build_logits_processors(
-            self.token_map, temperature=settings["temperature"], top_k=settings["top_k"], top_p=settings["top_p"],
-            min_p=settings.get("min_p", 0.0), repetition_penalty=advanced["repetition_penalty"],
-            repetition_window=advanced["repetition_window"], token_run_penalty=advanced["token_run_penalty"],
-            token_run_grace=advanced["token_run_grace"], prompt_length=len(prompt))
-        input_ids = torch.tensor([prompt], dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            embeds = m.get_input_embeddings()(input_ids)  # speaker.py's hook: position 0 carries the speaker
-            spk = m.spk_proj(reference["embedding"].to(embeds.dtype)).unsqueeze(1)
-            embeds = torch.cat([spk, embeds[:, 1:, :]], dim=1)
-            m._pending_speaker_embedding = None
-            cache.reset()
-            output = m.generate(
-                input_ids, inputs_embeds=embeds, past_key_values=cache, compile_config=compile_config,
-                max_new_tokens=int(max_new_tokens), do_sample=True, temperature=1.0, top_p=1.0, top_k=0,
-                repetition_penalty=1.0, logits_processor=processors,
-                eos_token_id=[self.token_map.speech_end_id, self.token_map.stop_id],
-                pad_token_id=getattr(self.tokenizer, "pad_token_id", None) or 0)
-        low, high = self.token_map.audio_id_base, self.token_map.audio_id_end
-        return [t - low for t in output[0].tolist()[len(prompt):] if low <= t < high]
-
-    tts._generate_tokens = types.MethodType(generate_tokens, tts)
-    return length * 2 * cfg.num_hidden_layers * cfg.num_key_value_heads * cfg.head_dim * 2
-
-
-def warm_graph_decode(tts, torch, voice):
-    """Compiles and records the decode graph at load (cudagraph trees: warm-up, record, replay), leaving the random
-    state as it was, so the first request is neither slow nor seeded differently."""
-    reference = tts._voice_reference(voice)
-    advanced = tts._resolve_advanced(None)
-    settings = tts._resolve_preset(tts.default_preset, {})
-    cpu, gpu = torch.get_rng_state(), torch.cuda.get_rng_state()
-    for i in range(3):
-        tts._generate_tokens(reference, f"Warming up the decoder, take {i + 1}.", settings, 24,
-                             tts.use_reference_prompt, None, advanced)
-    torch.cuda.synchronize()
-    torch.set_rng_state(cpu)
-    torch.cuda.set_rng_state(gpu)
+def check_marker(opts):
+    """The qualification marker names the decode it qualified: refuse to serve another one under it (the daemon only
+    reads "qualified"). No readable marker: nothing to check here, the daemon's gate decides."""
+    if not opts.qualification:
+        return
+    try:
+        with open(opts.qualification) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return
+    want = {"lm_decode": opts.lm_decode}
+    if opts.lm_decode == "graphs":
+        want |= {"graph_backend": opts.graph_backend, "graph_tokens": opts.graph_tokens}
+    got = {k: record.get(k, "eager" if k == "lm_decode" else None) for k in want}
+    if record.get("qualified") is True and got != want:
+        raise RuntimeError(f"{opts.qualification} qualified {got}, but this tool is configured for {want}: run "
+                           "tools/speech/kitten/qualify.sh for this configuration")
 
 
 class KittenEngine:
@@ -280,6 +230,7 @@ class KittenEngine:
         pins = load_pins()
         kitten_dir, s3gen_path = asset_paths(opts.root, pins)
         verify_assets(opts.root, pins, opts.verify, opts.lm_weights, opts.decoder)
+        check_marker(opts)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         if opts.lm_decode == "graphs":
@@ -356,13 +307,20 @@ class KittenEngine:
             if device != "cuda":
                 raise RuntimeError(f"lm_decode \"graphs\" needs CUDA; the device is {device}")
             t = time.monotonic()
-            cache_bytes = enable_graph_decode(self.model, torch, opts)
-            warm_graph_decode(self.model, torch, self.default_voice)
+            import importlib.util  # by path: the worker runs with -I, so its own directory is not on sys.path
+            spec = importlib.util.spec_from_file_location("kitten_graphs", os.path.join(HERE, "kitten_graphs.py"))
+            graphs = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(graphs)
+            cache_bytes = graphs.enable_graph_decode(self.model, torch, opts)
+            graphs.warm_graph_decode(self.model, torch, self.default_voice)
             log(f"graphs: decode compiled and recorded in {time.monotonic() - t:.1f} s ({opts.graph_backend}, "
                 f"static cache {opts.graph_tokens} tokens, {cache_bytes >> 20} MiB)")
         if device == "cuda":
             torch.cuda.synchronize()
-        log(f"loaded on {device}: host {json.dumps(host_memory(torch))}")
+        try:  # a diagnostic: it never fails the load
+            log(f"loaded on {device}: host {json.dumps(host_memory(torch))}")
+        except Exception as e:
+            log(f"loaded on {device}: host memory not measured: {type(e).__name__}: {e}")
         return resident_bytes()
 
     def request(self, r):

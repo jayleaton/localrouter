@@ -7,7 +7,8 @@
 kernels than kittenml's eager reference, so its codec tokens (and so its audio) differ from the reference once a
 step's logits differ. That is a deliberate, named exception to the bit-exact rule (EXCEPTIONS below), and it relaxes
 nothing else. The gate checks, and report.json records:
-  op        bitwise, as for eager: text, prompts, prefill logits, flow mel, vocoder (the shared load path)
+  op        bitwise, as for eager: text, prompts, eager prefill logits, flow mel, vocoder (the shared load path; under
+            graphs the prefill runs over the static cache too, so it is part of the exception)
   self      bitwise: the graphs path against itself, cold and warm in one process and across two processes
   baseline  bitwise: against the accepted baseline for this GPU and runtime (baselines/graphs-<gpu>.json); with
             --accept-baseline a missing or different baseline is replaced by this run's, which the report and the
@@ -28,9 +29,10 @@ import qualify as q
 EXCEPTION = "kitten-tts-2-graphs-decode"
 EXCEPTIONS = {
     EXCEPTION: {
-        "scope": "lm_decode graphs only: the decode step's logits (CUDA graphs over a static KV cache) and so the "
-                 "sampled codec tokens and audio. Still exact: text, prompts, prefill logits, flow mel and vocoder "
-                 "(op); the graphs path against itself (self) and against its accepted baseline (baseline)",
+        "scope": "lm_decode graphs only: the language model under graphs (the prefill over the static cache, with its "
+                 "explicit mask, and the decode step as CUDA graphs), so its logits, sampled codec tokens and audio. "
+                 "Still exact: the shared eager load path (op: text, prompts, eager prefill logits, flow mel, "
+                 "vocoder); the graphs path against itself (self) and against its accepted baseline (baseline)",
         "tolerances": {"duration_ratio": [0.75, 1.33], "silence_over_reference_s": 0.5, "silence_floor_s": 1.0},
         "evidence": "docs/dev/KITTEN-TTS2.md, Numerics: the accepted GB10 baseline and its listening check",
     },
@@ -63,7 +65,9 @@ def run_worker(args, label, names):
     import wave
     d = os.path.join(args.out, label)
     os.makedirs(d, exist_ok=True)
-    w = q.Worker(q.tool_config(args.root, args.device, args.threads, lm_decode="graphs"), os.path.join(d, "worker.log"))
+    tool = q.tool_config(args.root, args.device, args.threads, lm_decode="graphs", graph_backend=args.graph_backend,
+                         graph_tokens=args.graph_tokens)
+    w = q.Worker(tool, os.path.join(d, "worker.log"))
     w.send({"op": "load"})
     loaded = w.reply()
     if not loaded.get("ok"):
@@ -115,6 +119,7 @@ def gate(args):
             checks.append({"level": "self", **q.compare(f"{n}.a-b.{k}", a[n][k], b[n][k])})
     # baseline: this GPU and runtime's accepted bits
     env = runtime(torch)
+    env |= {"graph_backend": args.graph_backend, "graph_tokens": args.graph_tokens}  # the bits belong to these settings
     record = {"exception": EXCEPTION, "env": env,
               "fixtures": {n: {"tokens_sha256": sha(a[n]["tokens"]), "pcm_sha256": sha(a[n]["pcm"]),
                                "samples": a[n]["samples"]} for n in names}}
@@ -159,7 +164,8 @@ def gate(args):
                        "tokens": same_prefix, "reference_tokens": sum(map(len, ref_tokens))})
     report = {
         "gate": "kitten-tts-2 lm_decode graphs: op exact, self exact, baseline exact, quality within the exception",
-        "pass": all(c["equal"] for c in checks), "lm_decode": "graphs", "exceptions": [EXCEPTION],
+        "pass": all(c["equal"] for c in checks), "lm_decode": "graphs", "graph_backend": args.graph_backend,
+        "graph_tokens": args.graph_tokens, "exceptions": [EXCEPTION],
         "exception_terms": EXCEPTIONS, "baseline": baseline, "env": env, "device": args.device,
         "worker_resident": loaded_a.get("resident"), "worker_load_s": [loaded_a["load_s"], loaded_b["load_s"]],
         "warm_wall_s": a[names[0] + "-warm"]["wall_s"], "checks": checks,
@@ -194,9 +200,15 @@ def marker(args):
         raise SystemExit(f"marker: the gate and bench did not both run lm_decode {args.lm_decode}")
     if bench_r.get("device") != "cuda":
         raise SystemExit("marker: a qualification is a CUDA run")
+    graph = {}
+    if args.lm_decode == "graphs":  # the marker binds the settings whose bits the gate checked (the worker compares)
+        graph = {"graph_backend": args.graph_backend, "graph_tokens": args.graph_tokens}
+        for name, r in (("gate", gate_r), ("bench", bench_r)):
+            if {k: r.get(k) for k in graph} != graph:
+                raise SystemExit(f"marker: the {name} ran {[r.get(k) for k in graph]}, not {graph}")
     runs = {r["run"]: r for r in bench_r["runs"]}
     exceptions = gate_r.get("exceptions", [])
-    record = {"qualified": True, "model": "KittenML/kitten-tts-2", "lm_decode": args.lm_decode,
+    record = {"qualified": True, "model": "KittenML/kitten-tts-2", "lm_decode": args.lm_decode, **graph,
               "host": os.uname().nodename, "gpu": bench_r["env"].get("gpu"),
               "pins_sha256": sha(open(kw.PINS, "rb").read()),
               "exceptions": exceptions, "exception_evidence": {n: EXCEPTIONS[n]["evidence"] for n in exceptions},

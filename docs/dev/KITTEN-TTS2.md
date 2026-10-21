@@ -137,13 +137,14 @@ and seed, never across devices.
 - the speaker conditioning computed with the reference hook's own ops before `generate`;
 - SDPA attention.
 
-The prefill stays eager. Its kernels differ from eager decode's, so its logits differ in the low bits and the sampled
+The prefill is not captured, but it also runs over the static cache (all `graph_tokens` slots, an explicit mask), and
+the decode kernels differ from eager decode's. So its logits differ in the low bits and the sampled
 codec tokens drift from the reference's after some step. That is a deliberate exception to `CONTRIBUTING.md`'s
 bit-exact rule. It is made explicit here, so it is not made quietly, and it relaxes nothing else.
 
 | Name | Scope | Still exact | Tolerances against the eager reference | Evidence |
 | --- | --- | --- | --- | --- |
-| `kitten-tts-2-graphs-decode` | `lm_decode: "graphs"` only: the decode step's logits, so the codec tokens and audio | **op:** text, prompts, prefill logits, flow mel and vocoder, via the shared load path. **self:** cold and warm in one process, and across two processes. **baseline:** the accepted bits for this GPU and runtime | each fixture's audio length within 0.75–1.33x of the reference; its longest silence (−45 dBFS, 20 ms frames) at most the reference's + 0.5 s, and at least 1 s allowed | pending: the first accepted GB10 run |
+| `kitten-tts-2-graphs-decode` | `lm_decode: "graphs"` only: the language model under graphs (the prefill over the static cache with its explicit mask, and the decode step as CUDA graphs), so its logits, codec tokens and audio | **op:** text, prompts, eager prefill logits, flow mel and vocoder, via the shared eager load path. **self:** cold and warm in one process, and across two processes. **baseline:** the accepted bits for this GPU and runtime | each fixture's audio length within 0.75–1.33x of the reference; its longest silence (−45 dBFS, 20 ms frames) at most the reference's + 0.5 s, and at least 1 s allowed | pending: the first accepted GB10 run |
 
 `qualify.py gate --lm-decode graphs` is in `qualify_graphs.py`. It checks all of that and records how many tokens
 each fixture matched the reference for (information, not a gate).
@@ -160,7 +161,8 @@ each fixture matched the reference for (information, not a gate).
 
 ```sh
 tools/speech/kitten/qualify.sh ROOT VENV OUT --lm-decode eager  --marker /data/models/kitten/qualification-eager.json
-tools/speech/kitten/qualify.sh ROOT VENV OUT --lm-decode graphs --marker /data/models/kitten/qualification-graphs.json [--accept-baseline]
+tools/speech/kitten/qualify.sh ROOT VENV OUT --lm-decode graphs --marker /data/models/kitten/qualification-graphs.json \
+  [--graph-backend inductor|cudagraphs] [--graph-tokens 2048] [--accept-baseline]
 ```
 
 A run writes the marker only when:
@@ -168,10 +170,24 @@ A run writes the marker only when:
 - the full fixture set ran;
 - it was a CUDA run.
 
-The marker holds `"qualified": true`, the host and GPU, the pins' sha256, the exceptions used and their evidence, the
-graphs baseline, and the bench's cold load, warm RTF, warm first chunk and memory. A failed run leaves an existing
-marker alone. A run whose manifest fails removes the marker it wrote. The daemon reads only `"qualified"` (#14's
-`qualification` gate).
+It writes the marker last, after `status.json` and a complete `SHA256SUMS`, and then takes the manifest again with
+`marker.json` in it. A run cut short before that point leaves no marker, and a run whose second manifest fails
+removes the one it wrote. A failed run leaves an existing marker alone.
+
+The marker holds:
+- `"qualified": true`;
+- the `lm_decode`, and for graphs the `graph_backend` and `graph_tokens` it was qualified with (`--graph-backend`,
+  `--graph-tokens`);
+- the host, GPU and pins' sha256;
+- the exceptions used and their evidence;
+- the graphs baseline;
+- the bench's cold load, warm RTF, warm first chunk and memory.
+
+The daemon reads only `"qualified"` (#14's `qualification` gate). The worker also reads the marker its tool names,
+and refuses to load if the marker qualified another `lm_decode` or other graph settings.
+
+Under graphs, a decode step torch cannot capture is an error (`cudagraph_or_error`), and so is any capture skipped
+during the load's warm-up. "graphs" never quietly runs uncaptured.
 
 ### The kitten-tts-2-cpp runtime
 

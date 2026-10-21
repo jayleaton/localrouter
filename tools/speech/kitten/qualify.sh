@@ -18,7 +18,7 @@ root=${1:?usage: qualify.sh ROOT VENV OUT [--fixtures LIST] [--device DEV] [--lm
 venv=${2:?}
 out=${3:?}
 shift 3
-fixtures=F1,F2,F3,F4,F5 device=cuda lm_decode=eager accept=() marker=""
+fixtures=F1,F2,F3,F4,F5 device=cuda lm_decode=eager graph_backend=inductor graph_tokens=2048 accept=() marker=""
 while [ $# -gt 0 ]; do
   case $1 in
     --fixtures) fixtures=$2; shift 2 ;;
@@ -26,10 +26,14 @@ while [ $# -gt 0 ]; do
     --lm-decode) lm_decode=$2; shift 2 ;;
     --accept-baseline) accept=(--accept-baseline); shift ;;
     --marker) marker=$2; shift 2 ;;
+    --graph-backend) graph_backend=$2; shift 2 ;;
+    --graph-tokens) graph_tokens=$2; shift 2 ;;
     *) echo "qualify.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 case $lm_decode in eager|graphs) ;; *) echo "qualify.sh: --lm-decode eager or graphs" >&2; exit 2 ;; esac
+case $graph_backend in inductor|cudagraphs) ;; *) echo "qualify.sh: --graph-backend inductor or cudagraphs" >&2; exit 2 ;; esac
+[[ $graph_tokens =~ ^[0-9]+$ ]] || { echo "qualify.sh: --graph-tokens is a number" >&2; exit 2; }
 mkdir -p "$out"
 py="$venv/bin/python"
 declare -A rc
@@ -64,8 +68,9 @@ import sys; sys.path.insert(0, sys.argv[1]); import kitten_worker as kw
 kw.verify_assets(sys.argv[2], kw.load_pins(), "sha256", "packed", "default"); print("pinned files verified (sha256)")
 ' "$here" "$root"
 step gate 2700 "$py" -I "$here/qualify.py" gate "$root" "$out/gate" --fixtures "$fixtures" --device "$device" \
-  --lm-decode "$lm_decode" "${accept[@]}"
-step bench 1200 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device" --lm-decode "$lm_decode"
+  --lm-decode "$lm_decode" --graph-backend "$graph_backend" --graph-tokens "$graph_tokens" "${accept[@]}"
+step bench 1200 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device" --lm-decode "$lm_decode" \
+  --graph-backend "$graph_backend" --graph-tokens "$graph_tokens"
 
 # Nothing may write into OUT once the manifest is taken: stop the sampler (and wait for it) first.
 stop_sampler
@@ -75,24 +80,43 @@ qualified=false
 [ "${rc[unit]}" = 0 ] && [ "${rc[assets]}" = 0 ] && [ "${rc[gate]}" = 0 ] && [ "${rc[bench]}" = 0 ] &&
   [ "$fixtures" = F1,F2,F3,F4,F5 ] && qualified=true
 rc[marker]=none
-if [ "$qualified" = true ] && [ -n "$marker" ]; then  # the file the tool's `qualification` names
-  step marker 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" --marker "$marker"
-  [ "${rc[marker]}" = 0 ] || qualified=false
-fi
-printf '{"unit": %s, "assets": %s, "gate": %s, "bench": %s, "marker": "%s", "fixtures": "%s", "device": "%s", "lm_decode": "%s", "accept_baseline": %s, "qualified": %s}\n' \
+[ "$qualified" = true ] && [ -n "$marker" ] && rc[marker]=pending
+printf '{"unit": %s, "assets": %s, "gate": %s, "bench": %s, "marker": "%s", "fixtures": "%s", "device": "%s", "lm_decode": "%s", "graph_backend": "%s", "graph_tokens": %s, "accept_baseline": %s, "qualified": %s}\n' \
   "${rc[unit]}" "${rc[assets]}" "${rc[gate]}" "${rc[bench]}" "${rc[marker]}" "$fixtures" "$device" "$lm_decode" \
-  "$([ ${#accept[@]} -gt 0 ] && echo true || echo false)" "$qualified" > "$out/status.json"
-# The reports and the audio, not the float dumps (large, reproducible from the commands above).
-timeout --kill-after=10 120 bash -c '
-  find "$1" -name "*.f32" -delete
-  find "$1" -path "*/ops-*" -type f ! -name "*.text" -delete
-  cd "$1" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS' _ "$out" || {
-  # No complete manifest: the run cannot be a qualification, whatever the steps said.
-  qualified=false
-  rm -f "$out/SHA256SUMS"
-  sed -i 's/"qualified": true}/"qualified": false, "manifest": "failed"}/' "$out/status.json"
-  # and a marker this run wrote is taken back
-  [ -z "$marker" ] || timeout 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" --marker "$marker" --revoke
+  "$graph_backend" "$graph_tokens" "$([ ${#accept[@]} -gt 0 ] && echo true || echo false)" "$qualified" > "$out/status.json"
+manifest() { # the reports and the audio, not the float dumps (large, reproducible from the commands above)
+  timeout --kill-after=10 120 bash -c '
+    find "$1" -name "*.f32" -delete
+    find "$1" -path "*/ops-*" -type f ! -name "*.text" -delete
+    cd "$1" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.tmp &&
+      mv SHA256SUMS.tmp SHA256SUMS' _ "$out"
 }
+manifest_failed() { # no complete manifest: the run cannot be a qualification, whatever the steps said
+  qualified=false
+  rm -f "$out/SHA256SUMS" "$out/SHA256SUMS.tmp"
+  sed -i 's/"qualified": true}/"qualified": false, "manifest": "failed"}/' "$out/status.json"
+}
+manifest || manifest_failed
+# Last of all, the marker the daemon trusts: only after a complete manifest, so a run cut short before this point never
+# leaves one. Then its outcome goes into status.json and the manifest is taken again with marker.json in it; if that
+# fails, the marker this run wrote is taken back.
+if [ "${rc[marker]}" = pending ] && [ "$qualified" != true ]; then  # the manifest failed: no marker
+  rc[marker]=skipped
+  sed -i 's/"marker": "pending"/"marker": "skipped"/' "$out/status.json"
+elif [ "${rc[marker]}" = pending ]; then
+  timeout --kill-after=10 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" \
+    --graph-backend "$graph_backend" --graph-tokens "$graph_tokens" --marker "$marker" > "$out/marker.log" 2>&1
+  rc[marker]=$?
+  sed -i "s/\"marker\": \"pending\"/\"marker\": \"${rc[marker]}\"/" "$out/status.json"
+  if [ "${rc[marker]}" != 0 ]; then
+    qualified=false
+    sed -i 's/"qualified": true}/"qualified": false}/' "$out/status.json"
+  fi
+  if ! manifest; then
+    manifest_failed
+    [ "${rc[marker]}" != 0 ] || timeout 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" \
+      --marker "$marker" --revoke
+  fi
+fi
 echo "qualify.sh: qualified $qualified ($(cat "$out/status.json")), results in $out"
 [ "$qualified" = true ]

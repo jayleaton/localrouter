@@ -153,6 +153,28 @@ class OptionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "graph_tokens"):
             kw.Options({"options": {"lm_decode": "graphs", "graph_tokens": 64, **one}})
 
+    def test_marker_must_name_this_decode(self):
+        one = {"min_speed": 1, "max_speed": 1, "device": "cuda"}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "q.json")
+            graphs = kw.Options({"qualification": path, "options": {"lm_decode": "graphs", **one}})
+            kw.check_marker(graphs)  # no marker yet: the daemon's gate decides
+            marker = {"qualified": True, "lm_decode": "graphs", "graph_backend": "inductor", "graph_tokens": 2048}
+            with open(path, "w") as f:
+                json.dump(marker, f)
+            kw.check_marker(graphs)
+            for other in ({"graph_tokens": 4096}, {"graph_backend": "cudagraphs"}):
+                with self.assertRaisesRegex(RuntimeError, "configured for"):
+                    kw.check_marker(kw.Options({"qualification": path,
+                                                "options": {"lm_decode": "graphs", **other, **one}}))
+            with self.assertRaisesRegex(RuntimeError, "configured for"):
+                kw.check_marker(kw.Options({"qualification": path, "options": one}))  # eager under a graphs marker
+            with open(path, "w") as f:
+                json.dump({"qualified": True}, f)  # an eager marker (no lm_decode recorded) serves eager only
+            kw.check_marker(kw.Options({"qualification": path, "options": one}))
+            with self.assertRaisesRegex(RuntimeError, "configured for"):
+                kw.check_marker(graphs)
+
     def test_config_example(self):
         with open(os.path.join(os.path.dirname(__file__), "config.example.json")) as f:
             config = json.load(f)
