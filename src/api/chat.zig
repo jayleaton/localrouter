@@ -134,8 +134,8 @@ fn readAt(fd: posix.fd_t, buf: []u8, offset: u64) usize {
     return @intCast(rc);
 }
 
-/// The client left: cancel its request (the proxied call ends; the model stays loaded).
-fn gone(app: *App, j: *jobs.Job) error{ClientGone} {
+/// The client left: cancel its request (the proxied call ends; the model stays loaded). Not an error of this
+/// daemon's, so nothing is returned for the connection loop to log.
+fn gone(app: *App, j: *jobs.Job) void {
     if (!j.done.isSet()) app.scheduler.cancel(j);
-    return error.ClientGone;
 }
