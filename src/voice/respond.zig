@@ -64,6 +64,42 @@ pub fn work(s: *Session) void {
 
 const Pass = enum { partial, draft, final };
 
+/// Under the lock: the chat server reads the conversation as the next turn's request will begin it (the same system
+/// prompt, tools and history; `max_tokens` 1, the reply discarded), so that request finds it in the server's prefix
+/// cache and pays only for the new turn. On DGX-01 the first request after a new assistant message or a barge-in took
+/// 260 to 390 ms to its first token, the others 165 to 185. One at a time, off the worker thread.
+pub fn prime(s: *Session) void {
+    if (!s.voice.prime_chat or s.priming or s.closing) return;
+    if (s.primer) |t| t.join(); // finished: `priming` is cleared as its last step
+    s.primer = null;
+    s.priming = true;
+    s.primer = std.Thread.spawn(.{}, primeChat, .{s}) catch {
+        s.priming = false;
+        return;
+    };
+}
+
+fn primeChat(s: *Session) void {
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    s.mutex.lockUncancelable(s.io);
+    var req = request(s, a, .{ .auto = true }) catch {
+        s.priming = false;
+        s.mutex.unlock(s.io);
+        return;
+    };
+    s.mutex.unlock(s.io);
+    req.max_tokens = 1;
+    var why: backend.Why = .{};
+    _ = s.backend.stream(a, &req, .{ .ctx = s, .text = discard }, &s.close_stop, &why) catch {};
+    s.mutex.lockUncancelable(s.io);
+    s.priming = false;
+    s.mutex.unlock(s.io);
+}
+
+fn discard(_: *anyopaque, _: []const u8) void {}
+
 /// A second of silence through the session's STT model, the result discarded (see Task.warm).
 fn warm(s: *Session) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
@@ -464,6 +500,7 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
     }
     s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
+    prime(s);
 }
 
 fn statusDetails(a: std.mem.Allocator, typ: []const u8, reason: []const u8, message: []const u8) !Value {

@@ -115,6 +115,8 @@ pub const Session = struct {
     early_end: bool = false, // the turn ended on its draft's sentence end
     stt_draft: bool = false, // its final transcript is the draft made when the speaker paused
     last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
+    primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
+    priming: bool = false,
     draft: ?Draft = null,
     language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
     language_len: usize = 0,
@@ -137,6 +139,9 @@ pub const Session = struct {
         defer tmp.deinit();
         s.emit.send(tmp.allocator(), "session.created", .{ .session = try events.sessionObject(tmp.allocator(), s.id, &s.settings) });
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
+        s.mutex.lockUncancelable(io);
+        respond.prime(s); // the system prompt and tools, before the first turn needs them
+        s.mutex.unlock(io);
         return s;
     }
 
@@ -149,6 +154,7 @@ pub const Session = struct {
         s.mutex.unlock(s.io);
         s.close_stop.set(s.io);
         if (s.worker) |t| t.join();
+        if (s.primer) |t| t.join(); // the worker has finished: no response can start another
         for (s.waiters.items) |t| t.join();
         s.waiters.deinit(s.gpa);
         for (s.tasks.items) |t| t.free(s.gpa);

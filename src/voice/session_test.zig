@@ -251,7 +251,7 @@ test "a spoken turn: VAD boundaries, the transcript, a streamed reply in sentenc
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{ .partial_interval_ms = 300 });
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 300 });
     defer rig.stop();
     try rig.audio(300, false);
     try rig.audio(500, true);
@@ -290,12 +290,37 @@ test "a spoken turn: VAD boundaries, the transcript, a streamed reply in sentenc
     try testing.expect(!contains(second, "generate_video")); // no video model here
 }
 
+test "the chat server is primed with the conversation so far: at the start and after each reply, max_tokens 1" {
+    var rig: Rig = undefined;
+    try rig.start(.{});
+    defer rig.stop();
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 0);
+    var primes: usize = 0;
+    var after_reply = false;
+    for (0..2000) |_| {
+        rig.fake.mutex.lockUncancelable(rig.fake.io);
+        primes = 0;
+        for (rig.fake.requests.items) |body| {
+            if (!contains(body, "\"max_tokens\":1")) continue;
+            primes += 1;
+            if (contains(body, "{\"role\":\"assistant\",\"content\":\"Hello there!")) after_reply = true;
+        }
+        rig.fake.mutex.unlock(rig.fake.io);
+        if (after_reply) break;
+        Io.sleep(rig.fake.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expect(after_reply);
+    try testing.expect(primes >= 2); // the system prompt alone, then with the turn and its reply
+}
+
 test "a pause starts a draft transcript: one ending a sentence ends the turn early, and the final transcript reuses it" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{});
+    try rig.start(.{ .prime_chat = false });
     defer rig.stop();
     rig.heard("What is two plus two?");
     try rig.audio(300, false);
@@ -323,7 +348,7 @@ test "barge-in: speech over the reply cancels the chat stream and the speech, an
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{ .partial_interval_ms = 0 });
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
     defer rig.stop();
     rig.heard("tell me something slow");
     try rig.audio(600, true);
@@ -347,7 +372,7 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{ .partial_interval_ms = 0 });
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
     defer rig.stop();
     rig.heard("make me a picture of a fox");
     try rig.audio(600, true);
@@ -374,7 +399,7 @@ test "error paths, push to talk and a text-only response" {
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{});
+    try rig.start(.{ .prime_chat = false });
     defer rig.stop();
     const s = rig.s;
     const cases = [_]struct { event: []const u8, code: []const u8 }{
