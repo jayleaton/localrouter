@@ -10,6 +10,7 @@
 //!   transcribe_audio waits up to `wait_s` for the transcript of an audio file (base64, data URL or URL): its text and
 //!                    JSON (language, segments, words), else the job id; get_job returns the transcript once done
 //!   synthesize_speech waits for spoken text; returns the audio inline (WAV) and as a URL
+//!   chat             a chat completion from the chat model (whole): the reply's text, then the completion as JSON
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
@@ -24,6 +25,7 @@ const sched = @import("../sched/scheduler.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
+const chat = @import("chat.zig");
 const audio = @import("../media/audio.zig");
 
 const App = routes.App;
@@ -69,10 +71,10 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
 }
 
 const instructions =
-    \\Generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
+    \\Chat, generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
     \\then answers in seconds; it unloads by itself when idle. Send one request at a time. Images come back inline and as
     \\URLs; videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
-    \\JSON; speech as WAV inline and a URL.
+    \\JSON; speech as WAV inline and a URL; chat replies as text (chat keeps its model loaded, so it answers at once).
 ;
 
 // ---------------------------------------------------------------- tools/call
@@ -101,6 +103,8 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
         transcribeAudio(app, a, host, args, &out)
     else if (eql(name, "synthesize_speech"))
         synthesizeSpeech(app, a, host, args, &out)
+    else if (eql(name, "chat"))
+        chatTool(app, a, args, &out)
     else if (eql(name, "get_job"))
         getJob(app, a, host, args, &out)
     else if (eql(name, "cancel_job"))
@@ -131,7 +135,7 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, max_audio_s: ?u64 = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -139,6 +143,8 @@ fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
+        var buf: [512]u8 = undefined;
+        if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
     }
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{ .emit_null_optional_fields = false }) });
     return true;
@@ -193,11 +199,11 @@ fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Valu
 }
 
 fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true };
+    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true, references: ?Value = null };
     const b = try parseArgs(Args, a, args, out);
     const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
     var why: routes.Refusal = .{};
-    const j = speech.startSpeech(app, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed }, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .references = b.references }, &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_audio) {
@@ -207,6 +213,58 @@ fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Val
     }
     try summary(app, a, host, j, out);
     return true;
+}
+
+/// A whole chat completion. `prompt` becomes the last user message (after `messages`, after a `system` message);
+/// `reasoning` false switches the model's thinking off, true on (absent: the model's default). Returns the reply's
+/// text (its tool calls as JSON when it made some instead), then the whole completion.
+fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    if (args != .object) return fail(a, out, "arguments must be an object", .{});
+    const given = args.object;
+    var body: std.json.ObjectMap = .empty;
+    var messages = std.json.Array.init(a);
+    if (str(given.get("system"))) |s| try messages.append(try chatMessage(a, "system", s));
+    if (given.get("messages")) |m| {
+        if (m != .array) return fail(a, out, "messages must be an array of messages", .{});
+        try messages.appendSlice(m.array.items);
+    }
+    if (str(given.get("prompt"))) |s| try messages.append(try chatMessage(a, "user", s));
+    if (messages.items.len == 0 or (given.get("prompt") == null and given.get("messages") == null)) return fail(a, out, "prompt or messages is required", .{});
+    try body.put(a, "messages", .{ .array = messages });
+    for ([_][]const u8{ "model", "max_tokens", "temperature", "top_p", "stop", "seed", "tools", "tool_choice", "response_format" }) |k|
+        if (given.get(k)) |v| try body.put(a, k, v);
+    if (given.get("reasoning")) |r| if (r == .bool) {
+        var kwargs: std.json.ObjectMap = .empty;
+        try kwargs.put(a, "enable_thinking", .{ .bool = r.bool });
+        try body.put(a, "chat_template_kwargs", .{ .object = kwargs });
+        if (!r.bool) try body.put(a, "reasoning_effort", .{ .string = "none" });
+    };
+    var why: routes.Refusal = .{};
+    const j = chat.startChat(app, a, .{ .object = body }, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    const text = chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    try out.append(a, .{ .type = "text", .text = replyText(a, text) catch "" });
+    try out.append(a, .{ .type = "text", .text = text });
+    return true;
+}
+
+fn chatMessage(a: std.mem.Allocator, role: []const u8, content: []const u8) !Value {
+    var m: std.json.ObjectMap = .empty;
+    try m.put(a, "role", .{ .string = role });
+    try m.put(a, "content", .{ .string = content });
+    return .{ .object = m };
+}
+
+/// The first choice's text, or its tool calls as JSON when it has no text.
+fn replyText(a: std.mem.Allocator, completion: []const u8) ![]const u8 {
+    const v = try std.json.parseFromSliceLeaky(Value, a, completion, .{});
+    const choices = v.object.get("choices") orelse return "";
+    if (choices != .array or choices.array.items.len == 0) return "";
+    const msg = choices.array.items[0].object.get("message") orelse return "";
+    if (str(msg.object.get("content"))) |s| if (s.len > 0) return s;
+    if (msg.object.get("tool_calls")) |calls| return std.json.Stringify.valueAlloc(a, calls, .{});
+    return "";
 }
 
 fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -289,6 +347,8 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
         .seed = j.request.seed(),
         .ms = j.ms,
         .files = urls,
+        .finish_reason = if (j.finish_reason.len > 0) @as(?[]const u8, j.finish_reason) else null,
+        .segments = if (j.segments.len > 0) @as(?[]const u8, j.segments) else null,
         .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?[]const u8, try a.dupe(u8, j.error_message)) else null,
         .next = if (j.finished()) @as(?[]const u8, null) else "call get_job with this id (wait_s up to 3000) until status is completed",
     };
@@ -333,7 +393,7 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech or transcription), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription or chat), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (fast) or will load on first use, and qualified (false: refused until this machine has qualified it).", .inputSchema = .{ .text =
     \\{"type":"object","properties":{}}
     } },
     .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits for the result (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
@@ -381,7 +441,24 @@ const tool_list = [_]Tool{
     \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
     \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
     \\"seed":{"type":"integer","minimum":0},
+    \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},
     \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}}}
+    } },
+    .{ .name = "chat", .title = "Chat", .description = "A chat completion from the local chat model (OpenAI Chat Completions semantics). Returns the reply's text (or its tool calls as JSON when it called a tool instead), then the whole completion as JSON (message, reasoning_content when the model thought, finish_reason, usage). The chat model stays loaded, so replies start at once.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{
+    \\"prompt":{"type":"string","description":"The user's message (appended after messages)."},
+    \\"messages":{"type":"array","items":{"type":"object"},"description":"OpenAI chat messages (role system, user, assistant or tool; content; tool_calls; tool_call_id), for a multi-turn conversation."},
+    \\"system":{"type":"string","description":"A system message, put first."},
+    \\"model":{"type":"string","description":"A chat model id from list_models; default: the one whose default_for lists chat_completion."},
+    \\"reasoning":{"type":"boolean","description":"false: answer without thinking (faster); true: think first. Omit for the model's default."},
+    \\"max_tokens":{"type":"integer","minimum":1},
+    \\"temperature":{"type":"number","minimum":0,"description":"0: greedy and deterministic."},
+    \\"top_p":{"type":"number"},
+    \\"stop":{"description":"A string or a list of strings that end the reply."},
+    \\"seed":{"type":"integer","minimum":0},
+    \\"tools":{"type":"array","items":{"type":"object"},"description":"OpenAI function tools the model may call."},
+    \\"tool_choice":{"description":"none, auto, required, or {\"type\":\"function\",\"function\":{\"name\":...}}."},
+    \\"response_format":{"type":"object","description":"{\"type\":\"json_object\"} or {\"type\":\"json_schema\",\"json_schema\":{...}} for structured output."}}}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
     \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0}}}

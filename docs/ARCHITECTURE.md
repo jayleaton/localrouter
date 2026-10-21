@@ -26,10 +26,11 @@ adding a model, or a new kind of model, does not touch the orchestration.
 
 | Piece | Where | Does |
 | --- | --- | --- |
-| API | `src/api/routes.zig`, `src/api/speech.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`; output files; `/v1/tools` for operators |
+| API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`; output files; `/v1/tools` for operators |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
+| Voice | `src/api/realtime.zig`, `src/voice/` | `/v1/realtime` (OpenAI Realtime API over a WebSocket) and the `/voice` page: VAD, STT, chat, sentence-chunked TTS, barge-in, tool jobs ([VOICE.md](dev/VOICE.md)) |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
-| Scheduler | `src/sched/scheduler.zig` | one executor thread: admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
+| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech and transcription): admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
 | Tools | `src/tool/` | a tool is a model as the scheduler sees it: `needs`, `load`, `generate`, `unload`, `abort`, `state`. Today every tool is a worker process (`process.zig`) |
 | Engines | `src/engine/engine.zig`, `src/engines/` | the compiled-in model implementations a worker runs |
 
@@ -41,13 +42,18 @@ few MB and holds no GPU memory.
 working bytes for this request). The scheduler admits a job only if it fits under the budget (the machine's available
 memory minus `reserve_bytes`, or `budget_bytes`). If it does not fit, idle tools are unloaded: lowest `priority` first,
 then least recently used. Priority only orders the victims: a request is never refused while unloading idle tools would
-make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own once
-the memory is free again, so an operator can keep, say, an image model and a voice model warm side by side and still
-let a video job take the whole machine when it needs it.
+make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own as soon
+as the scheduler is idle, unloading idle tools of lower priority if they must, so an operator can keep, say, an image
+model and a voice model warm side by side and still let a video job take the whole machine when it needs it.
+
+**Lanes.** Each lane runs one job at a time. Speech and transcription tools run on the `realtime` lane (a tool's `lane`
+overrides it), so a sentence of TTS or a turn of STT never waits behind an image, a video or a chat reply. A tool is
+loaded and run only by its own lane; admission and eviction are serialized across lanes, a tool in use on either lane
+is never a victim, and memory admitted on one lane but not yet allocated is held back from the other's admission.
 
 ## Requests and capabilities
 
-A request has a kind (`image`, `video`, `speech`, `transcription`) and needs one capability:
+A request has a kind (`image`, `video`, `speech`, `transcription`, `chat`) and needs one capability:
 
 | Capability | Kind | Request |
 | --- | --- | --- |
@@ -57,6 +63,7 @@ A request has a kind (`image`, `video`, `speech`, `transcription`) and needs one
 | `image_to_video` | video | prompt + 1 input image |
 | `text_to_speech` | speech | text (+ voice, speed, preset) |
 | `speech_to_text` | transcription | one audio file (+ language, prompt, timestamps) |
+| `chat_completion` | chat | an OpenAI chat request (messages, tools, sampling, ...), proxied to the model's own server |
 
 A tool's capabilities come from its engine (or from its config). A request names a model, or gets the config's default
 for its capability (`defaults`, checked at start), else the first one of its kind that has it; a model that lacks it,
@@ -99,6 +106,10 @@ worker -> daemon   {"ok":true,"files":["0.png"],"seed":7,"ms":11800}
 daemon -> worker   {"op":"exit"}
 ```
 
+A worker that can end a generate early answers its load with `"cancel":"signal"` beside `ok`: a cancel then sends it
+SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no reload for the next request). Any other
+worker, or one that has not answered within 5 s, is cancelled by killing its process group.
+
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
 there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
@@ -132,9 +143,71 @@ the model: input decoding, response encodings, and the limits checked before a t
   model-native styles `preset` may name; none: every preset is refused), `min_speed` / `max_speed` (1 and 1 for a
   model without a speed control), `max_input_chars` (at most 4096) and, for transcription, `max_audio_s`. `/v1/models`
   and `list_models` show them.
-- Not offered by the API, and refused with a reason: translation, streamed responses, speech `instructions`.
+- A reply may say why the audio ended and where long-form segments start: `{"ok":true,"files":["speech.wav"],
+  "finish_reason":"length","segments":"2;220500"}`. `/v1/audio/speech` sends them as `x-finish-reason` and
+  `x-long-form-segments` (printable ASCII only; anything else is dropped).
+- Streaming: a tool whose options say `"stream": true` gets `"stream": true` in the request when a client asks for a
+  stream, and writes `speech.wav` as the audio comes: a canonical 44-byte header first (its sizes may be placeholders),
+  then the samples, then the real sizes before it replies. The daemon sends each new run of samples on as an HTTP/1.1
+  chunk; when the job fails after the first chunk, the connection ends without the last chunk.
+- References: a tool whose options say `"references": true` gets the request's voice references as
+  `references.json` in the job directory (`"references": "references.json"`), a list of `{text, vq_codes}` whose shape
+  the daemon has checked.
+- A refusal's `type` is `invalid_request_error` (400), `service_unavailable` (503: the model's own server is busy or
+  not ready, retry later) or anything else (500).
+- Not offered by the API, and refused with a reason: translation, SSE streams, speech `instructions`.
 
-### A new kind of model (text, …)
+### Models that wrap their own server
+
+A `cmd` worker can run a model's own server rather than load the model itself (`tools/speech/drama3`). It starts the
+server on load (on loopback; a launcher that insists on a lock gets the worker's private `LOCALROUTER_GPU_LOCK`, see
+[the host's GPU lock](#the-hosts-gpu-lock)), is its client for each request, and stops it on `exit`, keeping the
+daemon waiting with progress lines until the server is down, so nothing else loads into memory that is still held. A
+launcher's own memory admission is turned off: the scheduler, from the tool's `resident_bytes`, is the only admission
+authority. A server that dies takes the worker with it (no reply), so the job fails with a 503 and the next request
+starts the model again. Its worker may check more than the [qualification](#qualification) file (Drama 3's binds it
+to the host, its pins and its engine binary).
+
+### A model's own server (`openai_server`)
+
+Some models ship their own OpenAI-compatible server (TensorFold's `serve`, a llama.cpp server). The compiled-in
+`openai_server` engine runs one as the worker: on `load` it starts `options.server` (an argv; `{port}`, `{id}` and
+`{weights}` are filled in) on a free loopback port with `options.env`, waits until `options.health` (default `/health`)
+answers 200, and replies `{"ok":true,"resident":0,"port":N}`. Any `cmd` worker may name a `port` the same way.
+
+```
+{"id": "qwen3.8-27b", "kind": "chat", "engine": "openai_server", "resident_bytes": 25769803776,
+ "options": {"server": ["tensorfold-native", "serve", "TensorFold/Qwen3.8-27B-MLX-4bit", "--host", "127.0.0.1",
+                        "--port", "{port}", "--name", "{id}"], "env": {"HF_HUB_OFFLINE": "1"}}}
+```
+
+The daemon sends each chat request to that port itself (`src/tool/upstream.zig`, a loopback HTTP/1.1 client) and
+writes the reply into the job directory as it arrives: `completion.json`, or the event stream `completion.sse`, which
+the route forwards while it grows. The server's 4xx is a 400, its 503 a 503, anything else a 500. Cancelling closes the
+request's connection and leaves the worker loaded (the server keeps its weights and prompt cache warm); a server that is
+gone, or silent past `generate_timeout_s`, kills the worker, so the next request starts it again. Unload stops the
+server with SIGTERM (SIGKILL after `stop_timeout_s`, default 8); if the daemon dies, the worker stops the server first.
+`resident_bytes` and `working_bytes` are the model's measured figures: a server reports none.
+
+### The host's GPU lock
+
+A machine whose GPU is shared with jobs outside LocalRouter names their lock file in `gpu_lock`; those jobs take it
+exclusively. The scheduler is the one admission authority for LocalRouter's own models: it decides what is loaded
+together from `resident_bytes` against the budget alone, and holds the host lock once for all of them (`flock`, shared,
+without waiting) from the first load until nothing is loaded. While an outside job holds it, nothing loads: the request,
+explicit load or `keep_loaded` start fails with a 503 naming the lock. No worker takes the host lock, so the chat model,
+a voice model and a transcription model stay loaded side by side. A worker sees `LOCALROUTER_GPU_LOCK_HELD=1` and the
+host lock's path in `LOCALROUTER_HOST_GPU_LOCK`; `LOCALROUTER_GPU_LOCK` names a lock file of its own,
+`<data>/locks/<id>.lock` (created, uncontended), for a launcher that insists on taking a lock (Drama 3's `pilot.py`,
+given `--gpu-lock "$LOCALROUTER_GPU_LOCK"`), so it can never keep another LocalRouter model out.
+
+### Qualification
+
+A model not yet verified on a machine's GPU names a `qualification` file in its config: it is listed (`"qualified":
+false`) and every request, load or `keep_loaded` start is refused with a 503 until that file, written by the model's
+qualify script on this machine, says `"qualified": true`. The gate is the same for every kind (`engine.unqualified`).
+
+### A new kind of model (embeddings, …)
 
 1. Add the kind to `request.Kind` and its request struct to `Request` (validated in `request.validate`).
 2. Add its capabilities to `request.Capability`.

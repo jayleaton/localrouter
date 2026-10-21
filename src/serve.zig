@@ -64,7 +64,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
     for (procs, slots, cfg.tools) |*p, *s, *t| {
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir }, t);
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock }, t);
         s.* = .{ .tool = p.asTool() };
     }
     defer for (procs) |*p| p.deinit();
@@ -74,6 +74,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var scheduler: sched.Scheduler = .{ .io = io, .gpa = gpa, .cfg = &cfg, .slots = slots, .table = &table };
     defer scheduler.deinit();
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
+    defer app.voice.deinit(gpa);
 
     // `host` may be an IP, localhost, all or tailscale (see bind.zig); listen on the resolved address
     const ifaces: []const bind.Iface = if (bind.needsInterfaces(cfg.host)) bind.listInterfaces(arena) catch &.{} else &.{};
@@ -94,11 +95,17 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     try Io.File.stdout().writeStreamingAll(io, line);
 
     installSignals();
-    const exec = try std.Thread.spawn(.{}, sched.Scheduler.run, .{&scheduler});
-    const watcher = try std.Thread.spawn(.{}, watchStop, .{ io, &server });
+    const exec = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.main });
+    const exec_rt = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.realtime });
+    const exec_chat = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.chat });
+    const exec_listen = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.listen });
+    const watcher = try std.Thread.spawn(.{}, watchStop, .{ io, &server, &app });
     http.Server(routes.App, routes.handle).serve(io, &server, &app, &stop_flag);
     scheduler.stop();
     exec.join();
+    exec_rt.join();
+    exec_chat.join();
+    exec_listen.join();
     watcher.join();
     return 0;
 }
@@ -113,9 +120,10 @@ fn installSignals() void {
     posix.sigaction(posix.SIG.TERM, &act, null);
 }
 
-/// Wakes the accept loop once a signal set the flag (shutdown closes the listening socket).
-fn watchStop(io: Io, server: *Io.net.Server) void {
+/// Once a signal set the flag: ends the voice sessions' reads, then wakes the accept loop (shutdown closes the socket).
+fn watchStop(io: Io, server: *Io.net.Server, app: *routes.App) void {
     while (!stop_flag.load(.acquire)) Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
+    app.voice.closeAll(io);
     _ = posix.system.shutdown(server.socket.handle, posix.SHUT.RDWR);
 }
 

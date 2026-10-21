@@ -32,7 +32,8 @@ import wave
 
 SAMPLE_RATE = 24000
 OUTPUT = "speech.wav"
-PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+PINS = os.path.join(HERE, "pins.json")
 LOSSLESS_WEIGHTS = ("packed", "full")
 LOSSLESS_DECODERS = ("default",)
 # The voices named after a language: KittenML's guidance is to switch the English-tuned normalizer off for them.
@@ -53,7 +54,7 @@ class Options:
         # does not know are logged rather than refused.
         known = {"device", "threads", "lm_weights", "decoder", "allow_lossy", "max_input_chars",
                  "default_voice", "voices", "presets", "min_speed", "max_speed", "default_preset", "normalize",
-                 "warm_voices", "verify", "keep_float"}
+                 "warm_voices", "verify", "keep_float", "lm_decode", "graph_tokens", "graph_backend"}
         unknown = sorted(set(o) - known)
         if unknown:
             log(f"options not used by the worker: {unknown}")
@@ -81,6 +82,16 @@ class Options:
         self.warm_voices = o.get("warm_voices")
         self.verify = o.get("verify", "size")
         self.keep_float = bool(o.get("keep_float", False))
+        # "eager": kittenml's own generate, bit-exact with the reference (and slower than real time on GB10: RTF about
+        # 1.5, host-bound). "graphs": the decode step as CUDA graphs over a static KV cache (other kernels, so other
+        # bits; qualify.sh --lm-decode graphs checks it against its accepted baseline). graph_tokens: the static
+        # cache's length, prompt plus the longest chunk's budget.
+        self.lm_decode = o.get("lm_decode", "eager")
+        self.graph_tokens = int(o.get("graph_tokens", 2048))
+        # "inductor": torch.compile reduce-overhead (fused Triton kernels in CUDA graphs); "cudagraphs": the eager
+        # kernels captured as they are (no Triton), the fallback where inductor cannot build for the GPU.
+        self.graph_backend = o.get("graph_backend", "inductor")
+        self.qualification = tool.get("qualification") or ""  # the marker the daemon gates on; load() checks it
         if not self.allow_lossy and self.lm_weights not in LOSSLESS_WEIGHTS:
             raise ValueError(f"lm_weights {self.lm_weights!r} is lossy; set allow_lossy to serve it")
         if not self.allow_lossy and self.decoder not in LOSSLESS_DECODERS:
@@ -91,6 +102,14 @@ class Options:
             raise ValueError("verify must be \"size\", \"sha256\" or \"none\"")
         if self.max_chars < 1:
             raise ValueError("max_input_chars must be at least 1")
+        if self.lm_decode not in ("eager", "graphs"):
+            raise ValueError("lm_decode must be \"eager\" or \"graphs\"")
+        if self.lm_decode == "graphs" and self.device not in ("cuda", "auto"):
+            raise ValueError("lm_decode \"graphs\" needs device \"cuda\" (CUDA graphs)")
+        if self.graph_backend not in ("inductor", "cudagraphs"):
+            raise ValueError("graph_backend must be \"inductor\" or \"cudagraphs\"")
+        if not 256 <= self.graph_tokens <= 8192:
+            raise ValueError("graph_tokens must be from 256 to 8192")
 
 
 class Speech:
@@ -152,6 +171,53 @@ def resident_bytes():
     return rss
 
 
+def host_memory(torch):
+    """After load: free what nothing references and report what host memory is left (RSS split, live CPU tensors)."""
+    import ctypes
+    import gc
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+    with open("/proc/self/status") as f:
+        rss = {k: int(v.split()[0]) >> 10 for k, v in (line.split(":", 1) for line in f) if k in ("RssAnon", "RssFile")}
+    seen, sizes = set(), []
+    for o in gc.get_objects():  # issubclass(type(o)): isinstance would touch dead weakref proxies (Dynamo's)
+        try:
+            if not issubclass(type(o), torch.Tensor) or o.device.type != "cpu":
+                continue
+            storage = o.untyped_storage()
+            if storage.data_ptr() in seen:  # views and shared storages count once
+                continue
+            seen.add(storage.data_ptr())
+            sizes.append(storage.nbytes())
+        except Exception:  # fake, meta or lazy tensors, odd subclasses
+            continue
+    sizes.sort(reverse=True)
+    return {"rss_anon_mib": rss.get("RssAnon"), "rss_file_mib": rss.get("RssFile"),
+            "cpu_tensors_mib": sum(sizes) >> 20, "largest_cpu_tensors_mib": [s >> 20 for s in sizes[:5]]}
+
+
+def check_marker(opts):
+    """The qualification marker names the decode it qualified: refuse to serve another one under it (the daemon only
+    reads "qualified"). No readable marker: nothing to check here, the daemon's gate decides."""
+    if not opts.qualification:
+        return
+    try:
+        with open(opts.qualification) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return
+    want = {"lm_decode": opts.lm_decode}
+    if opts.lm_decode == "graphs":
+        want |= {"graph_backend": opts.graph_backend, "graph_tokens": opts.graph_tokens}
+    got = {k: record.get(k, "eager" if k == "lm_decode" else None) for k in want}
+    if record.get("qualified") is True and got != want:
+        raise RuntimeError(f"{opts.qualification} qualified {got}, but this tool is configured for {want}: run "
+                           "tools/speech/kitten/qualify.sh for this configuration")
+
+
 class KittenEngine:
     """The loaded model: kittenml's KittenTTS2 on the pinned, verified files."""
 
@@ -164,8 +230,13 @@ class KittenEngine:
         pins = load_pins()
         kitten_dir, s3gen_path = asset_paths(opts.root, pins)
         verify_assets(opts.root, pins, opts.verify, opts.lm_weights, opts.decoder)
+        check_marker(opts)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        if opts.lm_decode == "graphs":
+            # inductor's compiled kernels survive a restart here, so a reload compiles from cache, not from scratch
+            os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR",
+                                  os.path.join(os.path.expanduser("~"), ".cache", "localrouter", "kitten-inductor"))
         import torch
         import kittenml
         if kittenml.__version__ != pins["runtime"]["kittenml"]:
@@ -197,6 +268,21 @@ class KittenEngine:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         with open(os.path.join(kitten_dir, "config.json")) as f:
             config = json.load(f)
+        if device != "cpu" and not getattr(KittenTTS2, "_weights_to_device", False):
+            # kittenml unpacks the language model into a CPU state dict, installs it with load_state_dict(assign=True)
+            # and moves the model with .to(): on GB10 about 3.9 GiB of host memory stayed live after load. Moving each
+            # unpacked tensor to the device first leaves no host copy for anything to hold. The values are the same
+            # bf16 bits, so the output is unchanged (the gate checks it).
+            unpack = KittenTTS2._load_lm_weights
+
+            def weights_on_device(model, lm_dir):
+                state = unpack(model, lm_dir)
+                for name in list(state):
+                    state[name] = state[name].to(model.device)
+                return state
+
+            KittenTTS2._load_lm_weights = weights_on_device
+            KittenTTS2._weights_to_device = True
         self.model = KittenTTS2(kitten_dir, config, device=device, decoder=opts.decoder, weights=opts.lm_weights)
         self.text = text_utils
         self.torch = torch
@@ -217,8 +303,24 @@ class KittenEngine:
         text_utils.warm_normalizer()
         for voice in opts.warm_voices if opts.warm_voices is not None else [self.default_voice]:
             self.model._voice_reference(voice)
+        if opts.lm_decode == "graphs":
+            if device != "cuda":
+                raise RuntimeError(f"lm_decode \"graphs\" needs CUDA; the device is {device}")
+            t = time.monotonic()
+            import importlib.util  # by path: the worker runs with -I, so its own directory is not on sys.path
+            spec = importlib.util.spec_from_file_location("kitten_graphs", os.path.join(HERE, "kitten_graphs.py"))
+            graphs = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(graphs)
+            cache_bytes = graphs.enable_graph_decode(self.model, torch, opts)
+            graphs.warm_graph_decode(self.model, torch, self.default_voice)
+            log(f"graphs: decode compiled and recorded in {time.monotonic() - t:.1f} s ({opts.graph_backend}, "
+                f"static cache {opts.graph_tokens} tokens, {cache_bytes >> 20} MiB)")
         if device == "cuda":
             torch.cuda.synchronize()
+        try:  # a diagnostic: it never fails the load
+            log(f"loaded on {device}: host {json.dumps(host_memory(torch))}")
+        except Exception as e:
+            log(f"loaded on {device}: host memory not measured: {type(e).__name__}: {e}")
         return resident_bytes()
 
     def request(self, r):

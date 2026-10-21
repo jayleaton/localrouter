@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const Kind = enum { image, video, speech, transcription };
+pub const Kind = enum { image, video, speech, transcription, chat };
 
 /// What a model can do; a request needs exactly one (`Request.capability`).
 pub const Capability = enum {
@@ -12,6 +12,7 @@ pub const Capability = enum {
     image_to_video,
     text_to_speech,
     speech_to_text,
+    chat_completion,
 
     pub fn kind(c: Capability) Kind {
         return switch (c) {
@@ -19,6 +20,7 @@ pub const Capability = enum {
             .text_to_video, .image_to_video => .video,
             .text_to_speech => .speech,
             .speech_to_text => .transcription,
+            .chat_completion => .chat,
         };
     }
 };
@@ -58,6 +60,8 @@ pub const Speech = struct {
     speed: f32 = 1,
     preset: []const u8 = "", // a model-native style the tool lists in its `presets` option; "": none
     seed: u64 = 0,
+    stream: bool = false, // the tool writes `speech.wav` as it goes (header first, sizes fixed at the end), for a streamed reply
+    references: []const u8 = "", // "references.json" in the job directory: the voice references the request sent; "": none
 };
 
 pub const Timestamps = enum { none, segment, word };
@@ -86,12 +90,22 @@ pub const Transcript = struct {
     pub const Word = struct { word: []const u8, start: f64, end: f64 };
 };
 
-/// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}} or {"transcription": {...}}.
+/// A chat completion: `body` is the OpenAI request as the model's own server receives it (`model` set to the tool's id).
+/// The daemon proxies it to the server its worker runs and keeps the reply in the job directory: `completion.json`, or
+/// `completion.sse` (the server's event stream as it arrives) when `stream` is set.
+pub const Chat = struct {
+    body: []const u8,
+    stream: bool = false,
+    seed: u64 = 0, // the request's own seed, if it named one (the server samples with it)
+};
+
+/// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}}, {"transcription": {...}} or {"chat": {...}}.
 pub const Request = union(Kind) {
     image: Image,
     video: Video,
     speech: Speech,
     transcription: Transcription,
+    chat: Chat,
 
     pub fn kind(r: Request) Kind {
         return std.meta.activeTag(r);
@@ -104,6 +118,7 @@ pub const Request = union(Kind) {
             .video => |v| if (v.first_frame != null) .image_to_video else .text_to_video,
             .speech => .text_to_speech,
             .transcription => .speech_to_text,
+            .chat => .chat_completion,
         };
     }
 
@@ -128,6 +143,7 @@ pub const Limits = struct {
     max_speed: f32 = 4,
     max_audio_ms: u64 = 30 * 60 * 1000, // one transcription's audio
     max_transcription_prompt: usize = 4096,
+    max_chat_body: usize = 16 << 20, // one chat request as sent to the model's server
 };
 
 pub const Invalid = error{Invalid};
@@ -152,6 +168,7 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (!(v.speed >= l.min_speed and v.speed <= l.max_speed)) return fail(why, "speed must be 0.25 to 4");
             if (v.voice.len > 64 or !token(v.voice)) return fail(why, "voice must be a voice id (letters, digits, '-', '_' and '.')");
             if (v.preset.len > 32 or !token(v.preset)) return fail(why, "preset must be a preset id (letters, digits, '-', '_' and '.')");
+            if (v.references.len > 0 and !token(v.references)) return fail(why, "references must name a file in the job directory");
         },
         .transcription => |v| {
             if (v.audio.len == 0 or !token(v.audio)) return fail(why, "audio must name a file in the job directory");
@@ -159,6 +176,10 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (!language(v.language)) return fail(why, "language must be an ISO-639-1 code such as en or de");
             if (v.prompt.len > l.max_transcription_prompt or !std.unicode.utf8ValidateSlice(v.prompt)) return fail(why, "prompt must be UTF-8 text of at most 4096 bytes");
             if (!(v.temperature >= 0 and v.temperature <= 1)) return fail(why, "temperature must be 0 to 1");
+        },
+        .chat => |v| {
+            if (v.body.len == 0) return fail(why, "the chat request is empty");
+            if (v.body.len > l.max_chat_body) return fail(why, "the chat request is larger than 16 MB");
         },
     }
 }
@@ -252,4 +273,22 @@ test "speech and transcription requests: capabilities, limits and wire shape" {
     const back = try std.json.parseFromSlice(Request, std.testing.allocator, text, .{});
     defer back.deinit();
     try std.testing.expectEqualStrings("de", back.value.transcription.language);
+}
+
+test "chat requests: capability, limits and wire shape" {
+    var why: []const u8 = "";
+    const ask: Request = .{ .chat = .{ .body = "{\"model\":\"m\",\"messages\":[]}", .stream = true, .seed = 9 } };
+    try validate(ask, .{}, &why);
+    try std.testing.expectEqual(Capability.chat_completion, ask.capability());
+    try std.testing.expectEqual(Kind.chat, ask.capability().kind());
+    try std.testing.expectEqual(@as(u64, 9), ask.seed());
+    try std.testing.expectError(error.Invalid, validate(.{ .chat = .{ .body = "" } }, .{}, &why));
+    try std.testing.expectEqualStrings("the chat request is empty", why);
+    try std.testing.expectError(error.Invalid, validate(.{ .chat = .{ .body = "{}" } }, .{ .max_chat_body = 1 }, &why));
+    const text = try std.json.Stringify.valueAlloc(std.testing.allocator, ask, .{});
+    defer std.testing.allocator.free(text);
+    const back = try std.json.parseFromSlice(Request, std.testing.allocator, text, .{});
+    defer back.deinit();
+    try std.testing.expectEqualStrings(ask.chat.body, back.value.chat.body);
+    try std.testing.expect(back.value.chat.stream);
 }

@@ -141,14 +141,53 @@ class OptionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "speed"):
             kw.Options({"options": {}})  # the daemon's default range, 0.25 to 4, would advertise a control it lacks
 
+    def test_lm_decode(self):
+        one = {"min_speed": 1, "max_speed": 1}
+        self.assertEqual(kw.Options({"options": one}).lm_decode, "eager")  # the reference's bits unless asked
+        o = kw.Options({"options": {"lm_decode": "graphs", "device": "cuda", **one}})
+        self.assertEqual((o.lm_decode, o.graph_tokens), ("graphs", 2048))
+        with self.assertRaisesRegex(ValueError, "lm_decode"):
+            kw.Options({"options": {"lm_decode": "compiled", **one}})
+        with self.assertRaisesRegex(ValueError, "cuda"):
+            kw.Options({"options": {"lm_decode": "graphs", "device": "cpu", **one}})
+        with self.assertRaisesRegex(ValueError, "graph_tokens"):
+            kw.Options({"options": {"lm_decode": "graphs", "graph_tokens": 64, **one}})
+
+    def test_marker_must_name_this_decode(self):
+        one = {"min_speed": 1, "max_speed": 1, "device": "cuda"}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "q.json")
+            graphs = kw.Options({"qualification": path, "options": {"lm_decode": "graphs", **one}})
+            kw.check_marker(graphs)  # no marker yet: the daemon's gate decides
+            marker = {"qualified": True, "lm_decode": "graphs", "graph_backend": "inductor", "graph_tokens": 2048}
+            with open(path, "w") as f:
+                json.dump(marker, f)
+            kw.check_marker(graphs)
+            for other in ({"graph_tokens": 4096}, {"graph_backend": "cudagraphs"}):
+                with self.assertRaisesRegex(RuntimeError, "configured for"):
+                    kw.check_marker(kw.Options({"qualification": path,
+                                                "options": {"lm_decode": "graphs", **other, **one}}))
+            with self.assertRaisesRegex(RuntimeError, "configured for"):
+                kw.check_marker(kw.Options({"qualification": path, "options": one}))  # eager under a graphs marker
+            with open(path, "w") as f:
+                json.dump({"qualified": True}, f)  # an eager marker (no lm_decode recorded) serves eager only
+            kw.check_marker(kw.Options({"qualification": path, "options": one}))
+            with self.assertRaisesRegex(RuntimeError, "configured for"):
+                kw.check_marker(graphs)
 
     def test_config_example(self):
         with open(os.path.join(os.path.dirname(__file__), "config.example.json")) as f:
-            tool = json.load(f)["tools"][0]
-        o = kw.Options(tool)
-        self.assertEqual((tool["kind"], len(o.voices), o.presets), ("speech", 47, ["stable", "expressive"]))
-        self.assertIn(tool["options"]["default_voice"], o.voices)
-        self.assertTrue(kw.LANGUAGE_VOICES <= set(o.voices))
+            config = json.load(f)
+        modes = {}
+        for tool in config["tools"]:  # the same model twice: eager (the reference's bits) and graphs
+            o = kw.Options(tool)
+            self.assertEqual((tool["kind"], len(o.voices), o.presets), ("speech", 47, ["stable", "expressive"]))
+            self.assertIn(tool["options"]["default_voice"], o.voices)
+            self.assertTrue(kw.LANGUAGE_VOICES <= set(o.voices))
+            self.assertTrue(tool["qualification"].endswith(f"qualification-{o.lm_decode}.json"))
+            modes[tool["id"]] = o.lm_decode
+        self.assertEqual(modes, {"kitten-tts-2": "eager", "kitten-tts-2-graphs": "graphs"})
+        self.assertEqual(config["defaults"]["text_to_speech"], "kitten-tts-2-graphs")
 
 
 class AssetTest(unittest.TestCase):

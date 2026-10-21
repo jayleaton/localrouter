@@ -29,6 +29,8 @@ pub const Output = struct {
     files: []const []const u8,
     seed: u64 = 0,
     ms: u64 = 0,
+    finish_reason: []const u8 = "", // speech: why the audio ended (stop, length, silence); "": the tool does not say
+    segments: []const u8 = "", // speech: a long-form reply's segments, "N;S2,S3,..." (sample offsets); "": one
 };
 
 /// One request for a tool: where its inputs and outputs live and what to make.
@@ -74,6 +76,7 @@ pub const Tool = struct {
         generate: *const fn (ptr: *anyopaque, job: *const Job, sink: Sink, arena: std.mem.Allocator) Error!Output,
         unload: *const fn (ptr: *anyopaque) void,
         abort: *const fn (ptr: *anyopaque) void,
+        cancel: *const fn (ptr: *anyopaque) bool,
         state: *const fn (ptr: *anyopaque) State,
         failure: *const fn (ptr: *anyopaque) Failure,
     };
@@ -101,6 +104,11 @@ pub const Tool = struct {
     /// Ends a running load or generate from another thread; that call returns `error.Cancelled`.
     pub fn abort(t: Tool) void {
         t.vtable.abort(t.ptr);
+    }
+    /// Asks a running generate to end early and the tool to stay loaded (that call returns `error.Cancelled`); false
+    /// when the tool cannot, and only `abort` ends it.
+    pub fn cancel(t: Tool) bool {
+        return t.vtable.cancel(t.ptr);
     }
     /// Safe to read from any thread.
     pub fn state(t: Tool) State {
