@@ -1,0 +1,51 @@
+{
+ "exception": "kitten-tts-2-graphs-decode",
+ "env": {
+  "torch": "2.11.0+cu130",
+  "kittenml": "0.9.4",
+  "cuda": "13.0",
+  "gpu": "NVIDIA GB10",
+  "machine": "aarch64",
+  "transformers": "5.19.0",
+  "graph_backend": "inductor",
+  "graph_tokens": 2048
+ },
+ "fixtures": {
+  "F1": {
+   "tokens_sha256": "0266e1110050a60f91e330ba8cfdcecc81c4fecb54e7d0bab3ca716d39dba66f",
+   "pcm_sha256": "e14769e90e32f906d8d14fbf54f87292391640233b4170600ab798a96c5b9cd1",
+   "samples": [
+    94560
+   ]
+  },
+  "F2": {
+   "tokens_sha256": "a0615e6c17cd2aced13fe3b152d33c679e98ba30da5c38e5370c0bf8a8227b96",
+   "pcm_sha256": "86688d628b628456b860613fa21ec9864d6e9d5132436f2b6a91533cdd95fd63",
+   "samples": [
+    202560
+   ]
+  },
+  "F3": {
+   "tokens_sha256": "49cd83f6b7666aea8734046436393fae8da32016fbf76cf5b0de3aa0d3980219",
+   "pcm_sha256": "dd9fd5966e0e38a11561518790096ceb9cc19afad0df33f68cc60ed473309b44",
+   "samples": [
+    96960
+   ]
+  },
+  "F4": {
+   "tokens_sha256": "99aecb370913db8c007e8cc039a28ab6e59b9b4a88b554f06f42565821499c08",
+   "pcm_sha256": "3f140feb972471c76045c139a4334e9eb9559141470f505241c9f378fe79cd65",
+   "samples": [
+    99840
+   ]
+  },
+  "F5": {
+   "tokens_sha256": "6aba58d0c692b7f1f045321c8dc41767af8f617e0aeb17bab3eaf43af5b8e765",
+   "pcm_sha256": "942472db932460943015ab84a7f168b41cf01dedff074694dece38dc53188dc2",
+   "samples": [
+    367200,
+    403680
+   ]
+  }
+ }
+}

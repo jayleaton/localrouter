@@ -8,6 +8,7 @@ const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
+const testdir = @import("testdir.zig");
 
 pub const DType = enum {
     bf16,
@@ -213,11 +214,11 @@ pub const Pack = struct {
 test "open a pack: manifest kinds, tensors, reads" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/tmp/stk-pack-test";
-    Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const dir = try testdir.make(io, arena.allocator(), "/tmp", "stk-pack-test");
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/manifest.json", .data =
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(arena.allocator(), dir, "manifest.json"), .data =
         \\{"format": "stk-pack/1", "model": "qwen-image-2.1", "precision": "nvfp4", "kinds": {"L0.qkv": "nvfp4", "L0.out": "fp8"}, "tensors": {}}
     });
     const header = "{\"L0.qkv.codes\":{\"dtype\":\"U8\",\"shape\":[2,3],\"data_offsets\":[0,6]},\"L0.out.w8\":{\"dtype\":\"F8_E4M3\",\"shape\":[2],\"data_offsets\":[6,8]},\"__metadata__\":{}}";
@@ -225,7 +226,7 @@ test "open a pack: manifest kinds, tensors, reads" {
     std.mem.writeInt(u64, file[0..8], header.len, .little);
     @memcpy(file[8 .. 8 + header.len], header);
     @memcpy(file[8 + header.len ..], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/weights.safetensors", .data = &file });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(arena.allocator(), dir, "weights.safetensors"), .data = &file });
 
     var p = try Pack.open(gpa, io, dir);
     defer p.close(io);
@@ -242,11 +243,13 @@ test "open a pack: manifest kinds, tensors, reads" {
 test "aligned reads: odd offsets and lengths come back exact, direct and buffered alike, from a pack or a checkpoint" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/var/tmp/stk-pack-direct-test"; // a disk filesystem, so O_DIRECT is taken where it exists
-    Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try testdir.make(io, a, "/var/tmp", "stk-pack-direct-test"); // a disk filesystem, so O_DIRECT is taken where it exists
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/manifest.json", .data =
+    const weights = try testdir.file(a, dir, "weights.safetensors");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(a, dir, "manifest.json"), .data =
         \\{"format": "stk-pack/1", "precision": "nvfp4", "kinds": {}, "tensors": {}}
     });
     const n = 3 * block + 777; // a tensor that starts mid-block (after the odd header) and ends mid-block
@@ -257,11 +260,11 @@ test "aligned reads: odd offsets and lengths come back exact, direct and buffere
     @memcpy(file[8 .. 8 + header.len], header);
     const data = file[8 + header.len ..];
     for (data, 0..) |*c, j| c.* = @truncate(j *% 131 +% 7);
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/weights.safetensors", .data = file });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = weights, .data = file });
 
     var pack = try Pack.open(gpa, io, dir);
     defer pack.close(io);
-    var ckpt = try Pack.openFile(gpa, io, dir ++ "/weights.safetensors");
+    var ckpt = try Pack.openFile(gpa, io, weights);
     defer ckpt.close(io);
     try std.testing.expectEqual(pack.direct >= 0, ckpt.direct >= 0); // a checkpoint takes direct I/O wherever a pack does
     const buf = try gpa.alignedAlloc(u8, .fromByteUnits(block), n + 2 * block);

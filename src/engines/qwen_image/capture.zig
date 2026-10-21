@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const testdir = @import("testdir.zig");
 
 /// A tensor as captured: its bytes are `blobs/<sha>`.
 pub const Ref = struct {
@@ -101,16 +102,18 @@ pub const Capture = struct {
 test "parse a capture: ops, notes, blobs" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/tmp/stk-capture-test";
-    Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir ++ "/blobs");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try testdir.make(io, a, "/tmp", "stk-capture-test");
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/ops.jsonl", .data =
+    try Io.Dir.cwd().createDirPath(io, try testdir.file(a, dir, "blobs"));
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(a, dir, "ops.jsonl"), .data =
         \\{"i": 0, "note": "sigmas", "values": [1.0, 0.5, 0.0]}
         \\{"i": 1, "name": "L0.adaln1", "kind": "adaln", "attrs": {"eps": 1e-06}, "ins": {"x": {"sha": "aa", "dtype": "bfloat16", "shape": [1, 2]}}, "outs": {"y": {"sha": "bb", "dtype": "bfloat16", "shape": [1, 2]}}, "launches": []}
         \\
     });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/blobs/aa", .data = &.{ 1, 2, 3, 4 } });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(a, dir, "blobs/aa"), .data = &.{ 1, 2, 3, 4 } });
     var c = try Capture.open(gpa, io, dir);
     defer c.close();
     try std.testing.expectEqual(@as(usize, 1), c.ops.len);
