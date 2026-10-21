@@ -30,12 +30,12 @@ When the user starts talking over the assistant, playback stops and the chat gen
 | Audio | `pcm16` only, 24 kHz mono little-endian both ways (OpenAI's default); g711 is refused | One format keeps the daemon free of codecs; the page and SDKs send pcm16 already |
 | Subprotocol | When the client offers `realtime` in `Sec-WebSocket-Protocol` (browser SDKs do), the server selects it | Browsers fail the handshake if an offered protocol is not echoed |
 | VAD | Energy based, in the daemon, per 20 ms frame against an adaptive noise floor. `threshold` (0 to 1) sets the margin over the floor (6 + 24 x threshold dB); `prefix_padding_ms` and `silence_duration_ms` as OpenAI's `server_vad`. `turn_detection: null` is push-to-talk (`input_audio_buffer.commit`) | Runs on the reader thread in microseconds, so barge-in needs no model and no GPU. Whisper's own Silero gate still drops non-speech from transcripts. Echo is the browser's job (`echoCancellation`) |
-| Barge-in | On `speech_started` during a response, on the reader thread: the response is marked cancelled, the chat stream's socket is shut down, queued TTS jobs are dropped, and no further audio is sent. `response.done` reports `cancelled` / `turn_detected` | Within the audio chunk that crossed the threshold. A TTS job already running finishes and is discarded: killing its worker would cost a reload on the next turn |
+| Barge-in | On `speech_started` during a response, on the reader thread: the response is marked cancelled, the chat stream's socket is shut down, queued TTS jobs are dropped, the speech job in progress is ended in its worker when the worker offers the soft cancel (`"cancel":"signal"` in its load reply: SIGUSR1, no reload), and no further audio is sent. `response.done` reports `cancelled` / `turn_detected` | Within the audio chunk that crossed the threshold. A TTS job already running finishes and is discarded: killing its worker would cost a reload on the next turn |
 | History | Per session: the system `instructions`, then user, assistant, tool-call and tool-result messages. An interrupted reply keeps only the sentences whose audio was sent, and `conversation.item.truncate` cuts it to what was played. The oldest turns are dropped past `max_history_chars` | The model sees what the user actually heard |
-| STT | The final transcript runs on the whole turn when VAD commits it. While the user speaks, a partial runs every `partial_interval_ms` (1000; 0: off) of new speech, never more than one at a time, reported as `localrouter.transcription.partial` | Whisper is not a streaming model; re-running it on the growing turn is the standard way to get partials. Partials replace each other, so they are not OpenAI's append-only `delta` |
+| STT | The final transcript runs on the whole turn when VAD commits it. While the user speaks, a partial can run every `partial_interval_ms` of new speech (default 0, off: on one Whisper a partial in flight holds the final back by a whole decode), never more than one at a time, reported as `localrouter.transcription.partial` | Whisper is not a streaming model; re-running it on the growing turn is the standard way to get partials. Partials replace each other, so they are not OpenAI's append-only `delta` |
 | Chat | OpenAI `/v1/chat/completions` with `stream: true`, behind `voice.Chat` (`src/voice/chat.zig`). `voice.chat_url` defaults to this daemon's own `/v1`, so the chat tool works the day it lands; any OpenAI-compatible server works too | One contract, no coupling to how the chat model is served |
-| TTS | A sentence chunker over the streamed text; one speech job a chunk; the first chunk may end at a clause (a comma after 24 characters) | First audio after the first clause, not the whole reply |
-| Lanes | The scheduler gets a second executor, the `realtime` lane. Speech and transcription tools default to it (`lane` in the tool config). Residency changes (admission, eviction, loads) are serialized across lanes; memory admitted but not yet visible in MemAvailable is held back | With one executor a streaming chat job would hold the GPU queue, and sentence 1's TTS would wait for the whole reply. Small speech models share the GPU with the chat model; image and video stay on the main lane |
+| TTS | A sentence chunker over the streamed text; one speech job a chunk; the first chunk may end at a clause (a comma after 24 characters). Within a sentence the audio is streamed: the session tails the job's `speech.wav` as the model writes it, resamples it piece by piece (`resample.Stream`, the same samples as the whole) and sends 40 to 100 ms deltas | First audio when the model's first audio exists, not after the whole reply or sentence |
+| Lanes | The scheduler gets more executors: `realtime` for speech and `listen` for transcription (a tool's `lane` overrides its kind's default; with the chat kind of #14, chat gets its own). Residency changes (admission, eviction, loads) are serialized across lanes; memory admitted but not yet visible in MemAvailable is held back | With one executor a streaming chat job would hold the GPU queue, and sentence 1's TTS would wait for the whole reply. A turn's transcript must not wait behind a sentence of speech either (measured on DGX-01: the barge-in turn's transcript 6.1 s after speech end on a shared lane, 2.3 s on its own) |
 | Tools | The chat model is offered `generate_image` and `generate_video` (when such models exist; `voice.tools`). A call queues a normal LocalRouter job; the session waits for it in the background, sends `localrouter.job.done` with the file URLs, adds the result to the history and creates a response so the assistant confirms it aloud. Client-defined `tools` follow OpenAI's flow (the client returns `function_call_output`) | The conversation continues while the job runs; files are ordinary `/v1/files/...` outputs |
 | Client | `/voice`: one HTML file with inline JS, embedded in the binary. Mic through an AudioWorklet at 24 kHz, playback scheduled gap-free, flushed on `speech_started` | No build step. `getUserMedia` needs a secure context: `http://127.0.0.1` is one; remote use needs HTTPS in front |
 | Exposure | `/voice` and `/v1/realtime` answer loopback peers only unless `voice.remote` is true | A microphone endpoint should not appear on the network because the image API was opened up |
@@ -54,7 +54,7 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 ```json
 {"voice": {"remote": false, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
            "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
-           "partial_interval_ms": 1000, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
+           "partial_interval_ms": 0, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
 ```
 
 A Jarvis box keeps the three voice models warm above the image and video models, so a picture or a clip evicts
@@ -129,6 +129,32 @@ Expected on one GB10, warm, not yet measured (the end-to-end run on DGX-01 measu
 | **Total** | **about 1.8 to 2.9 s** after the user stops (1.3 to 2.4 s after the VAD commits) | |
 
 The daemon's own share is covered by `tests/voice.zig` with zero-latency fakes; the model stages are what DGX-01 measures.
+
+### Measured on DGX-01 (2026-10-21)
+
+`tools/spark/jarvis/voice_e2e.sh` on `integration/jarvis` `24be911` (this branch with #14, #13 and #17). Qwen3.8-27B
+(TensorFold, thinking off), Drama 3 (whole sentences, not streamed), Whisper large-v3-turbo, `silence_duration_ms`
+500. The prompts were spoken by Drama 3 and streamed in real time; times are from the last voiced sample. Six turns,
+the warm-up excluded from the statistics:
+
+| From speech end to | median | p90 |
+| --- | ---: | ---: |
+| final transcript | 1.66 s | 2.30 s |
+| first reply text | 1.83 s | 2.91 s |
+| first reply audio | 4.77 s | 8.20 s |
+
+VAD ends the turn 0.42–0.51 s after speech. Whisper takes 0.8–1.5 s more, and the chat model's first token about
+0.2–0.6 s. Most of the rest is Drama 3 synthesising the whole first sentence before any of it is sent (1.4–3.3 s).
+Two levers come next: streamed TTS (#13's worker streams) and a first chunk that breaks at a clause.
+
+The p90 (8.2 s) is the barge-in turn. Its first sentence waited for the interrupted answer's in-flight Drama 3
+sentence: a running speech job is finished, not killed, so that killing it costs no reload. A worker-level cancel
+would remove that wait.
+
+Barge-in: speech was detected 1 ms after the interruption began and the answer was cancelled 19–42 ms later; no audio
+of it arrived after `speech_started`. The tool turn's image (1024x1024, PNG at its `/v1/files` URL) was done 20 s
+after speech end and confirmed aloud. A 1 s video then took 24 s. It evicted only the idle image model, so chat, STT
+and TTS never went down. Peak memory: 13.0 GiB `MemAvailable` (of 114.3 idle) during the image job.
 
 ## Tests
 

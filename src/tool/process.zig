@@ -35,6 +35,7 @@ pub const ProcessTool = struct {
     buf: []u8 = &.{},
     pid: std.atomic.Value(i32) = .init(0), // the worker's pid (= its process group), for abort from other threads
     aborted: std.atomic.Value(bool) = .init(false),
+    soft_cancel: std.atomic.Value(bool) = .init(false), // the worker said `"cancel":"signal"` when it loaded
     st: std.atomic.Value(tool.State) = .init(.unloaded),
     fail_msg: [2048]u8 = undefined,
     fail: tool.Failure = .{},
@@ -60,6 +61,7 @@ pub const ProcessTool = struct {
             .generate = generate,
             .unload = unload,
             .abort = abort,
+            .cancel = cancel,
             .state = state,
             .failure = failure,
         } };
@@ -103,6 +105,14 @@ pub const ProcessTool = struct {
         if (pid > 0) _ = posix.system.kill(-pid, posix.SIG.KILL);
     }
 
+    /// SIGUSR1 to the worker alone (not its group): a worker that offers it ends the generate and stays loaded.
+    fn cancel(ptr: *anyopaque) bool {
+        const p = self(ptr);
+        const pid = p.pid.load(.acquire);
+        if (!p.soft_cancel.load(.acquire) or pid <= 0) return false;
+        return posix.system.kill(pid, posix.SIG.USR1) == 0;
+    }
+
     fn load(ptr: *anyopaque) tool.Error!u64 {
         const p = self(ptr);
         if (p.child != null) return 0;
@@ -125,6 +135,7 @@ pub const ProcessTool = struct {
             return p.failed(.unloaded, tool.Error.LoadFailed, "load failed: {s}", .{r.value.@"error"});
         }
         p.port = r.value.port;
+        p.soft_cancel.store(std.mem.eql(u8, r.value.cancel, "signal"), .release);
         p.st.store(.ready, .release);
         return r.value.resident;
     }
@@ -144,6 +155,11 @@ pub const ProcessTool = struct {
         wire.send(p.stdinFd(), p.setup.gpa, cmd) catch return p.died(tool.Error.WorkerDied);
         const r = p.awaitReply(sink, p.cfg.generate_timeout_s) catch |err| return p.died(err);
         defer r.deinit();
+        if (r.value.ok != true and std.mem.eql(u8, r.value.type, "cancelled")) { // ended early on `cancel`; still loaded
+            p.fail = .{ .message = "cancelled", .type = "server_error" };
+            p.st.store(.ready, .release);
+            return tool.Error.Cancelled;
+        }
         if (r.value.ok != true) {
             const t = for ([_][]const u8{ "invalid_request_error", "service_unavailable" }) |known| {
                 if (std.mem.eql(u8, r.value.type, known)) break known;

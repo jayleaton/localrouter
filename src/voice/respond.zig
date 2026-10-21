@@ -230,40 +230,95 @@ fn speak(s: *Session, r: *Response, say: backend.Say) void {
     }
 }
 
-/// Speaks one sentence; false when the response is over for the speaker (cancelled or failed).
+/// Speaks one sentence; false when the response is over for the speaker (cancelled or failed). The audio is sent as
+/// the speech model makes it: each piece is resampled to the wire rate and sent once 40 ms of it are ready.
 fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
     const a = tmp.allocator();
     const text = chunker.speakable(a, c.text) catch return false;
     if (text.len == 0) return true;
+    var out: Voice = .{ .s = s, .r = r, .a = a };
+    defer out.rs.deinit(s.gpa);
     var why: backend.Why = .{};
-    const pcm = s.backend.speak(a, text, say, &r.stop, &why) catch |err| {
+    s.backend.speak(a, text, say, .{ .ctx = &out, .write = Voice.write }, &r.stop, &why) catch |err| {
         if (err == error.Cancelled) return false;
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         if (!r.stop.cancelled()) s.emit.fail(a, "server_error", "speech_failed", why.message, null);
         return false;
     };
-    const out = resample.resample(a, pcm.samples, pcm.rate, session.rate) catch return false;
-    const piece: usize = session.rate / 10;
-    const enc = std.base64.standard.Encoder;
-    var at: usize = 0;
-    while (at < out.len) : (at += piece) {
-        const samples = out[at..@min(at + piece, out.len)];
-        const bytes = resample.toLe(a, samples) catch return false;
-        const b64 = enc.encode(a.alloc(u8, enc.calcSize(bytes.len)) catch return false, bytes);
-        s.mutex.lockUncancelable(s.io);
-        defer s.mutex.unlock(s.io);
-        if (r.stop.cancelled()) return false; // barge-in: not one more chunk after speech_started
-        s.emit.send(a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
-        r.audio_ms += samples.len * 1000 / session.rate;
-    }
+    if (!out.finish()) return false;
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     r.spoken.append(s.gpa, .{ .end_ms = r.audio_ms, .text_end = c.text_end }) catch {};
     return true;
 }
+
+/// One sentence's audio on its way to the client: resampled as it arrives, sent in pieces of 40 to 100 ms.
+const Voice = struct {
+    s: *Session,
+    r: *Response,
+    a: std.mem.Allocator,
+    rs: resample.Stream = .{ .from = 0, .to = session.rate },
+    ready: std.ArrayList(i16) = .empty, // resampled, not yet sent
+    failed: bool = false,
+
+    const min_piece = session.rate / 25; // 40 ms: the first audio leaves as soon as there is this much
+    const max_piece = session.rate / 10; // 100 ms
+
+    fn write(ctx: *anyopaque, samples: []const i16, rate: u32) void {
+        const v: *Voice = @ptrCast(@alignCast(ctx));
+        if (v.failed or v.r.stop.cancelled()) return;
+        if (v.rs.from == 0) v.rs.from = rate;
+        if (rate != v.rs.from) { // a model that changes its rate mid-sentence: not ours to guess
+            v.failed = true;
+            return;
+        }
+        const got = v.rs.push(v.s.gpa, v.a, samples, false) catch {
+            v.failed = true;
+            return;
+        };
+        v.ready.appendSlice(v.a, got) catch {
+            v.failed = true;
+            return;
+        };
+        if (!v.send(false)) v.failed = true;
+    }
+
+    /// The rest of the sentence; false when it was not all sent.
+    fn finish(v: *Voice) bool {
+        if (v.failed or v.r.stop.cancelled()) return false;
+        if (v.rs.from != 0) {
+            const got = v.rs.push(v.s.gpa, v.a, &.{}, true) catch return false;
+            v.ready.appendSlice(v.a, got) catch return false;
+        }
+        return v.send(true);
+    }
+
+    /// Sends what is ready in pieces of at most 100 ms (all of it when `all`, else pieces of at least 40 ms).
+    fn send(v: *Voice, all: bool) bool {
+        const s, const r = .{ v.s, v.r };
+        const enc = std.base64.standard.Encoder;
+        var at: usize = 0;
+        while (v.ready.items.len - at >= (if (all) 1 else min_piece)) {
+            const n: usize = @min(v.ready.items.len - at, max_piece);
+            const samples = v.ready.items[at..][0..n];
+            const bytes = resample.toLe(v.a, samples) catch return false;
+            const b64 = enc.encode(v.a.alloc(u8, enc.calcSize(bytes.len)) catch return false, bytes);
+            s.mutex.lockUncancelable(s.io);
+            defer s.mutex.unlock(s.io);
+            if (r.stop.cancelled()) return false; // barge-in: not one more piece after speech_started
+            s.emit.send(v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
+            r.audio_ms += n * 1000 / session.rate;
+            at += n;
+        }
+        const rest = v.ready.items.len - at;
+        std.mem.copyForwards(i16, v.ready.items[0..rest], v.ready.items[at..]);
+        v.ready.shrinkRetainingCapacity(rest);
+        return true;
+    }
+};
 
 /// Under the lock: the done events, the tool calls, response.done; the session is free for the next response.
 fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *backend.Why) void {

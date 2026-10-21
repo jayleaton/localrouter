@@ -9,8 +9,11 @@ const Stop = @import("stop.zig").Stop;
 pub const Error = chat.Error;
 pub const Why = chat.Why;
 
-/// Mono 16-bit samples at `rate`.
-pub const Pcm = struct { samples: []const i16, rate: u32 };
+/// Receives speech as it is made: mono 16-bit samples at `rate`, in order, any number of calls.
+pub const PcmSink = struct {
+    ctx: *anyopaque,
+    write: *const fn (ctx: *anyopaque, samples: []const i16, rate: u32) void,
+};
 
 pub const Hear = struct { model: []const u8 = "", language: []const u8 = "", prompt: []const u8 = "" };
 pub const Say = struct { model: []const u8 = "", voice: []const u8 = "" };
@@ -41,7 +44,7 @@ pub const Backend = struct {
 
     pub const VTable = struct {
         transcribe: *const fn (ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: Hear, stop: *Stop, why: *Why) Error![]const u8,
-        speak: *const fn (ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: Say, stop: *Stop, why: *Why) Error!Pcm,
+        speak: *const fn (ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: Say, sink: PcmSink, stop: *Stop, why: *Why) Error!void,
         stream: *const fn (ptr: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result,
         start_job: *const fn (ptr: *anyopaque, a: std.mem.Allocator, spec: JobSpec, why: *Why) Error!Job,
         wait_job: *const fn (ptr: *anyopaque, a: std.mem.Allocator, job: Job, timeout_s: u32, stop: *Stop) Outcome,
@@ -53,9 +56,9 @@ pub const Backend = struct {
     pub fn transcribe(b: Backend, a: std.mem.Allocator, pcm16k: []const i16, o: Hear, stop: *Stop, why: *Why) Error![]const u8 {
         return b.vtable.transcribe(b.ptr, a, pcm16k, o, stop, why);
     }
-    /// `text` spoken, in `a`.
-    pub fn speak(b: Backend, a: std.mem.Allocator, text: []const u8, o: Say, stop: *Stop, why: *Why) Error!Pcm {
-        return b.vtable.speak(b.ptr, a, text, o, stop, why);
+    /// Speaks `text` into `sink` as the audio is made (streamed when the speech model streams).
+    pub fn speak(b: Backend, a: std.mem.Allocator, text: []const u8, o: Say, sink: PcmSink, stop: *Stop, why: *Why) Error!void {
+        return b.vtable.speak(b.ptr, a, text, o, sink, stop, why);
     }
     /// Streams a completion; text deltas go to `sink` as they arrive.
     pub fn stream(b: Backend, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) Error!chat.Result {

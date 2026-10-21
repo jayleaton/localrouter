@@ -1,4 +1,11 @@
-//! The voice loop's backend in the daemon: speech to text and text to speech are ordinary scheduler jobs (on the
+//! T        if (head) |h| {
+            while (true) {
+                const n = readAt(fd, &buf, at) & ~@as(usize, 1); // whole samples; an odd byte waits for its pair
+                if (n == 0) break;
+                sink.write(sink.ctx, std.mem.bytesAsSlice(i16, buf[0..n]), h.rate);
+                at += n;
+            }
+        }e voice loop's backend in the daemon: speech to text and text to speech are ordinary scheduler jobs (on the
 //! realtime lane by default), the chat model is OpenAI's streaming API at `voice.chat_url` (this daemon's own /v1 when
 //! unset), and tool calls queue image and video jobs whose files are served from /v1/files. Voice jobs keep their
 //! audio only until the next expiry tick.
@@ -114,35 +121,135 @@ fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8) ![
     return list.items;
 }
 
-/// Speaks with the first candidate that serves; a refusal or failure of one falls through to the next (its own default
-/// voice, since voices are per model).
-fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, stop: *Stop, why: *Why) backend.Error!backend.Pcm {
+/// Counts what reaches the session, so a model that failed after it began speaking is not followed by another.
+const Counted = struct {
+    sink: backend.PcmSink,
+    samples: usize = 0,
+
+    fn write(ctx: *anyopaque, samples: []const i16, rate: u32) void {
+        const c: *Counted = @ptrCast(@alignCast(ctx));
+        c.samples += samples.len;
+        c.sink.write(c.sink.ctx, samples, rate);
+    }
+};
+
+/// Speaks with the first candidate that serves; one that fails before any of its audio was sent falls through to the
+/// next (with its own default voice, since voices are per model).
+fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     const l = self(ptr);
     const app = l.app;
     const candidates = try speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model);
+    var counted: Counted = .{ .sink = sink };
+    const out: backend.PcmSink = .{ .ctx = &counted, .write = Counted.write };
     for (candidates, 0..) |model, n| {
         const voice = if (n > 0) "" else if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
-        if (speakWith(app, a, model, voice, text, stop, why)) |pcm| return pcm else |err| {
-            if (err != error.Failed or n + 1 == candidates.len) return err;
+        speakWith(app, a, model, voice, text, out, stop, why) catch |err| {
+            if (err != error.Failed or n + 1 == candidates.len or counted.samples > 0) return err;
             std.log.warn("voice: speech model {s} failed ({s}); trying {s}", .{ model orelse "default", why.message, candidates[n + 1] orelse "default" });
-        }
+            continue;
+        };
+        return;
     }
     return failed(why, "no speech model");
 }
 
-fn speakWith(app: *App, a: std.mem.Allocator, model: ?[]const u8, voice: []const u8, text: []const u8, stop: *Stop, why: *Why) backend.Error!backend.Pcm {
+/// The speech job, streamed when the model streams (its `stream` option): its audio then reaches `sink` as it is made.
+fn speakWith(app: *App, a: std.mem.Allocator, model: ?[]const u8, voice: []const u8, text: []const u8, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     var ref: routes.Refusal = .{};
-    const j = speech.startSpeech(app, a, .{ .model = model, .input = text, .voice = voice }, &ref) orelse return failed(why, ref.message);
-    try wait(app, j, stop);
+    const streams = if (model) |m| (if (app.cfg.tool(m)) |c| engine.optionBool(c, "stream", false) else false) else false;
+    const j = speech.startSpeech(app, a, .{ .model = model, .input = text, .voice = voice, .stream = streams }, &ref) orelse return failed(why, ref.message);
     defer forget(app, j);
+    try tail(app, j, sink, stop, why);
+}
+
+/// Hands `speech.wav` to `sink` as the job writes it (a streaming model writes it as it speaks; others all at once at
+/// the end), until the job is done; when `stop` is set the job is dropped (ended early if its tool can stay loaded).
+fn tail(app: *App, j: *jobs.Job, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
+    var path_buf: [4096]u8 = undefined;
+    const name = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{s}/speech.wav", .{j.dir}) catch return failed(why, "the job directory's path is too long");
+    path_buf[name.len] = 0;
+    const path: [:0]const u8 = path_buf[0..name.len :0];
+    var fd: std.posix.fd_t = -1;
+    defer closeFd(fd);
+    var head: ?Head = null;
+    var at: u64 = 0;
+    var buf: [32 * 1024]u8 align(2) = undefined;
+    while (true) {
+        if (stop.cancelled()) {
+            app.scheduler.drop(j);
+            return error.Cancelled;
+        }
+        const done = j.done.isSet(); // read once more after the job ends: everything it wrote is in the file
+        if (fd < 0) fd = std.posix.openatZ(std.posix.AT.FDCWD, path, .{}, 0) catch -1;
+        if (fd >= 0 and head == null) {
+            const n = readAt(fd, &buf, 0);
+            head = parseHead(buf[0..n]) catch |err| return failed(why, switch (err) {
+                error.NotPcm16Mono => "the speech model's audio is not 16-bit mono PCM",
+                error.NotWav => "the speech model wrote audio that is not a WAV file",
+            });
+            if (head) |h| at = h.data_at;
+        }
+        if (head) |h| {
+            while (true) {
+                const n = readAt(fd, &buf, at) & ~@as(usize, 1); // whole samples; an odd byte waits for its pair
+                if (n == 0) break;
+                sink.write(sink.ctx, std.mem.bytesAsSlice(i16, buf[0..n]), h.rate);
+                at += n;
+            }
+        }
+        if (done) break;
+        j.done.waitTimeout(app.io, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }) catch {};
+    }
+    if (j.status == .cancelled) return error.Cancelled;
     if (j.status != .completed) return failed(why, j.error_message);
-    if (j.files.len == 0) return failed(why, "the speech model wrote no audio");
-    const path = try std.fs.path.join(a, &.{ j.dir, j.files[0] });
-    const bytes = Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(1 << 30)) catch return failed(why, "could not read the speech model's audio");
-    const w = audio.parseWav(bytes) orelse return failed(why, "the speech model wrote audio that is not a WAV file");
-    if (!w.pcm or w.bits != 16 or w.channels != 1) return failed(why, "the speech model's audio is not 16-bit mono PCM");
-    const samples = resample.fromLe(a, w.data[0 .. w.data.len & ~@as(usize, 1)]) catch return error.OutOfMemory;
-    return .{ .samples = samples, .rate = w.rate };
+    if (head == null) return failed(why, "the speech model wrote no audio");
+}
+
+const Head = struct { rate: u32, data_at: u64 };
+
+/// The format and the start of the data of a WAV header that may still be growing: null until the data chunk begins.
+/// Its sizes are ignored (a streaming writer fills them in last).
+fn parseHead(b: []const u8) error{ NotWav, NotPcm16Mono }!?Head {
+    if (b.len < 12) return null;
+    if (!std.mem.eql(u8, b[0..4], "RIFF") or !std.mem.eql(u8, b[8..12], "WAVE")) return error.NotWav;
+    var rate: u32 = 0;
+    var at: usize = 12;
+    while (at + 8 <= b.len) {
+        const id = b[at..][0..4];
+        const size = std.mem.readInt(u32, b[at + 4 ..][0..4], .little);
+        if (std.mem.eql(u8, id, "data")) return if (rate == 0) error.NotPcm16Mono else .{ .rate = rate, .data_at = at + 8 };
+        if (std.mem.eql(u8, id, "fmt ")) {
+            if (at + 24 > b.len) return null;
+            const format = std.mem.readInt(u16, b[at + 8 ..][0..2], .little);
+            const channels = std.mem.readInt(u16, b[at + 10 ..][0..2], .little);
+            const bits = std.mem.readInt(u16, b[at + 22 ..][0..2], .little);
+            if ((format != 1 and format != 0xFFFE) or channels != 1 or bits != 16) return error.NotPcm16Mono;
+            rate = std.mem.readInt(u32, b[at + 12 ..][0..4], .little);
+        }
+        at += 8 + size + (size & 1);
+    }
+    return null;
+}
+
+fn closeFd(fd: std.posix.fd_t) void {
+    if (fd >= 0) _ = std.posix.system.close(fd);
+}
+
+fn readAt(fd: std.posix.fd_t, buf: []u8, offset: u64) usize {
+    const rc = std.posix.system.pread(fd, buf.ptr, buf.len, @intCast(offset));
+    if (std.posix.errno(rc) != .SUCCESS) return 0;
+    return @intCast(rc);
+}
+
+test "a growing WAV header: nothing until the data chunk starts; then its rate and offset" {
+    const full = audio.header(44_100, 1, 0xFFFF_FFFF);
+    try std.testing.expect((try parseHead(full[0..20])) == null);
+    const h = (try parseHead(&full)).?;
+    try std.testing.expectEqual(@as(u32, 44_100), h.rate);
+    try std.testing.expectEqual(@as(u64, 44), h.data_at);
+    const stereo = audio.header(24_000, 2, 0);
+    try std.testing.expectError(error.NotPcm16Mono, parseHead(&stereo));
+    try std.testing.expectError(error.NotWav, parseHead("RIFX0000WAVEfmt "));
 }
 
 fn chatStream(ptr: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sink: chat.Sink, stop: *Stop, why: *Why) backend.Error!chat.Result {

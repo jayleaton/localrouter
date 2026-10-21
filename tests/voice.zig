@@ -172,7 +172,7 @@ fn config(a: std.mem.Allocator, chat_port: u16) ![]const u8 {
     return std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"voice\": {{\"chat_url\": \"http://127.0.0.1:{d}/v1\", \"partial_interval_ms\": 0}}, \"tools\": [" ++
         "{{\"id\": \"ears\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50," ++
         " \"options\": {{\"phrases\": [{{\"hz\": 440, \"text\": \"hello there\"}}, {{\"hz\": 660, \"text\": \"tell me something slow\"}}, {{\"hz\": 880, \"text\": \"make me a picture of a fox\"}}]}}}}," ++
-        "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50, \"options\": {{\"voices\": [\"plain\", \"bright\"], \"default_voice\": \"plain\"}}}}," ++
+        "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50, \"options\": {{\"voices\": [\"plain\", \"bright\"], \"default_voice\": \"plain\", \"speak_ms\": 300}}}}," ++
         "{{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {{\"step_ms\": 5}}}}," ++
         "{{\"id\": \"tpv\", \"kind\": \"video\", \"engine\": \"testpattern\", \"options\": {{\"step_ms\": 400}}}}]}}", .{ chat_port, opts.speech_worker, opts.speech_worker });
 }
@@ -257,6 +257,9 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
         sleepMs(io, 50);
     }
     try testing.expect(cancelled);
+    // The speech in progress was cancelled in the worker, not by killing it: it was loaded once.
+    const mouth_log = try Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(a, "{s}/data/logs/mouth.log", .{d.dir}), a, .limited(1 << 20));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mouth_log, "speech worker loaded"));
     try w.audio(a, 800, 0); // that turn ends; its answer comes and is ignored here
     _ = try w.until(a, "response.done", &seen);
 

@@ -56,7 +56,8 @@ pub const Voice = struct {
     transcription_model: []const u8 = "", // "": the speech_to_text default
     voice: []const u8 = "", // "": the speech model's default voice
     instructions: []const u8 = "You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
-    partial_interval_ms: u32 = 1000, // a partial transcript per this much new speech; 0: none
+    partial_interval_ms: u32 = 0, // a partial transcript per this much new speech; 0 (default): none, since a partial
+    // on a non-streaming STT model (Whisper) can hold the turn's final transcript back by a whole decode
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
