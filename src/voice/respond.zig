@@ -84,7 +84,7 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     }
     const st = &s.settings;
     const language = if (st.language.len > 0) st.language else s.heardLanguage(); // no detection pass on each turn
-    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "" };
+    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "", .greedy = s.voice.greedy_transcripts };
     s.mutex.unlock(s.io);
     var worker_ms: u64 = 0;
     var detected: []const u8 = "";

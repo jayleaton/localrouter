@@ -37,6 +37,9 @@ CARD_KWARGS = {
     "no_speech_threshold": 0.6,
     "return_timestamps": True,
 }
+# decode "greedy" (opt-in, for voice turns): one pass at temperature 0 without the fallback's thresholds, so no
+# per-step scores are kept. Same model, precision and timestamps; the gate still runs on its segments.
+GREEDY_KWARGS = {"num_beams": 1, "condition_on_prev_tokens": False, "return_timestamps": True}
 
 
 # Silero VAD v6.2.3 (snakers4/silero-vad, MIT): the model file and the vendored algorithm, both pinned.
@@ -156,7 +159,7 @@ def _set_attn(model, impl):
 
 
 def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=None):
-    """One request: samples (float32, 16 kHz) and opts {language, prompt, temperature, timestamps, seed,
+    """One request: samples (float32, 16 kHz) and opts {language, prompt, temperature, timestamps, seed, decode,
     max_new_tokens} -> {"text", "language", "duration", "segments", "words"?, "vad"?}. With `vad` (load_vad), the
     voice activity gate runs on the model's transcript. With debug, also "_debug": digests of the input features and
     per-window scores, the generated token ids and the model's own transcript before the gate (for twin.py)."""
@@ -170,6 +173,11 @@ def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=
     language = (opts.get("language") or "").lower()
     if language and language not in codes:
         raise InvalidRequest(f"unsupported language {language!r}")
+    decode = opts.get("decode") or "card"
+    if decode not in ("card", "greedy"):
+        raise InvalidRequest(f"decode must be card or greedy, got {decode!r}")
+    if decode == "greedy" and (temperature != 0.0 or debug):
+        raise InvalidRequest("decode greedy is temperature 0 only, without debug")
     seed = int(opts.get("seed") or 0)
     device, dtype = model.device, model.dtype
 
@@ -185,10 +193,10 @@ def transcribe(model, processor, samples, opts, progress=None, debug=False, vad=
                                             num_segment_frames=FRAMES_PER_WINDOW).item()
         language = {v: k for k, v in codes.items()}[lang_id]
 
-    kwargs = dict(CARD_KWARGS)
+    kwargs = dict(GREEDY_KWARGS if decode == "greedy" else CARD_KWARGS)
     kwargs["max_new_tokens"] = opts.get("max_new_tokens") or None
     # OpenAI's transcription API: temperature 0 means fallback through higher temperatures on failed thresholds.
-    kwargs["temperature"] = TEMPERATURE_FALLBACK if temperature == 0.0 else (temperature,)
+    kwargs["temperature"] = (0.0,) if decode == "greedy" else TEMPERATURE_FALLBACK if temperature == 0.0 else (temperature,)
     kwargs["return_segments"] = True
     words = timestamps == "word"
     if words:
