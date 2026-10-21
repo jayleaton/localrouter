@@ -81,4 +81,16 @@ test {
     _ = @import("tool/upstream.zig");
     _ = @import("engines/openai_server.zig");
     _ = @import("media/audio.zig");
+    _ = @import("api/realtime.zig");
+    _ = @import("api/voice_local.zig");
+    _ = @import("voice/ws.zig");
+    _ = @import("voice/vad.zig");
+    _ = @import("voice/resample.zig");
+    _ = @import("voice/chunker.zig");
+    _ = @import("voice/chat.zig");
+    _ = @import("voice/stop.zig");
+    _ = @import("voice/events.zig");
+    _ = @import("voice/session.zig");
+    _ = @import("voice/respond.zig");
+    _ = @import("voice/session_test.zig");
 }

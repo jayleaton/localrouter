@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install Zig 0.17.0 and ffmpeg
         run: |
           sudo apt-get update
@@ -20,3 +22,10 @@ jobs:
       - run: zig build
       - run: zig build test
         timeout-minutes: 20
+      - name: zig fmt on the Zig files this change touches (prints what it would change)
+        if: always()
+        run: |
+          files=$(git diff --name-only --diff-filter=AMR "$(git merge-base origin/main HEAD)" -- '*.zig')
+          if [ -z "$files" ]; then exit 0; fi
+          zig fmt $files
+          git diff --exit-code -- $files

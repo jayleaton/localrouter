@@ -201,6 +201,30 @@ A streamed request the model refuses gets an ordinary JSON error, not a stream. 
 it ends with `data: {"error": {...}}` and `data: [DONE]`. Closing the connection cancels the request; the model stays
 loaded. A model that is not yet qualified on this machine (`"qualified": false` in `/models`) is refused with a 503.
 
+## Voice (OpenAI Realtime API)
+
+`ws://<host>:8190/v1/realtime` is a full-duplex voice conversation: the OpenAI Realtime API's events over a WebSocket,
+pcm16 at 24 kHz mono both ways (base64 in `input_audio_buffer.append` and `response.audio.delta`). Server VAD ends
+each turn; the turn is transcribed, answered by the chat model with the session's history, and spoken back sentence
+by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) stops its audio and cancels the reply.
+`http://127.0.0.1:8190/voice` is a browser client for it (microphone and speaker, no install).
+
+| `session.update` field | Notes |
+| --- | --- |
+| `model` | the chat model (also `?model=` on the URL); blank: the chat server's default |
+| `voice`, `speech_model` | a voice of the speech model, and which speech model (extension) |
+| `input_audio_transcription` | `{model, language, prompt}` for the transcription model |
+| `turn_detection` | `{type: "server_vad", threshold, prefix_padding_ms, silence_duration_ms, create_response, interrupt_response}`, or null for push to talk (`input_audio_buffer.commit`, then `response.create`) |
+| `modalities` | `["audio","text"]` (default) or `["text"]` |
+| `instructions`, `tools`, `tool_choice`, `temperature`, `max_response_output_tokens` | as OpenAI's; `tools` are your functions (you return `function_call_output`) |
+| `partial_interval_ms` | extension: a `localrouter.transcription.partial` per this much speech (0: none) |
+
+The chat model can also call LocalRouter's own `generate_image` and `generate_video`: the job runs, its URLs arrive as
+`localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. Only
+`pcm16` and `server_vad` are offered; anything else is an `error` event naming the field, and the session stays open.
+By default both endpoints answer this machine only (the operator sets `voice.remote` to open them; browsers need HTTPS
+for the microphone off loopback). Details: `docs/dev/VOICE.md`.
+
 ## Input URLs
 
 A URL in `image`, `images`, `input_reference` or `file` (HTTP) or `images` / `image` / `audio` (MCP) is fetched by the daemon, so by default

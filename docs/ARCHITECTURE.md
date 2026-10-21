@@ -28,8 +28,9 @@ adding a model, or a new kind of model, does not touch the orchestration.
 | --- | --- | --- |
 | API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`; output files; `/v1/tools` for operators |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
+| Voice | `src/api/realtime.zig`, `src/voice/` | `/v1/realtime` (OpenAI Realtime API over a WebSocket) and the `/voice` page: VAD, STT, chat, sentence-chunked TTS, barge-in, tool jobs ([VOICE.md](dev/VOICE.md)) |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
-| Scheduler | `src/sched/scheduler.zig` | one executor thread: admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
+| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech and transcription): admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
 | Tools | `src/tool/` | a tool is a model as the scheduler sees it: `needs`, `load`, `generate`, `unload`, `abort`, `state`. Today every tool is a worker process (`process.zig`) |
 | Engines | `src/engine/engine.zig`, `src/engines/` | the compiled-in model implementations a worker runs |
 
@@ -44,6 +45,11 @@ then least recently used. Priority only orders the victims: a request is never r
 make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own as soon
 as the scheduler is idle, unloading idle tools of lower priority if they must, so an operator can keep, say, an image
 model and a voice model warm side by side and still let a video job take the whole machine when it needs it.
+
+**Lanes.** Each lane runs one job at a time. Speech and transcription tools run on the `realtime` lane (a tool's `lane`
+overrides it), so a sentence of TTS or a turn of STT never waits behind an image, a video or a chat reply. A tool is
+loaded and run only by its own lane; admission and eviction are serialized across lanes, a tool in use on either lane
+is never a victim, and memory admitted on one lane but not yet allocated is held back from the other's admission.
 
 ## Requests and capabilities
 
@@ -99,6 +105,10 @@ worker -> daemon   {"ok":true,"files":["0.png"],"seed":7,"ms":11800}
                    or {"ok":false,"error":"…","type":"invalid_request_error"}
 daemon -> worker   {"op":"exit"}
 ```
+
+A worker that can end a generate early answers its load with `"cancel":"signal"` beside `ok`: a cancel then sends it
+SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no reload for the next request). Any other
+worker, or one that has not answered within 5 s, is cancelled by killing its process group.
 
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
 there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
