@@ -1,12 +1,13 @@
 {
-  "defaults": {"text_to_speech": "kitten-tts-2"},
+  "defaults": {"text_to_speech": "kitten-tts-2-graphs"},
   "tools": [
     {
       "id": "kitten-tts-2",
       "kind": "speech",
-      "name": "Kitten TTS 2 (KittenML, 47 voices, 24 kHz)",
+      "name": "Kitten TTS 2 (KittenML, 47 voices, 24 kHz; the reference's bits, not real time on GB10)",
       "cmd": ["/opt/localrouter/kitten-venv/bin/python", "-I", "/opt/localrouter/tools/speech/kitten/kitten_worker.py"],
       "weights": "/data/models/kitten",
+      "qualification": "/data/models/kitten/qualification-eager.json",
       "resident_bytes": 12884901888,
       "working_bytes": 2147483648,
       "idle_ttl_s": 600,
@@ -14,6 +15,35 @@
       "generate_timeout_s": 900,
       "options": {
         "device": "cuda",
+        "lm_decode": "eager",
+        "max_input_chars": 4096,
+        "min_speed": 1,
+        "max_speed": 1,
+        "default_voice": "Bruno",
+        "presets": ["stable", "expressive"],
+        "voices": ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo", "Matthew", "Elliot", "Willow",
+                   "Dolores", "Victor", "Dante", "Alfred", "Saoirse", "Claire", "Raven", "Marcus", "Herbert", "Diana",
+                   "Laurence", "Maeve", "Walter", "Edith", "Miles", "Grace", "Reginald", "Iris", "Frank", "Serena",
+                   "Julian", "Eleanor", "Otis", "Vincent", "Martha", "Sable", "Victoria", "Arabic", "German",
+                   "Spanish", "French", "Italian", "Portuguese", "Russian", "Chinese", "Hindi"]
+      }
+    },
+    {
+      "id": "kitten-tts-2-graphs",
+      "kind": "speech",
+      "name": "Kitten TTS 2 (KittenML, 47 voices, 24 kHz; CUDA-graph decode)",
+      "cmd": ["/opt/localrouter/kitten-venv/bin/python", "-I", "/opt/localrouter/tools/speech/kitten/kitten_worker.py"],
+      "weights": "/data/models/kitten",
+      "qualification": "/data/models/kitten/qualification-graphs.json",
+      "resident_bytes": 12884901888,
+      "working_bytes": 2147483648,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 900,
+      "generate_timeout_s": 900,
+      "options": {
+        "device": "cuda",
+        "lm_decode": "graphs",
+        "graph_tokens": 2048,
         "max_input_chars": 4096,
         "min_speed": 1,
         "max_speed": 1,

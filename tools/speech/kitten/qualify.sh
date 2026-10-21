@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
 # The Kitten TTS 2 qualification run on a target machine (GB10: CUDA). Bounded: every step has a time limit (then
 # SIGTERM, and SIGKILL 30 s later), and everything it writes goes to OUT.
-#   tools/speech/kitten/qualify.sh ROOT VENV OUT [--fixtures F1,F2,F3,F4,F5] [--device cuda]
+#   tools/speech/kitten/qualify.sh ROOT VENV OUT [--fixtures F1,F2,F3,F4,F5] [--device cuda] [--lm-decode eager|graphs]
+#                                  [--accept-baseline] [--marker FILE]
 # ROOT: the asset root (filled by fetch.sh, verified here by sha256). VENV: made by setup.sh.
 # Exit 0 (and "qualified": true in OUT/status.json) only when the unit tests pass, every pinned file matches, the bits
 # gate passes, and the bench completes with every measurement. Each step's exit code is in status.json either way.
+# --lm-decode graphs gates the CUDA-graph decode instead (qualify_graphs.py: exact against itself and its accepted
+# baseline, within a named exception against the eager reference); --accept-baseline records this run's bits as that
+# baseline (the operator's decision). --marker FILE: on a qualified run, write the file the tool's `qualification`
+# names (the daemon serves the tool only while it says "qualified": true); a failed run leaves an existing one alone.
 # Worst case: environment 150 + unit 150 + assets 930 + gate 2730 + bench 1230 + cleanup and manifest 130 = 5320 s.
 # A run cut short (any limit, or an outer timeout) leaves no "qualified": true: status.json is written only at the end.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-root=${1:?usage: qualify.sh ROOT VENV OUT [--fixtures LIST] [--device DEV]}
+root=${1:?usage: qualify.sh ROOT VENV OUT [--fixtures LIST] [--device DEV] [--lm-decode MODE] [--accept-baseline] [--marker FILE]}
 venv=${2:?}
 out=${3:?}
 shift 3
-fixtures=F1,F2,F3,F4,F5 device=cuda
+fixtures=F1,F2,F3,F4,F5 device=cuda lm_decode=eager accept=() marker=""
 while [ $# -gt 0 ]; do
   case $1 in
     --fixtures) fixtures=$2; shift 2 ;;
     --device) device=$2; shift 2 ;;
+    --lm-decode) lm_decode=$2; shift 2 ;;
+    --accept-baseline) accept=(--accept-baseline); shift ;;
+    --marker) marker=$2; shift 2 ;;
     *) echo "qualify.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+case $lm_decode in eager|graphs) ;; *) echo "qualify.sh: --lm-decode eager or graphs" >&2; exit 2 ;; esac
 mkdir -p "$out"
 py="$venv/bin/python"
 declare -A rc
@@ -54,8 +63,9 @@ step assets 900 "$py" -I -c '
 import sys; sys.path.insert(0, sys.argv[1]); import kitten_worker as kw
 kw.verify_assets(sys.argv[2], kw.load_pins(), "sha256", "packed", "default"); print("pinned files verified (sha256)")
 ' "$here" "$root"
-step gate 2700 "$py" -I "$here/qualify.py" gate "$root" "$out/gate" --fixtures "$fixtures" --device "$device"
-step bench 1200 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device"
+step gate 2700 "$py" -I "$here/qualify.py" gate "$root" "$out/gate" --fixtures "$fixtures" --device "$device" \
+  --lm-decode "$lm_decode" "${accept[@]}"
+step bench 1200 "$py" -I "$here/qualify.py" bench "$root" "$out/bench" --device "$device" --lm-decode "$lm_decode"
 
 # Nothing may write into OUT once the manifest is taken: stop the sampler (and wait for it) first.
 stop_sampler
@@ -64,8 +74,14 @@ qualified=false
 # A qualification needs every fixture: a subset (--fixtures) is a diagnostic run.
 [ "${rc[unit]}" = 0 ] && [ "${rc[assets]}" = 0 ] && [ "${rc[gate]}" = 0 ] && [ "${rc[bench]}" = 0 ] &&
   [ "$fixtures" = F1,F2,F3,F4,F5 ] && qualified=true
-printf '{"unit": %s, "assets": %s, "gate": %s, "bench": %s, "fixtures": "%s", "device": "%s", "qualified": %s}\n' \
-  "${rc[unit]}" "${rc[assets]}" "${rc[gate]}" "${rc[bench]}" "$fixtures" "$device" "$qualified" > "$out/status.json"
+rc[marker]=none
+if [ "$qualified" = true ] && [ -n "$marker" ]; then  # the file the tool's `qualification` names
+  step marker 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" --marker "$marker"
+  [ "${rc[marker]}" = 0 ] || qualified=false
+fi
+printf '{"unit": %s, "assets": %s, "gate": %s, "bench": %s, "marker": "%s", "fixtures": "%s", "device": "%s", "lm_decode": "%s", "accept_baseline": %s, "qualified": %s}\n' \
+  "${rc[unit]}" "${rc[assets]}" "${rc[gate]}" "${rc[bench]}" "${rc[marker]}" "$fixtures" "$device" "$lm_decode" \
+  "$([ ${#accept[@]} -gt 0 ] && echo true || echo false)" "$qualified" > "$out/status.json"
 # The reports and the audio, not the float dumps (large, reproducible from the commands above).
 timeout --kill-after=10 120 bash -c '
   find "$1" -name "*.f32" -delete
@@ -75,6 +91,8 @@ timeout --kill-after=10 120 bash -c '
   qualified=false
   rm -f "$out/SHA256SUMS"
   sed -i 's/"qualified": true}/"qualified": false, "manifest": "failed"}/' "$out/status.json"
+  # and a marker this run wrote is taken back
+  [ -z "$marker" ] || timeout 60 "$py" -I "$here/qualify.py" marker "$root" "$out" --lm-decode "$lm_decode" --marker "$marker" --revoke
 }
 echo "qualify.sh: qualified $qualified ($(cat "$out/status.json")), results in $out"
 [ "$qualified" = true ]

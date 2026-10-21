@@ -38,11 +38,18 @@ tools/speech/kitten/setup.sh /opt/localrouter/kitten-venv     # Python 3.12 from
 tools/speech/kitten/fetch.sh /data/models/kitten              # 2.08 GB: the packed language model, voices, tokenizer, s3gen
 ```
 
-Then add the tool from `tools/speech/kitten/config.example.json` to the daemon's config. `weights` is the directory
-`fetch.sh` filled; `voices`, `default_voice`, `presets`, `max_input_chars` and the speed range are what the daemon
-advertises on `/v1/models` and checks before loading. The worker checks them against the checkpoint when it loads, and
-refuses to load if the config offers a speed range (`min_speed` and `max_speed` must both be 1), a voice or a preset
-the model lacks.
+Then add the tools from `tools/speech/kitten/config.example.json` to the daemon's config. There are two, one model
+each way:
+- **`kitten-tts-2`:** `lm_decode: "eager"`, kittenml's own generate, bit for bit the reference. It is **not real
+  time on GB10**: RTF 1.5–1.6, host-bound (see [GB10](#gb10)).
+- **`kitten-tts-2-graphs`:** `lm_decode: "graphs"`, the decode step as CUDA graphs, made to be the realtime fallback.
+  It is the `text_to_speech` default.
+
+Each names its own `qualification` file. The daemon serves a tool only once `qualify.sh --marker` has written that
+file on this machine (see [Qualification](#qualification)). `weights` is the directory `fetch.sh` filled; `voices`,
+`default_voice`, `presets`, `max_input_chars` and the speed range are what the daemon advertises on `/v1/models` and
+checks before loading. The worker checks them against the checkpoint when it loads, and refuses to load if the config
+offers a speed range (`min_speed` and `max_speed` must both be 1), a voice or a preset the model lacks.
 
 | Option | Default | |
 | --- | --- | --- |
@@ -54,6 +61,9 @@ the model lacks.
 | `warm_voices` | the default voice | voices whose conditioning is built at load, not in the first request |
 | `verify` | `size` | at load, check each pinned file's size, or its `sha256` (slower), or `none` |
 | `keep_float` | false | also write `speech.f32` and `speech.chunks.json` (tokens per chunk), for the gate |
+| `lm_decode` | `eager` | `eager`: kittenml's generate (the reference's bits); `graphs`: CUDA-graph decode (CUDA only; its own accepted baseline) |
+| `graph_tokens` | 2048 | `graphs`: the static KV cache's length (112 KiB a token, 224 MiB at 2048); a chunk whose prompt and budget exceed it decodes eagerly |
+| `graph_backend` | `inductor` | `graphs`: `inductor` (`torch.compile` reduce-overhead) or `cudagraphs` (the eager kernels captured, no Triton) |
 
 The worker never reaches the network: it sets the Hugging Face libraries offline and answers the package's one
 download (the s3gen weights from ResembleAI/chatterbox-turbo) with the pinned file.
@@ -119,6 +129,50 @@ reported as a result. Memory is sampled every 0.5 s into `memory.log`; the sampl
 A GPU run is a separate baseline from a CPU run: the gate compares worker and reference on the same device, threads
 and seed, never across devices.
 
+### The graphs decode: a named exception
+
+`lm_decode: "graphs"` changes how the language model's decode step runs, not the model. It uses:
+- a static KV cache (one per worker, reset between chunks);
+- the decode step compiled and captured as CUDA graphs, through transformers' `compile_config`;
+- the speaker conditioning computed with the reference hook's own ops before `generate`;
+- SDPA attention.
+
+The prefill stays eager. Its kernels differ from eager decode's, so its logits differ in the low bits and the sampled
+codec tokens drift from the reference's after some step. That is a deliberate exception to `CONTRIBUTING.md`'s
+bit-exact rule. It is made explicit here, so it is not made quietly, and it relaxes nothing else.
+
+| Name | Scope | Still exact | Tolerances against the eager reference | Evidence |
+| --- | --- | --- | --- | --- |
+| `kitten-tts-2-graphs-decode` | `lm_decode: "graphs"` only: the decode step's logits, so the codec tokens and audio | **op:** text, prompts, prefill logits, flow mel and vocoder, via the shared load path. **self:** cold and warm in one process, and across two processes. **baseline:** the accepted bits for this GPU and runtime | each fixture's audio length within 0.75–1.33x of the reference; its longest silence (−45 dBFS, 20 ms frames) at most the reference's + 0.5 s, and at least 1 s allowed | pending: the first accepted GB10 run |
+
+`qualify.py gate --lm-decode graphs` is in `qualify_graphs.py`. It checks all of that and records how many tokens
+each fixture matched the reference for (information, not a gate).
+
+**The baseline:**
+- `tools/speech/kitten/baselines/graphs-<gpu>.json` holds each fixture's token and PCM sha256 under the runtime that
+  made them (torch, transformers, kittenml, CUDA, GPU).
+- A baseline that is missing, or recorded under another runtime, fails the gate.
+- `--accept-baseline` replaces it with this run's bits. That is the operator's recorded decision, after listening to
+  the run's WAVs.
+- The new file is written to `OUT/gate/baseline/` to be committed, and the gate report and marker name it.
+
+### Qualification
+
+```sh
+tools/speech/kitten/qualify.sh ROOT VENV OUT --lm-decode eager  --marker /data/models/kitten/qualification-eager.json
+tools/speech/kitten/qualify.sh ROOT VENV OUT --lm-decode graphs --marker /data/models/kitten/qualification-graphs.json [--accept-baseline]
+```
+
+A run writes the marker only when:
+- every step passed (unit, sha256 of every pinned file, the gate for that `lm_decode`, a complete bench);
+- the full fixture set ran;
+- it was a CUDA run.
+
+The marker holds `"qualified": true`, the host and GPU, the pins' sha256, the exceptions used and their evidence, the
+graphs baseline, and the bench's cold load, warm RTF, warm first chunk and memory. A failed run leaves an existing
+marker alone. A run whose manifest fails removes the marker it wrote. The daemon reads only `"qualified"` (#14's
+`qualification` gate).
+
 ### The kitten-tts-2-cpp runtime
 
 KittenML's [kitten-tts-2-cpp](https://github.com/KittenML/kitten-tts-2-cpp) (MIT, a llama.cpp fork) runs the
@@ -136,6 +190,23 @@ measured speed, for the trade-off:
 The C++ runtime is about 3x faster on this CPU and uses 40% of the memory. Using it would need an accepted numerical
 baseline of its own (an explicit, documented decision, not taken here); on GB10 the reference itself runs on the GPU.
 
+## GB10
+
+Eager, measured before this change (DGX-01, 2026-10-21, `tools/spark/jarvis/kitten_probe.py`, the 125-character
+calendar sentence, 161 codec tokens, 6.54 s of audio):
+
+| | |
+| --- | --- |
+| Warm RTF | 1.52–1.64 (20 or 4 CPU threads alike) |
+| Language model | 15.6–17.0 tokens/s (real time needs 25): 57–64 ms a token wall, 24.8 ms of it kernels, one CPU core at 100 % |
+| Decoder (S3 flow + HiFT) | 0.19–0.31 s, 2–3 % of the wall |
+| Memory after load | host RSS 4.44 GiB (3.95 anonymous, live: `malloc_trim` frees nothing), CUDA 4.33 GiB reserved; 10.6 GiB `MemAvailable` drop through the daemon |
+| Load | 16–18 s |
+
+So eager decode is host-bound. The graphs decode removes the per-token Python and launch overhead, and the estimate is
+about 40 tokens/s (RTF 0.6–0.75). Moving the unpacked weights to the device during load should remove about 3.5 GiB of
+host memory. Both are measured by `qualify.sh` (gate and bench, eager and graphs). This section gets the numbers then.
+
 ## Measurements
 
 DEV (AMD Ryzen 7 6800U, 16 threads, 27 GB, shared with other jobs: load average 14 to 30), CPU, 8 threads:
@@ -151,7 +222,7 @@ DEV (AMD Ryzen 7 6800U, 16 threads, 27 GB, shared with other jobs: load average 
 
 CPU torch is a correctness baseline, not a serving target: at RTF 10 it is too slow to speak to anyone. The GB10 numbers
 (cold load, first audio, warm RTF for F1 and the 640-character F5, peak RSS and CUDA memory, cancel reclaim) come
-from `qualify.sh bench` on dgx02.
+from `qualify.sh` (gate and bench) on a GB10: see [GB10](#gb10).
 
 ## Lifecycle
 
