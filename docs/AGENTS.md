@@ -218,9 +218,10 @@ Per tool in the config: `priority` (integer, default 0, a chat model 100; higher
 When a request needs memory, idle tools are unloaded lowest priority first, then least recently used, until it fits;
 a tool that is loading or running is never unloaded. Priority only orders the victims: a request is never refused while
 unloading idle tools, of any priority, would make room. A `keep_loaded` tool is loaded when the daemon starts if it
-fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again once memory frees up (the scheduler
-idle for a couple of seconds and the tool fits without unloading anything). It can still be evicted by a request that
-needs the room, and `POST /v1/tools/{id}/unload` (or `release`) keeps it down until it is next used or loaded.
+fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again as soon as the scheduler has been
+idle for a couple of seconds: if it does not fit, it unloads idle tools of lower priority, as a request would (never one
+of its own priority or above), so a video job's model gives the room back right after the job rather than at its idle
+TTL. It can still be evicted by a request that needs the room, and `POST /v1/tools/{id}/unload` (or `release`) keeps it down until it is next used or loaded.
 `GET /v1/tools` shows `priority`, `keep_loaded` and `capabilities`.
 
 ## Errors
