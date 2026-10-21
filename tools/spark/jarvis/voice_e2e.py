@@ -542,8 +542,8 @@ def main():
     # 6. A short video job, then the voice models must be back and a new session answered. Then the same under memory
     #    pressure (a ballast, as another tenant), so the video must unload part of the voice set and the scheduler must
     #    bring it back.
-    for name, prompt, squeeze in (("video", "after_video", False), ("eviction", "after_eviction", True)):
-        video_phase(args, name, results, checks, squeeze)
+    for name, prompt, pressure in (("video", "after_video", False), ("eviction", "after_eviction", True)):
+        video_phase(args, name, results, checks, pressure)
         sess = Session(args.url, events)
         try:
             sess.pump(1.0)
