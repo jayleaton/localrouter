@@ -20,8 +20,6 @@ const root = "/tmp/localrouter-it-drama3-root";
 const native = root ++ "/build/tensorfold/zig-out/native/bin/tensorfold-native";
 const marker = root ++ "/qualification.json";
 const lock = root ++ "/gpu.lock"; // the host's lock: the scheduler holds it shared while any model is loaded
-/// The tool's own lock, which the daemon names in LOCALROUTER_GPU_LOCK and the launcher takes.
-const own_lock = "/tmp/localrouter-it-drama3/data/locks/fishaudio_drama-3.lock";
 
 /// A raw HTTP/1.1 reply: its status, its head (lowercased), the body (de-chunked), the trailers (lowercased) and
 /// whether a chunked body ended with its terminating chunk.
@@ -192,6 +190,8 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
         "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot });
     var d = try Daemon.start(testing.allocator, io, "drama3", cfg);
     defer d.stop();
+    // The tool's own lock, which the daemon names in LOCALROUTER_GPU_LOCK and the launcher takes (in this run's directory).
+    const own_lock = try std.fmt.allocPrint(a, "{s}/data/locks/fishaudio_drama-3.lock", .{d.dir});
     const say = "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hello there.\"}"; // 12 characters: 5292 samples
 
     // Listed, and refused before anything starts until this machine is qualified.

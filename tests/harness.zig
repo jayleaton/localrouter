@@ -17,8 +17,10 @@ pub const Daemon = struct {
     client: std.http.Client,
 
     pub fn start(gpa: std.mem.Allocator, io: Io, name: []const u8, cfg_json: []const u8) !Daemon {
-        const dir = try std.fmt.allocPrint(gpa, "/tmp/localrouter-it-{s}", .{name});
-        Io.Dir.cwd().deleteTree(io, dir) catch {};
+        var rnd: [8]u8 = undefined; // unique per run: another user's leftovers or a parallel run cannot collide
+        io.random(&rnd);
+        const dir = try std.fmt.allocPrint(gpa, "/tmp/localrouter-it-{s}-{x:0>16}", .{ name, std.mem.readInt(u64, &rnd, .little) });
+        errdefer gpa.free(dir);
         try Io.Dir.cwd().createDirPath(io, dir);
         const cfg_path = try std.fmt.allocPrint(gpa, "{s}/config.json", .{dir});
         defer gpa.free(cfg_path);
@@ -118,7 +120,6 @@ pub fn sleepMs(io: Io, ms: i64) void {
 
 pub const reserve = "\"reserve_bytes\": 67108864";
 
-
 /// One MCP tools/call; the result object (content, isError).
 pub fn mcpCall(d: *Daemon, a: std.mem.Allocator, tool: []const u8, args: []const u8) !std.json.Value {
     const body = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{{\"name\":\"{s}\",\"arguments\":{s}}}}}", .{ tool, args });
@@ -134,4 +135,3 @@ pub fn mcpText(a: std.mem.Allocator, result: std.json.Value) !std.json.Value {
         if (std.mem.eql(u8, c.object.get("type").?.string, "text")) return std.json.parseFromSliceLeaky(std.json.Value, a, c.object.get("text").?.string, .{});
     return error.NoText;
 }
-
