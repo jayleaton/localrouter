@@ -40,7 +40,7 @@ PROMPTS = {
     "story": "Tell me a long story about a lighthouse keeper and a winter storm, with plenty of detail.",
     "interrupt": "Sorry to interrupt. Which time zone is Tokyo in?",
     "picture": "Please make me a picture of a red fox sitting in fresh snow.",
-    "after_video": "Are you still there? Answer yes in one short sentence.",
+    "after_video": "Are you still there and listening to me?",  # one sentence: Drama 3 dropped the second of two here
 }
 
 

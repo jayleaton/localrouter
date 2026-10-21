@@ -98,12 +98,14 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const exec = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.main });
     const exec_rt = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.realtime });
     const exec_chat = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.chat });
+    const exec_listen = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.listen });
     const watcher = try std.Thread.spawn(.{}, watchStop, .{ io, &server, &app });
     http.Server(routes.App, routes.handle).serve(io, &server, &app, &stop_flag);
     scheduler.stop();
     exec.join();
     exec_rt.join();
     exec_chat.join();
+    exec_listen.join();
     watcher.join();
     return 0;
 }
