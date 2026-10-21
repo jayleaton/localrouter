@@ -133,16 +133,29 @@ Clips and voice files hold a person's voice: keep them out of source control.
 
 ## Qualification
 
-`qualify.sh ROOT CONFIG OUT --reference RUNTIME [--accept-native-numerics]` runs on the GB10, every step under a time limit, and writes
-`OUT/status.json` and a manifest as Kitten's does:
+`qualify.sh ROOT CONFIG OUT --reference RUNTIME [--accept-native-numerics] [--coresident]` runs on the GB10 (DGX-01),
+every step under a time limit, and writes `OUT/status.json` and a manifest as Kitten's does. Like the daemon, e2e and
+bench hold the host's `gpu_lock` shared while the model is loaded and give the launcher a private lock; the worker
+runs with LocalRouter's admission (`--external-admission`).
 
-- **assets:** the checkout, every pinned file and patch, the engine binary against `engine.json`, and the full sha256
-  of every checkpoint file;
-- **e2e:** the real worker on the real GPU: a cold load (the shared lock is held while loaded); a sentence whole (44.1
+- **assets:** the checkout, every pinned file and patch, the patched launcher, the engine binary against
+  `engine.json`, and the full sha256 of every checkpoint file;
+- **e2e:** the real worker on the real GPU: a cold load (the private lock is held while loaded); a sentence whole (44.1
   kHz mono, `stop`), again warm (byte-identical), and streamed (the same bytes); a 300-character paragraph whole and
   streamed (equal, warm RTF recorded); each configured voice, and inline references from a voice file; an unknown
   voice refused with a 400; long form when it is on; then unload: the unit inactive, the lock free and `MemAvailable`
   back within 2 GiB;
+- **bench:** upstream's own client, `bench/drama_bench.py`, against the server the worker started, with upstream's
+  24-item corpus (sha256-checked) and schedule, as its `before-after.sh` runs it: whole WAV replies on the fresh
+  process (cold, 2 warmup, 3 warm passes), then streamed PCM on the same process. Every 0.5 s it samples the unit's
+  cgroup memory, `MemAvailable` and `nvidia-smi`. It passes when every request was valid audio, warm streamed first
+  playable audio (`first_frame_s`) p50 is at most 0.5 s, warm RTF p50 is under 1.0 for both runs (real time: why
+  Drama 3 is the Jarvis box's voice), and the peak (the larger of the cgroup's peak and the drop in `MemAvailable`
+  from before the load, since GB10's CUDA memory does not show in the cgroup) fits `resident_bytes`. The comparison
+  with upstream's claims (first audio 0.141 s, RTF 0.634, 0.682 after its patch 0040) is recorded as ratios, not
+  gated. With `--coresident` (chat and Whisper already warm in a running daemon), the report records what was
+  loaded and `MemAvailable`; such a run measures the Jarvis box but cannot qualify, because upstream's accuracy guard
+  needs the host lock to itself;
 - **accuracy:** upstream's own checks from `qualification/`, as its README runs them, each in its bounded GPU guard
   (`run-bounded-oracle.py`: the launcher's admission, 54 GiB cap, abort floor and the shared lock): the backbone
   reference check (the 40-layer prefill of its 182-token fixture, native chunks 1, 7 and 128 against the reference's
@@ -152,9 +165,11 @@ Clips and voice files hold a person's voice: keep them out of source control.
   fails some bars, so a failing verdict is the expected result today. Upstream's codec gate and its tower full-context
   replays are not reproducible from its repository (its `qualification/README.md` says so) and are not run.
 
-Only when assets and e2e pass, the accuracy checks produced valid evidence, and `--accept-native-numerics` is given,
-does it write the tool's `qualification` file: `{"qualified": true, "host", "gpu", "pins_sha256", "native_sha256",
-"upstream_commit", "checkpoint_revision", "numerics", "upstream_accuracy", "report", "qualified_at"}`, where
+Only when assets, e2e and bench pass, the accuracy checks produced valid evidence, and `--accept-native-numerics` is
+given, does it write the tool's `qualification` file: `{"qualified": true, "host", "gpu", "pins_sha256",
+"native_sha256", "upstream_commit", "checkpoint_revision", "numerics", "upstream_accuracy", "bench", "report",
+"qualified_at"}`, where `bench` holds first audio, RTF, the peak memory, `resident_bytes` and the ratios to upstream's
+claims, where
 `upstream_accuracy` holds the reference revision, each check's verdict and metrics, and upstream's own
 `native_drama_qualified`. The accuracy verdicts do not decide acceptance; the flag does. The daemon admits the model once that file says `"qualified": true`; the
 worker also refuses to load unless its `host` is this machine, its `pins_sha256` the current `pins.json` and its

@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""Fish Audio Drama 3 qualification: the pinned assets, the worker end to end on the GPU, and the marker.
+"""Fish Audio Drama 3 qualification: the pinned assets, the worker end to end on the GPU, its speed, and the marker.
 
     python3 -I tools/speech/drama3/qualify.py assets ROOT CONFIG OUT [--tool ID]
     python3 -I tools/speech/drama3/qualify.py e2e    ROOT CONFIG OUT [--tool ID]
+    python3 -I tools/speech/drama3/qualify.py bench  ROOT CONFIG OUT [--tool ID] [--coresident]
     python3 -I tools/speech/drama3/qualify.py accuracy ROOT CONFIG OUT --reference RUNTIME [--tool ID]
     python3 -I tools/speech/drama3/qualify.py marker ROOT CONFIG OUT [--tool ID] [--write --accept-native-numerics]
 
 ROOT is the asset root fetch.sh and build.sh filled. CONFIG is the LocalRouter config: its drama3 tool (the speech
 tool whose cmd ends in drama3_worker.py; --tool picks one by id) and its top-level "gpu_lock". qualify.sh runs the
-four in order, each under a time limit, and is what an operator runs; OUT receives report.json and the audio.
+five in order, each under a time limit, and is what an operator runs; OUT receives report.json and the audio.
+
+e2e and bench hold the GPU lock as the daemon does (LocalRouter PR #14): the host's "gpu_lock" shared (flock
+LOCK_SH, non-blocking: a job holding it exclusively fails the "host_gpu_lock" check and nothing is loaded) for as
+long as the model is loaded, and the worker gets a private lock file in OUT (LOCALROUTER_GPU_LOCK, with
+LOCALROUTER_GPU_LOCK_HELD=1 and LOCALROUTER_HOST_GPU_LOCK=<host lock>), which the launcher takes exclusively. The
+worker runs ROOT/launcher/pilot.py with admission "external" unless the tool says otherwise. accuracy's guard takes
+the host lock exclusively itself, so it runs after bench has released it (each role is its own process).
 
 assets checks that the tool serves ROOT's own layout, that the upstream checkout and every checkpoint file match
 pins.json by sha256 (fetch.sh --check, which also runs upstream's checkpoint.sha256), and that ROOT/engine.json
 names the pinned patched TensorFold HEAD and the binary the worker runs, by sha256.
 e2e drives drama3_worker.Worker in this process, as the daemon's worker process does, with the tool's own config
 and require_qualification=False, on the real GPU:
-  load     cold load and time to ready; the shared GPU lock is held and the pilot's unit is active while loaded.
+  load     cold load and time to ready; the private lock is held and the pilot's unit is active while loaded.
   F1       a short sentence whole (RIFF/WAVE PCM, mono, 16-bit, 44100 Hz, finish "stop"); again warm, byte for byte
            the same file (Drama 3 seeds each synthesis from its prompt rows); streamed, the same PCM data.
   F2       a 316-character paragraph whole and streamed: the same PCM data; the warm real-time factor.
@@ -23,12 +31,25 @@ and require_qualification=False, on the real GPU:
            when the tool offers references and its voices_dir has one.
   refusal  an unknown voice is refused as invalid_request_error, and the server stays up.
   long     with long_form, an input over long_form_chars is spoken in segments.
-  unload   exit: the unit is inactive, the lock is free and MemAvailable is back within 2 GiB of its level before load.
+  unload   exit: the unit is inactive, the private lock is free and MemAvailable is back within 2 GiB of its level
+           before load.
+bench loads the worker the same way and runs upstream's own benchmark client, ROOT/drama-tensorfold/bench/
+drama_bench.py, against the server it started, as upstream's bench/before-after.sh does, so the numbers stand next
+to upstream's: whole WAV replies on the fresh process (1 cold, 2 warmup, 3 warm passes of the 24-item corpus), then
+streamed PCM on the same process (2 warmup, 3 warm passes). Every 0.5 s while they run it samples the unit's cgroup
+memory.current and memory.peak, MemAvailable and nvidia-smi memory.used. It passes when both runs exit 0 (every
+request valid audio, the server unchanged), the warm streamed first_frame_s p50 (first playable audio) and the warm
+real-time factor p50 of both runs are within THRESHOLDS, and the peak (the larger of the cgroup's peak and the drop in
+MemAvailable from before the load: GB10's CUDA memory does not show in the cgroup) is within the tool's resident_bytes.
+The ratios to upstream's claims (UPSTREAM_CLAIMS) are recorded, not gated. The report records MemAvailable before
+load and, when a LocalRouter daemon answers on 127.0.0.1:8190, its /v1/tools: with --coresident the operator says
+chat and speech-to-text are loaded by a running daemon (the Jarvis box: one GB10, all of them warm together). Its
+models hold the host lock shared, so e2e and bench run beside them, and accuracy's exclusive guard cannot.
 accuracy runs upstream's own qualification/ checks against the SGLang-Omni reference (see accuracy()); their
 verdicts are recorded, and do not decide acceptance.
-marker writes the tool's "qualification" file (--write, only with --accept-native-numerics, passing assets and e2e
-reports and an accuracy report with valid evidence, whose results it records); without --write it writes nothing
-and warns if a marker that says qualified is already there.
+marker writes the tool's "qualification" file (--write, only with --accept-native-numerics, passing assets, e2e and
+bench reports and an accuracy report with valid evidence, whose results it records with bench's measurements);
+without --write it writes nothing and warns if a marker that says qualified is already there.
 """
 
 import argparse
@@ -41,13 +62,32 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = "fishaudio/drama-3"
 GIB = 1 << 30
 NUMERICS = ("native TensorFold build of drama-tensorfold; not bit-exact with SGLang-Omni ab095ef9; accepted by the "
             "operator with --accept-native-numerics")
+
+# bench's gate. Real time is the reason Drama 3 is the Jarvis box's text to speech: a reply must be spoken faster
+# than it plays, and its first audio must come within half a second. The peak (see with_drop) must fit the memory the
+# scheduler admitted the load with (the tool's resident_bytes, else the launcher's 54 GiB cap).
+THRESHOLDS = {"stream_first_frame_s_p50_max": 0.5, "warm_rtf_p50_below": 1.0, "default_resident_bytes": 54 * GIB}
+# Upstream's claims for the same client, corpus and schedule (README.md, results/qualification.json and
+# results/before-after-02/: warm, whole RTF and streamed first audio); patch 0040 later cost about 5% (README.md,
+# results/backbone-attention-tiles.json: RTF 0.682 on its 48-request capture). Recorded beside ours, not gated.
+UPSTREAM_CLAIMS = {"first_audio_p50_s": 0.141, "rtf_p50": 0.634, "rtf_p50_after_patch_0040": 0.682,
+                   "source": "drama-tensorfold README.md and results/before-after-02 (GB10, native TensorFold)"}
+CORPUS = os.path.join("bench", "corpus", "drama-bench-en-v1.jsonl")
+CORPUS_SHA256 = "b8995194915f75ffa8860eaca5fc75821d30d209db907d80a07af946ebf59d3b"  # upstream's bench/README.md
+# drama_bench.py's own defaults (2 warmup, 3 repeats, 120 s a request) give 75 and 74 requests, about 500 s each at
+# upstream's speed. Each run is bounded, and the role leaves itself 300 s of the step's 3000 s to unload.
+BENCH_RUN_LIMIT_S = 1200
+BENCH_BUDGET_S = 2700
+DAEMON_TOOLS = "http://127.0.0.1:8190/v1/tools"  # the LocalRouter daemon's default port
 
 FIXTURES = {
     "F1": "The train leaves at seven fifteen.",
@@ -123,7 +163,7 @@ def mem_available():
 
 
 def lock_free(path):
-    """Whether a non-blocking exclusive flock on the GPU lock succeeds; a lock it takes is released at once."""
+    """Whether a non-blocking exclusive flock on a lock file succeeds; a lock it takes is released at once."""
     with open(path) as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -133,10 +173,55 @@ def lock_free(path):
         return True
 
 
+def hold_shared(path):
+    """The host GPU lock held shared, as the daemon holds it while a model is loaded; None while a job holds it
+    exclusively. Closing the file releases it."""
+    f = open(path)
+    try:
+        fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        return None
+    return f
+
+
+def worker_environ(out, host_lock):
+    """The worker's environment as the daemon gives it: a private lock (created in OUT) the launcher takes, the
+    host lock already held."""
+    private = os.path.join(out, "drama3.lock")
+    open(private, "a").close()
+    return private, dict(os.environ, LOCALROUTER_GPU_LOCK=private, LOCALROUTER_GPU_LOCK_HELD="1",
+                         LOCALROUTER_HOST_GPU_LOCK=host_lock)
+
+
 def unit_state(unit):
     r = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "LoadState"],
                        capture_output=True, text=True, timeout=10)
     return dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+
+
+def unit_property(unit, name):
+    r = subprocess.run(["systemctl", "--user", "show", unit, "-p", name, "--value"], capture_output=True, text=True,
+                       timeout=10)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def wait_inactive(unit, seconds):
+    deadline = time.monotonic() + seconds
+    state = unit_state(unit) if unit else {}
+    while unit and state.get("ActiveState") != "inactive" and time.monotonic() < deadline:
+        time.sleep(0.5)
+        state = unit_state(unit)
+    return state
+
+
+def daemon_tools():
+    """What a running LocalRouter daemon has loaded (its /v1/tools), or why there is no answer."""
+    try:
+        with urllib.request.urlopen(DAEMON_TOOLS, timeout=5) as r:
+            return {"url": DAEMON_TOOLS, "tools": json.loads(r.read(1 << 20))}
+    except (OSError, ValueError) as e:
+        return {"url": DAEMON_TOOLS, "error": f"{type(e).__name__}: {e}"}
 
 
 def read_wav(path):
@@ -310,19 +395,22 @@ def e2e(args):
            "options": opts, "gpu_lock": lock}
     with open("/proc/loadavg") as f:
         env["loadavg"] = f.read().split()[:3]
-    # A timeout's SIGTERM unwinds through the finally below, so the server is stopped and the lock released.
+    # A timeout's SIGTERM unwinds through the finally below, so the server is stopped and the locks released.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     w = None
+    held = None
     exited = False
     try:
         if not lock or not os.path.isfile(lock):
             rep.add("gpu_lock", False, error=f"the config's gpu_lock {lock!r} is not an existing file")
             return 1
-        if not lock_free(lock):
-            rep.add("gpu_lock_free_before_load", False, error="another GPU job holds the lock; nothing was loaded")
+        held = hold_shared(lock)
+        if not rep.add("host_gpu_lock", held is not None, gpu_lock=lock, mode="shared",
+                       error=None if held else "a GPU job holds the host lock exclusively; nothing was loaded"):
             return 1
+        private, environ = worker_environ(args.out, lock)
+        env["private_lock"] = private
         before = mem_available()
-        environ = dict(os.environ, LOCALROUTER_GPU_LOCK=lock)
         w = kw.Worker(dict(tool), require_qualification=False, environ=environ)
         t = time.monotonic()
         loaded = w.load()
@@ -330,7 +418,7 @@ def e2e(args):
         if not rep.add("load", loaded.get("ok") is True, reply=loaded, ready_s=ready_s,
                        mem_available_before=before, mem_available_loaded=mem_available()):
             return 1
-        rep.add("gpu_lock_held_while_loaded", not lock_free(lock))
+        rep.add("private_lock_held_while_loaded", not lock_free(private), private_lock=private)
         unit = w.unit
         state = unit_state(unit) if unit else {}
         rep.add("unit_active", state.get("ActiveState") == "active", unit=unit, state=state)
@@ -389,14 +477,10 @@ def e2e(args):
         w.exit()
         exited = True
         exit_s = time.monotonic() - t
-        deadline = time.monotonic() + 60
-        state = unit_state(unit) if unit else {}
-        while unit and state.get("ActiveState") != "inactive" and time.monotonic() < deadline:
-            time.sleep(0.5)
-            state = unit_state(unit)
+        state = wait_inactive(unit, 60)
         rep.add("unload_unit_inactive", bool(unit) and state.get("ActiveState") == "inactive", state=state,
                 exit_s=exit_s)
-        rep.add("unload_lock_free", lock_free(lock))
+        rep.add("unload_private_lock_free", lock_free(private))
         deadline = time.monotonic() + 120
         after = mem_available()
         while after < before - 2 * GIB and time.monotonic() < deadline:
@@ -414,7 +498,320 @@ def e2e(args):
                 w.exit()
             except Exception as e:
                 rep.add("exit_after_failure", False, error=f"{type(e).__name__}: {e}")
+        if held is not None:
+            held.close()  # the host lock, held shared since before the load
         rc = rep.write(args.out, model=MODEL, fixtures=FIXTURES, env=env,
+                       upstream_commit=pins["upstream"]["commit"], checkpoint_revision=pins["checkpoint"]["revision"])
+        if rc:
+            sys.exit(rc)
+
+
+# ── bench ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def read_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def read_int(path):
+    text = read_text(path)
+    return int(text) if text and text.isdigit() else None
+
+
+def gpu_used_mib():
+    """nvidia-smi's memory.used; None where it reports none (a GB10's unified memory may read [N/A])."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    first = (r.stdout.strip().splitlines() or [""])[0].strip()
+    return int(first) if r.returncode == 0 and first.isdigit() else None
+
+
+class MemorySampler:
+    """Every 0.5 s, into a JSON-lines log: the unit's cgroup memory.current and memory.peak, MemAvailable and
+    nvidia-smi's memory.used. The highest of each is kept, and MemAvailable's lowest and highest."""
+
+    def __init__(self, cgroup, path):
+        self.cgroup, self.path = cgroup, path
+        self.stop = threading.Event()
+        self.high = {"cgroup_current_bytes": None, "cgroup_peak_bytes": None, "gpu_used_mib": None}
+        self.available = []
+        self.samples = 0
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def sample(self):
+        s = {"t": time.time(), "cgroup_current_bytes": read_int(os.path.join(self.cgroup, "memory.current")),
+             "cgroup_peak_bytes": read_int(os.path.join(self.cgroup, "memory.peak")),
+             "mem_available_bytes": mem_available(), "gpu_used_mib": gpu_used_mib()}
+        for k, v in self.high.items():
+            if s[k] is not None:
+                self.high[k] = s[k] if v is None else max(v, s[k])
+        a = s["mem_available_bytes"]
+        self.available = [min(self.available[0], a), max(self.available[1], a)] if self.available else [a, a]
+        self.samples += 1
+        return s
+
+    def run(self):
+        with open(self.path, "w") as f:
+            while True:
+                f.write(json.dumps(self.sample()) + "\n")
+                f.flush()
+                if self.stop.wait(0.5):
+                    return
+
+    def start(self):
+        self.thread.start()
+
+    def finish(self):
+        """Stops the sampling; one last read, since memory.peak covers the cgroup's whole life."""
+        if not self.stop.is_set():
+            self.stop.set()
+            self.thread.join(timeout=15)
+            self.sample()
+        peaks = [v for v in (self.high["cgroup_current_bytes"], self.high["cgroup_peak_bytes"]) if v is not None]
+        return {"samples": self.samples, "interval_s": 0.5, "log": os.path.basename(self.path), "cgroup": self.cgroup,
+                "cgroup_current_max_bytes": self.high["cgroup_current_bytes"],
+                "cgroup_peak_max_bytes": self.high["cgroup_peak_bytes"], "peak_bytes": max(peaks) if peaks else None,
+                "mem_available_min_bytes": self.available[0] if self.available else None,
+                "mem_available_max_bytes": self.available[1] if self.available else None,
+                "gpu_used_max_mib": self.high["gpu_used_mib"]}
+
+
+def pilot_evidence(w):
+    """The launcher's evidence directory: the worker's, if it names one, else the one under ROOT/evidence whose
+    session.json names the worker's unit (the newest, should there be two)."""
+    named = getattr(w, "evidence", None)
+    if named:
+        return named if os.path.isdir(named) else None
+    base = os.path.join(w.opts.root, "evidence")
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return None
+    found = []
+    for name in names:
+        d = os.path.join(base, name)
+        try:
+            session = read_json(os.path.join(d, "session.json"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(session, dict) and w.unit and session.get("unit") == w.unit:
+            found.append((os.path.getmtime(d), d))
+    return max(found)[1] if found else None
+
+
+def bench_summary(path):
+    """What the gate and the report need from one drama_bench.py summary.json."""
+    try:
+        s = read_json(path)
+    except (OSError, ValueError) as e:
+        return {"error": f"no summary.json: {e}"}
+    phases = s.get("phases") or {}
+
+    def stat(phase, key, form, p):
+        return (((phases.get(phase) or {}).get(key) or {}).get(form) or {}).get(p)
+
+    warm = phases.get("warm") or {}
+    out = {"complete": s.get("complete"), "scheduled": s.get("scheduled"), "completed": s.get("completed"),
+           "server_process_unchanged": s.get("server_process_unchanged"),
+           "failures": {phase: v.get("failures") for phase, v in phases.items()},
+           "warm": {"attempted": warm.get("attempted"), "succeeded": warm.get("succeeded"),
+                    "rtf_p50": stat("warm", "realtime_factor", "ok_only", "p50"),
+                    "rtf_p95": stat("warm", "realtime_factor", "ok_only", "p95"),
+                    "rtf_p50_all_attempts": stat("warm", "realtime_factor", "all_attempts", "p50"),
+                    "end_to_end_s_p50": stat("warm", "end_to_end_s", "ok_only", "p50"),
+                    "end_to_end_s_p95": stat("warm", "end_to_end_s", "ok_only", "p95"),
+                    "first_frame_s_p50": stat("warm", "first_frame_s", "ok_only", "p50"),
+                    "first_frame_s_p95": stat("warm", "first_frame_s", "ok_only", "p95"),
+                    "audio_s_total": (warm.get("audio_s") or {}).get("total"),
+                    "clipped_samples": warm.get("clipped_samples"),
+                    "items_with_varying_audio": warm.get("items_with_varying_audio")}}
+    if "cold" in phases:
+        out["cold"] = {"end_to_end_s": stat("cold", "end_to_end_s", "ok_only", "p50"),
+                       "realtime_factor": stat("cold", "realtime_factor", "ok_only", "p50"),
+                       "first_frame_s": stat("cold", "first_frame_s", "ok_only", "p50")}
+    return out
+
+
+def number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def with_drop(memory, before):
+    """`memory` with the drop in MemAvailable from `before` (the level before the load) to its lowest, and `peak_bytes`
+    the larger of that drop and the cgroup's peak. On GB10 the GPU's memory is system memory and CUDA allocations do
+    not show in the cgroup or RSS, so the drop is the measure of what the server took (as in docs/dev/JARVIS-BRINGUP.md);
+    co-resident models that change meanwhile make it an upper bound."""
+    low = memory.get("mem_available_min_bytes")
+    drop = before - low if number(before) and number(low) else None
+    peaks = [v for v in (memory.get("cgroup_peak_max_bytes"), memory.get("cgroup_current_max_bytes"), drop)
+             if number(v)]
+    return {**memory, "mem_available_before_bytes": before, "mem_available_drop_bytes": drop,
+            "peak_bytes": max(peaks) if peaks else None}
+
+
+def bench_result(runs, memory, resident, cold_ready_s):
+    """The measurements the marker keeps, and their ratios to upstream's claims."""
+    whole = (runs.get("whole") or {}).get("warm") or {}
+    stream = (runs.get("stream") or {}).get("warm") or {}
+    first, rtf = stream.get("first_frame_s_p50"), whole.get("rtf_p50")
+
+    def ratio(v, claim):
+        return v / claim if number(v) else None
+
+    return {"first_audio_p50_s": first, "first_audio_p95_s": stream.get("first_frame_s_p95"), "rtf_p50": rtf,
+            "rtf_p95": whole.get("rtf_p95"), "rtf_p50_stream": stream.get("rtf_p50"),
+            "end_to_end_s_p50": whole.get("end_to_end_s_p50"),
+            "cold_end_to_end_s": ((runs.get("whole") or {}).get("cold") or {}).get("end_to_end_s"),
+            "cold_ready_s": cold_ready_s, "peak_memory_bytes": memory.get("peak_bytes"), "resident_bytes": resident,
+            "ratios_to_upstream": {"first_audio": ratio(first, UPSTREAM_CLAIMS["first_audio_p50_s"]),
+                                   "rtf": ratio(rtf, UPSTREAM_CLAIMS["rtf_p50"]),
+                                   "rtf_after_patch_0040": ratio(rtf, UPSTREAM_CLAIMS["rtf_p50_after_patch_0040"])}}
+
+
+def bench(args):
+    """Upstream's own benchmark client against the server the worker started (see the module docstring)."""
+    kw = worker_module()
+    pins = kw.load_pins()
+    cfg, tool = load_tool(args.config, args.tool)
+    opts = tool.get("options") or {}
+    lock = cfg.get("gpu_lock") or ""
+    root = os.path.realpath(args.root)
+    up = os.path.join(root, "drama-tensorfold")
+    paths = tool_paths(tool)
+    resident = int(tool.get("resident_bytes") or THRESHOLDS["default_resident_bytes"])
+    rep = Report()
+    env = {"host": os.uname().nodename, "gpu": gpu_name(), "python": platform.python_version(),
+           "machine": platform.machine(), "pins_sha256": kw.sha256_file(kw.PINS), "tool": tool.get("id"),
+           "options": opts, "gpu_lock": lock, "coresident": args.coresident,
+           "mem_available_before_load": mem_available(), "localrouter_daemon": daemon_tools()}
+    with open("/proc/loadavg") as f:
+        env["loadavg"] = f.read().split()[:3]
+    began = time.monotonic()
+    # A timeout's SIGTERM unwinds through the finally below: the client is killed, the server stopped, the locks
+    # released.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    w = held = sampler = before = None
+    exited = False
+    runs, memory, cold_ready_s = {}, {}, None
+    try:
+        corpus = os.path.join(up, CORPUS)
+        digest = kw.sha256_file(corpus) if os.path.isfile(corpus) else None
+        if not rep.add("corpus_sha256", digest == CORPUS_SHA256, corpus=corpus, sha256=digest, expected=CORPUS_SHA256):
+            return 1
+        if not lock or not os.path.isfile(lock):
+            rep.add("gpu_lock", False, error=f"the config's gpu_lock {lock!r} is not an existing file")
+            return 1
+        held = hold_shared(lock)
+        if not rep.add("host_gpu_lock", held is not None, gpu_lock=lock, mode="shared",
+                       error=None if held else "a GPU job holds the host lock exclusively; nothing was loaded"):
+            return 1
+        private, environ = worker_environ(args.out, lock)
+        env["private_lock"] = private
+        before = mem_available()
+        w = kw.Worker(dict(tool), require_qualification=False, environ=environ)
+        t = time.monotonic()
+        loaded = w.load()
+        if not rep.add("load", loaded.get("ok") is True, reply=loaded, ready_s=time.monotonic() - t,
+                       admission=w.opts.admission, mem_available_before=before, mem_available_loaded=mem_available()):
+            return 1
+        unit = w.unit
+        main_pid = unit_property(unit, "MainPID") if unit else ""
+        pid = int(main_pid) if main_pid.isdigit() else 0
+        # The unit runs env, which execs the server: its main process is the binary assets verified.
+        exe = os.path.realpath(f"/proc/{pid}/exe") if pid else None
+        if not rep.add("server_pid", pid > 0 and exe == os.path.realpath(paths["native_bin"]), unit=unit, pid=pid,
+                       exe=exe, native_bin=paths["native_bin"]):
+            return 1
+        evidence = pilot_evidence(w)
+        try:
+            cold_ready_s = read_json(os.path.join(evidence, "ready.json")).get("cold_ready_s") if evidence else None
+        except (OSError, ValueError):
+            evidence = None
+        if not rep.add("pilot_evidence", evidence is not None, path=evidence, cold_ready_s=cold_ready_s):
+            return 1
+        group = unit_property(unit, "ControlGroup")
+        cgroup = "/sys/fs/cgroup" + group if group else ""
+        memory_max = {"unit_memory_max": unit_property(unit, "MemoryMax"),
+                      "cgroup_memory_max": read_text(os.path.join(cgroup, "memory.max")) if cgroup else None}
+        if not rep.add("cgroup", bool(group) and read_int(os.path.join(cgroup, "memory.current")) is not None,
+                       cgroup=cgroup, **memory_max):
+            return 1
+        sampler = MemorySampler(cgroup, os.path.join(args.out, "memory.jsonl"))
+        sampler.start()
+
+        common = ["--endpoint", f"http://127.0.0.1:{w.opts.port}", "--model", MODEL, "--corpus", corpus,
+                  "--precision", f"native TensorFold (drama-tensorfold {pins['upstream']['commit'][:7]})",
+                  "--server-pid", str(pid), "--server-source", os.path.join(root, "build", "tensorfold"),
+                  "--checkpoint", paths["checkpoint"],
+                  "--checkpoint-pins", os.path.join(up, "recipe", "checksums", "checkpoint.sha256"),
+                  "--pilot-evidence", evidence]
+        # The client's frame limit is the server's: a tool that raises max_frames raises both.
+        if opts.get("max_frames") is not None and int(opts["max_frames"]) != 1024:
+            common += ["--max-frames", str(int(opts["max_frames"]))]
+        deadline = began + BENCH_BUDGET_S
+        # As upstream's before-after.sh: whole replies on the fresh process (its first request is the cold one),
+        # then streamed on the same process.
+        for name, start, flags in (("whole", "fresh", ["--response-format", "wav"]),
+                                   ("stream", "reused", ["--response-format", "pcm", "--stream"])):
+            limit = min(BENCH_RUN_LIMIT_S, deadline - time.monotonic())
+            if limit < 60:
+                runs[name] = {"error": "no time left in the step"}
+                rep.add(f"{name}_run", False, error=runs[name]["error"])
+                continue
+            argv = [sys.executable, "-I", os.path.join(up, "bench", "drama_bench.py"), "run", *common,
+                    "--evidence-dir", os.path.join(args.out, name), "--label", f"localrouter-qualify-{name}",
+                    "--server-start", start, *flags]
+            t = time.monotonic()
+            rc = run_logged(argv, os.path.join(args.out, f"{name}.log"), limit)
+            runs[name] = {"exit": rc, "seconds": time.monotonic() - t, "limit_s": limit, "log": f"{name}.log",
+                          **bench_summary(os.path.join(args.out, name, "summary.json"))}
+            # Exit 0: every request was valid audio and the server process did not change (1: some failed; 2:
+            # refused, nothing measured; None: past its limit).
+            rep.add(f"{name}_run", rc == 0, **{k: runs[name].get(k) for k in (
+                "exit", "seconds", "complete", "server_process_unchanged", "failures", "error")})
+        memory = with_drop({**sampler.finish(), **memory_max}, before)
+
+        r = bench_result(runs, memory, resident, cold_ready_s)
+        first, cap = r["first_audio_p50_s"], THRESHOLDS["stream_first_frame_s_p50_max"]
+        rep.add("first_audio_p50", number(first) and first <= cap, first_frame_s_p50=first,
+                first_frame_s_p95=r["first_audio_p95_s"], max_s=cap)
+        below = THRESHOLDS["warm_rtf_p50_below"]
+        for name in ("whole", "stream"):
+            rtf = ((runs.get(name) or {}).get("warm") or {}).get("rtf_p50")
+            rep.add(f"rtf_p50_{name}", number(rtf) and rtf < below, rtf_p50=rtf, below=below)
+        peak = memory.get("peak_bytes")
+        rep.add("peak_memory", number(peak) and peak <= resident, peak_memory_bytes=peak, resident_bytes=resident,
+                **memory_max)
+
+        t = time.monotonic()
+        w.exit()
+        exited = True
+        exit_s = time.monotonic() - t
+        state = wait_inactive(unit, 60)
+        rep.add("unload_unit_inactive", state.get("ActiveState") == "inactive", state=state, exit_s=exit_s)
+        rep.add("unload_private_lock_free", lock_free(private))
+        return 0
+    except Exception as e:  # a crash is recorded, never silently a partial result
+        rep.add("crash", False, error=f"{type(e).__name__}: {e}")
+        return 1
+    finally:
+        if sampler is not None:
+            memory = with_drop({**memory, **sampler.finish()}, before)
+        if w is not None and not exited:
+            try:
+                w.exit()
+            except Exception as e:
+                rep.add("exit_after_failure", False, error=f"{type(e).__name__}: {e}")
+        if held is not None:
+            held.close()  # the host lock, held shared since before the load
+        rc = rep.write(args.out, model=MODEL, thresholds=THRESHOLDS, upstream_claims=UPSTREAM_CLAIMS,
+                       result=bench_result(runs, memory, resident, cold_ready_s), runs=runs, memory=memory, env=env,
                        upstream_commit=pins["upstream"]["commit"], checkpoint_revision=pins["checkpoint"]["revision"])
         if rc:
             sys.exit(rc)
@@ -580,14 +977,16 @@ def marker(args):
     if not args.accept_native_numerics:
         print("qualify.py: --write needs --accept-native-numerics", file=sys.stderr)
         return 1
-    for step in ("assets", "e2e"):
+    reports = {}
+    for step in ("assets", "e2e", "bench"):
         try:
-            ok = read_json(os.path.join(args.out, step, "report.json")).get("pass") is True
+            reports[step] = read_json(os.path.join(args.out, step, "report.json"))
         except (OSError, ValueError):
-            ok = False
-        if not ok:
+            reports[step] = {}
+        if reports[step].get("pass") is not True:
             print(f"qualify.py: {args.out}/{step}/report.json does not pass; no marker", file=sys.stderr)
             return 1
+    measured_bench = reports["bench"].get("result") or {}
     try:
         acc = read_json(os.path.join(args.out, "accuracy", "report.json"))
     except (OSError, ValueError):
@@ -614,6 +1013,10 @@ def marker(args):
               "numerics": NUMERICS,
               "upstream_accuracy": {k: acc.get(k) for k in ("reference_revision", "passed", "upstream_reports_qualified",
                                                              "checks")},
+              "bench": {**{k: measured_bench.get(k) for k in ("first_audio_p50_s", "rtf_p50", "peak_memory_bytes",
+                                                              "resident_bytes", "ratios_to_upstream")},
+                        "coresident": (reports["bench"].get("env") or {}).get("coresident"),
+                        "upstream_claims": reports["bench"].get("upstream_claims")},
               "report": args.out,
               "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     text = json.dumps(record, indent=1) + "\n"
@@ -629,7 +1032,7 @@ def marker(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("role", choices=["assets", "e2e", "accuracy", "marker"])
+    ap.add_argument("role", choices=["assets", "e2e", "bench", "accuracy", "marker"])
     ap.add_argument("root")
     ap.add_argument("config")
     ap.add_argument("out")
@@ -638,10 +1041,12 @@ def main():
     ap.add_argument("--revoke", action="store_true")
     ap.add_argument("--accept-native-numerics", action="store_true")
     ap.add_argument("--reference", help="accuracy: the SGLang-Omni reference runtime (venv/ and sglang-omni/)")
+    ap.add_argument("--coresident", action="store_true",
+                    help="bench: chat and speech-to-text are loaded by a running LocalRouter daemon (recorded)")
     args = ap.parse_args()
     args.out = os.path.abspath(args.out)
     os.makedirs(args.out, exist_ok=True)
-    return {"assets": assets, "e2e": e2e, "accuracy": accuracy, "marker": marker}[args.role](args) or 0
+    return {"assets": assets, "e2e": e2e, "bench": bench, "accuracy": accuracy, "marker": marker}[args.role](args) or 0
 
 
 if __name__ == "__main__":

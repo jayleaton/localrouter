@@ -258,6 +258,7 @@ class Worker:
         self.opts = Options(tool)
         self.pilot = None
         self.unit = None
+        self.evidence = None  # the launcher's evidence directory (session.json, ready.json, server.log)
         self.lines = queue.Queue()
         self.tail = collections.deque(maxlen=8)
 
@@ -286,7 +287,7 @@ class Worker:
             open(lock, "a").close()
         self._stop_stale_unit()
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        evidence = os.path.join(self.opts.root, "evidence", f"{stamp}-{os.getpid()}")
+        evidence = self.evidence = os.path.join(self.opts.root, "evidence", f"{stamp}-{os.getpid()}")
         os.makedirs(os.path.dirname(evidence), exist_ok=True)
         argv = [sys.executable, "-I", self.opts.pilot, "--native-bin", self.opts.native_bin,
                 "--runtime-dir", self.opts.runtime_dir, "--checkpoint", self.opts.checkpoint, "--gpu-lock", lock,
