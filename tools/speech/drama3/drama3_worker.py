@@ -57,6 +57,7 @@ PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins.json")
 MODEL = "fishaudio/drama-3"  # the name the launcher serves the model under
 UNIT_FILE = "localrouter-drama3.unit"  # in the runtime directory: the launcher's unit while this worker runs it
 READY = "DRAMA_PILOT_READY"
+BUSY_WAIT_S = 10  # how long a request waits while the server drops a cancelled synthesis (`Worker._post`)
 PR_SET_PDEATHSIG = 1
 _prctl = ctypes.CDLL(None, use_errno=True).prctl  # resolved before any fork, so the child only calls it
 
@@ -402,23 +403,6 @@ class Worker:
             if o.verify == "sha256" and sha256_file(path) != digest:
                 raise ValueError(f"{path} sha256 differs from the pin {digest}")
 
-    def settle(self, timeout=10.0):
-        """True once the server runs no request (its /health requests_running is 0, or absent), within `timeout`."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                r = Http(self.opts.port, "GET", "/health", timeout=2)
-                try:
-                    health = json.loads(r.body())
-                finally:
-                    r.close()
-            except (Gone, OSError, EOFError, ValueError):
-                return False
-            if not health.get("requests_running"):
-                return True
-            time.sleep(0.05)
-        return False
-
     def _check_voices(self):
         wanted = [v for v in self.opts.voices if v != "default"]
         if not wanted:
@@ -463,7 +447,7 @@ class Worker:
                 body["references"] = json.load(f)
         if stream:
             body["stream"] = True
-        res = Http(self.opts.port, "POST", "/v1/audio/speech", json.dumps(body).encode())
+        res = self._post(json.dumps(body).encode())
         try:
             if res.status != 200:
                 why = res.error_message()
@@ -486,6 +470,19 @@ class Worker:
             return fields.get("x-finish-reason", "stop"), fields.get("x-long-form-segments", "")
         finally:
             res.close()
+
+    def _post(self, body):
+        """POST /v1/audio/speech. The server takes one synthesis at a time and the daemon sends one request at a time,
+        so a 503 "busy" means a synthesis the worker cancelled is still being dropped: retried every 50 ms for up to
+        BUSY_WAIT_S, then returned as it is."""
+        deadline = time.monotonic() + BUSY_WAIT_S
+        while True:
+            res = Http(self.opts.port, "POST", "/v1/audio/speech", body)
+            if res.status != 503 or time.monotonic() >= deadline:
+                return res
+            res.body()
+            res.close()
+            time.sleep(0.05)
 
     @staticmethod
     def _stream_to(res, out):
@@ -581,9 +578,8 @@ def watch_parent(worker):
 
 
 def generate(worker, cmd):
-    """A generate that SIGUSR1 can end early. The connection to the server is closed (so the server cancels the
-    synthesis) and, before the reply, the server is waited on until it has dropped the request, so the next one is
-    not refused as busy. Without a signal it is exactly Worker.generate."""
+    """A generate that SIGUSR1 can end early: the connection to the server is closed, so the server cancels the
+    synthesis, and the model stays loaded. Without a signal it is exactly Worker.generate."""
     global GENERATING
     try:
         try:
@@ -592,8 +588,7 @@ def generate(worker, cmd):
         finally:
             GENERATING = False
     except Cancelled:
-        idle = worker.settle()
-        log(f"generate cancelled; the server {'is idle' if idle else 'did not report idle within 10 s'}")
+        log("generate cancelled; the server drops the synthesis (the next request waits while it is busy)")
         return {"ok": False, "type": "cancelled", "error": "cancelled"}
 
 

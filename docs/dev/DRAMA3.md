@@ -81,9 +81,11 @@ daemon ── worker protocol ──> drama3_worker.py ── HTTP on 127.0.0.1:
   stops the unit, waits until systemd reports it inactive, then releases the lock. The worker keeps the daemon waiting
   with progress lines until then, so nothing else loads into memory the server still holds.
 - **Soft cancel.** The worker's load reply declares `"cancel": "signal"`: SIGUSR1 during a generate closes its
-  connection to the server (which cancels the synthesis), waits until the server's `/health` shows no request
-  running, and replies `{"ok": false, "type": "cancelled"}` with the model still loaded, so the next request needs no
-  reload. Without the signal a generate is unchanged. A daemon that sends the signal (barge-in) and its hard-abort
+  connection to the server, which cancels the synthesis, and replies `{"ok": false, "type": "cancelled"}` with the
+  model still loaded, so the next request needs no reload. The server takes one synthesis at a time and refuses another
+  with a 503 "busy" until the cancelled one is dropped (its `/health` does not count speech, so the worker cannot wait
+  for that up front), so the worker retries a busy reply every 50 ms for up to 10 s: the daemon sends one request at a
+  time, so busy can only mean a synthesis being dropped. Without the signal a generate is unchanged. A daemon that sends the signal (barge-in) and its hard-abort
   fallback are #15's.
 - **Cancel and deadlines** kill the worker's process group. The launcher runs in its own session with a parent-death
   signal, so it still gets SIGTERM and stops the unit. A launcher that is itself killed outright leaves its unit's name
