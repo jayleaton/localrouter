@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     const it_opts = b.addOptions();
     it_opts.addOptionPath("localrouter_exe", exe.getEmittedBin());
     it_opts.addOptionPath("speech_worker", b.path("tests/fixtures/speech_worker.py"));
-    it_opts.addOptionPath("chat_server", b.path("tests/fixtures/chat_server.py"));
+    it_opts.addOptionPath("voice_chat_server", b.path("tests/fixtures/voice_chat_server.py"));
     const it_mod = b.createModule(.{
         .root_source_file = b.path("tests/integration.zig"),
         .target = target,

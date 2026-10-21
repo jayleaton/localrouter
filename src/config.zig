@@ -34,7 +34,7 @@ pub const Lane = enum { main, realtime };
 pub fn laneOf(t: *const ToolConfig) Lane {
     return t.lane orelse switch (t.kind) {
         .speech, .transcription => .realtime,
-        .image, .video => .main,
+        else => .main, // image, video, and every other kind
     };
 }
 

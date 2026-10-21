@@ -136,6 +136,6 @@ The daemon's own share is covered by `tests/voice.zig` with zero-latency fakes; 
   resampling, sentence chunking, the chat SSE parser, and the session state machine with in-process fake STT, chat and
   TTS (turns, history, barge-in cancelling chat and TTS, tool call to job, error paths).
 - `tests/voice.zig`: the real daemon and real workers: `tests/fixtures/speech_worker.py` (transcripts chosen by the
-  tone's pitch, slow synthesis on request) and `tests/fixtures/chat_server.py` (an OpenAI-compatible streaming fake
+  tone's pitch, slow synthesis on request) and `tests/fixtures/voice_chat_server.py` (an OpenAI-compatible streaming fake
   that records requests and disconnects), over a real WebSocket: a spoken turn end to end, barge-in, a tool call that
   makes a testpattern image, the page, refusals.

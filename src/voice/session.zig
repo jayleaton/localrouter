@@ -139,7 +139,7 @@ pub const Session = struct {
         if (v != .object) return s.emit.fail(a, "invalid_request_error", "invalid_event", "an event must be a JSON object", null);
         const eid = events.str(v.object.get("event_id") orelse .null);
         const typ = events.str(v.object.get("type") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_event", "the event has no type", eid);
-        s.dispatch(a, typ, v.object, eid) catch s.emit.fail(a, "server_error", "out_of_memory", "out of memory", eid);
+        s.dispatch(a, typ, v.object, eid) catch |err| s.emit.fail(a, "server_error", "internal_error", @errorName(err), eid);
     }
 
     /// A binary WebSocket message: the protocol is JSON text, audio travels base64 inside it.
@@ -151,7 +151,7 @@ pub const Session = struct {
         s.emit.fail(tmp.allocator(), "invalid_request_error", "invalid_event", "events are JSON text messages; send audio as base64 in input_audio_buffer.append", null);
     }
 
-    fn dispatch(s: *Session, a: std.mem.Allocator, typ: []const u8, o: std.json.ObjectMap, eid: ?[]const u8) error{OutOfMemory}!void {
+    fn dispatch(s: *Session, a: std.mem.Allocator, typ: []const u8, o: std.json.ObjectMap, eid: ?[]const u8) !void {
         if (eql(typ, "input_audio_buffer.append")) return s.append(a, o, eid);
         if (eql(typ, "session.update")) return s.update(a, o, eid);
         s.mutex.lockUncancelable(s.io);

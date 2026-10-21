@@ -1,6 +1,6 @@
 //! Integration tests of the voice loop on a real daemon over a real WebSocket: speech to text and text to speech by
 //! external workers (tests/fixtures/speech_worker.py: what was "said" is chosen by the tone's pitch), the chat model
-//! by an OpenAI-compatible streaming fake (tests/fixtures/chat_server.py), and an image tool by the testpattern engine.
+//! by an OpenAI-compatible streaming fake (tests/fixtures/voice_chat_server.py), and an image tool by the testpattern engine.
 
 const std = @import("std");
 const Io = std.Io;
@@ -17,7 +17,7 @@ const ChatServer = struct {
     port: u16,
 
     fn start(io: Io) !ChatServer {
-        var child = try std.process.spawn(io, .{ .argv = &.{ "python3", opts.chat_server, "--delay-ms", "5" }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
+        var child = try std.process.spawn(io, .{ .argv = &.{ "python3", opts.voice_chat_server, "--delay-ms", "5" }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
         var buf: [128]u8 = undefined;
         var r = child.stdout.?.reader(io, &buf);
         const line = try r.interface.takeDelimiterExclusive('\n');

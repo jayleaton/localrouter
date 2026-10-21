@@ -4,7 +4,7 @@ server-sent events (`data: {chunk}` ... `data: [DONE]`, one HTTP chunk each), co
 the usage chunk on `stream_options.include_usage`, OpenAI's error envelope, and a client disconnect that stops the
 generation.
 
-Run as `python3 chat_server.py [--delay-ms N]`: it prints `listening <port>` once bound to 127.0.0.1 and exits when
+Run as `python3 voice_chat_server.py [--delay-ms N]`: it prints `listening <port>` once bound to 127.0.0.1 and exits when
 its stdin closes. Test hooks, chosen by the last message: a `tool` message gets "Done. Your picture is ready."; user
 text containing "fail" gets a 500, "picture" a `generate_image` tool call, "slow" twenty sentences at five times the
 delay; anything else is echoed back a word at a time. GET /stats returns every request seen with its model, messages,
