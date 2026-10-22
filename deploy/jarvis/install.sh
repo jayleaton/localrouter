@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Installs LocalRouter as the Jarvis box on this GB10 host (DGX-01), from the checkout this script is in:
 #   deploy/jarvis/install.sh            then deploy/jarvis/start.sh
-# 1. Preflight: aarch64 and a GB10; zig 0.17, nvcc, jq, curl, python3; the qualified installs (chat, Drama 3, Kitten
-#    graphs) and their markers, each "qualified": true and made from the same pins as this tree (else: re-qualify with
+# 1. Preflight: aarch64 and a GB10; zig 0.17, nvcc, jq, curl, python3; the qualified installs (chat and Drama 3)
+#    and their markers, each "qualified": true and made from the same pins as this tree (else: re-qualify with
 #    that model's qualify.sh first); Whisper, the VAD, the image and video packs.
 # 2. The tree goes to $DEPLOY/src/<commit> (git archive of HEAD from a clean checkout, or a copy of an archive that
 #    carries COMMIT) and is built there with its CUDA kernels; $DEPLOY/current points at it.
 # 3. $DEPLOY/config.json from config.json.in, and the systemd user unit from localrouter-jarvis.service.in, enabled
-#    (lingering keeps it running without a login). A running service is restarted onto the new build.
+#    (lingering keeps it running without a login). A running service is restarted onto the new build once no voice
+#    session is open; until then (and when a check fails) current, the config and the unit stay as they were.
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (sudo; other serve entries are
 #    left as they are). The daemon itself listens on 127.0.0.1 only: LocalRouter has no API keys, so the tailnet (its
 #    ACLs) is who may connect; nothing binds 0.0.0.0.
-# Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER,
-# KITTEN_MARKER). Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), NVCC, SM (121).
+# Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER).
+# Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), NVCC, SM (121).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -37,14 +38,10 @@ marker() {
 echo "== preflight"
 marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
 marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3"
-marker "$KITTEN_MARKER" "$repo/tools/speech/kitten/pins.json" "kitten-tts-2-graphs"
-jq -e '.lm_decode == "graphs" and .graph_tokens == 2048 and .graph_backend == "inductor"' "$KITTEN_MARKER" > /dev/null ||
-  die "$KITTEN_MARKER does not qualify the graphs decode this config serves"
 [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
 [ -d "$DRAMA_ROOT" ] || die "no Drama 3 install at $DRAMA_ROOT"
 whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | head -1)
 [ -n "$whisper" ] && [ -x "$J/venvs/whisper/bin/python" ] && [ -f "$J/models/vad/silero_vad.jit" ] || die "Whisper is not set up under $J"
-[ -x "$J/venvs/kitten/bin/python" ] || die "no Kitten venv under $J/venvs/kitten"
 [ -d "$J/lr/weights/qwen-image-2.1" ] && [ -d "$J/lr/weights/minimax-h3" ] || die "no image and video packs under $J/lr/weights"
 
 # ---- 2. the tree and the build
@@ -70,26 +67,43 @@ if [ "${SKIP_BUILD:-0}" != 1 ] || [ ! -x "$src/zig-out/bin/localrouter" ]; then
     { tail -20 "$DEPLOY/logs/build-$commit.log"; die "the build failed: $DEPLOY/logs/build-$commit.log"; }
   rm -rf "$src" && mv "$src.tmp" "$src"
 fi
-ln -sfn "src/$commit" "$DEPLOY/current"
 sha256sum "$src/zig-out/bin/localrouter"
 
-# ---- 3. config and unit
+# ---- 3. config and unit, rendered and checked first; nothing the running service uses changes until it is idle
 render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
-      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@WHISPER@|${whisper%/}|g" -e "s|@KITTEN_MARKER@|$KITTEN_MARKER|g" "$1"
+      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@WHISPER@|${whisper%/}|g" "$1"
 }
 render "$here/config.json.in" > "$DEPLOY/config.json.new"
-jq -e '.tools | length == 6' "$DEPLOY/config.json.new" > /dev/null || die "the rendered config is not valid"
-! grep -q '@[A-Z_]*@' "$DEPLOY/config.json.new" || die "unrendered placeholders in the config"
-mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
+jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
+  die "the rendered config is not valid (no tools, or a @…@ left)"
 mkdir -p "$HOME/.config/systemd/user"
-render "$here/localrouter-jarvis.service.in" > "$HOME/.config/systemd/user/$UNIT.service"
+render "$here/localrouter-jarvis.service.in" > "$DEPLOY/$UNIT.service.new"
+! grep -q '@[A-Z_]*@' "$DEPLOY/$UNIT.service.new" || die "unrendered placeholders in the unit"
+running=0; systemctl --user is-active -q "$UNIT" && running=1
+if [ $running = 1 ]; then
+  # never under a live call: wait until no voice session is open (/v1/tools, else, on an older build, no connection
+  # to the daemon's port), IDLE_WAIT_S at most (default 1800; FORCE_RESTART=1 skips the wait)
+  t0=$(date +%s)
+  while [ "${FORCE_RESTART:-0}" != 1 ]; do
+    n=$(curl -fs -m 5 "$URL/v1/tools" | jq -r '.voice_sessions // empty' 2> /dev/null || true)
+    [ -n "$n" ] || n=$(ss -Htn state established "( sport = :$PORT )" 2> /dev/null | wc -l)
+    [ "$n" = 0 ] && break
+    [ $(($(date +%s) - t0)) -lt "${IDLE_WAIT_S:-1800}" ] ||
+      die "$n voice session(s) still open after ${IDLE_WAIT_S:-1800} s: nothing changed (FORCE_RESTART=1 to restart anyway)"
+    echo "  waiting: $n voice session(s) open"
+    sleep 10
+  done
+fi
+ln -sfn "src/$commit" "$DEPLOY/current.new" && mv -T "$DEPLOY/current.new" "$DEPLOY/current"
+mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
+mv "$DEPLOY/$UNIT.service.new" "$HOME/.config/systemd/user/$UNIT.service"
 systemctl --user daemon-reload
 systemctl --user enable "$UNIT" > /dev/null 2>&1
 [ "$(loginctl show-user "$(id -un)" -p Linger --value 2> /dev/null)" = yes ] ||
   echo "warning: lingering is off: the service stops at logout (sudo loginctl enable-linger $(id -un))" >&2
-if systemctl --user is-active -q "$UNIT"; then
+if [ $running = 1 ]; then
   echo "== restarting the running service onto $commit"
   systemctl --user restart "$UNIT"
 fi

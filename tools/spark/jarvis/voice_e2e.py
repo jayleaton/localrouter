@@ -228,7 +228,7 @@ class Ws:
 class Session:
     """Streams the microphone on the wall clock; every event is kept with its arrival time."""
 
-    def __init__(self, url, events_file):
+    def __init__(self, url, events_file, voice=None):
         host, port = re.match(r"http://([^:/]+):(\d+)", url).groups()
         self.ws = Ws(host, int(port), "/v1/realtime")
         self.events = []
@@ -241,7 +241,8 @@ class Session:
         self.ws.send({"type": "session.update", "session": {
             "modalities": ["audio", "text"],
             "turn_detection": {"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
-                               "silence_duration_ms": 500, "create_response": True, "interrupt_response": True}}})
+                               "silence_duration_ms": 500, "create_response": True, "interrupt_response": True}}
+            | ({"voice": voice} if voice else {})})
         self.wait_for("session.updated", 30)
 
     def say(self, samples):
@@ -552,6 +553,7 @@ def main():
     ap.add_argument("--tts", required=True, help="the speech model that records the prompts")
     ap.add_argument("--stt", required=True)
     ap.add_argument("--chat", required=True)
+    ap.add_argument("--voice", help="the session's voice (default: none, the daemon's)")
     ap.add_argument("--video", default="minimax-h3")
     ap.add_argument("--video-size", default="768x448")
     ap.add_argument("--eviction-free-gib", type=int, default=30, help="MemAvailable left by the ballast in the eviction case")
@@ -590,7 +592,7 @@ def main():
     silence = lambda s: array.array("h", [0] * int(RATE * s))
 
     events = open(f"{args.out}/events.jsonl", "w")
-    sess = Session(args.url, events)
+    sess = Session(args.url, events, args.voice)
     try:
         sess.pump(1.0)
         # 2. Plain turns (the first warms every path and is reported apart).
@@ -647,7 +649,7 @@ def main():
     #    bring it back.
     for name, prompt, pressure in (("video", "after_video", False), ("eviction", "after_eviction", True)):
         video_phase(args, name, results, checks, pressure)
-        sess = Session(args.url, events)
+        sess = Session(args.url, events, args.voice)
         try:
             sess.pump(1.0)
             turn(sess, prompt, mic[prompt], turns, checks)

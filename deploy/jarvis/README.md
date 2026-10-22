@@ -6,14 +6,20 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
-| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), **on demand** (it loads only if Drama 3 fails or a Kitten voice is asked for), priority -10 (the first to be evicted), on the `main` lane: its load (about 30 s with the graph capture) never holds the realtime lane |
+| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
 | Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load |
-| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model (and Kitten) to run, and the image model comes back after it |
+| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model to run, and the image model comes back after it |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
-Measured with everything warm: 42.4 GiB `MemAvailable` of about 115. A 1024x1024 image evicts only Kitten (the image needs 36 GiB plus the 8 GiB reserve; the lowest `MemAvailable` during it was 14 GiB); Drama 3 and Whisper stay, and the first voice turn after it reached first audio in 951 ms. The image job takes the fallback voice's memory
-(Kitten), and a video job takes part of the voice set. The scheduler brings the kept models back as soon as it is
-idle, within about 30 s of a clip.
+Memory, measured on DGX-01 (2026-10-22):
+- **With the warm set at full size** (chat 24 GiB with its 4 GiB prompt cache, Drama 3 43, Whisper 3.6, image 35.2):
+  about 9 GiB `MemAvailable` of about 115, and 13.7 GiB just after a start.
+- **The reserve is 6 GiB.** That leaves room for Whisper's 2 GiB working memory beside the full warm set; with 8 GiB,
+  each voice turn evicted the image model.
+- **A 1024x1024 image** on the warm model evicts nothing; the lowest `MemAvailable` was 11.8 GiB.
+- **A 1 s video** (40 GiB) evicts only the image model; the lowest was 11.7 GiB. The image model is back about 30 s
+  later.
+- **Chat, Drama 3 and Whisper** are never unloaded for an image or a video.
 
 ## Install, start, stop
 
@@ -28,7 +34,8 @@ tools/jarvis/smoke.sh [--quick]                       # every capability against
 
 `install.sh` refuses unless each qualified model's marker says `"qualified": true` and was made from the pins in
 this tree. When a model's `pins.json` changes, re-run that model's `qualify.sh` first. Re-running `install.sh` on a
-new commit builds it and restarts the running service onto it. The unit restarts on failure, and lingering keeps it
+new commit builds it and restarts the running service onto it, once no voice call is open (`voice_sessions` in
+`/v1/tools`; it waits up to `IDLE_WAIT_S`, 30 min). The unit restarts on failure, and lingering keeps it
 running without a login.
 
 Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) and `HTTPS_PORT` (10443).

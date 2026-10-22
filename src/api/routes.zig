@@ -92,7 +92,7 @@ fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
-    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes });
+    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });
 }
 
 /// POST /v1/tools/{id}/load, /v1/tools/{id}/unload, /v1/tools/release.

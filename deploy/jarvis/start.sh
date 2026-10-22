@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts the Jarvis service (installed by install.sh) and waits until chat, Drama 3, Whisper and Kitten are warm.
+# Starts the Jarvis service (installed by install.sh) and waits until chat, Drama 3, Whisper and the image model are warm.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 source "$here/env.sh"
