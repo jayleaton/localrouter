@@ -3,7 +3,8 @@
 # before and after. Runs on the host, against the daemon's loopback URL, under the host's exclusive lock.
 #   tools/jarvis/smoke.sh [--quick] [--url URL] [--out DIR]
 # Voice: warm turns must reach first audio in 1.2 s (median), and the first turns after an image job in 1.5 s with Drama 3
-# and Whisper kept. --quick (about 1.5 min) skips the video and the barge-in; the full run (under 10 min) has both, then waits for the
+# and Whisper kept. --quick (about 1 min) skips the video, the barge-in and the after-image turns; the full run (under
+# 10 min) has them, then waits for the
 # kept-warm models to be back. Exit 0 only when every check passed. Writes OUT/results.jsonl, OUT/summary.json and
 # each check's files (replies, audio, image, video, the voice driver's events).
 # Env: CHAT, DRAMA, KITTEN, STT, IMAGE, VIDEO (model ids; the deploy's defaults), STT_FIXTURE (the pinned LibriSpeech
@@ -145,8 +146,8 @@ record image "$([ "$code" = 200 ] && [ "$(head -c 8 "$out/image.png" | od -An -t
 memory after-image
 down=$(jq -r '[.tools[] | select(.state != "ready") | .id] - ["'"$IMAGE"'", "'"$VIDEO"'"] | join(" ")' "$out/memory-after-image.json")
 record image_kept_voice "$(! grep -qE "$DRAMA|$STT" <<< "$down" && echo true || echo false)" 0 "not ready right after the image: ${down:-none}"
-# the first voice turns after it (the first counts): the voice set must not have to reload
-voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
+# the first voice turns after it (the first counts; full run): the voice set must not have to reload
+[ $quick = 1 ] || voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
 
 # video (full run): a 1 s clip, then its MP4
 if [ $quick = 0 ]; then
