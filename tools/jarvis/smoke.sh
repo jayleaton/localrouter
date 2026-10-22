@@ -226,10 +226,13 @@ if [ $quick = 0 ]; then
   record warm_again "$(! grep -qv '=ready' <<< "$(tr ' ' '\n' <<< "$state")" && echo true || echo false)" "$(secs $t)" "$state"
 fi
 memory after
-# the daemon's evictions during the run: none but the video's (no eviction loop)
+# the daemon's evictions during the run: only the video's round trip (the image model out for it, then the idle video
+# model out for the image model's return), at most once (no eviction loop)
 ev=$(journalctl --user -u "${UNIT:-localrouter-jarvis}" --since "@${t_all%.*}" --no-pager -o cat 2> /dev/null | grep 'evicting ' || true)
-other=$(grep -v " for $VIDEO:" <<< "$ev" | grep -c . || true)
-record evictions "$([ "$other" = 0 ] && echo true || echo false)" 0 "$(grep -c . <<< "$ev" || true) in the run, $other not for the video$(grep -v " for $VIDEO:" <<< "$ev" | head -3 | cut -c1-90 | sed 's/^/; /' | tr -d '\n')"
+trip="^info: evicting $IMAGE \(priority -?[0-9]+\) for $VIDEO:|^info: evicting $VIDEO \(priority -?[0-9]+\) for $IMAGE:"
+other=$(grep -vE "$trip" <<< "$ev" | grep -c . || true)
+trips=$(grep -cE "$trip" <<< "$ev" || true)
+record evictions "$([ "$other" = 0 ] && [ "$trips" -le 2 ] && echo true || echo false)" 0 "$(grep -c . <<< "$ev" || true) in the run, $trips of the video's round trip$(grep -vE "$trip" <<< "$ev" | head -3 | cut -c1-90 | sed 's/^/; /' | tr -d '\n')"
 
 jq -s --arg mode "$([ $quick = 1 ] && echo quick || echo full)" --argjson s "$(secs "$t_all")" --slurpfile b "$out/memory-before.json" --slurpfile a "$out/memory-after.json" \
   '{mode: $mode, seconds: $s, passed: ([.[] | select(.pass)] | length), failed: [.[] | select(.pass | not) | .check],
