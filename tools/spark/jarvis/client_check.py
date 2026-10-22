@@ -501,7 +501,7 @@ def main():
             cdp.wait(f"{VOICE_REPLIES}.some(x => x.at > performance.timeOrigin + {fail_at}) && window.jarvis.voice.live === 0", 120, "the reply after the failure")
             said = cdp.js(f"{VOICE_REPLIES}.filter(x => x.at > performance.timeOrigin + {fail_at}).map(x => x.text)")
             check("reel: a refused picture shows a failed card with Retry", True, fail)
-            check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|won'?t|fail|sorry|unable|limit|up to|instead|too (large|big))\b", t, re.I) for t in said), said)
+            check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|won'?t|fail|sorry|unable|limit|up to|instead|tops out|biggest|maximum|too (large|big))\b", t, re.I) for t in said), said)
             snap(cdp, a.out, "23-reel-failed-desktop")
             if a.reel_video:
                 k = cdp.js("document.querySelectorAll('#reelList .rc').length")

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Voice page: while a picture or video is being made, a reply starts once 500 ms are in hand (900 ms at most),
+  not 200, so the denoise step already on the GPU cannot stall its first words. Smoke budgets now include the wait:
+  warm turns 1.4 s from the end of speech (the 500 ms wait plus STT, chat and speech), 1.7 s after a picture or video.
+  `client_check`'s gap test ends each window with the reply's own audio (the quiet before the next reply is not a
+  gap).
 - Speech first: while the daemon makes speech, image and video workers pause between their diffusion steps (and
   before the VAE), so a reply never stutters while a picture or clip generates. Each wait is at most 6 s and a job's
   waits at most 30 s in all. The gate is a flock on `<data>/locks/speech.gate`. On DGX-01, streamed Drama 3 replies
