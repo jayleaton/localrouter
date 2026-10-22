@@ -308,6 +308,8 @@
            background: var(--text); color: var(--bg); border-radius: 14px; padding: 8px 8px 8px 16px; display: flex; align-items: center;
            gap: 10px; box-shadow: var(--shadow); font-size: 14px; }
   #toast button { color: var(--amber); font-weight: 700; min-height: 36px; padding: 0 10px; }
+  #toast { pointer-events: none; } #toast button { pointer-events: auto; }
+  body.voice-open #toast { top: calc(70px + env(safe-area-inset-top)); bottom: auto; } /* clear of the voice controls */
   .scrim { display: none; }
 
   /* ------------------------------------------------ narrow screens */
@@ -969,6 +971,7 @@ async function loadModels() {
     if (!r.ok) throw new Error(await errorText(r));
     models = (await r.json()).data || [];
   } catch (e) { note(`Could not reach the models: ${e.message}`, true); return; }
+  cleanVoiceSettings();
   const chats = models.filter(m => m.kind === 'chat');
   fillSelect($('chatmodel'), [['', chats[0] ? `${short(chats[0])} (default)` : 'default'], ...chats.slice(1).map(m => [m.id, short(m)])], S.chatModel);
   renderVoiceName();
@@ -1247,31 +1250,42 @@ function sendText() {
 
 // ---------------------------------------------------------------- voices: the list, previews, the picker
 
-const voiceCache = new Map();
-// The engine's named voices: a voice-list API when the daemon has one (GET /v1/audio/voices?model=, then /v1/voices?model=;
-// an array, or {data|voices: [...]}, of names or {id|voice, name, description, preview_url}), else the model's `voices`.
+// The engine's voices: exactly what /v1/models lists for it (names, or {id, name, description, preview_url}).
 async function loadVoices(id) {
-  if (voiceCache.has(id)) return voiceCache.get(id);
   const m = models.find(x => x.id === id) || {};
-  let list = null, source = '';
-  for (const path of [`/v1/audio/voices?model=${encodeURIComponent(id)}`, `/v1/voices?model=${encodeURIComponent(id)}`]) {
-    try {
-      const r = await api(path, { retried: true });
-      if (!r.ok) continue;
-      const j = await r.json();
-      const arr = Array.isArray(j) ? j : j.data || j.voices;
-      if (Array.isArray(arr)) { list = arr; source = path.split('?')[0]; break; }
-    } catch {}
-  }
-  const norm = (list || m.voices || []).map(v => typeof v === 'string' ? { id: v, name: v } : {
-    id: v.id || v.voice || v.name, name: v.name || v.label || v.display_name || v.id || v.voice,
+  const list = (m.voices || []).map(v => typeof v === 'string' ? { id: v, name: v } : {
+    id: v.id || v.voice || v.name, name: v.name || v.label || v.id || v.voice,
     description: v.description || [v.gender, v.style, v.accent, v.language].filter(Boolean).join(' · '),
-    preview: v.preview_url || v.preview || '', model: v.model || '' })
-    .filter(v => v.id && (!v.model || v.model === id));
-  const out = { list: norm, source, def: m.default_voice || (norm[0] && norm[0].id) || '' };
-  voiceCache.set(id, out);
-  dbg('voices', { model: id, count: norm.length, source: source || '/v1/models' });
-  return out;
+    preview: v.preview_url || v.preview || '' }).filter(v => v.id);
+  return { list, source: '/v1/models', def: m.default_voice || (list[0] && list[0].id) || '' };
+}
+// Settings kept in this browser can name a speech model or a voice the daemon no longer has (a model taken out of the
+// config; Drama 3's one "default" voice before its named voices). They are dropped, so the session and previews use
+// what /v1/models lists now: the session gets no `voice` the model would refuse on every sentence.
+function cleanVoiceSettings() {
+  const speech = models.filter(m => m.kind === 'speech');
+  if (!speech.length) return;
+  const dropped = [];
+  if (S.speechModel && !speech.some(m => m.id === S.speechModel)) { dropped.push(S.speechModel); S.speechModel = ''; }
+  for (const [id, v] of Object.entries(S.voices || {})) {
+    const m = speech.find(x => x.id === id);
+    const names = ((m && m.voices) || []).map(x => (typeof x === 'string' ? x : x && (x.id || x.name)));
+    if (!names.includes(v)) { dropped.push(`${id}:${v}`); delete S.voices[id]; }
+  }
+  if (dropped.length) { saveSettings(); dbg('settings.cleaned', { dropped }); }
+}
+// The server refused the session's voice (it named one the model lacks): forget it and carry on with the default.
+function voiceRefused(message) {
+  const m = /model '([^']+)' has no voice '([^']+)'/.exec(message || '');
+  if (!m) return false;
+  if ((S.voices || {})[m[1]] === m[2]) delete S.voices[m[1]];
+  if (S.speechModel === m[1]) S.speechModel = '';
+  saveSettings();
+  dbg('voice.refused', { model: m[1], voice: m[2] });
+  toast(`The voice “${m[2]}” is no longer available; using the default`);
+  sessionUpdate();
+  renderVoiceName();
+  return true;
 }
 const voiceOf = id => (S.voices || {})[id] || '';
 async function renderVoiceName() {
@@ -1285,6 +1299,7 @@ async function renderVoiceName() {
 async function renderVoices() {
   const speech = models.filter(m => m.kind === 'speech');
   const id = engine();
+  $('engines').parentElement.hidden = speech.length < 2; // one engine: nothing to choose
   $('engines').replaceChildren(...speech.map(m => {
     const b = Object.assign(document.createElement('button'), { className: 'engine' });
     b.setAttribute('role', 'radio');
@@ -1330,8 +1345,21 @@ async function preview(id, v, btn) {
     if (!url) {
       if (v.preview && href(v.preview)) url = href(v.preview);
       else {
-        const r = await api('/v1/audio/speech', { json: { model: id, voice: v.id, input: `Hi, I'm ${v.name}. This is how I sound.`, response_format: 'wav' } });
-        if (!r.ok) throw new Error(await errorText(r));
+        // The speech model may be loading (after a restart, or back from an eviction): a 503 is waited out, up to 90 s.
+        let r;
+        for (let tries = 0; ; tries++) {
+          r = await api('/v1/audio/speech', { json: { model: id, voice: v.id, input: `Hi, I'm ${v.name}. This is how I sound.`, response_format: 'wav' } });
+          if (r.status !== 503 || tries >= 45) break;
+          if (tries === 0) toast('The voice model is loading; the preview plays when it is ready');
+          dbg('voice.preview.wait', { model: id, voice: v.id, status: r.status });
+          await new Promise(ok => setTimeout(ok, 2000));
+        }
+        if (!r.ok) {
+          const msg = await errorText(r);
+          dbg('voice.preview', { model: id, voice: v.id, status: r.status, error: msg });
+          if (voiceRefused(msg)) { renderVoices(); return; }
+          throw new Error(msg);
+        }
         const blob = await r.blob();
         url = URL.createObjectURL(blob);
         dbg('voice.preview', { model: id, voice: v.id, bytes: blob.size, ms: Math.round(performance.now() - t0) });
@@ -1383,6 +1411,7 @@ registerProcessor('pcm24k', Pcm24k);
 const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
+  retries: 0, retryTimer: 0,
   held: [], holdTimer: 0, started: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
@@ -1402,6 +1431,7 @@ function turnDetection() {
            create_response: true, interrupt_response: true };
 }
 function sessionUpdate() {
+  cleanVoiceSettings();
   const s = { modalities: ['audio', 'text'], turn_detection: turnDetection() };
   if (S.speechModel) s.speech_model = S.speechModel;
   const v = voiceOf(engine());
@@ -1420,6 +1450,43 @@ function seed() {
   dbg('voice.seed', { items: recent.length });
 }
 
+// The realtime socket. A close the user did not ask for (the service restarting, a proxy dropping the connection) is
+// followed by a new session after 1, 2, 4 ... 15 s, with the conversation seeded again; the microphone and the view stay.
+// Only after about a minute of failures does voice end.
+function connect(my) {
+  const url = new URL('/v1/realtime', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (S.key) url.searchParams.set('api_key', S.key);
+  const sock = new WebSocket(url.href, ['realtime']);
+  V.ws = sock;
+  let opened = false;
+  sock.onopen = () => {
+    opened = true;
+    // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps']) V[k].clear();
+    V.pendingTurn = null;
+    if (V.retries) dbg('voice.reconnected', { after: V.retries });
+    V.retries = 0;
+    sessionUpdate();
+    seed();
+    renderVoice();
+  };
+  sock.onmessage = e => { if (V.ws === sock) handle(JSON.parse(e.data)); };
+  sock.onclose = e => {
+    if (V.ws !== sock || my !== V.run) return;
+    dbg('voice.closed', { code: e.code, reason: e.reason, opened });
+    silence();
+    V.userSpeaking = V.thinking = V.holding = false;
+    V.resp = null;
+    if (e.code === 1000 && e.reason) { note(`Voice ended: ${e.reason}`); return voiceStop(); }
+    if (++V.retries > 8) { note('Voice lost its connection to the server; tap the mic to try again', true); return voiceStop(); }
+    V.ws = { readyState: WebSocket.CONNECTING, close() {}, send() {} }; // shown as connecting until the next socket
+    const wait = Math.min(15000, 1000 * 2 ** (V.retries - 1));
+    if (V.retries === 1) toast('Voice connection dropped; reconnecting…');
+    V.retryTimer = setTimeout(() => { if (my === V.run) connect(my); }, wait);
+    renderVoice();
+  };
+}
 async function voiceStart() {
   if (V.ws) return;
   const my = ++V.run;
@@ -1433,25 +1500,15 @@ async function voiceStart() {
     V.an.connect(V.ctx.destination);
     if (window.jarvis.recordOutput && V.ctx.audioWorklet) startTap().catch(e => dbg('tap', { error: e.message }));
   } catch (e) { return note(`Audio is not available: ${e.message}`, true); }
-  const url = new URL('/v1/realtime', location.href);
-  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (S.key) url.searchParams.set('api_key', S.key);
-  const sock = new WebSocket(url.href, ['realtime']);
-  V.ws = sock;
-  sock.onopen = () => { sessionUpdate(); seed(); renderVoice(); };
-  sock.onmessage = e => { if (V.ws === sock) handle(JSON.parse(e.data)); };
-  sock.onclose = e => {
-    if (V.ws !== sock) return;
-    dbg('voice.closed', { code: e.code, reason: e.reason });
-    note(`Voice disconnected${e.reason ? ': ' + e.reason : ''}`, e.code !== 1000);
-    voiceStop();
-  };
+  connect(my);
   openMic(my).then(renderVoice);
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {});
   renderVoice();
 }
 function voiceStop() {
   V.run++;
+  clearTimeout(V.retryTimer);
+  V.retries = 0;
   if (V.ws) { const s = V.ws; V.ws = null; s.onclose = null; try { s.close(); } catch {} }
   silence();
   if (V.mic) V.mic.getTracks().forEach(t => t.stop());
@@ -1848,7 +1905,7 @@ function handle(ev) {
       break;
     }
     case 'error':
-      note((ev.error && ev.error.message) || 'error', true);
+      if (!voiceRefused(ev.error && ev.error.message)) note((ev.error && ev.error.message) || 'error', true);
       break;
   }
   renderVoice();
@@ -1902,6 +1959,7 @@ function renderVoice() {
 }
 function showVoice(open) {
   V.open = open;
+  document.body.classList.toggle('voice-open', open);
   $('vm').hidden = !open;
   document.querySelector('.app').inert = open;
   if (open) { renderVoice(); renderVoiceName(); animate(); $('talk').focus({ preventScroll: true }); }
@@ -2074,7 +2132,9 @@ if (window.visualViewport) {
 
 // A test or another script can see the state without scraping the page.
 window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
-                  output: outputStats, recordOutput: false, get arrivals() { return V.rec ? V.rec.arrivals : null; },
+                  output: outputStats, recordOutput: false,
+                  get engine() { return engine(); },
+                  dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },
                   debug, settings: S, ui: { voiceState: 'off' }, ready: false };
 
 openConv(store.get('current', null) || ((convs.find(c => c.msgs.length) || {}).id));
