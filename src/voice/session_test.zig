@@ -332,6 +332,7 @@ test "a pause starts a draft transcript: one ending a sentence ends the turn ear
     try testing.expect(end >= 900 + 300 and end <= 1300); // speech ends at 900; early_end_ms 300
     const heard = try rig.rec.get(a, try rig.rec.wait("conversation.item.input_audio_transcription.completed", 0));
     try testing.expectEqualStrings("What is two plus two?", heard.object.get("transcript").?.string);
+    _ = try rig.rec.wait("localrouter.transcription.partial", 0); // the draft, shown while the turn was open
     try testing.expectEqual(@as(u32, 2), rig.fake.hears); // the first speech warms the idle STT, then the draft only
 
     rig.heard("and once more"); // no sentence end: the turn waits for silence_duration_ms, then reuses the draft

@@ -38,7 +38,7 @@ When the user starts talking over the assistant, playback stops and the chat gen
 | Leaked reasoning | `<think>…</think>` spans are dropped from the stream (`chunker.ThinkFilter`). A reply's start is also held (`chunker.Lead`) until text follows its first sentence end, or a clause mark 24 or more characters in (where the chunker may end the first chunk), that is not and cannot become `</think>` (about one token): a `</think>` that was never opened (a model writing its reasoning as plain text) drops everything before it, and later stray tags are removed. Send the server's own switch too (`voice.chat_extra`, e.g. `{"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}` for TensorFold's Qwen) | Measured on DGX-01: with thinking off, Qwen3.8-27B still answered "The capital of France is Paris.\n</think>\n\nThe capital of France is Paris." once; the voice must neither say the tag nor the answer twice |
 | Lanes | The scheduler gets more executors: `realtime` for speech and `listen` for transcription (a tool's `lane` overrides its kind's default; with the chat kind of #14, chat gets its own). Residency changes (admission, eviction, loads) are serialized across lanes; memory admitted but not yet visible in MemAvailable is held back | With one executor a streaming chat job would hold the GPU queue, and sentence 1's TTS would wait for the whole reply. A turn's transcript must not wait behind a sentence of speech either (measured on DGX-01: the barge-in turn's transcript 6.1 s after speech end on a shared lane, 2.3 s on its own) |
 | Tools | The chat model is offered `generate_image` and `generate_video` (when such models exist; `voice.tools`). A call queues a normal LocalRouter job; the session waits for it in the background, sends `localrouter.job.done` with the file URLs, adds the result to the history and creates a response so the assistant confirms it aloud. Client-defined `tools` follow OpenAI's flow (the client returns `function_call_output`) | The conversation continues while the job runs; files are ordinary `/v1/files/...` outputs |
-| Client | `/voice`: one HTML file with inline JS, embedded in the binary. Mic through an AudioWorklet at 24 kHz, playback scheduled gap-free, flushed on `speech_started` | No build step. `getUserMedia` needs a secure context: `http://127.0.0.1` is one; remote use needs HTTPS in front |
+| Client | `/voice` (and `/`, which redirects to it): Jarvis, one HTML file with inline JS, embedded in the binary. See [The web client](#the-web-client) | No build step. `getUserMedia` needs a secure context: `http://127.0.0.1` is one; remote use needs HTTPS in front |
 | Exposure | `/voice` and `/v1/realtime` answer loopback peers only unless `voice.remote` is true | A microphone endpoint should not appear on the network because the image API was opened up |
 | Memory | Chat, STT and TTS are `keep_loaded` with priorities above the image and video tools; the scheduler decides the rest. Voice job directories (user audio, TTS audio) are deleted within a minute of use | The loop never forces the chat model out; utterances do not sit on disk for 24 h |
 
@@ -205,6 +205,63 @@ speech or silence, including the codec variants, and on the 8 e2e prompts, each 
 (56 pairs; silence and noise in auto only). The median e2e prompt took 362 ms with the recipe and 265 ms greedy. drama-tensorfold's 0.14 s figure is
 TTS alone: request start to the first streamed codec frame, warm (`bench/drama_bench.py --stream`). Here that stage
 is `TTS first samples`, about 130 ms.
+
+## The web client
+
+`src/voice/voice.html` is the page at `/voice`. It is one file, with no build step and no libraries, embedded in the
+binary, and it works in desktop Chrome and Safari and in phone browsers. Chat and voice share one conversation.
+
+- **Chat.**
+  - It streams `/v1/chat/completions`, rendering Markdown with a small built-in renderer: the text is escaped first,
+    and links must be http(s) or same-origin.
+  - **Reasoning** switches thinking on (`chat_template_kwargs.enable_thinking`) or off (plus `reasoning_effort:
+    none`). `delta.reasoning_content` and inline `<think>` text fold into a "Reasoning" block.
+  - **Stop** aborts the stream; **Regenerate** answers the last user message again.
+  - When image or video models exist, the page offers `generate_image` and `generate_video` and runs the calls
+    itself: `/v1/images/generations` with `response_format: url`, or `/v1/videos` polled until the clip is done. It
+    shows the results inline and returns them to the model as tool messages.
+- **Voice.**
+  - The mic button starts a `/v1/realtime` session. On a phone it starts on release, the only point at which a touch
+    lets the page play audio.
+  - **Hands-free** uses server VAD (a tap mutes). **Push to talk** sets `turn_detection: null`: you hold the button,
+    release, and the page commits the turn plus 200 ms of tail.
+  - The draft transcript appears as an interim line (`localrouter.transcription.partial`), then the final one.
+  - The reply plays as it streams. Speaking over it, pressing push-to-talk, or **Stop speaking** stops the audio,
+    sends `conversation.item.truncate` with what was heard, and (by tap) `response.cancel`.
+  - A light echo gate sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a
+    row say someone is talking over it. You can turn it off in the settings.
+  - You choose the speech model (Drama 3, Kitten) and the voice in the bar. A new voice session gets the typed
+    conversation so far as items, and typed messages during a voice session get spoken replies.
+  - Tool jobs from voice (`localrouter.job.done`) render inline like chat's.
+- **Status strip.**
+  - It shows each model's state from `/v1/tools` (ready, busy, loading, unloaded, failed), polled every 4 s, and the
+    free memory.
+  - Per turn it shows the latency. For voice, that is from the end of your speech (the last loud microphone chunk, not
+    the VAD's decision) to the first audible reply sample as this browser schedules it, plus the server's STT, chat
+    and TTS stages from `localrouter.response.timing`. For chat, it is the first token and tokens per second.
+- **Local only.**
+  - Conversations and settings live in `localStorage` (`jarvis.*`). Nothing is kept on the server beyond its usual
+    job outputs.
+  - An API key, if a proxy in front asks for one, comes from a prompt on the first 401, from the settings, or once
+    from `#key=` in the URL, which is removed from the address bar. It is then sent as `Authorization: Bearer` and as
+    `?api_key=` on the WebSocket (browsers cannot set headers there). Media is fetched with the key into blob URLs.
+- **Copy log** copies the last N events: chat requests and results, realtime events without audio payloads, tool
+  jobs and page errors, with the settings, the key redacted.
+- **For scripts.** `window.jarvis` exposes the conversation, the voice state and the debug log, so a test does not
+  need to scrape the page.
+
+`tools/spark/jarvis/client_check.py` checks the page in headless Chrome over the DevTools protocol, using only the
+Python standard library, on the GPU host. It works against any running daemon, and `--page` writes a branch's
+`voice.html` over the served page before it parses, keeping the real URL and CSP.
+
+1. It loads the page and sees the status strip.
+2. It sends a chat message and sees it stream.
+3. It asks for a picture and sees the PNG render.
+4. It checks that the phone layout fits the screen.
+5. With `--wav`, it starts hands-free voice with Chrome's fake microphone playing the WAV once, and sees the
+   transcript, a spoken reply and its measured latency.
+
+It saves screenshots and `results.json`.
 
 ## Tests
 
