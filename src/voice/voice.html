@@ -1383,6 +1383,7 @@ registerProcessor('pcm24k', Pcm24k);
 const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
+  held: [], holdTimer: 0, started: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1430,6 +1431,7 @@ async function voiceStart() {
     V.an.fftSize = 512;
     V.out.connect(V.an);
     V.an.connect(V.ctx.destination);
+    if (window.jarvis.recordOutput && V.ctx.audioWorklet) startTap().catch(e => dbg('tap', { error: e.message }));
   } catch (e) { return note(`Audio is not available: ${e.message}`, true); }
   const url = new URL('/v1/realtime', location.href);
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1563,6 +1565,9 @@ function silence() {
   for (const e of V.live) { e.src.onended = null; try { e.src.stop(); } catch {} }
   V.live = [];
   V.nextTime = 0;
+  V.held = [];
+  clearTimeout(V.holdTimer);
+  V.holdTimer = 0;
 }
 function playedMs(item, now) {
   let ms = V.doneMs.get(item) || 0;
@@ -1585,11 +1590,14 @@ function bargeIn(cancel) {
   if (cancel && V.resp) vsend({ type: 'response.cancel' });
   renderVoice();
 }
-function play(item, b64) {
-  if (!V.ctx || V.cut.has(item)) return;
+// A reply's audio is held at its start until START_MS of it is in hand, or START_WAIT_MS after its first piece came,
+// then scheduled back to back on the AudioContext clock. Drama 3 streams a 46 ms first piece and then a 186 ms burst
+// every ~125 ms: started at once, playback ran dry after the first syllable for 30 to 90 ms (measured on DGX-01).
+const START_MS = 200, START_WAIT_MS = 150;
+function decode(b64) {
   const bytes = fromB64(b64);
   const n = bytes.length >> 1;
-  if (!n) return;
+  if (!n) return null;
   const view = new DataView(bytes.buffer);
   const buf = V.ctx.createBuffer(1, n, RATE);
   const ch = buf.getChannelData(0);
@@ -1600,18 +1608,50 @@ function play(item, b64) {
     acc += x * x;
     if (loudAt < 0 && Math.abs(x) > LOUD) loudAt = i;
   }
+  return { buf, loudAt, rms: Math.sqrt(acc / n) };
+}
+function play(item, b64) {
+  if (!V.ctx || V.cut.has(item)) return;
+  const piece = decode(b64);
+  if (!piece) return;
+  if (V.rec) V.rec.arrivals.push([Math.round(performance.now()), item, piece.buf.length]);
+  if (V.started.has(item)) return schedule(item, piece);
+  const wait = S.startWaitMs ?? START_WAIT_MS;
+  V.held.push({ item, ...piece });
+  if (wait <= 0) return release(item, 0.05);
+  const have = V.held.filter(p => p.item === item).reduce((s, p) => s + p.buf.duration, 0) * 1000;
+  if (have >= (S.startMs ?? START_MS)) return release(item, 0.01);
+  if (!V.holdTimer) V.holdTimer = setTimeout(() => release(item, 0.01), wait);
+}
+// The held start of `item` goes out, `lead` s from now.
+function release(item, lead) {
+  clearTimeout(V.holdTimer);
+  V.holdTimer = 0;
+  if (!V.ctx || V.cut.has(item)) { V.held = []; return; }
+  V.started.add(item);
+  const held = V.held.filter(p => p.item === item);
+  V.held = V.held.filter(p => p.item !== item);
+  V.nextTime = Math.max(V.nextTime, V.ctx.currentTime + lead);
+  for (const p of held) schedule(item, p);
+}
+function schedule(item, { buf, loudAt, rms }) {
+  const now = V.ctx.currentTime;
+  // Audio that ran dry mid-reply restarts with a lead that grows by how late it was (up to 0.5 s) and shrinks after
+  // each reply, so a stream that comes slower than it plays pauses rarely and briefly rather than stuttering.
+  if (V.nextTime < now) {
+    const gap = Math.round((now - V.nextTime) * 1000 + V.lead * 1000);
+    (V.gaps.get(item) || V.gaps.set(item, []).get(item)).push({ ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
+    dbg('voice.gap', { item, ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
+    V.lead = Math.min(0.5, V.lead + (now - V.nextTime));
+    V.nextTime = now + V.lead;
+  }
   const src = V.ctx.createBufferSource();
   src.buffer = buf;
   src.connect(V.out || V.ctx.destination);
-  const now = V.ctx.currentTime;
-  // A reply's first audio starts at once (50 ms to schedule it). Later audio that ran dry restarts with a lead that
-  // grows by how late it was (up to 0.5 s) and shrinks after each reply, so gaps inside a sentence stay rare.
-  const first = !V.doneMs.has(item) && !V.live.some(x => x.item === item);
-  if (!first && !V.live.length && V.nextTime && V.nextTime < now) V.lead = Math.min(0.5, V.lead + (now - V.nextTime));
-  const start = Math.max(now + (V.live.length ? 0 : first ? 0.05 : V.lead), V.nextTime);
+  const start = V.nextTime;
   src.start(start);
   V.nextTime = start + buf.duration;
-  const e = { src, item, start, dur: buf.duration, rms: Math.sqrt(acc / n) };
+  const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
   src.onended = () => {
@@ -1630,6 +1670,52 @@ function play(item, b64) {
     draw(m);
     renderStatus();
   }
+}
+
+// For tests: the page's own output, recorded after the mixer (window.jarvis.recordOutput before voice starts), and
+// where it fell silent mid-speech: an exact-zero run in played audio is a gap in the schedule, not a pause in speech.
+const TAP = 'class Tap extends AudioWorkletProcessor { process(i) { const c = i[0] && i[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; } } registerProcessor("tap", Tap);';
+async function startTap() {
+  const url = URL.createObjectURL(new Blob([TAP], { type: 'application/javascript' }));
+  try { await V.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+  const node = new AudioWorkletNode(V.ctx, 'tap');
+  const sink = V.ctx.createGain();
+  sink.gain.value = 0;
+  V.out.connect(node);
+  node.connect(sink).connect(V.ctx.destination);
+  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [] };
+  node.port.onmessage = e => V.rec.chunks.push(e.data);
+}
+// Each speech onset (sound after 300 ms of quiet): within `windowMs` of it, the longest exact-zero run that
+// sound follows (a gap), how many ran over `gapMs`, and the clicks: steps over 4 times the window's 99th percentile.
+function outputStats(windowMs = 2000, gapMs = 30) {
+  if (!V.rec) return null;
+  const n = V.rec.chunks.reduce((s, c) => s + c.length, 0);
+  const x = new Float32Array(n);
+  let o = 0;
+  for (const c of V.rec.chunks) { x.set(c, o); o += c.length; }
+  const r = V.rec.rate, quiet = Math.round(0.3 * r), win = Math.round(windowMs / 1000 * r), gapMin = Math.round(gapMs / 1000 * r);
+  const out = [];
+  let zeros = quiet;
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(x[i]) <= LOUD) { zeros++; continue; }
+    if (zeros >= quiet) {
+      const end = Math.min(n, i + win);
+      let run = 0, longest = 0, gaps = 0;
+      const steps = new Float32Array(end - i - 1);
+      for (let k = i + 1; k < end; k++) {
+        steps[k - i - 1] = Math.abs(x[k] - x[k - 1]);
+        if (x[k] === 0) { run++; continue; }
+        if (run) { if (run > longest) longest = run; if (run >= gapMin) gaps++; run = 0; }
+      }
+      const p99 = Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0;
+      const clicks = steps.filter(s => s > Math.max(4 * p99, 0.2)).length;
+      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, clicks, p99_step: +p99.toFixed(4), window_ms: Math.round((end - i) / r * 1000) });
+      i = end - 1;
+    }
+    zeros = 0;
+  }
+  return out;
 }
 
 function userMsg(itemId) {
@@ -1987,7 +2073,8 @@ if (window.visualViewport) {
 }
 
 // A test or another script can see the state without scraping the page.
-window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, live: V.live.length, thinking: V.thinking, lead: V.lead }; },
+window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
+                  output: outputStats, recordOutput: false, get arrivals() { return V.rec ? V.rec.arrivals : null; },
                   debug, settings: S, ui: { voiceState: 'off' }, ready: false };
 
 openConv(store.get('current', null) || ((convs.find(c => c.msgs.length) || {}).id));
