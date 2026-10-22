@@ -7,7 +7,8 @@
 # 2. The tree goes to $DEPLOY/src/<commit> (git archive of HEAD from a clean checkout, or a copy of an archive that
 #    carries COMMIT) and is built there with its CUDA kernels; $DEPLOY/current points at it.
 # 3. $DEPLOY/config.json from config.json.in, and the systemd user unit from localrouter-jarvis.service.in, enabled
-#    (lingering keeps it running without a login). A running service is restarted onto the new build.
+#    (lingering keeps it running without a login). A running service is restarted onto the new build once no voice
+#    session is open; until then (and when a check fails) current, the config and the unit stay as they were.
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (sudo; other serve entries are
 #    left as they are). The daemon itself listens on 127.0.0.1 only: LocalRouter has no API keys, so the tailnet (its
 #    ACLs) is who may connect; nothing binds 0.0.0.0.
@@ -66,10 +67,9 @@ if [ "${SKIP_BUILD:-0}" != 1 ] || [ ! -x "$src/zig-out/bin/localrouter" ]; then
     { tail -20 "$DEPLOY/logs/build-$commit.log"; die "the build failed: $DEPLOY/logs/build-$commit.log"; }
   rm -rf "$src" && mv "$src.tmp" "$src"
 fi
-ln -sfn "src/$commit" "$DEPLOY/current"
 sha256sum "$src/zig-out/bin/localrouter"
 
-# ---- 3. config and unit
+# ---- 3. config and unit, rendered and checked first; nothing the running service uses changes until it is idle
 render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
@@ -78,15 +78,11 @@ render() {
 render "$here/config.json.in" > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
-! grep -q '@[A-Z_]*@' "$DEPLOY/config.json.new" || die "unrendered placeholders in the config"
-mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
 mkdir -p "$HOME/.config/systemd/user"
-render "$here/localrouter-jarvis.service.in" > "$HOME/.config/systemd/user/$UNIT.service"
-systemctl --user daemon-reload
-systemctl --user enable "$UNIT" > /dev/null 2>&1
-[ "$(loginctl show-user "$(id -un)" -p Linger --value 2> /dev/null)" = yes ] ||
-  echo "warning: lingering is off: the service stops at logout (sudo loginctl enable-linger $(id -un))" >&2
-if systemctl --user is-active -q "$UNIT"; then
+render "$here/localrouter-jarvis.service.in" > "$DEPLOY/$UNIT.service.new"
+! grep -q '@[A-Z_]*@' "$DEPLOY/$UNIT.service.new" || die "unrendered placeholders in the unit"
+running=0; systemctl --user is-active -q "$UNIT" && running=1
+if [ $running = 1 ]; then
   # never under a live call: wait until no voice session is open (/v1/tools, else, on an older build, no connection
   # to the daemon's port), IDLE_WAIT_S at most (default 1800; FORCE_RESTART=1 skips the wait)
   t0=$(date +%s)
@@ -95,10 +91,19 @@ if systemctl --user is-active -q "$UNIT"; then
     [ -n "$n" ] || n=$(ss -Htn state established "( sport = :$PORT )" 2> /dev/null | wc -l)
     [ "$n" = 0 ] && break
     [ $(($(date +%s) - t0)) -lt "${IDLE_WAIT_S:-1800}" ] ||
-      die "$n voice session(s) still open after ${IDLE_WAIT_S:-1800} s: not restarting (FORCE_RESTART=1 to restart anyway)"
+      die "$n voice session(s) still open after ${IDLE_WAIT_S:-1800} s: nothing changed (FORCE_RESTART=1 to restart anyway)"
     echo "  waiting: $n voice session(s) open"
     sleep 10
   done
+fi
+ln -sfn "src/$commit" "$DEPLOY/current.new" && mv -T "$DEPLOY/current.new" "$DEPLOY/current"
+mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
+mv "$DEPLOY/$UNIT.service.new" "$HOME/.config/systemd/user/$UNIT.service"
+systemctl --user daemon-reload
+systemctl --user enable "$UNIT" > /dev/null 2>&1
+[ "$(loginctl show-user "$(id -un)" -p Linger --value 2> /dev/null)" = yes ] ||
+  echo "warning: lingering is off: the service stops at logout (sudo loginctl enable-linger $(id -un))" >&2
+if [ $running = 1 ]; then
   echo "== restarting the running service onto $commit"
   systemctl --user restart "$UNIT"
 fi
