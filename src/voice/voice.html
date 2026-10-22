@@ -334,7 +334,7 @@
     min-height: 44px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg); padding: 8px 12px; }
   .field textarea { min-height: 84px; resize: vertical; }
   .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; font-size: 14px; }
-  .switch small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 500; }
+  .switch small, .field > span small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 500; }
   .switch input { appearance: none; width: 46px; height: 28px; border-radius: 14px; background: var(--raised); border: 1px solid var(--border);
                   position: relative; cursor: pointer; flex: none; transition: background .15s; }
   .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
@@ -485,8 +485,8 @@
       <h3 id="hFree">Hands-free</h3>
       <label class="field"><span>Sensitivity</span><input type="range" id="sens" min="0" max="100" step="5">
         <span class="range-row"><span>Ignores more noise</span><span>Hears quiet speech</span></span></label>
-      <label class="field"><span>Pause before I reply: <b id="silenceV"></b></span><input type="range" id="silence" min="200" max="1500" step="50">
-        <span class="range-row"><span>Snappy</span><span>Patient</span></span></label>
+      <label class="field"><span>Wait before replying<small>How long you can pause to think before Jarvis answers. Keep talking within it and it is still your turn.</small></span>
+        <select id="wait"><option value="500">0.5 s (fast: a finished sentence may end your turn sooner)</option><option value="800">0.8 s</option><option value="1000">1 s</option><option value="1500">1.5 s</option><option value="2000">2 s</option></select></label>
       <label class="switch"><span>Echo guard<small>Ignore my own voice from the speaker</small></span><input type="checkbox" id="gate"></label>
       <label class="switch"><span>Smooth start for long replies<small>Waits up to about a second more so a long answer does not stutter while it is still being written</small></span><input type="checkbox" id="smooth"></label>
     </section>
@@ -559,10 +559,12 @@ const store = {
     }
   },
 };
-const S = Object.assign({ chatModel: '', think: false, speechModel: '', voices: {}, mode: 'vad', silence: 500, threshold: 0.5,
+const S = Object.assign({ chatModel: '', think: false, speechModel: '', voices: {}, mode: 'vad', wait: 800, threshold: 0.5,
   tools: true, gate: true, smoothStart: false, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
 if (S.voice && S.speechModel && !S.voices[S.speechModel]) S.voices[S.speechModel] = S.voice; // the earlier single voice
 delete S.voice;
+delete S.silence; // the old "pause before I reply" (200 to 1500 ms): the wait starts again at its default
+if (![500, 800, 1000, 1500, 2000].includes(Number(S.wait))) S.wait = 800;
 const saveSettings = () => store.set('settings', S);
 
 const debug = [];
@@ -1716,7 +1718,7 @@ const rms16 = v => { let a = 0; for (let i = 0; i < v.length; i++) a += v[i] * v
 
 function turnDetection() {
   if (S.mode === 'ptt') return null;
-  return { type: 'server_vad', threshold: Number(S.threshold), silence_duration_ms: Number(S.silence) || 500, prefix_padding_ms: 300,
+  return { type: 'server_vad', threshold: Number(S.threshold), silence_duration_ms: Number(S.wait) || 800, prefix_padding_ms: 300,
            create_response: true, interrupt_response: true };
 }
 function sessionUpdate() {
@@ -2362,8 +2364,7 @@ function openDrawer(section) {
   $('maxtok').value = S.maxTokens || '';
   $('instructions').value = S.instructions;
   $('sens').value = Math.max(0, Math.min(100, sensFromThreshold()));
-  $('silence').value = S.silence;
-  $('silenceV').textContent = `${(S.silence / 1000).toFixed(2)} s`;
+  $('wait').value = String(S.wait);
   $('gate').checked = S.gate;
   $('smooth').checked = S.smoothStart;
   $('key').value = S.key;
@@ -2381,11 +2382,10 @@ $('smooth').addEventListener('change', () => { S.smoothStart = $('smooth').check
 live('maxtok', e => { S.maxTokens = Number(e.value) || 0; });
 live('instructions', e => { S.instructions = e.value; });
 live('sens', e => { S.threshold = Math.round((0.8 - Number(e.value) / 100 * 0.6) * 100) / 100; });
-live('silence', e => { S.silence = Number(e.value) || 500; $('silenceV').textContent = `${(S.silence / 1000).toFixed(2)} s`; });
 live('key', e => { S.key = e.value.trim(); });
 live('logn', e => { S.logN = Number(e.value) || 300; });
 $('sens').addEventListener('change', sessionUpdate);
-$('silence').addEventListener('change', sessionUpdate);
+$('wait').addEventListener('change', () => { S.wait = Number($('wait').value) || 800; saveSettings(); sessionUpdate(); dbg('settings.wait', { ms: S.wait }); });
 $('vsearch').addEventListener('input', renderVoices);
 $('drawerClose').onclick = () => $('drawer').close();
 $('drawer').addEventListener('click', e => { if (e.target === $('drawer')) $('drawer').close(); });

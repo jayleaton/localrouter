@@ -19,6 +19,7 @@ pub const rate: u32 = 24_000; // pcm16 in and out
 const keep_silence_ms: u64 = 500; // audio kept before an onset beyond prefix_padding_ms, while nobody speaks
 const max_buffer_ms: u64 = 10 * 60 * 1000; // a manual turn longer than this is refused
 const warm_idle_ns: i96 = 20 * std.time.ns_per_s; // STT idle this long: warm it when someone starts speaking
+const fast_wait_ms: u32 = 500; // silence_duration_ms up to this is the fast setting: a finished sentence may end the turn sooner
 
 pub const Kind = enum { user, assistant, system, function_call, function_call_output };
 
@@ -118,6 +119,13 @@ pub const Session = struct {
     primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
     priming: bool = false,
     draft: ?Draft = null,
+    // A reply to the draft, made while the speaker is quiet but the turn is still open (respond.speculate): nothing of
+    // it reaches the client or the history until the quiet reaches silence_duration_ms and the turn ends as drafted.
+    // The speaker going on, or the history changing, discards it.
+    spec: ?*respond.Response = null,
+    spec_live: u32 = 0, // speculative responses whose threads have not finished (destroy waits for them)
+    changes: u64 = 0, // bumped by every change to the items: a speculation built on an older history is discarded
+    speech_end_ns: i96 = 0, // the last spoken turn's quiet began (awake clock), for its response's timing
     language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
     language_len: usize = 0,
 
@@ -150,10 +158,14 @@ pub const Session = struct {
         s.mutex.lockUncancelable(s.io);
         s.closing = true;
         if (s.resp) |r| r.stop.set(s.io);
+        s.dropSpec();
         s.cond.broadcast(s.io);
         s.mutex.unlock(s.io);
         s.close_stop.set(s.io);
         if (s.worker) |t| t.join();
+        s.mutex.lockUncancelable(s.io);
+        while (s.spec_live > 0) s.cond.waitUncancelable(s.io, &s.mutex);
+        s.mutex.unlock(s.io);
         if (s.primer) |t| t.join(); // the worker has finished: no response can start another
         for (s.waiters.items) |t| t.join();
         s.waiters.deinit(s.gpa);
@@ -199,6 +211,7 @@ pub const Session = struct {
         if (eql(typ, "input_audio_buffer.clear")) {
             s.input.clearRetainingCapacity();
             s.input_start_ms = s.nowMs();
+            s.dropSpec();
             s.endTurn();
             s.dropDraft();
             if (s.detector) |*d| d.reset();
@@ -240,6 +253,7 @@ pub const Session = struct {
         s.settings = st;
         s.settings_arena = next;
         old.deinit();
+        s.dropSpec(); // it was made with the old settings (model, voice, instructions)
         if (vad_changed and s.turn == null) s.resetDetector();
         s.emit.send(a, "session.updated", .{ .session = try events.sessionObject(a, s.id, &s.settings) });
     }
@@ -277,6 +291,7 @@ pub const Session = struct {
         if (s.turn == null and !s.detector.?.speaking()) s.trimSilence();
         try s.maybePartial();
         try s.maybeEndEarly(a);
+        if (s.spec) |r| if (!s.specHolds(r)) s.dropSpec(); // the speaker went on: the same turn, a reply to come
     }
 
     /// The awake clock, in ns (stage timings).
@@ -314,6 +329,7 @@ pub const Session = struct {
     }
 
     fn speechStarted(s: *Session, a: std.mem.Allocator, ms: u64) !void {
+        s.dropSpec();
         s.endTurn();
         const id = try s.newId(s.gpa, "item");
         s.turn = .{ .item_id = id, .start_ms = @max(ms, s.input_start_ms), .partial_ms = ms };
@@ -340,9 +356,67 @@ pub const Session = struct {
         s.emit.send(a, "input_audio_buffer.speech_stopped", .{ .audio_end_ms = ms, .item_id = t.item_id });
         s.stop_ns = s.clock();
         s.early_end = early;
-        try s.commit(a, t.item_id, t.start_ms, ms, key);
+        const silence = if (s.detector) |v| v.silenceMs() else 0;
+        const quiet_from = if (key > 0) key else ms -| silence; // where the speaker fell quiet
+        s.speech_end_ns = s.stop_ns - @as(i96, @intCast(ms -| quiet_from)) * std.time.ns_per_ms;
+        const held = s.takeSpec(t.item_id, key);
+        try s.commit(a, t.item_id, t.start_ms, ms, key, held == null);
+        if (held) |r| { // the reply made during the quiet answers exactly this turn: its transcript is the draft
+            const d = s.draft.?;
+            s.stt_start_ns = d.start_ns;
+            s.stt_end_ns = d.end_ns;
+            s.stt_worker_ms = d.worker_ms;
+            s.stt_draft = true;
+            const why: backend.Why = .{};
+            respond.completed(s, a, t.item_id, d.text.?, &why);
+            s.dropDraft();
+            s.endTurn();
+            return respond.adopt(s, r);
+        }
         s.endTurn();
         if (s.settings.create_response) try s.push(.{ .respond = .{ .auto = true } });
+    }
+
+    /// Under the lock: the speculative reply if it answers turn `item_id` ending on the pause `key` with the history it
+    /// was made from; otherwise it is discarded and null.
+    fn takeSpec(s: *Session, item_id: []const u8, key: u64) ?*respond.Response {
+        const r = s.spec orelse return null;
+        const d = s.draft orelse {
+            s.dropSpec();
+            return null;
+        };
+        if (key == 0 or r.key != key or d.key != key or d.text == null or !eql(r.turn_id, item_id) or r.changes != s.changes) {
+            s.dropSpec();
+            return null;
+        }
+        s.spec = null;
+        return r;
+    }
+
+    /// Under the lock: the draft is in and the speaker is still quiet, so a reply to it starts now, held back.
+    fn maybeSpeculate(s: *Session) void {
+        if (!s.voice.speculate or !s.settings.create_response or s.closing or s.spec != null or s.resp != null) return;
+        const d = s.draft orelse return;
+        const text = d.text orelse return;
+        const t = s.turn orelse return;
+        if (text.len == 0 or !eql(t.item_id, d.item_id) or !s.holds(d)) return;
+        for (s.tasks.items) |task| if (task == .respond or task == .final) return; // the history is about to change
+        respond.speculate(s, t.item_id, d.key, text);
+    }
+
+    /// Whether speculative reply `r` still answers the open turn: the speaker has been quiet since its pause.
+    fn specHolds(s: *Session, r: *const respond.Response) bool {
+        const t = s.turn orelse return false;
+        const since = (s.detector orelse return false).quietSince() orelse return false;
+        return eql(t.item_id, r.turn_id) and s.detector_ms + since == r.key;
+    }
+
+    /// Under the lock: the speculative reply, if any, is cancelled; its thread discards it (nothing was sent).
+    fn dropSpec(s: *Session) void {
+        const r = s.spec orelse return;
+        s.spec = null;
+        r.stop.set(s.io);
+        r.cond.broadcast(s.io);
     }
 
     /// The speaker paused: a draft transcript of the turn so far, on the worker.
@@ -375,11 +449,14 @@ pub const Session = struct {
     }
 
     /// Ends the turn now if its draft is in, ends a sentence, and `early_end_ms` of quiet have followed (the worker
-    /// calls this too, when a draft comes in after that).
+    /// calls this too, when a draft comes in after that). Only at the fast setting (silence_duration_ms up to
+    /// `fast_wait_ms`): a longer wait is the speaker's own, and a finished sentence does not cut it short.
     pub fn maybeEndEarly(s: *Session, a: std.mem.Allocator) !void {
         const d = s.draft orelse return;
         const text = d.text orelse return;
-        if (s.voice.early_end_ms == 0 or !endsSentence(text) or !s.holds(d) or s.nowMs() < d.key + s.voice.early_end_ms) return;
+        const wait = (s.settings.vad orelse return).silence_duration_ms;
+        if (s.voice.early_end_ms == 0 or wait > fast_wait_ms or !endsSentence(text) or !s.holds(d)) return;
+        if (s.nowMs() < d.key + @min(s.voice.early_end_ms, wait)) return;
         s.detector.?.reset();
         try s.speechStopped(a, s.nowMs(), d.key, true);
     }
@@ -404,6 +481,7 @@ pub const Session = struct {
         if (s.turn) |t| if (eql(t.item_id, h.item_id) and d.text.?.len > 0)
             s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = d.text.? });
         s.maybeEndEarly(a) catch {};
+        s.maybeSpeculate(); // the turn is still open: its reply starts now, held until the quiet ends it
     }
 
     /// Under the lock, for the worker: final task `h`'s transcript from its draft (in `a`), or null to transcribe it.
@@ -444,14 +522,16 @@ pub const Session = struct {
         const from = if (s.turn) |t| t.start_ms else s.input_start_ms;
         const id = if (s.turn) |t| try s.gpa.dupe(u8, t.item_id) else try s.newId(s.gpa, "item");
         defer s.gpa.free(id);
+        s.dropSpec();
         s.endTurn();
         if (s.detector) |*d| d.reset();
         s.dropDraft();
-        try s.commit(a, id, from, s.nowMs(), 0);
+        try s.commit(a, id, from, s.nowMs(), 0, true);
     }
 
-    /// The turn [from_ms, to_ms) becomes a user item, transcribed on the worker.
-    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64, key: u64) !void {
+    /// The turn [from_ms, to_ms) becomes a user item, transcribed on the worker (unless `transcribe` is false: the caller
+    /// has its transcript).
+    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64, key: u64, transcribe: bool) !void {
         const pcm = try s.gpa.dupe(i16, s.span(from_ms, to_ms));
         errdefer s.gpa.free(pcm);
         s.consume(to_ms);
@@ -461,6 +541,7 @@ pub const Session = struct {
         it.pending = true;
         s.emit.send(a, "input_audio_buffer.committed", .{ .previous_item_id = prev, .item_id = item_id });
         s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = try itemValue(a, it, s.settings.audio) });
+        if (!transcribe) return s.gpa.free(pcm);
         const owned = try s.gpa.dupe(u8, item_id);
         errdefer s.gpa.free(owned);
         try s.push(.{ .final = .{ .item_id = owned, .pcm = pcm, .key = key } });
@@ -494,6 +575,7 @@ pub const Session = struct {
 
     /// A new item at the end of the conversation (its id copied into its arena).
     pub fn addItem(s: *Session, kind: Kind, id: []const u8) !*Item {
+        s.changes += 1;
         const it = try s.gpa.create(Item);
         errdefer s.gpa.destroy(it);
         it.* = .{ .arena = .init(s.gpa), .id = "", .kind = kind };
@@ -569,6 +651,7 @@ pub const Session = struct {
             keep = sp.text_end;
         };
         if (keep < it.text.len) it.text = std.mem.trimEnd(u8, it.text[0..keep], " ");
+        s.changes += 1;
         s.emit.send(a, "conversation.item.truncated", .{ .item_id = id, .content_index = 0, .audio_end_ms = end.integer });
     }
 
@@ -577,6 +660,7 @@ pub const Session = struct {
         for (s.items.items, 0..) |it, i| if (eql(it.id, id)) {
             if (s.resp) |r| if (eql(r.item_id, id)) return s.emit.fail(a, "invalid_request_error", "item_delete_invalid_item_id", "the item belongs to the response in progress", eid);
             freeItem(s.gpa, s.items.orderedRemove(i));
+            s.changes += 1;
             return s.emit.send(a, "conversation.item.deleted", .{ .item_id = id });
         };
         s.emit.fail(a, "invalid_request_error", "item_delete_invalid_item_id", "no such item", eid);
