@@ -257,11 +257,38 @@ service's config lists only them.
 | `--port N` | `8190` | the service's loopback port. The Drama 3 server uses N + 10603 |
 | `--https-port N` | `10443` | `tailscale serve` on the tailnet. `0` sets up none |
 | `--unit NAME` | `localrouter-jarvis` | the systemd user unit |
+| `--models-dir DIR` | `~/jarvis` when `--prefix` is elsewhere | an existing install whose model files are reused instead of downloaded again. `none`: no reuse |
 | `--no-gpu` | | everything that needs no GPU, then stop |
 | `--dry-run` | | the plan only |
 
 A second install on the same box needs its own `--prefix`, `--port`, `--https-port 0` (or another port) and `--unit`.
 It also needs the memory for a second stack, which one GB10 does not have.
+
+## Models already on the box
+
+Never download a model the box already has. When an install exists (`~/jarvis`, or the one `--models-dir` names),
+bootstrap.sh reuses its model files in a new prefix:
+
+- **How.** It hard-links the files, so they take no second copy on disk. The image and video packs were written by
+  root in their container, so root links them in that container. Each model's own step then checks every reused file
+  against its pin, and fetches only a file that is missing or differs. The uv and zig caches are shared too.
+- **In the plan.** `--dry-run` prints `reuse ... GiB already present, reusing` for each reused directory, and the
+  `needs:` line gives the bytes reused instead of downloaded.
+- **When it does not link.** Hard links need both installs on one filesystem. On another filesystem, nothing is linked
+  and the step downloads as usual.
+- **Deleting one install.** Removing one install never affects the other: each keeps its links.
+
+What it reuses, per model: the chat checkpoint and archive, the Drama 3 checkpoint, the Whisper checkpoint and VAD,
+and the finished image and video packs (checked against `tools/twin/packs/built/`). The image and video download steps
+then have nothing left to fetch.
+
+To re-check the install logic on a box that already runs the stack, point a new prefix at the existing install. It
+downloads nothing big:
+
+```sh
+tools/install/bootstrap.sh --profile jarvis-gb10 --prefix ~/jarvis-check --port 8291 --https-port 0 \
+  --unit localrouter-jarvis-check --models-dir ~/jarvis --accept --no-gpu
+```
 
 ## Remove it
 

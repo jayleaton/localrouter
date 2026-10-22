@@ -3,7 +3,10 @@
 # model's fetch, setup and GPU qualification, then deploy/jarvis/install.sh and start.sh. All of it comes from the
 # profile's manifest (deploy/profiles/PROFILE.json); every download is checked against its pin by the step that makes it.
 #   tools/install/bootstrap.sh --profile jarvis-gb10 [--models chat,tts,stt,image,video] [--prefix DIR] [--port N]
-#     [--https-port N] [--unit NAME] [--accept] [--no-gpu] [--dry-run] [--force]
+#     [--https-port N] [--unit NAME] [--models-dir DIR] [--accept] [--no-gpu] [--dry-run] [--force]
+# --models-dir DIR: an existing install (default: ~/jarvis, when --prefix is elsewhere; "none": no reuse) whose model
+#   files are hard-linked in instead of downloaded again (no second copy on disk; each step still checks them against
+#   its pins and fetches only what is missing or differs); its uv and zig caches are shared too.
 # --accept: the user has read and accepted what the plan lists under "needs acceptance" (model licences, Drama 3's
 #   numerics); without it the steps that need it stop the run. --no-gpu: every step that needs no GPU (downloads,
 #   builds), then stop: for a box whose GPU is busy now; run again without it later. --dry-run: the plan (each step,
@@ -13,7 +16,7 @@
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 
-profile="" list=all PREFIX=$HOME/jarvis PORT=8190 HTTPS_PORT=10443 UNIT=localrouter-jarvis dry=0 force=0 accept=0 nogpu=0
+profile="" list=all PREFIX=$HOME/jarvis PORT=8190 HTTPS_PORT=10443 UNIT=localrouter-jarvis dry=0 force=0 accept=0 nogpu=0 STORE=
 args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -23,11 +26,12 @@ while [ $# -gt 0 ]; do
     --port) PORT=${2:?}; shift 2 ;;
     --https-port) HTTPS_PORT=${2:?}; shift 2 ;;
     --unit) UNIT=${2:?}; shift 2 ;;
+    --models-dir) STORE=${2:?}; shift 2 ;;
     --accept) accept=1; shift ;;
     --no-gpu) nogpu=1; shift ;;
     --dry-run) dry=1; shift ;;
     --force) force=1; shift ;;
-    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument $1 (see --help)" ;;
   esac
 done
@@ -37,6 +41,25 @@ p=$(profile_file "$profile") || exit 1
 mapfile -t keys < <(selected "$p" "$list")
 [ ${#keys[@]} -gt 0 ] || die "no models selected"
 step_env "$p"
+# the install to reuse model files from: --models-dir, else the default prefix when this one is elsewhere
+[ -z "$STORE" ] && [ "$PREFIX" != "$HOME/jarvis" ] && [ -d "$HOME/jarvis" ] && STORE=$HOME/jarvis
+[ "$STORE" = none ] && STORE=
+if [ -n "$STORE" ]; then
+  STORE=$(realpath "$STORE") || die "--models-dir $STORE does not exist"
+  [ "$STORE" != "$PREFIX" ] || STORE=
+fi
+if [ -n "$STORE" ]; then
+  [ -d "$STORE/uv-cache" ] && export UV_CACHE_DIR=$STORE/uv-cache
+  [ -d "$STORE/zig-cache" ] && export ZIG_GLOBAL_CACHE_DIR=$STORE/zig-cache
+fi
+# reusable KEY: the model's reuse paths present in the store and not yet in this prefix, one a line
+reusable() {
+  [ -n "$STORE" ] || return 0
+  local r
+  jq -r --arg k "$1" '.models[] | select(.key == $k) | .reuse.paths[]? // empty' "$p" | while read -r r; do
+    [ -e "$STORE/$r" ] && [ ! -e "$PREFIX/$r" ] && echo "$r"
+  done
+}
 LOGS=$PREFIX/install/logs
 again="$0 ${args[*]}"
 again=${again// --dry-run/}
@@ -73,14 +96,25 @@ for k in "${keys[@]}"; do
   if [ "$(jq .warm <<< "$m")" = true ]; then warm=$((warm + b)); elif [ "$b" -gt "$peak" ]; then peak=$b; fi
   while read -r a; do [ -n "$a" ] && accepts+=("$k: $a"); done < <(jq -r '.accept[]? // empty' <<< "$m")
 done
+saved=0 reuse_lines=()   # what the store already has: linked, not downloaded
+for k in "${keys[@]}"; do
+  while read -r r; do
+    [ -n "$r" ] || continue
+    b=$(du -s --apparent-size -B1 "$STORE/$r" 2> /dev/null | awk '{print $1}')
+    saved=$((saved + ${b:-0}))
+    reuse_lines+=("$(printf '  %-5s %-16s %s: %s GiB already present, reusing (hard links; checked against the pins)' reuse "$k" "$STORE/$r" "$(gib "${b:-0}")")")
+  done < <(reusable "$k")
+done
+need_dl=$((need_dl > saved ? need_dl - saved : 0)); need_disk=$((need_disk > saved ? need_disk - saved : 0))
 free=$(hw_disk_free "$PREFIX") margin=$(($(jq .disk_margin_gib "$p") * 1073741824))
 echo "plan:"
+for l in "${reuse_lines[@]}"; do echo "$l"; done
 for s in "${todo[@]}"; do
   printf '  %-5s %-16s %s%s\n' "$(is_done "$s" && echo done || echo todo)" "$(step_id "$s")" "$(jq -r .title <<< "$s")" \
     "$(jq -r 'if .gpu then " [GPU, \(.min_free_gib) GiB free]" else "" end' <<< "$s")"
 done
 printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on 127.0.0.1:$PORT), then start.sh until the warm models are ready"
-echo "needs: download $(gib $need_dl) GiB, disk $(gib $need_disk) GiB + $(gib $margin) margin (free: $(gib "$free") GiB)"
+echo "needs: download $(gib $need_dl) GiB, disk $(gib $need_disk) GiB + $(gib $margin) margin (free: $(gib "$free") GiB)$([ $saved -gt 0 ] && echo "; $(gib $saved) GiB reused from $STORE instead of downloaded")"
 echo "memory: $(gib $warm) GiB for the warm models$([ $peak -gt 0 ] && echo ", plus up to $(gib $peak) GiB for an on-demand one (it unloads the image model to fit)") of $(gib "$(hw_mem)") GiB"
 gpu_need=0   # the most free memory a GPU step still to do needs
 for s in "${todo[@]}"; do
@@ -109,6 +143,19 @@ mkdir -p "$LOGS" "$PREFIX/bin"
 t_all=$(date +%s)
 for s in "${todo[@]}"; do
   id=$(step_id "$s")
+  k=$(jq -r .model <<< "$s")
+  if [ "$k" != "${reused:-}" ]; then   # a model's first step: link what the store has first (its licence accepted)
+    reused=$k
+    mapfile -t rs < <(reusable "$k")
+    if [ ${#rs[@]} -gt 0 ] && { [ $accept = 1 ] || [ "$(model "$p" "$k" | jq '(.accept // []) | length')" = 0 ]; }; then
+      for r in "${rs[@]}"; do echo "reuse $k: $STORE/$r"; $STEPS reuse "$STORE/$r" "$PREFIX/$r" >> "$LOGS/$k-reuse.log" 2>&1; done
+      v=$(model "$p" "$k" | jq -r '.reuse.verify // empty')
+      if [ -n "$v" ]; then
+        echo "      checking the reused files against the pins (log: $LOGS/$k-reuse.log)"
+        bash -c "set -euo pipefail; $v" >> "$LOGS/$k-reuse.log" 2>&1 || echo "      they differ from the pins: the steps make them as usual"
+      fi
+    fi
+  fi
   if is_done "$s"; then echo "ok    $id (done)"; continue; fi
   if [ "$(jq -r '.gpu // false' <<< "$s")" = true ] && [ $nogpu = 1 ]; then echo "skip  $id (needs the GPU; --no-gpu)"; continue; fi
   if [ "$(jq -r '.needs_accept // false' <<< "$s")" = true ] && [ $accept = 0 ]; then

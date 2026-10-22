@@ -83,7 +83,7 @@ if [ "${SKIP_BUILD:-0}" != 1 ] || [ ! -x "$src/zig-out/bin/localrouter" ]; then
     tar -C "$repo" --exclude=.zig-cache --exclude=zig-out -cf - . | tar -x -C "$src.tmp"
   fi
   echo "$commit" > "$src.tmp/COMMIT"
-  (cd "$src.tmp" && ZIG_GLOBAL_CACHE_DIR=$J/zig-cache systemd-run --user --scope -q -p MemoryMax=24G -p CPUQuota=800% \
+  (cd "$src.tmp" && ZIG_GLOBAL_CACHE_DIR=${ZIG_GLOBAL_CACHE_DIR:-$J/zig-cache} systemd-run --user --scope -q -p MemoryMax=24G -p CPUQuota=800% \
     timeout 2400 zig build -Doptimize=ReleaseSafe -Dnvcc="$nvcc" -Dsm="${SM:-121}") > "$DEPLOY/logs/build-$commit.log" 2>&1 ||
     { tail -20 "$DEPLOY/logs/build-$commit.log"; die "the build failed: $DEPLOY/logs/build-$commit.log"; }
   rm -rf "$src" && mv "$src.tmp" "$src"

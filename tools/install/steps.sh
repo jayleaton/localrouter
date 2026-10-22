@@ -9,6 +9,7 @@
 #   steps.sh stamped NAME FILE... true when NAME finished for exactly these inputs
 #   steps.sh free GIB             true when MemAvailable is at least GIB (a GPU step's precondition); says what to stop
 #   steps.sh qualified MARKER PINS a qualification marker that says "qualified": true and was made from PINS (as install.sh checks)
+#   steps.sh reuse SRC DST        hard-link another install's model files SRC into DST (no second copy on disk)
 #   steps.sh drama3-config        $J/qualify-drama3/config.json: the deployed Drama 3 tool (deploy/jarvis/config.json.in)
 #                                 with this box's paths, for its qualify.sh
 set -euo pipefail
@@ -64,6 +65,22 @@ free() {
   return 1
 }
 
+# reuse SRC DST: the tree SRC (another install's model files) hard-linked into DST, so it takes no second copy on disk;
+# files already in DST are kept. What we may not link ourselves (another owner: the image and video packs were written
+# by root in their container) is linked by root in that container, through one mount of both (a link cannot cross
+# mounts). Another filesystem: nothing is linked and the step downloads as usual. The step that owns the files checks
+# them against its pins either way.
+reuse() {
+  local src dst base
+  src=$(realpath "$1") dst=$(realpath -m "$2")
+  mkdir -p "$dst"
+  cp -a -l -n "$src/." "$dst/" 2> /dev/null && return 0
+  base=$src; while [ "$base" != / ] && [[ $dst != "$base"/* ]]; do base=$(dirname "$base"); done   # the deepest directory holding both
+  [ -n "$base" ] && command -v docker > /dev/null && docker image inspect "$NGC_IMAGE" > /dev/null 2>&1 &&
+    docker run --rm -v "$base:/b" "$NGC_IMAGE" cp -a -l -n "/b/${src#$base/}/." "/b/${dst#$base/}/" > /dev/null 2>&1 && return 0
+  echo "steps.sh: could not link $src into $dst (another filesystem?); the step downloads instead" >&2
+}
+
 drama3_config() {
   local out=$J/qualify-drama3/config.json
   mkdir -p "$J/qualify-drama3"
@@ -77,7 +94,7 @@ drama3_config() {
   echo "wrote $out"
 }
 
-cmd=${1:?usage: steps.sh tool|tool-ok|file|stamp|stamped|qualified|free|drama3-config ...}
+cmd=${1:?usage: steps.sh tool|tool-ok|file|stamp|stamped|qualified|free|reuse|drama3-config ...}
 shift
 case $cmd in
   tool) tool "$@" ;;
@@ -87,6 +104,7 @@ case $cmd in
   stamped) stamped "$@" ;;
   qualified) qualified "$@" ;;
   free) free "$@" ;;
+  reuse) reuse "$@" ;;
   drama3-config) drama3_config ;;
   *) die "unknown step '$cmd'" ;;
 esac
