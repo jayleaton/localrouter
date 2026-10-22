@@ -36,6 +36,13 @@ pub const Registry = struct {
         };
     }
 
+    /// How many sessions are open (an operator restarts only when none is).
+    pub fn count(r: *Registry, io: Io) usize {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        return r.list.items.len;
+    }
+
     /// Shuts every session's socket down (they then close themselves); new sessions are refused.
     pub fn closeAll(r: *Registry, io: Io) void {
         r.mutex.lockUncancelable(io);

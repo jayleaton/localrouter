@@ -134,7 +134,8 @@ const Counted = struct {
 };
 
 /// Speaks with the first candidate that serves; one that fails before any of its audio was sent falls through to the
-/// next (with its own default voice, since voices are per model).
+/// next (with its own default voice, since voices are per model). A voice no candidate has (a client's "default",
+/// another API's name) is spoken in the first candidate's default voice rather than failing the turn.
 fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     const l = self(ptr);
     const app = l.app;
@@ -143,7 +144,7 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
     var counted: Counted = .{ .sink = sink };
     const out: backend.PcmSink = .{ .ctx = &counted, .write = Counted.write };
     for (candidates, 0..) |model, n| {
-        const voice = if (n > 0) "" else wanted;
+        const voice = if (n > 0) "" else voiceFor(app, model, wanted);
         speakWith(app, a, model, voice, text, out, stop, why) catch |err| {
             if (err != error.Failed or n + 1 == candidates.len or counted.samples > 0) return err;
             std.log.warn("voice: speech model {s} failed ({s}); trying {s}", .{ model orelse "default", why.message, candidates[n + 1] orelse "default" });
@@ -152,6 +153,15 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
         return;
     }
     return failed(why, "no speech model");
+}
+
+/// `wanted` when `model` has that voice (or lists none, or is the text_to_speech default, which picks its own), else ""
+/// (the model's default voice).
+fn voiceFor(app: *App, model: ?[]const u8, wanted: []const u8) []const u8 {
+    const c = app.cfg.tool(model orelse return wanted) orelse return wanted;
+    if (wanted.len == 0 or engine.voices(c) == null or engine.hasVoice(c, wanted)) return wanted;
+    std.log.warn("voice: {s} has no voice '{s}'; speaking in its default voice", .{ c.id, wanted });
+    return "";
 }
 
 /// The speech job, streamed when the model streams (its `stream` option): its audio then reaches `sink` as it is made.

@@ -9,7 +9,6 @@ CHAT_ROOT=${CHAT_ROOT:-$J/qualify-chat/root}
 CHAT_MARKER=${CHAT_MARKER:-$J/qualify-chat/qwen38-27b-qualification.json}
 DRAMA_ROOT=${DRAMA_ROOT:-$J/qualify-drama3/root}
 DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-qualification.json}
-KITTEN_MARKER=${KITTEN_MARKER:-$J/models/kitten/qualification-graphs.json}
 URL=http://127.0.0.1:$PORT
 export PATH=$J/bin:$PATH XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}

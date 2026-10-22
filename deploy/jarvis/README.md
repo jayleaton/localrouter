@@ -6,9 +6,9 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
-| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), **on demand** (it loads only if Drama 3 fails or a Kitten voice is asked for), priority -10 (the first to be evicted), on the `main` lane: its load (about 30 s with the graph capture) never holds the realtime lane |
+| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
 | Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load |
-| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model (and Kitten) to run, and the image model comes back after it |
+| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model to run, and the image model comes back after it |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
 Memory, measured on DGX-01 (2026-10-22):
@@ -34,7 +34,8 @@ tools/jarvis/smoke.sh [--quick]                       # every capability against
 
 `install.sh` refuses unless each qualified model's marker says `"qualified": true` and was made from the pins in
 this tree. When a model's `pins.json` changes, re-run that model's `qualify.sh` first. Re-running `install.sh` on a
-new commit builds it and restarts the running service onto it. The unit restarts on failure, and lingering keeps it
+new commit builds it and restarts the running service onto it, once no voice call is open (`voice_sessions` in
+`/v1/tools`; it waits up to `IDLE_WAIT_S`, 30 min). The unit restarts on failure, and lingering keeps it
 running without a login.
 
 Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) and `HTTPS_PORT` (10443).
