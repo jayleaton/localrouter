@@ -27,6 +27,8 @@ const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
 const audio = @import("../media/audio.zig");
+const config = @import("../config.zig");
+const sched_memory = @import("../sched/memory.zig");
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -93,8 +95,11 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
     const name = str(params.object.get("name")) orelse return rpcError(req, a, id, -32602, "no tool name");
     const args: Value = params.object.get("arguments") orelse .{ .object = .empty };
     var out: std.ArrayList(Content) = .empty;
+    calling = name;
     const result: ToolError!bool = if (eql(name, "list_models"))
         listModels(app, a, &out)
+    else if (eql(name, "list_voices"))
+        listVoices(app, a, &out)
     else if (eql(name, "generate_image"))
         generateImage(app, a, host, args, &out)
     else if (eql(name, "generate_video"))
@@ -112,7 +117,7 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
     else if (eql(name, "release_models"))
         release(app, a, &out)
     else
-        return rpcError(req, a, id, -32602, "unknown tool");
+        return rpcError(req, a, id, -32602, try std.fmt.allocPrint(a, "unknown tool '{s}'; tools/list names them: {s}", .{ name, tool_names }));
     const ok = result catch |err| switch (err) {
         error.ToolFailed, error.BadArguments => false, // the reason is already in `out`
         error.OutOfMemory => return error.OutOfMemory,
@@ -127,31 +132,54 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
     return error.ToolFailed;
 }
 
+/// The tool being called on this connection's thread, for argument errors that name it.
+threadlocal var calling: []const u8 = "";
+
 fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!T {
     return std.json.parseFromValueLeaky(T, a, args, .{ .ignore_unknown_fields = true }) catch |err| {
-        try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "invalid arguments: {s}", .{@errorName(err)}) });
+        const ename = @errorName(err);
+        const why = if (eql(ename, "MissingField")) "a required argument is missing" else if (eql(ename, "OutOfMemory")) return error.OutOfMemory else "an argument has the wrong type or is out of range";
+        try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "invalid arguments for {s}: {s}; its inputSchema in tools/list names the arguments, their types and which are required", .{ calling, why }) });
         return error.BadArguments;
     };
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
         if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
     }
-    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{ .emit_null_optional_fields = false }) });
+    const memory = .{ .mem_available_bytes = sched_memory.available() orelse 0, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes };
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine, .memory = memory }, .{ .emit_null_optional_fields = false }) });
+    return true;
+}
+
+/// Every speech model's voices, its default voice, whether it is loaded now and whether it may serve (qualified).
+fn listVoices(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
+    const Entry = struct { model: []const u8, name: []const u8, voices: []const Value, default_voice: ?[]const u8 = null, state: []const u8, default: bool, qualified: ?bool = null };
+    var list: std.ArrayList(Entry) = .empty;
+    for (app.scheduler.slots, 0..) |slot, i| {
+        const c = slot.tool.config();
+        if (c.kind != .speech) continue;
+        const info = engine.audioInfo(c);
+        var buf: [512]u8 = undefined;
+        const defaults = try routes.defaultFor(app, a, i);
+        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = info.voices orelse &.{}, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0) engine.unqualified(app.io, a, c, &buf) == null else null });
+    }
+    if (list.items.len == 0) return fail(a, out, "no speech model is configured on this machine", .{});
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .speech_models = list.items }, .{ .emit_null_optional_fields = false }) });
     return true;
 }
 
 fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "1024x1024", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, images: []const []const u8 = &.{} };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "1024x1024", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, images: []const []const u8 = &.{}, wait_s: u32 = 600 };
     const b = try parseArgs(Args, a, args, out);
     const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "ref", b.images, out);
@@ -161,7 +189,8 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     for (refs, files) |*d, f| d.* = f.name;
     const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs } };
     const j = try start(app, a, tool, r, files, out);
-    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    try waitFor(app, j, b.wait_s);
+    if (!finished(app, j)) return report(app, a, host, j, out); // still loading or drawing: the job id, for get_job
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_images) for (j.files) |f| {
         const png = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(h.max_body)) catch
@@ -187,15 +216,35 @@ fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
 }
 
 fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { audio: []const u8, model: ?[]const u8 = null, language: []const u8 = "", prompt: []const u8 = "", temperature: f32 = 0, timestamps: request.Timestamps = .none, seed: ?u64 = null, wait_s: u32 = 600 };
+    const Args = struct { audio: ?[]const u8 = null, path: ?[]const u8 = null, model: ?[]const u8 = null, language: []const u8 = "", prompt: []const u8 = "", temperature: f32 = 0, timestamps: request.Timestamps = .none, seed: ?u64 = null, wait_s: u32 = 600 };
     const b = try parseArgs(Args, a, args, out);
     var msg: []const u8 = "";
-    const upload = inputs.resolve(app.io, app.gpa, a, b.audio, app.policy(host), &msg) catch return fail(a, out, "{s}", .{msg});
+    const upload = if (b.path) |p| blk: {
+        if (b.audio != null) return fail(a, out, "send audio or path, not both", .{});
+        break :blk try localFile(app, a, p, out);
+    } else inputs.resolve(app.io, app.gpa, a, b.audio orelse return fail(a, out, "audio (base64, a data URL or an http(s) URL) or path (a file on this machine) is required", .{}), app.policy(host), &msg) catch return fail(a, out, "{s}", .{msg});
     if (upload.len > inputs.max_bytes) return fail(a, out, "the audio file is larger than 32 MB", .{});
     var why: routes.Refusal = .{};
     const j = speech.startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed }, upload, &why) orelse return fail(a, out, "{s}", .{why.message});
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
+}
+
+/// The bytes of a file on this machine, by absolute path, only inside a directory the operator listed in the config's
+/// `local_files` (the API has no authentication, so nothing else on the disk is readable through it).
+fn localFile(app: *App, a: std.mem.Allocator, path: []const u8, out: *std.ArrayList(Content)) ToolError![]const u8 {
+    if (app.cfg.local_files.len == 0) return fail(a, out, "path is off on this server: the operator lists the directories it may read in the config's local_files; send the audio as base64 or an http(s) URL instead", .{});
+    if (!std.fs.path.isAbsolute(path)) return fail(a, out, "path must be absolute (it names a file on the machine that runs LocalRouter)", .{});
+    const real = Io.Dir.realPathFileAbsoluteAlloc(app.io, path, a) catch return fail(a, out, "no such file: {s}", .{path});
+    for (app.cfg.local_files) |root| {
+        const r = Io.Dir.realPathFileAbsoluteAlloc(app.io, root, a) catch continue;
+        if (!std.mem.startsWith(u8, real, r) or real.len <= r.len or real[r.len] != '/') continue;
+        return Io.Dir.cwd().readFileAlloc(app.io, real, a, .limited(inputs.max_bytes + 1)) catch |err| return switch (err) {
+            error.StreamTooLong => fail(a, out, "the audio file is larger than 32 MB", .{}),
+            else => fail(a, out, "could not read {s}: {s}", .{ path, @errorName(err) }),
+        };
+    }
+    return fail(a, out, "{s} is outside the directories this server may read (local_files: {s}{s})", .{ path, app.cfg.local_files[0], if (app.cfg.local_files.len > 1) ", ..." else "" });
 }
 
 fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -393,10 +442,13 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription or chat), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (fast) or will load on first use, and qualified (false: refused until this machine has qualified it).", .inputSchema = .{ .text =
-    \\{"type":"object","properties":{}}
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription or chat), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{},"additionalProperties":false}
     } },
-    .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits for the result (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
+    .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices, default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{},"additionalProperties":false}
+    } },
+    .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits up to wait_s (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server; past wait_s it returns the job id for get_job. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"What to draw."},
     \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_image, or image_edit with images)."},
@@ -406,7 +458,9 @@ const tool_list = [_]Tool{
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
     \\"negative_prompt":{"type":"string"},
     \\"images":{"type":"array","maxItems":5,"items":{"type":"string"},"description":"Input images (PNG, JPEG or WebP, up to 32 MB each) as base64 strings, data URLs or http(s) URLs. Given: the request is an edit of these images, guided by the prompt."},
-    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."}}}
+    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "generate_video", .title = "Generate video", .description = "Text to video with audio (MP4), or image to video when `image` is given. Waits up to wait_s seconds; returns the MP4's URL when done, otherwise the job id for get_job.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
@@ -420,17 +474,20 @@ const tool_list = [_]Tool{
     \\"audio":{"type":"boolean","default":true},
     \\"negative_prompt":{"type":"string"},
     \\"image":{"type":"string","description":"First frame (image to video): a base64 string, data URL or http(s) URL of a PNG, JPEG or WebP up to 32 MB. Needs a model whose capabilities (list_models) include image_to_video."},
-    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}}}
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "transcribe_audio", .title = "Transcribe audio", .description = "Speech to text in the spoken language (no translation). Waits up to wait_s for the transcript and returns its text, then JSON with language, duration and segments (and words when timestamps is word); a longer job returns its id for get_job. Audio up to 32 MB and 30 minutes: WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["audio"],"properties":{
-    \\"audio":{"type":"string","description":"The audio file as a base64 string, a data URL or an http(s) URL."},
+    \\{"type":"object","properties":{
+    \\"audio":{"type":"string","description":"The audio file as a base64 string, a data URL or an http(s) URL (the daemon's own /v1/files URLs too). Send this or path."},
+    \\"path":{"type":"string","description":"An absolute path to an audio file on the machine that runs LocalRouter, inside a directory the operator listed in local_files (off by default). Send this or audio."},
     \\"model":{"type":"string","description":"A transcription model id from list_models; default: the one whose default_for lists speech_to_text."},
     \\"language":{"type":"string","description":"ISO-639-1 code of the spoken language (en, de, ja...); omit to detect it."},
     \\"prompt":{"type":"string","description":"Text that guides spelling and style (names, terms, the previous passage)."},
     \\"timestamps":{"type":"string","enum":["none","segment","word"],"default":"none"},
     \\"temperature":{"type":"number","minimum":0,"maximum":1,"default":0},
-    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (get_job returns the transcript; cancel_job stops it)."}}}
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (get_job returns the transcript; cancel_job stops it)."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "synthesize_speech", .title = "Synthesize speech", .description = "Text to speech. Waits for the audio and returns it inline (WAV unless format says otherwise) and as a URL on this server. Voices are listed per model in list_models.", .inputSchema = .{ .text =
     \\{"type":"object","required":["input"],"properties":{
@@ -442,7 +499,8 @@ const tool_list = [_]Tool{
     \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
     \\"seed":{"type":"integer","minimum":0},
     \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},
-    \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}}}
+    \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "chat", .title = "Chat", .description = "A chat completion from the local chat model (OpenAI Chat Completions semantics). Returns the reply's text (or its tool calls as JSON when it called a tool instead), then the whole completion as JSON (message, reasoning_content when the model thought, finish_reason, usage). The chat model stays loaded, so replies start at once.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{
@@ -458,15 +516,23 @@ const tool_list = [_]Tool{
     \\"seed":{"type":"integer","minimum":0},
     \\"tools":{"type":"array","items":{"type":"object"},"description":"OpenAI function tools the model may call."},
     \\"tool_choice":{"description":"none, auto, required, or {\"type\":\"function\",\"function\":{\"name\":...}}."},
-    \\"response_format":{"type":"object","description":"{\"type\":\"json_object\"} or {\"type\":\"json_schema\",\"json_schema\":{...}} for structured output."}}}
+    \\"response_format":{"type":"object","description":"{\"type\":\"json_object\"} or {\"type\":\"json_schema\",\"json_schema\":{...}} for structured output."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0}}}
+    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"A job id from generate_video, generate_image, transcribe_audio or a /v1 response."},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"How long to wait for it to finish."}},"additionalProperties":false}
     } },
     .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}
+    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}},"additionalProperties":false}
     } },
     .{ .name = "release_models", .title = "Release models", .description = "Unloads every model now, returning its memory to the machine (they also unload by themselves when idle).", .inputSchema = .{ .text =
-    \\{"type":"object","properties":{}}
+    \\{"type":"object","properties":{},"additionalProperties":false}
     } },
+};
+
+/// "list_models, list_voices, ...": the tool names, for an unknown tool's error.
+const tool_names = blk: {
+    var s: []const u8 = "";
+    for (tool_list, 0..) |t, i| s = s ++ (if (i > 0) ", " else "") ++ t.name;
+    break :blk s;
 };

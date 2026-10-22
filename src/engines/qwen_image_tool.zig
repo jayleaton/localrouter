@@ -174,7 +174,7 @@ const QwenImage = struct {
             .image => |x| x,
             .video, .speech, .transcription, .chat => return engine.Refused.Refused,
         };
-        if (v.references.len > 0) return engine.Refused.Refused; // edits are M6
+        if (v.references.len > 0) return refuse("this image engine does not do edits yet: send no input images", .{});
         const p = t.p orelse return error.NotLoaded;
         const start = std.Io.Clock.awake.now(t.env.io);
         const steps = if (v.steps == 0) t.variant.steps(t.cfg) else v.steps;
@@ -185,7 +185,9 @@ const QwenImage = struct {
         for (names, 0..) |*name, i| {
             const seed = v.seed +% i;
             _ = p.generate(v.prompt, v.height, v.width, steps, seed, pixels, bridge.progress()) catch |err| switch (err) {
-                error.ImageTooLarge, error.SizeNotMultipleOf16, error.PromptTooLong => return engine.Refused.Refused,
+                error.ImageTooLarge => return refuse("{d}x{d} is larger than this model takes: lower size", .{ v.width, v.height }),
+                error.SizeNotMultipleOf16 => return refuse("size {d}x{d}: each side must be a multiple of 16", .{ v.width, v.height }),
+                error.PromptTooLong => return refuse("the prompt is longer than the text encoder takes: shorten it", .{}),
                 else => return err,
             };
             name.* = try std.fmt.allocPrint(arena, "{d}.png", .{i});
@@ -232,4 +234,10 @@ fn create(comptime v: Variant) fn (env: engine.Env, cfg: *const ToolConfig) anye
             return .{ .ptr = t, .vtable = &.{ .load = QwenImage.load, .generate = QwenImage.generate, .unload = QwenImage.unload } };
         }
     }.f;
+}
+
+/// Refuses the request (the API's 400) with a reason the caller can act on.
+fn refuse(comptime fmt: []const u8, args: anytype) engine.Refused {
+    engine.explain(fmt, args);
+    return engine.Refused.Refused;
 }

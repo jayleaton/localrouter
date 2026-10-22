@@ -111,11 +111,12 @@ const MiniMaxH3 = struct {
             .video => |x| x,
             .image, .speech, .transcription, .chat => return engine.Refused.Refused,
         };
-        if (v.first_frame != null or v.fps != fps) return engine.Refused.Refused; // image to video is not ported
+        if (v.first_frame != null) return refuse("this video engine does not take a first frame yet: send no image", .{});
+        if (v.fps != fps) return refuse("this model makes {d} fps video: omit fps or send {d}", .{ fps, fps });
         const p = t.p orelse return error.NotLoaded;
         const start = std.Io.Clock.awake.now(t.env.io);
         const steps = if (v.steps == 0) @as(u32, @intCast(engine.optionInt(t.cfg, "steps", default_steps))) else v.steps;
-        const sh = P.shapes(v.width, v.height, v.seconds * fps) catch return engine.Refused.Refused;
+        const sh = P.shapes(v.width, v.height, v.seconds * fps) catch return refuse("{d}x{d} for {d} s is not a shape this model takes: omit size and seconds for its defaults", .{ v.width, v.height, v.seconds });
         const gpa = t.env.gpa;
         const frames = try gpa.alloc(u8, sh.frame_bytes);
         defer gpa.free(frames);
@@ -123,7 +124,9 @@ const MiniMaxH3 = struct {
         defer gpa.free(audio);
         var bridge: Bridge = .{ .sink = sink };
         _ = p.generate(v.prompt, v.width, v.height, v.seconds * fps, steps, v.seed, frames, audio, bridge.progress()) catch |err| switch (err) {
-            error.SizeNotMultipleOf32, error.RequestTooLarge, error.PromptTooLong => return engine.Refused.Refused,
+            error.SizeNotMultipleOf32 => return refuse("size {d}x{d}: each side must be a multiple of 32", .{ v.width, v.height }),
+            error.RequestTooLarge => return refuse("{d}x{d} for {d} s is more than this model takes: lower size or seconds", .{ v.width, v.height, v.seconds }),
+            error.PromptTooLong => return refuse("the prompt is longer than the text encoder takes: shorten it", .{}),
             else => return err,
         };
 
@@ -201,4 +204,10 @@ test "a video without a size gets the model's own; one it cannot make is refused
     const long: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448, .seconds = 6 } };
     try std.testing.expect(!check(cfg, &long, &why));
     try std.testing.expectEqualStrings("model 'h3' takes clips up to 5 seconds", why.buffered());
+}
+
+/// Refuses the request (the API's 400) with a reason the caller can act on.
+fn refuse(comptime fmt: []const u8, args: anytype) engine.Refused {
+    engine.explain(fmt, args);
+    return engine.Refused.Refused;
 }
