@@ -1403,7 +1403,7 @@ async function runTool(call, signal) {
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
   const kind = name === 'generate_video' ? 'video' : 'image';
-  const tm = addMsg({ role: 'tool', kind, callId: call.id, args, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
+  const tm = addMsg({ role: 'tool', kind, callId: call.id, args, owner: PAGE_ID, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
   dbg('tool.start', { name, args });
   if (name !== 'generate_image' && name !== 'generate_video') return jobFinished(tm, 'failed', [], `unknown tool ${name}`, kind);
   try {
@@ -1436,10 +1436,16 @@ function jobFinished(m, status, urls, error, kind) {
 // A voice generation never waits on one event: if job.done is late (the socket was replaced, the tab slept), the job is
 // asked for by id; a job that never started, or makes no progress, fails with a reason instead of spinning for ever.
 const NEVER_STARTED_MS = 45000, STALL_MS = { image: 240000, video: 1500000 };
+// This page load: an HTTP generation (the chat's own call, a retry) runs only as long as the page that started it.
+const PAGE_ID = Math.random().toString(36).slice(2);
 async function watchJobs() {
   if (!cur || document.hidden) return;
   const now = Date.now();
   for (const m of cur.msgs) {
+    if (m.role === 'tool' && m.via !== 'voice' && !(m.media && m.media.length) && !m.error && m.owner !== PAGE_ID) {
+      jobFinished(m, 'failed', [], 'interrupted (the page was reloaded)', m.kind);
+      continue;
+    }
     if (m.role !== 'tool' || m.via !== 'voice' || (m.media && m.media.length) || m.error || m.polling) continue;
     const kind = m.kind === 'video' ? 'video' : 'image';
     if (!m.jobId) {
@@ -1472,6 +1478,7 @@ async function retryTool(m) {
   m.media = null;
   m.jobId = null;
   m.via = 'retry';
+  m.owner = PAGE_ID;
   m.text = `making ${f.kind === 'video' ? 'a video' : 'a picture'}: ${f.prompt}`;
   draw(m);
   dbg('tool.retry', { kind: f.kind, prompt: f.prompt });
@@ -1484,14 +1491,18 @@ const voiceListed = (id, v) => {
 };
 // A tab left open across a deploy keeps running the old page (sending settings the server no longer knows): when the
 // served page changes, say so and offer a reload.
-let pageSum = null;
+let pageSum = null, pageNotified = null;
 async function checkPage() {
   try {
     const t = await (await fetch(location.pathname, { cache: 'no-store' })).text();
     let h = 0;
     for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
     if (pageSum === null) pageSum = h;
-    else if (h !== pageSum && !V.ws) toast('A new version of Jarvis is available', () => location.reload(), 'Reload', 60000);
+    else if (h !== pageSum && h !== pageNotified) {
+      pageNotified = h; // once a version; in a call it says what a reload costs
+      toast(V.ws ? 'Jarvis was updated. Reload to get the new version (this ends the call)' : 'A new version of Jarvis is available', () => location.reload(), 'Reload', 10 * 60 * 1000);
+      dbg('page.updated', { call: !!V.ws });
+    }
   } catch {}
 }
 function regenerate() {
@@ -1745,6 +1756,7 @@ function connect(my) {
     V.slow = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
+    checkPage(); // a tab left open across a deploy hears of it as a call starts, or reconnects to the new daemon
     V.retries = 0;
     sessionUpdate();
     seed();
@@ -2168,8 +2180,13 @@ function handle(ev) {
       }
       break;
     case 'localrouter.job.created': {
-      const m = V.byCall.get(ev.call_id);
-      if (m) { m.jobId = ev.job_id; m.seenAt = Date.now(); saveConv(); }
+      let m = V.byCall.get(ev.call_id) || cur.msgs.find(x => x.role === 'tool' && x.jobId && x.jobId === ev.job_id);
+      if (!m) { // a call whose function_call item this page missed: the card shows anyway
+        const kind = ev.kind === 'video' ? 'video' : 'image';
+        m = addMsg({ role: 'tool', kind, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: `, via: 'voice' });
+        if (ev.call_id) V.byCall.set(ev.call_id, m);
+      }
+      m.jobId = ev.job_id; m.seenAt = Date.now(); saveConv();
       break;
     }
     case 'localrouter.job.done': {

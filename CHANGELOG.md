@@ -12,6 +12,10 @@
     and to admit a failure.
   - A voice the model does not list is never sent.
   - A tab running a page older than the deploy offers a reload.
+  - It now checks as each call opens (and after a reconnect, which is how a deploy reaches an open call), and offers the
+    reload in a call too. A tab that predates the reel cannot hear of it: reload it once.
+  - The placeholder shows even when the page missed the call's item (it is made from `localrouter.job.created`). A
+    picture the chat asked for over HTTP that a reload interrupted is marked failed instead of waiting for ever.
   - On phones the reel shows as a strip under the call. The chat sidebar's off-canvas `aside` rule had moved it off
     screen, so that rule is now scoped to `#side`. With the reel open, the stage keeps the orb, its state and the reply.
 - A video request without a size gets the model's own size: 768x448 for MiniMax H3 by default, from its `max_width`
