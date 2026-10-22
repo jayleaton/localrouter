@@ -121,8 +121,9 @@ done <<< "$(pinned epatch)"
 
 # The named voices (model-invented, voices/SOURCES.md): copied to ROOT's voices directory, which must then hold
 # exactly the pinned files, since the server loads every *.json there.
-vdir= vpath=
-while read -r vdir vpath name digest; do
+voices=$(pinned voice)
+read -r vdir vpath _ <<< "$voices" # every line has the same two (a read past the last line would empty them)
+while read -r _ _ name digest; do
   got=$(sha "$here/$vdir/$name")
   [ "$got" = "$digest" ] || die "$vdir/$name sha256 $got, pinned $digest"
   if [ "$check" = 0 ]; then
@@ -131,8 +132,8 @@ while read -r vdir vpath name digest; do
   fi
   got=$(sha "$root/$vpath/$name" 2>/dev/null || echo missing)
   [ "$got" = "$digest" ] || die "$vpath/$name sha256 $got, pinned $digest"
-done <<< "$(pinned voice)"
-want=$(pinned voice | while read -r _ _ name _; do echo "$name"; done)
+done <<< "$voices"
+want=$(while read -r _ _ name _; do echo "$name"; done <<< "$voices")
 have=$(cd "$root/$vpath" && for f in *.json; do [ -e "$f" ] && echo "$f"; done)
 [ "$have" = "$want" ] || die "$vpath holds other *.json files than the pinned voices"
 echo "fetch.sh: $(grep -c . <<< "$want") voices verified in $root/$vpath"
