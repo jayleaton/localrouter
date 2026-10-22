@@ -11,9 +11,15 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model (and Kitten) to run, and the image model comes back after it |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
-Measured with everything warm: 42.4 GiB `MemAvailable` of about 115. A 1024x1024 image evicts only Kitten (the image needs 36 GiB plus the 8 GiB reserve; the lowest `MemAvailable` during it was 14 GiB); Drama 3 and Whisper stay, and the first voice turn after it reached first audio in 951 ms. The image job takes the fallback voice's memory
-(Kitten), and a video job takes part of the voice set. The scheduler brings the kept models back as soon as it is
-idle, within about 30 s of a clip.
+Memory, measured on DGX-01 (2026-10-22):
+- **With the warm set at full size** (chat 24 GiB with its 4 GiB prompt cache, Drama 3 43, Whisper 3.6, image 35.2):
+  about 9 GiB `MemAvailable` of about 115, and 13.7 GiB just after a start.
+- **The reserve is 6 GiB.** That leaves room for Whisper's 2 GiB working memory beside the full warm set; with 8 GiB,
+  each voice turn evicted the image model.
+- **A 1024x1024 image** on the warm model evicts nothing; the lowest `MemAvailable` was 11.8 GiB.
+- **A 1 s video** (40 GiB) evicts only the image model; the lowest was 11.7 GiB. The image model is back about 30 s
+  later.
+- **Chat, Drama 3 and Whisper** are never unloaded for an image or a video.
 
 ## Install, start, stop
 

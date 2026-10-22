@@ -14,7 +14,8 @@
 //! tools are loaded at start when they fit, skip the idle TTL, and come back by themselves once their lane has been
 //! idle for a moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one
 //! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
-//! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load.
+//! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load, and comes back
+//! only with room to spare for the working bytes of the kept tools above it (else their next job evicts it again).
 //!
 //! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
 //! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
@@ -340,7 +341,7 @@ pub const Scheduler = struct {
                 s.gate.unlock(s.io);
                 continue;
             }
-            if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate, c.priority)) {
+            if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate +| s.keptHeadroom(i), c.priority)) {
                 if (nowNs(s.io) >= slot.retry_ns) slot.unfit = true;
                 s.gate.unlock(s.io);
                 if (!wait_idle and nowNs(s.io) >= slot.retry_ns) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
@@ -375,6 +376,20 @@ pub const Scheduler = struct {
             if (st == .unloaded or st == .loading) return true;
         }
         return false;
+    }
+
+    /// The working bytes of the loaded `keep_loaded` tools of a higher priority than slot `i`: a kept tool comes back only
+    /// with that much to spare, or their next job unloads it again (DGX-01: every voice turn's transcription evicted the
+    /// kept image model, which reloaded as soon as the turn ended).
+    fn keptHeadroom(s: *Scheduler, i: usize) u64 {
+        const p = s.slots[i].tool.config().priority;
+        var bytes: u64 = 0;
+        for (s.slots, 0..) |*slot, j| {
+            const c = slot.tool.config();
+            if (j == i or !c.keep_loaded or c.priority <= p or slot.tool.state() == .unloaded) continue;
+            bytes +|= slot.tool.needs(&placeholder(c.kind)).working;
+        }
+        return bytes;
     }
 
     /// Marks `slot` in use with `bytes` admitted; under `gate`.

@@ -173,7 +173,7 @@ voice voice_warm voice --max-median-ms 1200 "${extra[@]}"
 if [ $quick = 0 ]; then
   record barge_in "$(jq -e '.barge_in.cut_status == "cancelled" and .barge_in.audio_deltas_after_speech_started == 0' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
     "$(jq -c '.barge_in // "missing"' "$out/voice/results.json" 2> /dev/null)"
-  record picture_turn "$(jq -e '.tool.job.status == "completed" and .tool.speech_end_to_first_audio_ms != null' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
+  record picture_turn "$(jq -e '.tool.job.status == "completed" and .tool.speech_end_to_confirmation_audio_s != null' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
     "$(jq -c '.tool | {first_audio_ms: .speech_end_to_first_audio_ms, job_done_s: .speech_end_to_job_done_s, confirmation_audio_s: .speech_end_to_confirmation_audio_s}' "$out/voice/results.json" 2> /dev/null)"
 fi
 
