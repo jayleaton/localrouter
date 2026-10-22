@@ -391,11 +391,13 @@ def main():
             click(cdp, "vmMin")
             snap(cdp, a.out, "18-chat-with-voice-phone-light")
             # Playback: typed prompts in voice mode get spoken replies too; the page's own output is analysed per reply.
-            # Three one-sentence replies, then a three-sentence one: the chat model still decodes it while its first sentence
-            # is spoken, and speech shares the GPU with it (slower than playback), so the client must hold its start.
+            # Three one-sentence replies (defaults), then a three-sentence one with "smooth start" on: the chat model still
+            # decodes it while its first sentence is spoken, and speech then shares the GPU (slower than playback).
             for n, text in enumerate(["Say good morning in one sentence.", "Name two colours of the rainbow, in a few words.",
                                       "What is two plus two? Answer in one short sentence.",
                                       "Tell me a little about lighthouses, in three sentences."][:a.replies]):
+                if n == 3 and a.slow_cap_ms is None:  # the long reply: the "smooth start" setting is what keeps it gapless
+                    cdp.js("window.jarvis.settings.smoothStart = true")
                 before = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length")
                 send(cdp, text)
                 cdp.wait(f"window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length > {before} && window.jarvis.voice.live === 0", 120, f"spoken reply {n + 1}")
