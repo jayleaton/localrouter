@@ -218,6 +218,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="for the image (a cold image model loads first)")
     ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker, voice and reel (its own --wav: a spoken picture request) to run, in that order")
     ap.add_argument("--reel-video", action="store_true", help="in the reel step, also generate and play a video (minutes)")
+    ap.add_argument("--desktop", default="1440x900", help="the reel step's desktop window, WIDTHxHEIGHT")
+    ap.add_argument("--profile", help="a Chrome profile to use and keep (one an earlier run, or an older client, left behind); default: a new one")
+    ap.add_argument("--expect-update", action="store_true", help="the page is older than the daemon's /voice: the call must offer the reload")
+    ap.add_argument("--call-after", help="the reel step's call waits for this file to exist (a deploy in between: the tab is then older than the daemon)")
     ap.add_argument("--start-wait-ms", type=int, help="the client's hold on a reply's start (0: start on the first piece, as before)")
     ap.add_argument("--slow-cap-ms", type=int, help="the client's hold on a slow stream's start (0: none, as in #28)")
     ap.add_argument("--preview-max", type=int, default=8, help="voices to preview in the picker step")
@@ -231,7 +235,11 @@ def main():
         checks.append({"check": name, "ok": bool(ok), "detail": detail})
         log(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  ({detail})"))
 
-    profile = tempfile.mkdtemp(prefix="jarvis-client-")
+    profile = a.profile or tempfile.mkdtemp(prefix="jarvis-client-")
+    os.makedirs(profile, exist_ok=True)
+    for f in ("DevToolsActivePort", "SingletonLock"):  # a kept profile's leftovers from its last browser
+        if os.path.lexists(os.path.join(profile, f)):
+            os.remove(os.path.join(profile, f))
     flags = ["--headless=new", "--remote-debugging-port=0", f"--user-data-dir={profile}", "--no-first-run",
              "--no-default-browser-check", "--disable-gpu", "--window-size=1280,900", "--autoplay-policy=no-user-gesture-required",
              "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--mute-audio"]
@@ -439,11 +447,19 @@ def main():
         # then a video plays. The realtime socket stays open throughout.
         if a.wav and "reel" in steps:
             theme(cdp, True)
-            size(cdp, 1440, 900, False)
+            size(cdp, *map(int, a.desktop.split("x")), False)
             VOICE_REPLIES = "window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text)"
             FINISHED = "window.jarvis.debug.filter(e => e.kind === 'tool.finished')"
+            while a.call_after and not os.path.exists(a.call_after):
+                time.sleep(2)
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected && window.jarvis.ui.voiceState === 'listening'", 30, "the voice session")
+            had = cdp.js("(() => { const r = document.getElementById('reel').getBoundingClientRect(), gens = window.jarvis.conversation.msgs.filter(m => m.role === 'tool' && !m.gone && (m.media && m.media.length ? true : m.error !== 'cancelled')).reduce((n, m) => n + (m.media && m.media.length ? m.media.length : 1), 0); return { reel: [r.x, r.width].map(Math.round), inner: innerWidth, cards: document.querySelectorAll('#reelList .rc').length, generations: gens }; })()")
+            check("reel: docked and on screen in the call, with every generation the conversation already has", had["reel"][1] > 0 and had["reel"][0] + had["reel"][1] <= had["inner"] and had["cards"] == had["generations"], had)
+            if a.expect_update:
+                cdp.wait("window.jarvis.debug.some(e => e.kind === 'page.updated') && !document.getElementById('toast').hidden", 20, "the update notice")
+                check("reel: a page older than the daemon offers the reload in the call", True, cdp.js("document.getElementById('toastText').textContent"))
+                snap(cdp, a.out, "19-update-notice-in-call")
             cdp.wait("!!(document.querySelector('#reelList .rc.pending') && document.querySelector('#log .card.pending'))", 90, "a placeholder in the reel and the chat")
             check("reel: the spoken request shows a placeholder in the reel and in the chat", True)
             snap(cdp, a.out, "20-reel-placeholder-desktop")
@@ -527,7 +543,8 @@ def main():
             chrome.wait(10)
         except subprocess.TimeoutExpired:
             chrome.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        if not a.profile:
+            shutil.rmtree(profile, ignore_errors=True)
     results["checks"] = checks
     results["passed"] = bool(checks) and all(c["ok"] for c in checks)
     with open(os.path.join(a.out, "results.json"), "w") as f:
