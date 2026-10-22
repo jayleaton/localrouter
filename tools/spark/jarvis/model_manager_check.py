@@ -235,7 +235,7 @@ def voice_session(user_text, timeout=1500):
             continue
         if t in ("response.audio_transcript.delta", "response.text.delta", "conversation.item.input_audio_transcription.delta"):
             continue
-        brief = {k: ev[k] for k in ("type", "model", "for_model", "status", "kind", "transcript", "text", "message") if k in ev}
+        brief = {("job_kind" if k == "kind" else k): ev[k] for k in ("type", "model", "for_model", "status", "kind", "transcript", "text", "message") if k in ev}
         if t == "response.output_item.done" and ev.get("item", {}).get("type") == "function_call":
             brief["call"] = (ev["item"]["name"], ev["item"]["arguments"])
         if t == "conversation.item.created" and ev.get("item", {}).get("type") == "function_call_output":
@@ -278,7 +278,8 @@ try:
         record["checks"]["checked_with_dry_run"] = any(e["kind"] == "tool" and e["name"] == "reserve_for" and e["arguments"].get("dry_run") for e in record["log"])
         record["checks"]["reserved_before_video"] = "reserve_for" in calls and "generate_video" in calls and calls.index("generate_video") > max(i for i, n in enumerate(calls) if n == "reserve_for")
         record["checks"]["made_the_video"] = any(e["kind"] == "tool" and e["name"] == "generate_video" and e["ok"] for e in record["log"])
-        record["checks"]["announced"] = any(e["kind"] == "assistant" and e.get("content") and e.get("tool_calls") for e in record["log"]) or any(e["kind"] == "assistant" and e.get("content") for e in record["log"][:-1])
+        cut = next((n for n, e in enumerate(record["log"]) if e["kind"] == "tool" and e["name"] == "reserve_for" and not e["arguments"].get("dry_run")), len(record["log"]))
+        record["checks"]["announced"] = any(e["kind"] == "assistant" and e.get("content") for e in record["log"][:cut])
         record["final_reply"] = next((e["content"] for e in reversed(record["log"]) if e["kind"] == "assistant"), "")
     elif SCENARIO == "voice":
         counts, events, state, open_after = voice_session(ASK)

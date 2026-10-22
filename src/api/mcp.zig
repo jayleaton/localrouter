@@ -245,8 +245,16 @@ const Pending = struct {
     }
 };
 
+/// The model `name` names: its id, or a kind ("video") when the machine has one model of that kind.
 fn modelIndex(app: *App, a: std.mem.Allocator, name: []const u8, out: *std.ArrayList(Content)) ToolError!usize {
-    return routes.toolIndex(app, name) orelse fail(a, out, "no model '{s}' on this machine; list_models names them", .{name});
+    if (routes.toolIndex(app, name)) |i| return i;
+    var found: ?usize = null;
+    for (app.scheduler.slots, 0..) |slot, i| {
+        if (!eql(@tagName(slot.tool.config().kind), name)) continue;
+        if (found != null) return fail(a, out, "more than one {s} model on this machine; name it by its id from list_models", .{name});
+        found = i;
+    }
+    return found orelse fail(a, out, "no model '{s}' on this machine; list_models names them", .{name});
 }
 
 fn loadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -271,7 +279,7 @@ fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList
 }
 
 fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, dry_run: bool = false, hold_s: u32 = 600, wait_s: u32 = 300 };
+    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
     const b = try parseArgs(Args, a, args, out);
     const i = try modelIndex(app, a, b.model, out);
     const cfg = app.scheduler.slots[i].tool.config();
@@ -611,7 +619,7 @@ const tool_list = [_]Tool{
     \\"size":{"type":"string","description":"WIDTHxHEIGHT of the job, to price it; omit for the model's default."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; default 5."},
     \\"dry_run":{"type":"boolean","default":false,"description":"true: unload nothing, only report what would go."},
-    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":600,"description":"The unloaded models come back after this even if the job never runs."},
+    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":180,"description":"The unloaded models come back after this even if the job never runs."},
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300,"description":"How long to wait for the unloads and the load."}},
     \\"additionalProperties":false}
     } },

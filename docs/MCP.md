@@ -68,7 +68,7 @@ full machine says `insufficient_memory`.
 | --- | --- | --- |
 | `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes`, `lane`, priority, `keep_loaded`, `qualified`; speech models' voices; the machine's `memory` |
 | `list_voices` | | each speech model's `voices`, `default_voice`, `state` and whether it is the default |
-| `reserve_for` | **`model`**, `seconds`, `size`, `dry_run`, `hold_s` (600), `wait_s` | what it unloads (or would) to fit the model's job, the bytes needed and free; the model loaded and held for its job. What it unloads comes back by itself after the job. Never a chat model |
+| `reserve_for` | **`model`**, `seconds`, `size`, `dry_run`, `hold_s` (180), `wait_s` | what it unloads (or would) to fit the model's job, the bytes needed and free; the model loaded and held for its job. What it unloads comes back by itself after the job. Never a chat model |
 | `unload_model` | **`model`**, `hold_s` (120) | one model unloaded now, back by itself after `hold_s`. A chat model is refused |
 | `load_model` | **`model`**, `wait_s` | loads it (refused if it would need the chat model's memory) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning`, `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format` | the reply's text (or its tool calls as JSON), then the whole completion |

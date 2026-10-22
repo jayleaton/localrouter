@@ -14,9 +14,12 @@ explicitly lets you tell the user first, and lets you check that everything came
 | Tool | Use |
 | --- | --- |
 | `list_models` | each model's `state`, `resident_bytes`, `needs_bytes` (its default job), `displaced` (unloaded to make room, coming back), `held`; `memory.mem_available_bytes`, `memory.reserve_bytes`, `memory.voice_paused` |
-| `reserve_for` | `model`, `seconds`/`size` (to price the job), `dry_run`, `hold_s` (default 600): what it would unload, or unloads it (never a chat model), loads the model and holds it for its next job. What it unloads comes back by itself when that job is done, or after `hold_s` |
+| `reserve_for` | `model`, `seconds`/`size` (to price the job), `dry_run`, `hold_s` (default 180): what it would unload, or unloads it (never a chat model), loads the model and holds it for its next job. What it unloads comes back by itself when that job is done, or after `hold_s` |
 | `unload_model` | `model`, `hold_s` (default 120): one model now; it comes back by itself after `hold_s`. A chat model is refused |
 | `load_model` | `model`, `wait_s`: bring one back now (refused if it would need the chat model's memory) |
+
+`model` is an id from `list_models`, or a kind (`video`, `image`, `speech`, `transcription`) when the box has one
+model of that kind.
 
 Voice sessions on the box are told before a voice model is unloaded (`localrouter.voice.paused`) and when they are back
 (`localrouter.voice.resumed`). While voice is paused they keep the call open: replies are text only, the user's turns

@@ -65,8 +65,8 @@ test "model tools: reserve_for unloads the image model only, never chat, and it 
     defer d.stop();
     try warm(&d, a);
 
-    // The dry run names the image model and changes nothing.
-    const dry = try result(a, try mcpCall(&d, a, "reserve_for", "{\"model\":\"vid\",\"dry_run\":true}"));
+    // The dry run (the model named by its kind) names the image model and changes nothing.
+    const dry = try result(a, try mcpCall(&d, a, "reserve_for", "{\"model\":\"video\",\"dry_run\":true}"));
     try testing.expect(dry.ok);
     try testing.expectEqual(@as(usize, 1), names(dry.v).len);
     try testing.expectEqualStrings("img", names(dry.v)[0].string);
