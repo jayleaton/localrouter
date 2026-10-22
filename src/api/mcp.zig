@@ -238,8 +238,8 @@ const Pending = struct {
         const deadline = std.Io.Clock.awake.now(app.io).addDuration(.fromSeconds(@min(wait_s, max_wait_s)));
         while (!p.c.done.isSet() and std.Io.Clock.awake.now(app.io).nanoseconds < deadline.nanoseconds)
             std.Io.sleep(app.io, .fromMilliseconds(100), .awake) catch break;
-        const finished = p.c.done.isSet();
-        const r: Result = .{ .finished = finished, .failed = finished and p.c.failed, .message = try a.dupe(u8, if (finished) p.c.message else ""), .plan = p.c.plan };
+        const ended = p.c.done.isSet();
+        const r: Result = .{ .finished = ended, .failed = ended and p.c.failed, .message = try a.dupe(u8, if (ended) p.c.message else ""), .plan = p.c.plan };
         if (p.gone.swap(true, .acq_rel)) app.gpa.destroy(p);
         return r;
     }
