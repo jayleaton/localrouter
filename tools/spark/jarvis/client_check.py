@@ -473,12 +473,11 @@ def main():
             check("reel: closing the lightbox returns to the orb", cdp.js("!document.getElementById('lightbox').open && !document.getElementById('vm').hidden && document.activeElement === document.getElementById('orb')"))
             # A request the image model refuses (over its size limit): the failed card, and the reply admits it.
             nf = cdp.js(f"{FINISHED}.length")
-            n = cdp.js(f"{VOICE_REPLIES}.length")
             cdp.js("window.jarvis.say('Make me a big poster of a penguin, size 2048x2048.'); true")
             fail = cdp.wait(f"{FINISHED}.slice({nf}).find(e => e.status !== 'completed')", 120, "the refused picture")
             fail_at = cdp.js(f"{FINISHED}.slice({nf}).find(e => e.status !== 'completed').t")
             cdp.wait("!!document.querySelector('#reelList .rc.failed .btn')", 10, "the failed card")
-            cdp.wait(f"{VOICE_REPLIES}.length >= {n} + 2 && window.jarvis.voice.live === 0", 120, "the reply after the failure")
+            cdp.wait(f"{VOICE_REPLIES}.some(x => x.at > performance.timeOrigin + {fail_at}) && window.jarvis.voice.live === 0", 120, "the reply after the failure")
             said = cdp.js(f"{VOICE_REPLIES}.filter(x => x.at > performance.timeOrigin + {fail_at}).map(x => x.text)")
             check("reel: a refused picture shows a failed card with Retry", True, fail)
             check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|fail|sorry|unable|limit|up to|instead|too large)\b", t, re.I) for t in said), said)
