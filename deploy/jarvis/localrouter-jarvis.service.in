@@ -1,0 +1,22 @@
+# LocalRouter, the whole Jarvis box: a systemd user unit (install.sh renders the @…@ paths and installs it).
+# Loopback only; tailscale serve puts HTTPS in front of it for the tailnet (install.sh).
+[Unit]
+Description=LocalRouter Jarvis (chat, voice, image, video) on 127.0.0.1:@PORT@
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=@DEPLOY@
+Environment=PATH=@J@/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@DEPLOY@/current/zig-out/bin/localrouter serve --config @DEPLOY@/config.json --host 127.0.0.1 --port @PORT@ --data @DEPLOY@/data
+# Workers are in this unit's cgroup: stopping it stops every model. GB10 memory is unified; 112 GiB leaves the host room.
+KillMode=control-group
+MemoryMax=112G
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
