@@ -9,6 +9,8 @@ Python 3 standard library only (it runs on the GPU host with `python3 -I`, next 
      Phone layout: nothing wider than the screen, touch targets large enough. Voice picker: engines, voices, a preview.
   4. Voice (with --wav): Chrome's fake microphone plays WAV once (padded with silence); start voice hands-free and
      see the transcript, a spoken reply and its measured "speech end to first audio"; each voice-view state photographed.
+     Then three typed one-sentence prompts in voice mode; the page's own output is recorded after its mixer, and no
+     reply may have a playback gap over 30 ms or a click in its first 2 s. --start-wait-ms 0 measures the old start.
 Screenshots (desktop and phone width) and results.json go to OUT. Exit 0 only when every check passed.
 
     python3 -I client_check.py --base https://host:10443 --out ~/jarvis/client-shots/RUN [--page voice.html] [--wav p.wav]
@@ -214,6 +216,8 @@ def main():
     ap.add_argument("--image", default="Please make me a picture of a red fox sitting in fresh snow.")
     ap.add_argument("--timeout", type=int, default=600, help="for the image (a cold image model loads first)")
     ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker and voice to run, in that order")
+    ap.add_argument("--start-wait-ms", type=int, help="the client's hold on a reply's start (0: start on the first piece, as before)")
+    ap.add_argument("--replies", type=int, default=3, help="typed prompts spoken in voice mode after the spoken turn, for playback stats")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     results, checks = {"base": a.base, "page": a.page or "(the daemon's)"}, []
@@ -349,6 +353,7 @@ def main():
         if a.wav and "voice" in steps:
             theme(cdp, True)
             size(cdp, 390, 844, True)
+            cdp.js("window.jarvis.recordOutput = true" + (f"; window.jarvis.settings.startWaitMs = {a.start_wait_ms}" if a.start_wait_ms is not None else ""))
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected", 20, "the voice session")
             seen, order = {}, ["connecting", "listening", "hearing", "thinking", "speaking"]
@@ -383,6 +388,22 @@ def main():
             snap(cdp, a.out, "17-voice-listening-phone-light")
             click(cdp, "vmMin")
             snap(cdp, a.out, "18-chat-with-voice-phone-light")
+            # Playback: typed prompts in voice mode get spoken replies too; the page's own output is analysed per reply.
+            # One-sentence replies: the chat model has finished before the speech streams, so a gap is the client's.
+            # (A longer reply streams slower than it plays while the chat model still decodes on the same GPU.)
+            for n, text in enumerate(["Say good morning in one sentence.", "Name two colours of the rainbow, in a few words.",
+                                      "What is two plus two? Answer in one short sentence."][:a.replies]):
+                before = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length")
+                send(cdp, text)
+                cdp.wait(f"window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length > {before} && window.jarvis.voice.live === 0", 120, f"spoken reply {n + 1}")
+                time.sleep(0.6)
+            onsets = cdp.js("window.jarvis.output(2000, 30)") or []
+            gaps = cdp.js("window.jarvis.voice.gaps")
+            lat = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && x.lat && x.lat.firstAudio != null).map(x => x.lat.firstAudio)")
+            bad = [o for o in onsets if o["gaps_over"] or o["longest_gap_ms"] > 30 or o["clicks"]]
+            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "arrivals": cdp.js("window.jarvis.arrivals")}
+            check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
+            check("voice: no playback gap over 30 ms or click in the first 2 s of any reply", not bad, bad or onsets)
             click(cdp, "vbarEnd")
         results["console_errors"] = console[:20]
         check("page: no script errors", not [c for c in console if "Uncaught" in c or "Error" in c], console[:5])

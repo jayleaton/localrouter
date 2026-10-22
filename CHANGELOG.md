@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Jarvis client: a spoken reply no longer stutters as it starts.
+  - Its audio is held until 200 ms is buffered, or 150 ms after the first piece, then scheduled back to back. Drama
+    3's 46 ms first piece used to run dry before the next burst.
+  - The cost is 86 to 110 ms on first audio.
+  - `client_check.py` records the page's output and fails on a playback gap over 30 ms, or a click, in a reply's
+    first 2 s.
 - Drama 3 speaks in fixed voices: six named speakers the model itself invented (`Mae` by default, `Arlo`, `Ezra`,
   `Nora`, `Theo`, `Wren`), pinned and installed by `fetch.sh`, so every sentence of every reply is the same voice.
   The built-in voice was a different speaker for each sentence. A pinned engine patch keeps each voice's prefilled
