@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Speech first: while the daemon makes speech, image and video workers pause between their diffusion steps (and
+  before the VAE), so a reply never stutters while a picture or clip generates. Each wait is at most 6 s and a job's
+  waits at most 30 s in all. The gate is a flock on `<data>/locks/speech.gate`. On DGX-01, streamed Drama 3 replies
+  played during a picture had a gap over 30 ms in the first 2 s in 8 of 8 trials before and 0 of 8 after (real-time
+  factor 0.55 to 0.75 before, 1.15 to 1.27 after). A picture took 8.3 to 8.5 s (13.7 s alongside a 10 s reply).
 - Voice: "Wait before replying" is the end of the turn: 0.3, 0.5, 0.8, 1, 1.5, 2, 3, 4 or 5 s, default 0.8 s, kept in
   settings. It replaces "Pause before I reply", and stored values start again at 0.8 s.
   - The turn ends on one unbroken quiet run that long. Speech restarts it, so pauses never add up. In a pause, a
