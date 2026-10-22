@@ -145,7 +145,7 @@ if [ $quick = 0 ]; then
     st=$(curl -fs -m 10 "$url/v1/videos/$id" | jq -r .status); [ "$st" = completed ] || [ "$st" = failed ] && break; sleep 1
   done
   [ "$st" = completed ] && curl -s -m 60 -o "$out/video.mp4" "$url/v1/videos/$id/content"
-  record video "$([ "$st" = completed ] && [ "$(head -c 12 "$out/video.mp4" 2> /dev/null | tail -c 4)" = ftyp ] && echo true || echo false)" "$(secs $t)" "job ${id:-none}: $st, $(stat -c %s "$out/video.mp4" 2> /dev/null || echo 0) B"
+  record video "$([ "$st" = completed ] && [ "$(head -c 8 "$out/video.mp4" 2> /dev/null | tail -c 4)" = ftyp ] && echo true || echo false)" "$(secs $t)" "job ${id:-none}: $st, $(stat -c %s "$out/video.mp4" 2> /dev/null || echo 0) B"
   # the kept-warm models are back after it (the scheduler reloads them as soon as it is idle)
   t=$(now); state=""
   for _ in $(seq 120); do
