@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), slow: null, textDone: new Set(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), slow: null, contend: null, firstAt: new Map(), textDone: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -2002,6 +2002,18 @@ const START_MS = 200, START_WAIT_MS = 150, SLOW_CAP_MS = 1000;
 // While a picture or video is being made, a reply starts with more in hand: speech pauses the generation between its
 // steps (speech first), but the step already on the GPU, about 0.7 s, still slows the reply's first words.
 const GEN_START_MS = 500, GEN_WAIT_MS = 900;
+// While the chat model is still writing the reply, speech shares the GPU with it and runs below real time, so a start
+// with only Drama 3's 46 ms first piece in hand ran dry at once (a 172 ms stall measured on DGX-01). Then the start
+// waits for enough in hand to play the first CONTEND_SPAN_MS without running dry at the rate the audio is coming in
+// (at rate p, CONTEND_SPAN_MS x (1 - p), at least START_MS, at most CONTEND_MAX_MS), or the chat model done (speech then
+// has the GPU and catches up), or CONTEND_CAP_MS after the first piece. A stream that keeps up never waits here.
+const CONTEND_SPAN_MS = 3000, CONTEND_MAX_MS = 1000, CONTEND_CAP_MS = 1500;
+function contendNeed(item) {
+  const since = performance.now() - (V.firstAt.get(item) || performance.now());
+  const first = (V.held.find(p => p.item === item) || { buf: { duration: 0 } }).buf.duration * 1000;
+  const rate = since > 100 ? (have(item) - first) / since : 0; // audio ms a wall ms, after the first piece (0: unknown yet)
+  return Math.min(CONTEND_MAX_MS, CONTEND_SPAN_MS * (1 - Math.min(rate, 1)));
+}
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
 const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
 function decode(b64) {
@@ -2027,10 +2039,11 @@ function play(item, b64) {
   if (V.rec) V.rec.arrivals.push([Math.round(performance.now()), item, piece.buf.length]);
   if (V.started.has(item)) return schedule(item, piece);
   const wait = S.startWaitMs ?? (generating() ? GEN_WAIT_MS : START_WAIT_MS);
+  if (!V.held.some(p => p.item === item)) V.firstAt.set(item, performance.now());
   V.held.push({ item, ...piece });
   if (wait <= 0) return release(item, 0.05);
-  if (have(item) >= (V.slow === item ? slowCap() : startMs())) return release(item, 0.01);
-  if (!V.holdTimer && V.slow !== item) V.holdTimer = setTimeout(() => startOrWait(item), wait);
+  if (have(item) >= (V.slow === item ? slowCap() : slowCap() > 0 ? startMs() : holdNeed(item))) return release(item, 0.01);
+  if (!V.holdTimer && V.slow !== item && V.contend !== item) V.holdTimer = setTimeout(() => startOrWait(item), wait);
 }
 // The slow-start hold is the "smooth start" setting (off by default): it removes a long reply's stutter for about a
 // second more before its first word (measured on DGX-01: replies with a gap in their first 2 s 8/10 -> 0/10, first
@@ -2043,10 +2056,21 @@ const have = item => V.held.filter(p => p.item === item).reduce((s, p) => s + p.
 // and catches up) or SLOW_CAP_MS in hand, whichever is first: one short wait instead of a stutter every few words.
 function startOrWait(item) {
   V.holdTimer = 0;
-  if (V.textDone.has(item) || have(item) >= startMs() || slowCap() <= 0) return release(item, 0.01);
-  V.slow = item;
-  dbg('voice.slow_start', { item, have_ms: Math.round(have(item)) });
+  if (have(item) >= (slowCap() > 0 ? startMs() : holdNeed(item))) return release(item, 0.01);
+  if (slowCap() > 0) { // the "smooth start" setting
+    if (V.textDone.has(item)) return release(item, 0.01);
+    V.slow = item;
+    return dbg('voice.slow_start', { item, have_ms: Math.round(have(item)) });
+  }
+  // Not START_MS in hand yet: hold on, never past CONTEND_CAP_MS from the first piece. Once the chat model is done, speech
+  // has the GPU and the rest of START_MS comes within about 100 ms; while it still writes, hold for contendNeed.
+  const left = CONTEND_CAP_MS - (performance.now() - (V.firstAt.get(item) || 0));
+  if (left <= 0 || have(item) >= holdNeed(item)) return release(item, 0.01);
+  if (V.contend !== item && !V.textDone.has(item)) dbg('voice.contend_start', { item, have_ms: Math.round(have(item)) });
+  V.contend = item; // released by more audio (play) or the cap
+  V.holdTimer = setTimeout(() => startOrWait(item), Math.min(left, 25));
 }
+const holdNeed = item => (V.textDone.has(item) ? startMs() : Math.max(startMs(), contendNeed(item)));
 function textDone(item) {
   V.textDone.add(item);
   if (V.slow === item && V.held.some(p => p.item === item)) release(item, 0.01);
@@ -2056,6 +2080,8 @@ function release(item, lead) {
   clearTimeout(V.holdTimer);
   V.holdTimer = 0;
   if (V.slow === item) V.slow = null;
+  if (V.contend === item) V.contend = null;
+  V.firstAt.delete(item);
   if (!V.ctx || V.cut.has(item)) { V.held = []; return; }
   V.started.add(item);
   const held = V.held.filter(p => p.item === item);
@@ -2080,7 +2106,7 @@ function schedule(item, { buf, loudAt, rms }) {
   const start = V.nextTime;
   src.start(start);
   V.nextTime = start + buf.duration;
-  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; }
+  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
@@ -2113,7 +2139,7 @@ async function startTap() {
   sink.gain.value = 0;
   V.out.connect(node);
   node.connect(sink).connect(V.ctx.destination);
-  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
+  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), srcs: [], t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
   node.port.onmessage = e => V.rec.chunks.push(e.data);
 }
 // Each speech onset (sound after 300 ms of quiet): within `windowMs` of it, the longest exact-zero run that
@@ -2132,16 +2158,24 @@ function outputStats(windowMs = 2000, gapMs = 30) {
     if (zeros >= quiet) {
       const t = V.rec.t0 + i / r, sp = [...V.rec.spans.values()].find(s => t >= s.a - 0.1 && t < s.b);
       const end = Math.min(n, i + win, sp ? Math.max(i + 1, Math.round((sp.b - V.rec.t0) * r)) : n);
-      let run = 0, longest = 0, gaps = 0;
+      let run = 0, longest = 0, longestAt = 0, gaps = 0, glitch = 0, glitches = 0;
       const steps = new Float32Array(end - i - 1);
       for (let k = i + 1; k < end; k++) {
         steps[k - i - 1] = Math.abs(x[k] - x[k - 1]);
         if (x[k] === 0) { run++; continue; }
-        if (run) { if (run > longest) longest = run; if (run >= gapMin) gaps++; run = 0; }
+        if (run) {
+          // Silence with no audio scheduled is a delivery gap (the stream ran dry); silence while a source was scheduled to play
+          // is the browser's audio rendering missing its deadline (CPU load), not the stream.
+          const ts = V.rec.t0 + (k - run) / r, te = V.rec.t0 + k / r;
+          const played = V.rec.srcs.some(([a, b]) => a <= ts + 0.003 && b >= te - 0.003);
+          if (played) { if (run > glitch) glitch = run; if (run >= gapMin) glitches++; }
+          else { if (run > longest) { longest = run; longestAt = k - run - i; } if (run >= gapMin) gaps++; }
+          run = 0;
+        }
       }
       const p99 = Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0;
       const clicks = steps.filter(s => s > Math.max(4 * p99, 0.2)).length;
-      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, clicks, p99_step: +p99.toFixed(4), window_ms: Math.round((end - i) / r * 1000) });
+      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, gap_at_ms: Math.round(longestAt / r * 1000), reply: sp ? [...V.rec.spans].find(([, s]) => s === sp)[0] : null, reply_ms: sp ? Math.round((sp.b - sp.a) * 1000) : null, render_gap_ms: Math.round(glitch / r * 1000), render_gaps: glitches, clicks, p99_step: +p99.toFixed(4), window_ms: Math.round((end - i) / r * 1000) });
       i = end - 1;
     }
     zeros = 0;
