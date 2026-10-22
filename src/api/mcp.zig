@@ -522,7 +522,7 @@ const tool_list = [_]Tool{
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
     \\{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"A job id from generate_video, generate_image, transcribe_audio or a /v1 response."},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"How long to wait for it to finish."}},"additionalProperties":false}
     } },
-    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job (an image, video or transcription by the id those tools or get_job returned); a chat or speech model stays loaded, any other job's worker is stopped.", .inputSchema = .{ .text =
+    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job (an image, video or transcription by the id those tools or get_job returned). A cancelled job's model may be stopped, and loads again on its next use.", .inputSchema = .{ .text =
     \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}},"additionalProperties":false}
     } },
     .{ .name = "release_models", .title = "Release models", .description = "Unloads every model now, returning its memory to the machine (they also unload by themselves when idle).", .inputSchema = .{ .text =
