@@ -253,6 +253,10 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
 - An echo guard sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a row say
   someone is talking over it.
 - Minimizing keeps the session on: a bar above the composer shows its state, and typed messages get spoken replies.
+- **Reconnects.** When the connection closes without being asked to (the service restarting, a proxy dropping it),
+  the page opens a new session after 1, 2, 4 and up to 15 s, sends the settings and the conversation again, and keeps
+  the microphone and the view. Per-item state is reset, since a new session numbers its items from 1. Voice ends only
+  after about a minute of failures.
 - **Playback start.** A reply's audio is held until 200 ms of it is in hand, or 150 ms after its first piece came,
   then scheduled back to back on the AudioContext clock.
   - Drama 3 streams a 46 ms first piece, then a 186 ms burst about every 125 ms (1.49 times real time). The first
@@ -275,12 +279,14 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   client.
 
 **Voice picker.**
-- In the settings drawer you choose the speech engine (Drama 3, Kitten) and its voice.
-- The list comes from a voice-list API when the daemon has one (`GET /v1/audio/voices?model=ID`, then
-  `/v1/voices?model=ID`). The page reads an array, or `{data|voices: [...]}`, of names or of
-  `{id|voice, name, description, preview_url}`. Without such an API it uses the model's `voices` from `/v1/models`.
-- Each voice has a preview button, which plays `preview_url` or speaks a short line through `/v1/audio/speech`.
-- The choice is kept per engine and sent as the session's `voice`.
+- The voices are exactly what `/v1/models` lists for the speech model in use (names, or `{id, name, description,
+  preview_url}`). The engine choice appears only when more than one speech model is listed.
+- Each voice has a preview button. It plays `preview_url`, or speaks a short line through `/v1/audio/speech` with
+  that voice's model. While the model is loading (a 503), the preview waits up to 90 s.
+- The choice is kept per engine and sent as the session's `voice`. Settings the daemon no longer lists, such as a
+  removed engine or Drama 3's single "default" voice from before its named voices, are dropped when the models
+  load. Every sentence would otherwise fail with "has no voice". A session that refuses a voice anyway (an `error`
+  naming it) gets the default instead.
 
 **Settings drawer.**
 - Chat model, reasoning, tools, max tokens and instructions.

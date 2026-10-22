@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Jarvis client voice fixes:
+  - A voice call survives the connection closing (a service restart): it reconnects with backoff and goes on. It used
+    to show "Voice disconnected" and stop.
+  - Saved voice settings the daemon no longer lists (Drama 3's "default" voice from before its named voices, a
+    removed engine) are dropped. They had made every spoken reply fail with "has no voice" and made previews fail.
+  - The voice picker shows exactly what `/v1/models` lists, with no engine choice when there is one engine.
+  - Previews wait for a loading model.
 - Jarvis client: a spoken reply no longer stutters as it starts.
   - Its audio is held until 200 ms is buffered, or 150 ms after the first piece, then scheduled back to back. Drama
     3's 46 ms first piece used to run dry before the next burst.

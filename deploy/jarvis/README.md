@@ -6,8 +6,9 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
-| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), priority 50, kept warm, on the `main` lane: its reload (about 30 s with the graph capture) would otherwise hold the realtime lane and Drama 3's speech behind it |
-| Image, video | `qwen-image-2.1-turbo` (idle 60 s), `minimax-h3` (idle 30 s), on demand |
+| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), **on demand** (it loads only if Drama 3 fails or a Kitten voice is asked for), priority -10 (the first to be evicted), on the `main` lane: its load (about 30 s with the graph capture) never holds the realtime lane |
+| Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load |
+| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model (and Kitten) to run, and the image model comes back after it |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
 Measured with everything warm: 42.4 GiB `MemAvailable` of about 115. A 1024x1024 image evicts only Kitten (the image needs 36 GiB plus the 8 GiB reserve; the lowest `MemAvailable` during it was 14 GiB); Drama 3 and Whisper stay, and the first voice turn after it reached first audio in 951 ms. The image job takes the fallback voice's memory
@@ -18,7 +19,7 @@ idle, within about 30 s of a clip.
 
 ```sh
 deploy/jarvis/install.sh   # preflight, build into ~/jarvis/deploy/src/<commit>, config, unit, tailscale serve
-deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and Kitten are warm (about 40 s)
+deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and the image model are warm
 deploy/jarvis/status.sh    # unit, build, each model's state and memory, URLs
 deploy/jarvis/stop.sh      # stop every model (and a Drama 3 server a killed worker left); --disable: off at boot too
 journalctl --user -u localrouter-jarvis -f          # the daemon; models log to ~/jarvis/deploy/data/logs/

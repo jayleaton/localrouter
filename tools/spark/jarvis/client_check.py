@@ -218,6 +218,8 @@ def main():
     ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker and voice to run, in that order")
     ap.add_argument("--start-wait-ms", type=int, help="the client's hold on a reply's start (0: start on the first piece, as before)")
     ap.add_argument("--slow-cap-ms", type=int, help="the client's hold on a slow stream's start (0: none, as in #28)")
+    ap.add_argument("--preview-max", type=int, default=8, help="voices to preview in the picker step")
+    ap.add_argument("--stale-settings", action="store_true", help="start from settings an older client kept (a voice and an engine the daemon no longer lists): they must be cleaned")
     ap.add_argument("--replies", type=int, default=4, help="typed prompts spoken in voice mode after the spoken turn, for playback stats")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -265,6 +267,13 @@ def main():
         check("page: loads, lists the models and shows their state", len(results["models"]) >= 2, results["models"])
         results["pill"] = cdp.js("[document.getElementById('statusPill').dataset.s, document.getElementById('statusPill').textContent]")
         check("page: the status pill shows the stack's state", results["pill"][0] in ("ready", "busy", "loading"), results["pill"])
+        if a.stale_settings:  # what an older client kept: Drama 3's pre-#25 voice and an engine that is gone
+            cdp.js("""localStorage.setItem('jarvis.settings', JSON.stringify(Object.assign(JSON.parse(localStorage.getItem('jarvis.settings') || '{}'),
+                { speechModel: 'retired-tts-model', voices: { 'fishaudio/drama-3': 'default', 'retired-tts-model': 'Bruno' } }))); location.reload(); true""")
+            time.sleep(1.5)
+            cdp.wait("window.jarvis && window.jarvis.ready", 60, "the page after a reload")
+            kept = cdp.js("({ speechModel: window.jarvis.settings.speechModel, voices: window.jarvis.settings.voices })")
+            check("settings: a voice or engine the daemon no longer lists is dropped", kept["speechModel"] == "" and "default" not in (kept["voices"] or {}).values() and "retired-tts-model" not in (kept["voices"] or {}), kept)
         cdp.js("localStorage.clear(); document.getElementById('newChat').click(); true")
         snap(cdp, a.out, "01-empty-desktop-light")
         unnamed = cdp.js(UNNAMED)
@@ -331,23 +340,29 @@ def main():
 
         # The voice picker: the engines, their voices (from a voice-list API when there is one), a preview.
         if "picker" in steps:
+            # The picker lists exactly what /v1/models lists; one engine: no engine choice; every voice previews.
+            speech = cdp.js("fetch('/v1/models').then(r => r.json()).then(j => j.data.filter(m => m.kind === 'speech').map(m => ({ id: m.id, voices: m.voices || [], def: m.default_voice })))")
             cdp.js("document.getElementById('gear').click(); true")
-            cdp.wait("document.querySelectorAll('#engines .engine').length > 0 && document.querySelectorAll('#voices .vrow').length > 0", 20, "the voice picker")
-            engines = cdp.js("[...document.querySelectorAll('#engines .engine b')].map(b => b.textContent)")
-            pick = cdp.js("""(() => { const e = [...document.querySelectorAll('#engines .engine')]; const many = e.find(x => /kitten/i.test(x.textContent)) || e[e.length - 1]; many.click(); return many.textContent; })()""")
-            n = cdp.wait("document.querySelectorAll('#voices .vrow').length > 1 && document.querySelectorAll('#voices .vrow').length", 20, "the engine's voices")
+            cdp.wait("document.querySelectorAll('#voices .vrow').length > 0", 20, "the voice picker")
+            engine_hidden = cdp.js("document.getElementById('engines').parentElement.hidden")
+            check("picker: the engine choice shows only when there is more than one engine", engine_hidden == (len(speech) < 2), {"engines": [s["id"] for s in speech], "hidden": engine_hidden})
+            shown = cdp.js("[...document.querySelectorAll('#voices .vrow')].map(b => b.dataset.voice)")
+            want = next((s["voices"] for s in speech if s["id"] == cdp.js("window.jarvis.engine")), [])
+            check("picker: the voices are exactly what /v1/models lists", shown == want, {"shown": shown, "listed": want})
             cdp.js("document.getElementById('voiceSect').scrollIntoView(); true")
             time.sleep(0.3)
             snap(cdp, a.out, "08-voice-picker-phone")
-            mark = cdp.js("window.jarvis.debug.length")
-            cdp.js("document.querySelector('#voices .play').click(); true")
-            prev = cdp.wait(f"window.jarvis.debug.slice({mark}).find(e => e.kind === 'voice.preview')", 120, "a voice preview")
-            results["picker"] = {"engines": engines, "picked": pick, "voices": n, "preview": prev,
-                                 "sources": cdp.js("window.jarvis.debug.filter(e => e.kind === 'voices')")}
-            check("picker: engines and their voices are listed", len(engines) >= 1 and n > 1, results["picker"])
-            check("picker: a voice preview plays", prev and prev.get("bytes", 0) > 1000 and not prev.get("error"), prev)
-            cdp.js("""(() => { const p = document.querySelector('.play[data-playing="1"]'); if (p) p.click();
-                const e = [...document.querySelectorAll('#engines .engine')][0]; e.click(); document.getElementById('drawer').close(); return true; })()""")
+            previews = []
+            for v in shown[:a.preview_max]:
+                mark = cdp.js("window.jarvis.debug.length")
+                cdp.js(f"document.querySelector('#voices .play[data-voice=\"{v}\"]').click(); true")
+                prev = cdp.wait(f"window.jarvis.debug.slice({mark}).find(e => e.kind === 'voice.preview' && e.voice === {json.dumps(v)})", 150, f"the preview of {v}")
+                previews.append(prev)
+                cdp.js("(() => { const p = document.querySelector('.play[data-playing=\"1\"]'); if (p) p.click(); return true; })()")
+            results["picker"] = {"speech_models": speech, "shown": shown, "previews": previews}
+            bad = [p for p in previews if not p or p.get("error") or p.get("bytes", 0) < 1000]
+            check(f"picker: a preview of each voice plays ({len(previews)})", previews and not bad, bad or [(p["voice"], p["bytes"], p["ms"]) for p in previews])
+            cdp.js("document.getElementById('drawer').close(); true")
             time.sleep(0.4)
 
         # Voice: hands-free, the fake microphone says the prompt once; each state of the voice view is photographed.
@@ -378,6 +393,12 @@ def main():
             check("voice: the spoken prompt is transcribed into the conversation", len(m["heard"]) > 3, m["heard"])
             check("voice: a spoken reply, with speech end to first audio measured", m["lat"].get("firstAudio") is not None, results["voice"]["lat"])
             check("voice: the view showed listening, hearing, thinking and speaking", {"listening", "hearing", "thinking", "speaking"} <= set(seen), sorted(seen))
+            # The connection drops mid-call (a service restart, a proxy): the page reconnects and the call goes on.
+            mark = cdp.js("window.jarvis.debug.length")
+            cdp.js("window.jarvis.dropVoiceSocket(); true")
+            back = cdp.wait(f"window.jarvis.debug.slice({mark}).find(e => e.kind === 'voice.reconnected')", 40, "the voice session to reconnect")
+            check("voice: a dropped connection reconnects and the call goes on", back and cdp.js("window.jarvis.voice.connected"), back)
+            cdp.wait("window.jarvis.ui.voiceState === 'listening'", 30, "listening again")
             click(cdp, "talk")
             check("voice: the big button mutes", cdp.js("window.jarvis.ui.voiceState") == "muted")
             snap(cdp, a.out, "15-voice-muted-phone")
