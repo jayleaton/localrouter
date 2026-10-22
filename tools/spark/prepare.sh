@@ -140,6 +140,7 @@ if ! { pack_done && shipped_done; }; then
     have_ckpt || { echo "prepare: the MiniMax-H3 checkpoints are not all in $V (network? disk?):" >&2
                    for f in "${CKPT[@]}"; do [[ -s $V/$f ]] || echo "  missing $f" >&2; done; exit 1; }
     verified $V minimax-h3
+    rm -rf $V/.dl   # hf's resume state and any partial file a killed run left: every checkpoint is in place and verified
     source $POD/video-env.sh   # again: on a fresh $LOCALROUTER_HOME the venv exists only now
     python -c "import torch, tensorfold.cuda.nvfp4.checkpoint" || { echo "prepare: the video venv is not usable" >&2; exit 1; }
 
