@@ -25,7 +25,7 @@ Service without a separate licence, so this tool stays on loopback.
 | --- | --- |
 | Request | `speech`: `input` (1 to 4096 characters), `voice`, `references`, `stream` (with `response_format: "pcm"`) |
 | Output | `speech.wav`: RIFF, mono, 16-bit PCM, 44100 Hz. The daemon encodes the other response formats; a stream is raw PCM chunks |
-| Voices | `default` (the model's built-in voice, or the operator's `default_voice` file), and the voice files in `voices_dir` |
+| Voices | the voice files in `voices_dir` (six shipped, [Voices](#voices)), the operator's `default_voice` among them; `default` (the model's built-in voice, a different speaker for each text) only when listed |
 | References | `[{"text", "vq_codes"}]`: a clip's exact transcript and its codec codes (10 codebooks), spoken into the prompt before the voice's own references, in the reference implementation's order |
 | Length | 1024 frames (47.55 s) a synthesis; `max_frames` raises it (4096: about 190 s in one synthesis); `long_form` speaks long inputs in joined segments |
 | Finish | `x-finish-reason`: `stop`, `length` (clipped at the frame limit) or `silence` (10 s below -40 dBFS, which also ends a collapse into a steady hum); long form adds `x-long-form-segments: N;S2,S3,...` |
@@ -131,7 +131,8 @@ models. Upstream pins the checkout but not the venv's packages, so LocalRouter c
 report records the torch and SGLang versions (on DGX-01: torch 2.13.0+cu130, sglang 0.5.21).
 
 `fetch.sh` prints the weights' licence before downloading them and accepts nothing on anyone's behalf. `build.sh`
-runs upstream's `scripts/build-engine.sh`, checks that the patched TensorFold HEAD is the pinned one, and records the
+runs upstream's `scripts/build-engine.sh`, checks that the patched TensorFold HEAD is the pinned one, applies
+LocalRouter's engine patches and builds the server again, checks that HEAD too, and records the
 engine binary's sha256 in `ROOT/engine.json`. Then add the tool from `tools/speech/drama3/config.example.json` to the
 daemon's config, with `gpu_lock` set to the lock every GPU job on the host already takes (only on a host without one,
 create it with `touch` and have the other GPU jobs take it too).
@@ -142,18 +143,55 @@ create it with `touch` and have the other GPU jobs take it too).
 | `max_frames` | the engine's 1024 | frames one synthesis may make (`--max-frames`) |
 | `long_form`, `long_form_chars`, `long_form_history` | off, 500, 1 | `--long-form` and its settings |
 | `voices_dir` | none | an absolute directory of voice files (`--voices`) |
-| `voices`, `default_voice` | `["default"]`, `default` | what `/v1/models` lists and the daemon checks; a `default_voice` other than `default` becomes `--default-voice` |
+| `voices`, `default_voice` | `["default"]`, `default` | what `/v1/models` lists and the daemon checks; a `default_voice` other than `default` becomes `--default-voice`. The example config lists the six shipped voices, `Mae` by default ([Voices](#voices)) |
 | `verify` | `size` | at load, each pinned checkpoint file's size, or its `sha256` (minutes), or `none` |
 | `pilot`, `native_bin`, `checkpoint`, `runtime_dir` | under `weights` | where fetch.sh and build.sh put them |
 | `ready_timeout_s` | 900 | the launcher's readiness deadline |
 
 ### Voices
 
+The built-in voice is not one speaker: the engine conditions on nothing but the prompt, so each text lands on its own
+model-invented speaker (CAM++ speaker-embedding cosine between its replies to ten voice-loop sentences: 0.52 on average,
+0.27 at worst, no higher than between different voices). A voice loop that speaks a reply one sentence a request
+therefore changed voice every sentence. A voice file pins the speaker: its reference (a clip's transcript and codec
+codes) is spoken into every prompt before the text.
+
+LocalRouter ships six, `Mae` (the default), `Arlo`, `Ezra`, `Nora`, `Theo` and `Wren`, all invented by Drama 3 itself
+(`tools/speech/drama3/voices/SOURCES.md` says how each was made and picked). `fetch.sh` installs them by sha256 into
+`ROOT/voices`; set `voices_dir` to it, list them in `voices`, and name the default in `default_voice` (as
+`config.example.json` does). Measured on DGX-01, the same ten sentences per voice, streamed:
+
+| | Within a voice: cosine mean (min) | To the other voices | First audio p50 | RTF |
+| --- | --- | --- | --- | --- |
+| Built-in voice | 0.52 (0.27) | 0.51 | 0.144 s | 0.70 |
+| The six voices, before the prefix cache | 0.75 to 0.86 (0.47 to 0.71) | 0.44 to 0.53 | 0.67 to 1.16 s | 0.86 to 1.28 |
+| The six voices, with it | 0.71 to 0.86 (0.47 to 0.71) | 0.43 to 0.53 | 0.127 to 0.134 s | 0.71 (warm) |
+
+The same text in the same voice gives the same audio, byte for byte. The built-in voice's RTF on the same short
+sentences is 0.70 (warm). A voice's first sentence after a load, or after the cache dropped it, fills the cache: it is
+prefilled whole (0.71 to 1.01 s to first audio). With the cache, the server's peak was 39.33 GiB.
+
+Verified on DGX-01 with the build pinned here:
+- the 26 qualify texts in the built-in voice are byte-identical to `run3`'s;
+- the 60 voice replies are byte-identical with the cache on (54 resumed, 6 filled) and off (`DRAMA_PREFIX_CACHE=0`).
+
+Two replies per voice, and the built-in voice's for comparison, are in `~/jarvis/voices/` on DGX-01.
+
+**The prefix cache.** A reference adds its rows (280 to 431 frames, plus its transcript) to every prompt, and the
+prompt pass reads every expert for each 128-row chunk, so a sentence in a voice cost 0.5 to 1 s more than one in the
+built-in voice. LocalRouter's engine patch (`patches/engine/`, applied by `build.sh` after upstream's series) prefills a
+referenced prompt's system message, the instruction and the references, in chunks of its own. It then keeps the
+backbone's and the tower's state after it, so a later prompt with the same references resumes there and prefills only
+its own text. The entries are keyed by those rows in full, least recently used dropped. There are
+`DRAMA_PREFIX_CACHE` of them (default 2, 0 off), each about 152 MiB plus 46 KiB a row: 174 MiB for the longest voice.
+A prompt without references runs exactly as before. With references, the cached and uncached passes are the same
+chunks, so a resumed reply equals one prefilled whole, byte for byte.
+
 Clone only a voice the model invented, your own, or one whose owner has consented on record: the model licence's
 Section IV(b) forbids imitating an identifiable person without consent. Voice files are made offline with upstream's
 tools (`drama_voice_clip.py` prepares a 10 to 30 s take, `drama_voice.py` encodes it under the GPU lock and records its
-`source`, which the server requires), as its README describes; list their names in `voices` and set `voices_dir`.
-Clips and voice files hold a person's voice: keep them out of source control.
+`source`, which the server requires), as its README describes. A clip of a person's voice, and its voice file, hold
+that voice: keep them out of source control. The six shipped files hold only voices the model invented.
 
 ## Pins
 
@@ -162,7 +200,8 @@ Clips and voice files hold a person's voice: keep them out of source control.
 | What | Pin |
 | --- | --- |
 | Upstream | plotarmordev/drama-tensorfold @ `1a53b8aea738a99d3630f949b6b2a1f9389f0795` (main, 2026-10-17, PRs #4 to #9); sha256 of `recipe/pilot.py`, `scripts/build-engine.sh`, `engine/UPSTREAM`, `recipe/checksums/checkpoint.sha256`, `recipe/sources.json`, `NOTICE`, `LICENSE`, `engine/patches/SHA256SUMS` |
-| Engine | TensorFold @ `c7137bb31a7dad924fb541a7068422127b9a94b2` plus the 59 patches in `engine/patches/` (each by sha256; series sha256 `3fff8dd6…a910d247`), applied by `build-engine.sh`: HEAD `459771e7531431490b80d7a8149c9160e03c01ce` |
+| Engine | TensorFold @ `c7137bb31a7dad924fb541a7068422127b9a94b2` plus the 59 patches in `engine/patches/` (each by sha256; series sha256 `3fff8dd6…a910d247`), applied by `build-engine.sh`: HEAD `459771e7531431490b80d7a8149c9160e03c01ce`; then LocalRouter's `patches/engine/` (the voice prefix cache, by sha256), applied by `build.sh`: HEAD `efc6c2f82a4a12726e36dce66b0969c1d3aee3f7` |
+| Voices | `voices/*.json`, the six named voices, each by sha256; `fetch.sh` installs exactly these into `ROOT/voices` |
 | Checkpoint | fishaudio/drama-3 @ `e0a9218aa48888270f06ef1ed9ea67622c0e17d2`: `codec.pth`, eight weight shards (41,474,674,072 bytes together, matching upstream's `sources.json` and `checkpoint.sha256`), tokenizer, config, chat template and licence, each by size and sha256 |
 | Toolchain | Zig 0.17.0, CUDA 13 |
 

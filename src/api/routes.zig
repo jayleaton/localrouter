@@ -146,6 +146,19 @@ pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Ref
     return first;
 }
 
+/// The speech model for a request: the one it names, else the text_to_speech default; but when it names no model and
+/// a voice the default lacks, the first speech model that lists that voice (voices are per model, so one picker can
+/// offer every model's).
+pub fn resolveSpeech(app: *App, model: ?[]const u8, voice: []const u8, why: *Refusal) ?usize {
+    const i = resolve(app, model, .text_to_speech, why) orelse return null;
+    if (model != null or voice.len == 0 or engine.hasVoice(app.scheduler.slots[i].tool.config(), voice)) return i;
+    for (app.scheduler.slots, 0..) |slot, k| {
+        const c = slot.tool.config();
+        if (engine.supports(c, .text_to_speech) and engine.hasVoice(c, voice)) return k;
+    }
+    return i;
+}
+
 fn article(k: request.Kind) []const u8 {
     return switch (k) {
         .image => "an image",

@@ -115,7 +115,7 @@ curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
 | Field | Notes |
 | --- | --- |
 | `input` | up to 4096 characters (or the model's `max_input_chars`) |
-| `voice` | one of the model's `voices`; omit for its `default_voice` |
+| `voice` | one of the model's `voices`; omit for its `default_voice`. Without `model`, a voice the default speech model lacks goes to the speech model that lists it |
 | `speed` | 0.25 to 4 within the model's `speed` range; a model without a speed control takes only 1 |
 | `response_format` | `wav` (default), `pcm` (16-bit little-endian, mono; rate in the `x-sample-rate` header), `flac`, `mp3`, `opus`, `aac` |
 | `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
@@ -140,8 +140,10 @@ for `pcm`) in chunks. Read it to its end:
 
 **Fish Audio Drama 3** (`fishaudio/drama-3`, when the operator has set it up; Built with Fish Audio) speaks 44.1 kHz
 audio up to 47.6 s a synthesis by default (longer with the operator's `max_frames`, and whole long inputs in segments
-with `long_form`). It has one built-in voice, `default`, plus the voice files the operator loaded (`voices` in
-`/v1/models`); there is no `speed` or `preset`, and `seed` is ignored (the engine seeds each synthesis from its prompt). Write
+with `long_form`). Its voices are fixed speakers (`voices` in `/v1/models`; LocalRouter ships six the model itself
+invented, `Mae` by default): the same voice is the same speaker in every reply, so a conversation keeps one voice. The
+model's built-in voice is not one speaker (each text lands on its own), so it is not offered unless the operator lists
+`default`. There is no `speed` or `preset`, and `seed` is ignored (the engine seeds each synthesis from its prompt). Write
 delivery cues in the text, such as `[sighs]` or `[laughs]` where they should land. Clone only a voice the model
 invented, your own, or one whose owner has consented on record: the model's licence forbids imitating anyone else.
 Until the operator has qualified it on the machine's GPU it is listed with `"qualified": false` and every request gets
@@ -212,7 +214,7 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | `session.update` field | Notes |
 | --- | --- |
 | `model` | the chat model (also `?model=` on the URL); blank: the chat server's default |
-| `voice`, `speech_model` | a voice of the speech model, and which speech model (extension) |
+| `voice`, `speech_model` | a voice from any speech model's `voices` in `/v1/models` (without `speech_model`, the first configured speech model that lists it speaks; it stays the session's voice for every reply), and which speech model (extension) |
 | `input_audio_transcription` | `{model, language, prompt}` for the transcription model |
 | `turn_detection` | `{type: "server_vad", threshold, prefix_padding_ms, silence_duration_ms, create_response, interrupt_response}`, or null for push to talk (`input_audio_buffer.commit`, then `response.create`) |
 | `modalities` | `["audio","text"]` (default) or `["text"]` |

@@ -18,8 +18,9 @@
       "load_timeout_s": 1200,
       "generate_timeout_s": 900,
       "options": {
-        "voices": ["default"],
-        "default_voice": "default",
+        "voices": ["Mae", "Arlo", "Ezra", "Nora", "Theo", "Wren"],
+        "default_voice": "Mae",
+        "voices_dir": "/data/models/drama3/voices",
         "min_speed": 1,
         "max_speed": 1,
         "max_input_chars": 4096,

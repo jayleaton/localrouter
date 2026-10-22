@@ -4,7 +4,8 @@
 # ROOT/drama-tensorfold is plotarmordev/drama-tensorfold at the pinned commit: the launcher (recipe/pilot.py), the
 # engine build script and the patch series. ROOT/drama-3 is the fishaudio/drama-3 checkpoint at the pinned revision
 # (41.5 GB). ROOT/launcher/pilot.py is upstream's launcher with LocalRouter's pinned admission patch
-# (patches/). Files already present with the pinned size and hash are kept. --no-weights stops after the upstream
+# (patches/). ROOT/voices holds the named voices (voices/, by sha256), and LocalRouter's engine patches
+# (patches/engine/, applied by build.sh) are checked by sha256. Files already present with the pinned size and hash are kept. --no-weights stops after the upstream
 # checkout. --check fetches and changes nothing: it verifies what is there and fails on any difference (build.sh and
 # qualify.sh use it). Nothing is executed from the downloads, and nothing here accepts the weights' licence.
 set -euo pipefail
@@ -41,6 +42,12 @@ for name, digest in sorted(p["files"].items()):
 print("series", p["count"], p["series_sha256"], p["dir"])
 l = pins["launcher"]
 print("launcher", l["patch"], l["patch_sha256"], l["base"], l["path"], l["sha256"])
+e = pins["engine_patches"]
+for name, digest in sorted(e["files"].items()):
+    print("epatch", e["dir"] + "/" + name, digest)
+v = pins["voices"]
+for name, digest in sorted(v["files"].items()):
+    print("voice", v["dir"], v["path"], name, digest)
 for path, (size, digest) in sorted(c["files"].items()):
     print("ckpt", c["repo"], c["revision"], c["dir"], path, size, digest)
 EOF
@@ -105,6 +112,30 @@ fi
 got=$(sha "$root/$lout" 2>/dev/null || echo missing)
 [ "$got" = "$lout_sha" ] || die "$lout sha256 $got, pinned $lout_sha"
 echo "fetch.sh: $lout is $updir/$lbase with $lpatch (sha256 $got)"
+
+# LocalRouter's engine patches (build.sh applies them after upstream's series), by sha256.
+while read -r path digest; do
+  got=$(sha "$here/$path")
+  [ "$got" = "$digest" ] || die "$path sha256 $got, pinned $digest"
+done <<< "$(pinned epatch)"
+
+# The named voices (model-invented, voices/SOURCES.md): copied to ROOT's voices directory, which must then hold
+# exactly the pinned files, since the server loads every *.json there.
+vdir= vpath=
+while read -r vdir vpath name digest; do
+  got=$(sha "$here/$vdir/$name")
+  [ "$got" = "$digest" ] || die "$vdir/$name sha256 $got, pinned $digest"
+  if [ "$check" = 0 ]; then
+    mkdir -p "$root/$vpath"
+    cp "$here/$vdir/$name" "$root/$vpath/$name.tmp" && mv "$root/$vpath/$name.tmp" "$root/$vpath/$name"
+  fi
+  got=$(sha "$root/$vpath/$name" 2>/dev/null || echo missing)
+  [ "$got" = "$digest" ] || die "$vpath/$name sha256 $got, pinned $digest"
+done <<< "$(pinned voice)"
+want=$(pinned voice | while read -r _ _ name _; do echo "$name"; done)
+have=$(cd "$root/$vpath" && for f in *.json; do [ -e "$f" ] && echo "$f"; done)
+[ "$have" = "$want" ] || die "$vpath holds other *.json files than the pinned voices"
+echo "fetch.sh: $(grep -c . <<< "$want") voices verified in $root/$vpath"
 [ "$weights" = 1 ] || exit 0
 
 if [ "$check" = 0 ]; then

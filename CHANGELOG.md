@@ -8,6 +8,12 @@
   - The cost is 86 to 110 ms on first audio.
   - `client_check.py` records the page's output and fails on a playback gap over 30 ms, or a click, in a reply's
     first 2 s.
+- Drama 3 speaks in fixed voices: six named speakers the model itself invented (`Mae` by default, `Arlo`, `Ezra`,
+  `Nora`, `Theo`, `Wren`), pinned and installed by `fetch.sh`, so every sentence of every reply is the same voice.
+  The built-in voice was a different speaker for each sentence. A pinned engine patch keeps each voice's prefilled
+  reference, so a sentence in a voice reaches first audio in 0.13 s, as the built-in voice did, with byte-identical
+  output. A `voice` without a `model` (HTTP, MCP and the realtime session) goes to the speech model that lists it, so
+  one picker offers every model's voices ([docs](docs/dev/DRAMA3.md#voices)).
 - Jarvis web client, a UI pass in Sidebud's look, with system light and dark themes:
   - a sidebar of conversations (rename, delete with undo);
   - messages with roles, timestamps, copy and regenerate, highlighted code blocks with copy, and a collapsible

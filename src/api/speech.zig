@@ -45,7 +45,7 @@ pub const SpeechArgs = struct {
 /// Validates and queues a text to speech job; null with `why` set on refusal. `references` become the job's
 /// `references.json`, allocated in `a`.
 pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, why: *Refusal) ?*jobs.Job {
-    const tool = routes.resolve(app, b.model, .text_to_speech, why) orelse return null;
+    const tool = routes.resolveSpeech(app, b.model, b.voice, why) orelse return null;
     if (b.instructions.len > 0) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' does not take instructions; send the text to speak as input", .{app.scheduler.slots[tool].tool.config().id}) catch "instructions are not supported";
         return null;
