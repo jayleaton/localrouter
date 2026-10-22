@@ -326,6 +326,14 @@ sha256 `51434b8f…` (399 files). Through the daemon at the old and new figure (
 loaded and idle the drop was 39.97 and 39.45 GiB, no higher while speaking, and back to within 0.2 GiB after unload;
 the scheduler booked 48.45 GiB (8.49 more than the drop) before and 42 GiB (2.54 more) now.
 
+**Requalified with the named voices and the prefix cache (`run6`, LocalRouter `74ee0d6`: new pins, engine
+`efc6c2f8`, binary sha256 `4248109c…`).** The six voices served, `Mae` the default, so the bench spoke in `Mae`.
+assets, e2e (each voice, and an unknown voice refused), bench and accuracy passed: first audio p50 0.137 s, RTF p50
+0.675 whole and 0.696 streamed, peak 40.30 GiB (43,270,909,952 bytes, within the 45,097,156,608 booked). Marker sha256
+`7ec4c40a572fb787bae493f56c71c4c94500b0ba6ee4f2a93484fe254a8aa908`; manifest sha256 `eb0740e1…` (406 files).
+Upstream's accuracy oracle admits only with 88 GiB free, so the Jarvis service is stopped for a qualify run (`run5`,
+with it up, had 52 GiB free and could not run it). Deployed to the Jarvis box: `smoke.sh --quick` 19 of 19.
+
 **LocalRouter's admission is the only one (through the daemon, `verify/` on the node).** Ballasts held by a bounded
 `systemd-run` unit, Drama 3 loaded on demand by a `localrouter serve` built from this branch:
 
