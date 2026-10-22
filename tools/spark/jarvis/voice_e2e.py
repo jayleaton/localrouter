@@ -315,7 +315,7 @@ def overlap(said, heard):
 def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
     """One spoken turn; its measurements go to results[name]."""
     mark = len(sess.events)
-    t_end = sess.say(samples)
+    t_end = sess.t_end = sess.say(samples)
     stopped = sess.wait_for("input_audio_buffer.speech_stopped", timeout, mark)
     item = stopped["item_id"]
     heard = sess.wait_for("conversation.item.input_audio_transcription.completed", timeout, mark, lambda e: e["item_id"] == item)
@@ -491,11 +491,40 @@ def leak_probe(args, extra, n):
     return {"requests": n, "leaks": leaks, "samples": samples[:3], "extra": extra}
 
 
+def picture(args, sess, mic, turns, checks, results):
+    """A spoken request for a picture: the generate_image call, its PNG and the spoken confirmation, timed from the end of
+    speech (first audio of the turn, the job done, the confirmation's first audio)."""
+    mark = len(sess.events)
+    r = turn(sess, "picture", mic["picture"], turns, checks, timeout=180, need_audio=False)  # it may be only the tool call
+    call = next((e for e in sess.events[mark:] if e["type"] == "response.function_call_arguments.done"), None)
+    job = sess.wait_for("localrouter.job.done", 900, mark)
+    confirm_created = sess.wait_for("response.created", 120, sess.index(job))
+    crid = confirm_created["response"]["id"]
+    confirm = sess.wait_for("response.done", 180, sess.index(confirm_created), lambda e: e["response"]["id"] == crid)
+    spoken = "".join(e.get("delta", "") for e in sess.events[sess.index(confirm_created):] if e["type"] == "response.audio_transcript.delta" and e["response_id"] == crid)
+    confirm_audio = next((e for e in sess.events[sess.index(confirm_created):] if e["type"] == "response.audio.delta" and e["response_id"] == crid), None)
+    png_ok = False
+    if job.get("status") == "completed" and job.get("urls"):
+        _, _, png = http(job["urls"][0], timeout=60)
+        png_ok = png[:8] == b"\x89PNG\r\n\x1a\n"
+        with open(f"{args.out}/image.png", "wb") as f:
+            f.write(png)
+    results["tool"] = {"call": call and {"name": call["name"], "arguments": call["arguments"]}, "job": {k: job.get(k) for k in ("job_id", "status", "urls", "error")},
+                       "speech_end_to_first_audio_ms": r["speech_end_to_first_audio_ms"],
+                       "speech_end_to_job_done_s": round(job["_t"] - sess.t_end, 2),
+                       "speech_end_to_confirmation_audio_s": round(confirm_audio["_t"] - sess.t_end, 2) if confirm_audio else None,
+                       "confirmation": spoken, "confirmation_status": confirm["response"]["status"]}
+    log("tool:", results["tool"])
+    checks.append({"check": "tool: the model called generate_image", "ok": bool(call) and call["name"] == "generate_image", "detail": call and call["name"]})
+    checks.append({"check": "tool: the job made a PNG served at its URL", "ok": png_ok, "detail": job.get("status")})
+    checks.append({"check": "tool: the assistant confirmed aloud", "ok": confirm["response"]["status"] == "completed" and bool(spoken.strip()), "detail": spoken[:120]})
+
+
 def smoke_end(args, results, checks, turns, sess, events):
     """--smoke: the turns' latency and the leak checks, written as results.json (the session closes in main's finally)."""
     events.close()
     plain = [t["speech_end_to_first_audio_ms"] for n, t in turns.items()
-             if n not in ("interrupt",) and (args.count_warmup or n != "warmup")]
+             if n not in ("interrupt", "picture") and (args.count_warmup or n != "warmup")]
     known = sorted(ms for ms in plain if ms is not None)
     median = known[len(known) // 2] if known and len(known) == len(plain) else None  # of two: the slower
     results["first_audio_ms"] = {"turns": {n: t["speech_end_to_first_audio_ms"] for n, t in turns.items()}, "median": median}
@@ -533,12 +562,16 @@ def main():
     ap.add_argument("--smoke", action="store_true", help="a deployment smoke test: the warm-up and one turn, then barge-in; no tool, video, eviction or leak probe")
     ap.add_argument("--skip-barge", action="store_true", help="with --smoke: the turns only")
     ap.add_argument("--count-warmup", action="store_true", help="with --smoke: the first turn counts in the latency (the turn after another model's job)")
+    ap.add_argument("--picture", action="store_true", help="with --smoke: then a spoken request for a picture (the tool call, the job, the spoken confirmation)")
+    ap.add_argument("--picture-prompt", help="the picture request (default: the e2e's red fox)")
     args = ap.parse_args()
     barge = not (args.smoke and args.skip_barge)
     if args.smoke:  # only what a deployment check needs
-        for name in [n for n in PROMPTS if n not in ("warmup", "capital", "tips") + (("story", "interrupt") if barge else ())]:
+        for name in [n for n in PROMPTS if n not in ("warmup", "capital", "tips") + (("story", "interrupt") if barge else ()) + (("picture",) if args.picture else ())]:
             del PROMPTS[name]
         args.leak_probe = 0
+    if args.picture_prompt:
+        PROMPTS["picture"] = args.picture_prompt
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
     os.makedirs(f"{args.out}/replies", exist_ok=True)
     results, checks = {"turns": {}}, []
@@ -565,6 +598,8 @@ def main():
             turn(sess, name, mic[name], turns, checks)
             sess.pump(1.0)
         if not barge:
+            if args.picture:
+                picture(args, sess, mic, turns, checks, results)
             return smoke_end(args, results, checks, turns, sess, events)
 
         # 4. Barge-in: talk over a long answer once a second of it has arrived.
@@ -596,30 +631,12 @@ def main():
         checks.append({"check": "barge-in: speech detected within 1 s", "ok": results["barge_in"]["speech_start_after_barge_ms"] <= 1000, "detail": results["barge_in"]["speech_start_after_barge_ms"]})
         sess.pump(1.0)
         if args.smoke:
+            if args.picture:
+                picture(args, sess, mic, turns, checks, results)
             return smoke_end(args, results, checks, turns, sess, events)
 
         # 5. A tool call that makes an image.
-        mark = len(sess.events)
-        t0 = time.monotonic()
-        r = turn(sess, "picture", mic["picture"], turns, checks, timeout=180, need_audio=False)  # it may be only the tool call
-        call = next((e for e in sess.events[mark:] if e["type"] == "response.function_call_arguments.done"), None)
-        job = sess.wait_for("localrouter.job.done", 900, mark)
-        confirm_created = sess.wait_for("response.created", 120, sess.index(job))
-        crid = confirm_created["response"]["id"]
-        confirm = sess.wait_for("response.done", 180, sess.index(confirm_created), lambda e: e["response"]["id"] == crid)
-        spoken = "".join(e.get("delta", "") for e in sess.events[sess.index(confirm_created):] if e["type"] == "response.audio_transcript.delta" and e["response_id"] == crid)
-        png_ok = False
-        if job.get("status") == "completed" and job.get("urls"):
-            _, _, png = http(job["urls"][0], timeout=60)
-            png_ok = png[:8] == b"\x89PNG\r\n\x1a\n"
-            with open(f"{args.out}/image.png", "wb") as f:
-                f.write(png)
-        results["tool"] = {"call": call and {"name": call["name"], "arguments": call["arguments"]}, "job": {k: job.get(k) for k in ("job_id", "status", "urls", "error")},
-                           "speech_end_to_job_done_s": round(job["_t"] - t0, 1), "confirmation": spoken, "confirmation_status": confirm["response"]["status"]}
-        log("tool:", results["tool"])
-        checks.append({"check": "tool: the model called generate_image", "ok": bool(call) and call["name"] == "generate_image", "detail": call and call["name"]})
-        checks.append({"check": "tool: the job made a PNG served at its URL", "ok": png_ok, "detail": job.get("status")})
-        checks.append({"check": "tool: the assistant confirmed aloud", "ok": confirm["response"]["status"] == "completed" and bool(spoken.strip()), "detail": spoken[:120]})
+        picture(args, sess, mic, turns, checks, results)
     finally:
         for rid, s in sess.audio.items():
             write_wav(f"{args.out}/replies/{rid}.wav", s)

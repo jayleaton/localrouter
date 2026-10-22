@@ -5,7 +5,8 @@
 //! short TTS or STT job never waits behind a chat reply or a video, nor a chat turn behind a video. A tool is loaded and
 //! run only by its own lane. Residency changes (admission, eviction, the reservation of a load, the GPU lock) are
 //! serialized by `gate`; memory admitted but perhaps not yet allocated (a load in progress, the working bytes of a
-//! running job) is held back from MemAvailable.
+//! running job) is held back from MemAvailable, less what MemAvailable has dropped since it was admitted (that part has
+//! landed and is already counted there).
 //!
 //! Eviction: when a request needs room, idle tools are unloaded lowest `priority` first, least recently used among
 //! equals, until it fits. Priority only orders the victims: a request is never refused while unloading idle tools
@@ -13,6 +14,7 @@
 //! tools are loaded at start when they fit, skip the idle TTL, and come back by themselves once their lane has been
 //! idle for a moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one
 //! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
+//! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load.
 //!
 //! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
 //! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
@@ -40,6 +42,9 @@ pub const Slot = struct {
     backoff_ns: i96 = reload_backoff_min_ns, // the next wait after a failed load: doubles to the maximum, reset by a load
     in_use: bool = false, // its lane is loading or running it: never a victim (under `gate`)
     pending: u64 = 0, // admitted bytes that MemAvailable may not show yet (under `gate`)
+    pending_ns: i96 = 0, // when `pending` was admitted (under `gate`)
+    pending_avail: u64 = 0, // MemAvailable then: what has landed since shows as its drop, not counted twice
+    unfit: bool = false, // a `keep_loaded` reload last found no room: lower priorities stop deferring to it
     unload_after: bool = false, // unloaded on request while in use: its lane unloads it when done
 };
 
@@ -331,7 +336,12 @@ pub const Scheduler = struct {
             slot.visited = true;
             const c = slot.tool.config();
             const estimate = slot.tool.needs(&placeholder(c.kind)).resident;
+            if (s.higherKeptDue(i)) { // it takes its room first; this one comes back on a later poll
+                s.gate.unlock(s.io);
+                continue;
+            }
             if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate, c.priority)) {
+                if (nowNs(s.io) >= slot.retry_ns) slot.unfit = true;
                 s.gate.unlock(s.io);
                 if (!wait_idle and nowNs(s.io) >= slot.retry_ns) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
                 continue;
@@ -351,10 +361,29 @@ pub const Scheduler = struct {
         }
     }
 
+    /// Under `gate`: a `keep_loaded` tool of a higher priority than slot `i` is down and due to load (not released, not
+    /// backing off, not just found not to fit). Kept tools come back highest priority first across lanes, so a lower
+    /// one never takes the room a higher one is about to need (DGX-01: the image model loaded before chat at a restart,
+    /// and chat then unloaded Drama 3 and Whisper to fit).
+    fn higherKeptDue(s: *Scheduler, i: usize) bool {
+        const p = s.slots[i].tool.config().priority;
+        const now = nowNs(s.io);
+        for (s.slots, 0..) |*slot, j| {
+            const c = slot.tool.config();
+            if (j == i or !c.keep_loaded or c.priority <= p or slot.released or slot.unfit or now < slot.retry_ns) continue;
+            const st = slot.tool.state();
+            if (st == .unloaded or st == .loading) return true;
+        }
+        return false;
+    }
+
     /// Marks `slot` in use with `bytes` admitted; under `gate`.
-    fn reserve(_: *Scheduler, slot: *Slot, bytes: u64) void {
+    fn reserve(s: *Scheduler, slot: *Slot, bytes: u64) void {
         slot.in_use = true;
         slot.pending = bytes;
+        slot.pending_ns = nowNs(s.io);
+        slot.pending_avail = memory.available() orelse 0;
+        slot.unfit = false;
     }
 
     /// The lane is finished with `slot`: it becomes a possible victim again, and an unload asked for meanwhile happens.
@@ -438,6 +467,8 @@ pub const Scheduler = struct {
         defer s.gate.unlock(s.io);
         slot.resident = if (measured > 0) measured else estimate;
         slot.pending -|= estimate; // now visible in MemAvailable
+        slot.pending_ns = nowNs(s.io); // what is left (a job's working bytes) lands from here
+        slot.pending_avail = memory.available() orelse 0;
         slot.last_used_ns = nowNs(s.io);
         slot.released = false;
     }
@@ -531,12 +562,23 @@ pub const Scheduler = struct {
     fn fits(s: *Scheduler, extra: u64) bool {
         var held: u64 = 0;
         var pending: u64 = 0;
+        var first_ns: ?i96 = null;
+        var first_avail: u64 = 0;
         for (s.slots) |slot| {
             held += slot.resident;
+            if (slot.pending == 0) continue;
             pending += slot.pending;
+            if (first_ns == null or slot.pending_ns < first_ns.?) {
+                first_ns = slot.pending_ns;
+                first_avail = slot.pending_avail;
+            }
         }
         const avail = memory.available() orelse 0;
-        if (avail < s.cfg.reserve_bytes or avail - s.cfg.reserve_bytes < extra +| pending) return false;
+        // A load in progress already holds part of what it was admitted for, and MemAvailable shows that part: only the
+        // rest is still to come. Counting all of it again evicted ready models (DGX-01: a 2 GiB transcription unloaded
+        // Drama 3 with 36 GiB free while the image model reloaded).
+        const due = pending -| (first_avail -| avail);
+        if (avail < s.cfg.reserve_bytes or avail - s.cfg.reserve_bytes < extra +| due) return false;
         if (s.cfg.budget_bytes == 0) return true;
         return held + pending + extra <= s.cfg.budget_bytes;
     }
