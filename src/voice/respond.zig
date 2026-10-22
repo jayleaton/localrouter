@@ -211,7 +211,6 @@ fn stream(s: *Session, r: *Response, req: *chat.Request, say: backend.Say, why: 
     return result;
 }
 
-
 /// Under the lock: copies what the response needs, adds the assistant item and announces the response.
 fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *backend.Say) bool {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
