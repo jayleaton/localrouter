@@ -574,7 +574,7 @@ def main():
             click(cdp, "vmEnd")
         results["console_errors"] = console[:20]
         check("page: no script errors", not [c for c in console if "Uncaught" in c or "Error" in c], console[:5])
-        results["debug_tail"] = cdp.js("window.jarvis.debug.filter(e => !(e.kind === 'voice.in' && /\.delta$/.test(e.type || ''))).slice(-400)")
+        results["debug_tail"] = cdp.js("window.jarvis.debug.filter(e => !(e.kind === 'voice.in' && /\\.delta$/.test(e.type || ''))).slice(-400)")
     except Exception as e:  # a failed step is a failed check, with its reason
         check(f"no step failed: {type(e).__name__}", False, str(e))
         try:
