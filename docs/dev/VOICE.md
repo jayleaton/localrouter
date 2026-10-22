@@ -274,9 +274,23 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   - Drama 3 drops from 1.49 to 0.67 times real time;
   - the chat stream slows from 20.2 to 33.1 s.
 
-  Until the chat stream ends, speech arrives slower than it plays. A buffer large enough to cover it costs seconds, so
-  the fix belongs in how the two models share the GPU (for example, priority for the speech model), not in the
-  client.
+  Until the chat stream ends, speech arrives slower than it plays. The session sends
+  `localrouter.response.text_done` `{response_id, item_id}` as soon as the chat stream ends; from then on speech has the
+  GPU to itself.
+  - **Smooth start** (a setting, off by default). When a reply's start window ends without 200 ms of audio in hand,
+    the stream is slow. Its start then waits for `text_done`, or for 1 s of audio in hand.
+  - Replayed over 10 recorded default-length replies (15 to 35 s of audio, chat decoding for 3 to 10 s), first audio
+    measured from the request:
+
+    | | replies with a gap in their first 2 s | first audio median |
+    | --- | ---: | ---: |
+    | #28's hold alone | 8/10 | 1.24 s |
+    | smooth start (1 s cap) | 0/10 | 2.80 s |
+    | the whole text first | 0/10 | 4.69 s |
+  - So no lossless client or session choice removes the stutter within about 1.2 s. Cancelling the chat stream and
+    resuming it later is not lossless either: 0 of 6 greedy replies came back the same.
+  - The structural fix is GPU priority for speech over chat decoding, such as CUDA MPS client priority or capping the
+    chat process's share. That is a host-wide change, left to the deployment.
 
 **Voice picker.**
 - The voices are exactly what `/v1/models` lists for the speech model in use (names, or `{id, name, description,
