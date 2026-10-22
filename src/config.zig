@@ -69,6 +69,8 @@ pub const Voice = struct {
     // until the quiet reaches silence_duration_ms; dropped if the speaker goes on
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
+    manage_models: bool = false, // offer list_models, reserve_for, unload_model and load_model to the chat model, with the
+    // model management procedure (src/voice/model_skill.md) after its instructions; the web client reads the same
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
 };
 

@@ -9,7 +9,7 @@
   "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"},
   "speech_models": ["fishaudio/drama-3"],
   "draft_after_ms": 100, "early_end_ms": 300, "prime_chat": true, "greedy_transcripts": true,
-  "partial_interval_ms": 0, "tool_wait_s": 900
+  "partial_interval_ms": 0, "tool_wait_s": 900, "manage_models": true
  },
  "tools": [
   {"id": "qwen3.8-27b", "kind": "chat", "name": "Qwen3.8 27B (TensorFold 1.1.1, MLX 4-bit + DFlash2 drafter)",

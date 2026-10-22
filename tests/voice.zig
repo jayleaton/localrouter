@@ -43,7 +43,7 @@ const ChatServer = struct {
 
 /// A minimal WebSocket client: masked text frames out, server frames in. A watchdog shuts the socket down when a
 /// read waits longer than 20 s, so a missing event fails the test instead of hanging it.
-const Ws = struct {
+pub const Ws = struct {
     io: Io,
     stream: Io.net.Stream,
     rbuf: [16 * 1024]u8 = undefined,
@@ -55,7 +55,7 @@ const Ws = struct {
     closing: std.atomic.Value(bool) = .init(false),
     dog: ?std.Thread = null,
 
-    fn open(w: *Ws, io: Io, a: std.mem.Allocator, port: u16, protocol: []const u8) !void {
+    pub fn open(w: *Ws, io: Io, a: std.mem.Allocator, port: u16, protocol: []const u8) !void {
         const addr = try Io.net.IpAddress.parse("127.0.0.1", port);
         w.* = .{ .io = io, .stream = try addr.connect(io, .{ .mode = .stream }) };
         w.reader = w.stream.reader(io, &w.rbuf);
@@ -84,7 +84,7 @@ const Ws = struct {
         }
     }
 
-    fn close(w: *Ws) void {
+    pub fn close(w: *Ws) void {
         w.closing.store(true, .release);
         if (w.dog) |t| t.join();
         w.stream.close(w.io);
@@ -127,7 +127,7 @@ const Ws = struct {
     }
 
     /// Reads events until one of type `typ`; every event read is appended to `seen`.
-    fn until(w: *Ws, a: std.mem.Allocator, typ: []const u8, seen: *std.ArrayList(std.json.Value)) !std.json.Value {
+    pub fn until(w: *Ws, a: std.mem.Allocator, typ: []const u8, seen: *std.ArrayList(std.json.Value)) !std.json.Value {
         while (true) {
             const v = try std.json.parseFromSliceLeaky(std.json.Value, a, try w.next(a), .{});
             try seen.append(a, v);
@@ -152,7 +152,7 @@ const Ws = struct {
     }
 };
 
-fn now(io: Io) i64 {
+pub fn now(io: Io) i64 {
     return @intCast(Io.Clock.awake.now(io).toNanoseconds());
 }
 

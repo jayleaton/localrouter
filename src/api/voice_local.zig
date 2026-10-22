@@ -6,6 +6,7 @@
 const std = @import("std");
 const Io = std.Io;
 const routes = @import("routes.zig");
+const mcp = @import("mcp.zig");
 const speech = @import("speech.zig");
 const request = @import("../tool/request.zig");
 const jobs = @import("../sched/jobs.zig");
@@ -46,7 +47,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage };
 
 fn self(ptr: *anyopaque) *Local {
     return @ptrCast(@alignCast(ptr));
@@ -75,6 +76,35 @@ fn wait(app: *App, j: *jobs.Job, stop: *Stop) backend.Error!void {
     }
 }
 
+/// While a voice model is unloaded to make room (a video, an explicit unload_model or reserve_for), a turn or a reply
+/// waits for it to come back instead of failing; the session was told (`localrouter.voice.paused`). At most
+/// `voice.tool_wait_s`, and never past `stop` (barge-in, the session closing).
+fn waitVoice(app: *App, stop: *Stop) backend.Error!void {
+    if (!app.scheduler.voicePaused()) return;
+    std.log.info("voice: waiting for the voice models to come back", .{});
+    const limit = std.Io.Clock.awake.now(app.io).addDuration(.fromSeconds(app.cfg.voice.tool_wait_s));
+    while (app.scheduler.voicePaused()) {
+        if (stop.cancelled()) return error.Cancelled;
+        if (std.Io.Clock.awake.now(app.io).nanoseconds >= limit.nanoseconds) return;
+        std.Io.sleep(app.io, .fromMilliseconds(250), .awake) catch return error.Cancelled;
+    }
+}
+
+fn paused(ptr: *anyopaque) bool {
+    return self(ptr).app.scheduler.voicePaused();
+}
+
+/// A model management tool call: the same tool as MCP's (`mcp.callText`), so its guardrails (never the chat model,
+/// voice sessions told before a voice model goes, every unload logged) are the same for every caller.
+fn manage(ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8) backend.Managed {
+    const l = self(ptr);
+    const args = std.json.parseFromSliceLeaky(std.json.Value, a, if (arguments.len > 0) arguments else "{}", .{}) catch
+        return .{ .ok = false, .text = "the tool call's arguments are not JSON" };
+    std.log.info("voice: the chat model called {s} {s}", .{ name, arguments[0..@min(arguments.len, 200)] });
+    const r = mcp.callText(l.app, a, l.host, name, args) orelse return .{ .ok = false, .text = "no such tool" };
+    return .{ .ok = r.ok, .text = r.text };
+}
+
 /// The job's directory goes at the next expiry tick, once it has finished.
 fn forget(app: *App, j: *jobs.Job) void {
     app.table.mutex.lockUncancelable(app.io);
@@ -86,6 +116,7 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     const l = self(ptr);
     const app = l.app;
     var ref: routes.Refusal = .{};
+    try waitVoice(app, stop);
     const tool = routes.resolve(app, named(o.model, app.cfg.voice.transcription_model), .speech_to_text, &ref) orelse return failed(why, ref.message);
     const wav = audio.wav(a, 16_000, 1, try resample.toLe(a, pcm16k)) catch return error.OutOfMemory;
     const lang = try std.ascii.allocLowerString(a, std.mem.trim(u8, o.language, " "));
@@ -140,6 +171,12 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
     const l = self(ptr);
     const app = l.app;
     const wanted = if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+    // While a voice model is away (a video is being made) a reply is text only: waiting for the voice would hold the
+    // reply, and with it the tool call it carries, until the job it waits for is done. The job's follow-up waits instead.
+    if (app.scheduler.voicePaused()) {
+        std.log.info("voice: voice is paused; this reply is text only", .{});
+        return;
+    }
     const candidates = try speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model, wanted);
     var counted: Counted = .{ .sink = sink };
     const out: backend.PcmSink = .{ .ctx = &counted, .write = Counted.write };

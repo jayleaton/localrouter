@@ -664,6 +664,16 @@ const builtin_tools =
     \\  "seconds": {"type": "integer", "description": "length, 1 to 20 (default 5)"}}, "required": ["prompt"]}}}]
 ;
 
+/// The model management procedure (`voice.manage_models`): appended to the instructions, with its tools offered.
+pub const model_skill = @import("skill.zig").model_skill;
+
+const manage_tools =
+    \\[{"type": "function", "function": {"name": "list_models", "description": "This machine's models: state (ready, unloaded), needs_bytes, displaced (unloaded to make room, coming back), and memory.mem_available_bytes.", "parameters": {"type": "object", "properties": {}}}},
+    \\ {"type": "function", "function": {"name": "reserve_for", "description": "Make room for a model before its job: dry_run true says what it would unload; false unloads that (never you), loads the model and holds it for its job. What it unloads comes back by itself after the job.", "parameters": {"type": "object", "properties": {"model": {"type": "string"}, "seconds": {"type": "integer"}, "dry_run": {"type": "boolean"}}, "required": ["model"]}}},
+    \\ {"type": "function", "function": {"name": "unload_model", "description": "Unload one model now (never you, the chat model); it comes back by itself after hold_s seconds.", "parameters": {"type": "object", "properties": {"model": {"type": "string"}, "hold_s": {"type": "integer"}}, "required": ["model"]}}},
+    \\ {"type": "function", "function": {"name": "load_model", "description": "Load a model now, for example one you unloaded.", "parameters": {"type": "object", "properties": {"model": {"type": "string"}}, "required": ["model"]}}}]
+;
+
 /// Under the lock: the chat request from the settings and the conversation, copied into `a`.
 fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     return requestWith(s, a, ask, null);
@@ -673,7 +683,9 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
 fn requestWith(s: *Session, a: std.mem.Allocator, ask: Task.Ask, turn: ?[]const u8) !chat.Request {
     const st = &s.settings;
     var msgs: std.ArrayList(chat.Message) = .empty;
-    const instructions = ask.instructions orelse st.instructions;
+    const base = ask.instructions orelse st.instructions;
+    const manage = s.voice.tools and s.voice.manage_models;
+    const instructions = if (manage) try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ base, model_skill }) else base;
     if (instructions.len > 0) try msgs.append(a, .{ .role = "system", .content = try a.dupe(u8, instructions) });
     try history(s, a, &msgs);
     if (turn) |t| try msgs.append(a, .{ .role = "user", .content = try a.dupe(u8, t) });
@@ -684,6 +696,7 @@ fn requestWith(s: *Session, a: std.mem.Allocator, ask: Task.Ask, turn: ?[]const 
         const all = try std.json.parseFromSliceLeaky([]const chat.Tool, a, builtin_tools, .{});
         if (offer.image) try tools.append(a, all[0]);
         if (offer.video) try tools.append(a, all[1]);
+        if (manage) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
     }
     try tools.appendSlice(a, try events.chatTools(a, st.tools_json));
     return .{
