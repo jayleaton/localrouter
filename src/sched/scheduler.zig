@@ -28,6 +28,7 @@ const tool_mod = @import("../tool/tool.zig");
 const Tool = tool_mod.Tool;
 const jobs = @import("jobs.zig");
 const memory = @import("memory.zig");
+const speech_gate = @import("speech_gate.zig");
 const config = @import("../config.zig");
 const Config = config.Config;
 
@@ -129,6 +130,7 @@ pub const Scheduler = struct {
     lanes: [lane_count]LaneState = @splat(.{}),
     stopping: bool = false,
     gpu_lock_fd: posix.fd_t = -1, // the host's GPU lock while any tool is loaded (`holdGpuLock`); under `gate`
+    speech: speech_gate.Holder = .{}, // held while a speech job runs: image and video workers pause between steps
     lock_msg: [512]u8 = undefined,
     lock_len: usize = 0,
     hold_until_ns: i96 = 0, // displaced tools wait until this (a reservation's job ends it early); under `gate`
@@ -202,6 +204,7 @@ pub const Scheduler = struct {
 
     pub fn deinit(s: *Scheduler) void {
         s.releaseGpuLock();
+        s.speech.deinit();
         for (&s.lanes) |*l| l.queue.deinit(s.gpa);
     }
 
@@ -704,6 +707,8 @@ pub const Scheduler = struct {
         s.gate.unlock(s.io);
         defer s.endHold(slot); // after `done`: a reservation ends with its job, and what it unloaded comes back
         defer s.done(slot);
+        const heavy = j.request == .image or j.request == .video;
+        if (cold and heavy) s.speech.waitIdle(s.io); // a load next to speech starves it too
         if (cold) {
             s.setPhase(j, "load");
             s.loadSlot(slot) catch |err| {
@@ -715,6 +720,9 @@ pub const Scheduler = struct {
         defer arena.deinit();
         const job: tool_mod.Job = .{ .id = j.id, .dir = j.dir, .request = j.request };
         var pctx: ProgressCtx = .{ .s = s, .j = j };
+        const speaking = j.request == .speech;
+        if (speaking) s.speech.enter(s.io);
+        defer if (speaking) s.speech.leave(s.io);
         const out = slot.tool.generate(&job, .{ .ctx = &pctx, .progress = ProgressCtx.report }, arena.allocator()) catch |err| {
             if (slot.tool.state() == .unloaded) s.forget(slot);
             return s.finishError(j, slot, err);

@@ -17,6 +17,7 @@ const engine = @import("../engine/engine.zig");
 const upstream = @import("upstream.zig");
 const Request = @import("request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
+const speech_gate = @import("../sched/speech_gate.zig");
 
 pub const Setup = struct {
     gpa: std.mem.Allocator,
@@ -25,6 +26,7 @@ pub const Setup = struct {
     environ: *const std.process.Environ.Map,
     log_dir: []const u8,
     gpu_lock: []const u8 = "",
+    speech_gate: []const u8 = "", // the file workers wait on while speech is made (sched/speech_gate.zig); "": none
 };
 
 pub const ProcessTool = struct {
@@ -276,6 +278,7 @@ pub const ProcessTool = struct {
         }
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
+        if (p.setup.speech_gate.len > 0) try env.put(speech_gate.env_name, p.setup.speech_gate);
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);
