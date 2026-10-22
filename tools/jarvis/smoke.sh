@@ -130,6 +130,12 @@ voice() {
   med=$(jq -r '.first_audio_ms | "first audio median \(.median) ms, turns \(.turns | tojson)"' "$out/$dir/results.json" 2> /dev/null)
   record "$name" "$([ $rc = 0 ] && echo true || echo false)" "$(secs $t)" "${med:-driver exit $rc, see $dir.log}"
 }
+# first_turn NAME DIR: the first turn after another model's job is what a user waits for: it alone must reach 1.5 s
+first_turn() {
+  local ms
+  ms=$(jq -r '.first_audio_ms.turns.warmup // "null"' "$out/$2/results.json" 2> /dev/null)
+  record "$1" "$([ "$ms" != null ] && [ -n "$ms" ] && [ "$ms" -le 1500 ] && echo true || echo false)" 0 "first turn's first audio ${ms} ms"
+}
 # watch_start NAME / watch_stop NAME: MemAvailable and every model's state each 0.5 s while a job runs; watch_stop
 # prints the lowest MemAvailable (GiB) and the models that were ready at the start and unloaded during it
 watch_start() {
@@ -162,7 +168,8 @@ miss=""; for m in $want; do grep -q "$m=ready" <<< "$kept" || miss="$miss $m"; d
 record warm_set "$([ -z "$miss" ] && ! grep -q "$KITTEN" <<< "$kept" && echo true || echo false)" 0 "$kept${miss:+; not warm:$miss}"
 
 # warm voice turns (median first audio <= 1.2 s); in the full run, barge-in and a spoken picture request
-voice voice_warm voice --max-median-ms 1200 $([ $quick = 1 ] && echo --skip-barge || echo --picture --picture-prompt "Generate a picture of a dog.")
+extra=(--skip-barge); [ $quick = 1 ] || extra=(--picture --picture-prompt "Generate a picture of a dog.")
+voice voice_warm voice --max-median-ms 1200 "${extra[@]}"
 if [ $quick = 0 ]; then
   record barge_in "$(jq -e '.barge_in.cut_status == "cancelled" and .barge_in.audio_deltas_after_speech_started == 0' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
     "$(jq -c '.barge_in // "missing"' "$out/voice/results.json" 2> /dev/null)"
@@ -179,7 +186,10 @@ record image "$([ "$code" = 200 ] && [ "$(head -c 8 "$out/image.png" | od -An -t
   "${iu:-$(head -c 200 <<< "$r")}"
 w=$(watch_stop image); echo "image: lowest MemAvailable ${w%%|*} GiB"
 only_lost image_evicted_nothing "${w#*|}"
-[ $quick = 1 ] || voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
+if [ $quick = 0 ]; then
+  voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
+  first_turn first_turn_after_image voice-after-image
+fi
 
 # video (full run): a 1 s clip, then its MP4; it may evict only the image model (and Kitten); the voice turns right
 # after it within 1.5 s; then the image model is back
@@ -196,6 +206,7 @@ if [ $quick = 0 ]; then
   w=$(watch_stop video); echo "video: lowest MemAvailable ${w%%|*} GiB"
   only_lost video_evicted_only_image "${w#*|}" "$IMAGE" "$KITTEN"
   voice voice_after_video voice-after-video --skip-barge --count-warmup --max-median-ms 1500
+  first_turn first_turn_after_video voice-after-video
   # Kitten on demand (the fallback voice), then the warm set must be whole again (the image model back, Kitten gone first)
   tts tts_kitten "$KITTEN"
   t=$(now); state=""
