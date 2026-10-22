@@ -7,6 +7,7 @@ const engine = @import("engine.zig");
 const wire = @import("../tool/wire.zig");
 const tool = @import("../tool/tool.zig");
 const ToolConfig = @import("../config.zig").ToolConfig;
+const speech_gate = @import("../sched/speech_gate.zig");
 
 const stdin_fd = 0;
 const stdout_fd = 1;
@@ -28,6 +29,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
     var lines: wire.LineReader = .{ .fd = stdin_fd, .buf = &buf };
     var loaded: ?engine.Engine = null;
     defer if (loaded) |e| e.unload();
+    // Image and video jobs pause between steps while the daemon makes speech (sched/speech_gate.zig).
+    var gate: speech_gate.Waiter = .init(if (environ) |m| m.get(speech_gate.env_name) orelse "" else "");
     while (true) {
         const line = lines.next(-1) catch |err| switch (err) {
             error.EndOfStream => return 0,
@@ -66,7 +69,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
                     try reply(gpa, .{ .ok = false, .@"error" = "generate without a request", .type = "protocol_error" });
                     continue;
                 } };
-                var ctx: SinkCtx = .{ .gpa = gpa };
+                const heavy = job.request == .image or job.request == .video;
+                var ctx: SinkCtx = .{ .gpa = gpa, .io = io, .gate = if (heavy) &gate else null };
+                if (heavy) {
+                    gate.reset();
+                    gate.wait(io);
+                }
                 const out = e.generate(&job, .{ .ctx = &ctx, .progress = SinkCtx.progress }, a) catch |err| {
                     try fail(gpa, "generate", err);
                     continue;
@@ -79,10 +87,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
 
 const SinkCtx = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
+    gate: ?*speech_gate.Waiter, // an image or video job: it yields to speech at each report
 
     fn progress(ptr: *anyopaque, p: tool.Progress) void {
         const s: *SinkCtx = @ptrCast(@alignCast(ptr));
         reply(s.gpa, .{ .progress = p }) catch {};
+        if (s.gate) |g| g.wait(s.io);
     }
 };
 
