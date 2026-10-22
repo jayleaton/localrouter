@@ -50,7 +50,7 @@ pub const Response = struct {
 };
 
 /// Under the lock: an event of response `r` to the client, or to its outbox while `r` is held.
-fn out(s: *Session, r: *Response, a: std.mem.Allocator, typ: []const u8, fields: anytype) void {
+fn emitR(s: *Session, r: *Response, a: std.mem.Allocator, typ: []const u8, fields: anytype) void {
     if (!r.held) return s.emit.send(a, typ, fields);
     const text = s.emit.format(a, typ, fields) catch return;
     r.outbox.append(s.gpa, s.gpa.dupe(u8, text) catch return) catch {};
@@ -274,10 +274,10 @@ fn startSpec(s: *Session, r: *Response, turn_id: []const u8, text: []const u8) b
     var it: session.Item = .{ .arena = .init(s.gpa), .id = r.item_id, .kind = .assistant, .pending = true, .response_id = r.id };
     defer it.arena.deinit();
     const item = session.itemValue(ea, &it, r.audio) catch return false;
-    out(s, r, ea, "response.created", .{ .response = responseValue(r, "in_progress", null, &.{}) });
-    out(s, r, ea, "response.output_item.added", .{ .response_id = r.id, .output_index = 0, .item = item });
-    out(s, r, ea, "conversation.item.created", .{ .previous_item_id = r.turn_id, .item = item });
-    out(s, r, ea, "response.content_part.added", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .part = part(ea, r.audio, "") });
+    emitR(s, r, ea, "response.created", .{ .response = responseValue(r, "in_progress", null, &.{}) });
+    emitR(s, r, ea, "response.output_item.added", .{ .response_id = r.id, .output_index = 0, .item = item });
+    emitR(s, r, ea, "conversation.item.created", .{ .previous_item_id = r.turn_id, .item = item });
+    emitR(s, r, ea, "response.content_part.added", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .part = part(ea, r.audio, "") });
     s.spec = r;
     s.spec_live += 1;
     const t = std.Thread.spawn(.{}, specMain, .{ s, r, req, say }) catch {
@@ -420,7 +420,7 @@ const Feed = struct {
         if (r.stop.cancelled()) return;
         if (visible.len > 0) {
             r.text.appendSlice(a, visible) catch return;
-            out(s, r, tmp.allocator(), if (r.audio) "response.audio_transcript.delta" else "response.text.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = visible });
+            emitR(s, r, tmp.allocator(), if (r.audio) "response.audio_transcript.delta" else "response.text.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = visible });
             if (r.audio) f.chunks.push(visible) catch return;
         }
         if (!r.audio) return;
@@ -451,7 +451,7 @@ const Feed = struct {
         if (f.r.stop.cancelled()) return;
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
-        out(f.s, f.r, tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
+        emitR(f.s, f.r, tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
     }
 };
 
@@ -488,7 +488,7 @@ fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool
         if (err == error.Cancelled) return false;
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
-        if (!r.stop.cancelled()) out(s, r, a, "error", .{ .@"error" = .{ .type = "server_error", .code = "speech_failed", .message = why.message, .param = @as(?[]const u8, null), .event_id = @as(?[]const u8, null) } });
+        if (!r.stop.cancelled()) emitR(s, r, a, "error", .{ .@"error" = .{ .type = "server_error", .code = "speech_failed", .message = why.message, .param = @as(?[]const u8, null), .event_id = @as(?[]const u8, null) } });
         return false;
     };
     if (!out.finish()) return false;
@@ -553,7 +553,7 @@ const Voice = struct {
             s.mutex.lockUncancelable(s.io);
             defer s.mutex.unlock(s.io);
             if (r.stop.cancelled()) return false; // barge-in: not one more piece after speech_started
-            out(s, r, v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
+            emitR(s, r, v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
             if (r.held) r.held_audio = true else if (r.marks.first_audio == 0) r.marks.first_audio = s.clock();
             if (r.marks.first_voiced == 0 and !r.held_voiced) if (timing.firstLoud(samples)) |i| {
                 if (r.held) r.held_voiced = true else r.marks.first_voiced = s.clock(); // held: when adopt sends it
