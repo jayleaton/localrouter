@@ -42,7 +42,7 @@ marker() {
   [ "$got" = "$want" ] || die "$3: $1 was qualified with pins $got, this tree has $want: re-qualify first"
   echo "  $3: qualified ($(basename "$1") sha256 $(sha256sum "$1" | cut -c1-12), pins match)"
 }
-whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1')
+whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1' || true)   # none yet: fine for BUILD_ONLY
 whisper=${whisper%/}
 if [ "${BUILD_ONLY:-0}" != 1 ]; then
   echo "== preflight: $TOOLS"
