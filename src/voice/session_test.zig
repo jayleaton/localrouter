@@ -372,7 +372,16 @@ test "the wait is the speaker's: a pause under it keeps the turn open, the reply
     try testing.expectEqual(@as(usize, 0), rig.rec.count("response.audio_transcript.delta", 0));
     try testing.expectEqual(@as(usize, 0), rig.rec.count("response.audio.delta", 0));
     try rig.audio(400, true); // the speaker goes on: the same turn
-    try rig.audio(1100, false);
+    try rig.audio(300, false); // audio comes in real time: the draft and its held reply are made while it is quiet
+    for (0..2000) |_| {
+        rig.fake.mutex.lockUncancelable(rig.fake.io);
+        const n = rig.fake.requests.items.len;
+        rig.fake.mutex.unlock(rig.fake.io);
+        if (n >= 2) break;
+        Io.sleep(rig.fake.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.created", 0));
+    try rig.audio(800, false);
     const done = try rig.rec.wait("response.done", 0);
     Io.sleep(rig.fake.io, .fromMilliseconds(100), .awake) catch {};
     try testing.expectEqual(@as(usize, 1), rig.rec.count("input_audio_buffer.speech_stopped", 0));
