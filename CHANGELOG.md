@@ -4,8 +4,8 @@
 
 - Voice: "Wait before replying" is the end of the turn: 0.3, 0.5, 0.8, 1, 1.5, 2, 3, 4 or 5 s, default 0.8 s, kept in
   settings. It replaces "Pause before I reply", and stored values start again at 0.8 s.
-  - The turn ends on one unbroken quiet run that long. Speech restarts it, so pauses never add up. A loud run shorter
-    than 60 ms (a click) is not speech.
+  - The turn ends on one unbroken quiet run that long. Speech restarts it, so pauses never add up. In a pause, a
+    loud run shorter than 120 ms (a click, a knock) is not speech and does not restart it.
   - Nothing starts before the turn ends: no transcript, no chat request, no speech and no tool call. The whole
     utterance is transcribed once, after the wait.
   - Removed: the draft transcript at the first pause, the 300 ms early end on a finished sentence, and the

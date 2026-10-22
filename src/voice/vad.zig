@@ -23,6 +23,11 @@ const floor_high: f32 = -20;
 const loud_min: f32 = -50; // a frame quieter than this is never speech
 const creep: f32 = 0.05; // share of the gap the floor rises by each frame
 const silent_db: f32 = -100;
+// In a pause (`pause_min_frames` quiet in a row), a loud run shorter than `resume_frames` (a click, a knock, a cough) is
+// not the speaker going on: it counts as quiet, and the wait is not restarted. Frames are 20 ms and a sound rarely
+// starts on a frame edge, so a 40 ms click can light 3 frames; Chrome's processing can smear it further.
+const pause_min_frames: u32 = 10; // 200 ms
+const resume_frames: u32 = 6; // 120 ms
 
 pub const Vad = struct {
     cfg: Config,
@@ -40,6 +45,8 @@ pub const Vad = struct {
     active: bool = false,
     loud_run: u32 = 0,
     quiet_run: u32 = 0,
+    burst: u32 = 0, // in a turn: loud frames in a row after a pause, not yet speech
+    before_burst: u32 = 0, // the quiet run the burst interrupted
 
     /// A detector for mono audio at `rate` Hz, starting in silence.
     pub fn init(cfg: Config, rate: u32) Vad {
@@ -93,6 +100,7 @@ pub const Vad = struct {
         v.active = false;
         v.loud_run = 0;
         v.quiet_run = 0;
+        v.burst = 0;
     }
 
     /// Milliseconds of audio fed so far.
@@ -108,10 +116,18 @@ pub const Vad = struct {
         const loud = db > @max(v.floor + v.margin, loud_min);
         v.frames += 1;
         if (v.active) {
-            // The quiet run that ends the turn restarts only on speech: `min_speech_ms` of loud frames in a row, as
-            // speech must be to start a turn. A shorter loud run (a click, a knock, a breath) counts as quiet.
-            v.loud_run = if (loud) v.loud_run + 1 else 0;
-            v.quiet_run = if (v.loud_run >= v.speech_frames) 0 else v.quiet_run + 1;
+            // The turn ends on one unbroken quiet run of silence_duration_ms; speech restarts it. Mid-speech any loud frame
+            // does (speech has short dips); in a pause, only `resume_frames` of loud frames in a row do, and a shorter
+            // burst counts as quiet.
+            if (!loud) {
+                v.burst = 0;
+                v.quiet_run += 1;
+            } else if (v.burst > 0 or v.quiet_run >= pause_min_frames) {
+                if (v.burst == 0) v.before_burst = v.quiet_run;
+                v.burst += 1;
+                v.quiet_run = if (v.burst >= resume_frames) 0 else v.before_burst + v.burst;
+                if (v.burst >= resume_frames) v.burst = 0;
+            } else v.quiet_run = 0;
             if (v.pause_frames > 0 and v.quiet_run == v.pause_frames and v.pause_frames < v.silence_frames) try out.append(gpa, .{ .kind = .speech_paused, .ms = v.msAtFrame(v.frames - v.quiet_run) });
             if (v.quiet_run >= v.silence_frames) {
                 v.reset();
