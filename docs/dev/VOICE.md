@@ -253,6 +253,26 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
 - An echo guard sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a row say
   someone is talking over it.
 - Minimizing keeps the session on: a bar above the composer shows its state, and typed messages get spoken replies.
+- **Playback start.** A reply's audio is held until 200 ms of it is in hand, or 150 ms after its first piece came,
+  then scheduled back to back on the AudioContext clock.
+  - Drama 3 streams a 46 ms first piece, then a 186 ms burst about every 125 ms (1.49 times real time). The first
+    burst comes 120 to 185 ms after the first piece.
+  - Started on the first piece (the earlier client, 50 ms after it), playback ran dry after the first syllable. The
+    restart lead made that a 130 to 190 ms stall: the stutter at the start of every reply.
+  - The 10 recorded DGX-01 delta traces, replayed through both schedulers: the old one stalled in the first 2 s of all
+    10 replies, the hold in none of the 6 that streamed at full rate. Playback starts 86 to 110 ms later.
+  - In the browser (`client_check.py`, output recorded after the mixer): before, 4 of 5 replies had a 133 to 175 ms
+    gap in their first 2 s; after, none of the full-rate ones did.
+  - Later underruns restart with a lead that grows by their lateness (0.1 up to 0.5 s), so a slow stream pauses
+    rarely rather than stuttering.
+- **Known limit: a longer reply still pauses near its start.** The chat model decodes the rest of the reply on the
+  same GPU while Drama 3 speaks the first sentence. Measured on DGX-01, with a 600-token chat decoding:
+  - Drama 3 drops from 1.49 to 0.67 times real time;
+  - the chat stream slows from 20.2 to 33.1 s.
+
+  Until the chat stream ends, speech arrives slower than it plays. A buffer large enough to cover it costs seconds, so
+  the fix belongs in how the two models share the GPU (for example, priority for the speech model), not in the
+  client.
 
 **Voice picker.**
 - In the settings drawer you choose the speech engine (Drama 3, Kitten) and its voice.

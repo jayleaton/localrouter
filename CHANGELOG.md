@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Jarvis client: a spoken reply no longer stutters as it starts.
+  - Its audio is held until 200 ms is buffered, or 150 ms after the first piece, then scheduled back to back. Drama
+    3's 46 ms first piece used to run dry before the next burst.
+  - The cost is 86 to 110 ms on first audio.
+  - `client_check.py` records the page's output and fails on a playback gap over 30 ms, or a click, in a reply's
+    first 2 s.
 - Jarvis web client, a UI pass in Sidebud's look, with system light and dark themes:
   - a sidebar of conversations (rename, delete with undo);
   - messages with roles, timestamps, copy and regenerate, highlighted code blocks with copy, and a collapsible
