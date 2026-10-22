@@ -217,8 +217,8 @@ step's `done` test.
 
 ### image: `qwen-image-2.1-turbo`
 
-- **What it is.** Qwen-Image 2.1 Turbo, FP8 with 8 steps, on LocalRouter's own engine. Its licence is Qwen's own:
-  read the model card. Kept warm.
+- **What it is.** Qwen-Image 2.1 Turbo, FP8 with 8 steps, on LocalRouter's own engine. Its licence is the Qwen Research License: non-commercial research or
+  evaluation only. Kept warm.
 - **Size.** About 67 GB to download: 47 GB of checkpoints and the 20 GB NVIDIA PyTorch container, pulled once. About
   95 GB on disk. 35 GiB in memory.
 - **Steps.** Both run `tools/spark/install.sh` with `WEIGHTS_ONLY=1` inside the container.
@@ -231,8 +231,8 @@ step's `done` test.
 
 ### video: `minimax-h3`
 
-- **What it is.** MiniMax H3 text to video with audio: the NVFP4 Turbo pack, 8 steps. Its licence is MiniMax's own:
-  read the model card. It loads on demand and unloads the image model while it runs.
+- **What it is.** MiniMax H3 text to video with audio: the NVFP4 Turbo pack, 8 steps. Its licence is the MiniMax H3 Community License, which excludes the
+  US, EU, UK and South Korea and sets downstream use conditions. It loads on demand and unloads the image model while it runs.
 - **Size.** About 66 GB to download and 90 GB on disk. 39 GiB in memory while it runs.
 - **Steps.**
   - `download`: the checkpoints, each checked against `tools/twin/packs/sources/minimax-h3.json`, and the video venv.
