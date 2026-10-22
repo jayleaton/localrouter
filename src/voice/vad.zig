@@ -23,6 +23,11 @@ const floor_high: f32 = -20;
 const loud_min: f32 = -50; // a frame quieter than this is never speech
 const creep: f32 = 0.05; // share of the gap the floor rises by each frame
 const silent_db: f32 = -100;
+// In a pause (`pause_min_frames` quiet in a row), a loud run shorter than `resume_frames` (a click, a knock, a cough) is
+// not the speaker going on: it counts as quiet, and the wait is not restarted. Frames are 20 ms and a sound rarely
+// starts on a frame edge, so a 40 ms click can light 3 frames; Chrome's processing can smear it further.
+const pause_min_frames: u32 = 10; // 200 ms
+const resume_frames: u32 = 6; // 120 ms
 
 pub const Vad = struct {
     cfg: Config,
@@ -40,6 +45,8 @@ pub const Vad = struct {
     active: bool = false,
     loud_run: u32 = 0,
     quiet_run: u32 = 0,
+    burst: u32 = 0, // in a turn: loud frames in a row after a pause, not yet speech
+    before_burst: u32 = 0, // the quiet run the burst interrupted
 
     /// A detector for mono audio at `rate` Hz, starting in silence.
     pub fn init(cfg: Config, rate: u32) Vad {
@@ -93,6 +100,7 @@ pub const Vad = struct {
         v.active = false;
         v.loud_run = 0;
         v.quiet_run = 0;
+        v.burst = 0;
     }
 
     /// Milliseconds of audio fed so far.
@@ -108,9 +116,20 @@ pub const Vad = struct {
         const loud = db > @max(v.floor + v.margin, loud_min);
         v.frames += 1;
         if (v.active) {
-            v.quiet_run = if (loud) 0 else v.quiet_run + 1;
+            // The turn ends on one unbroken quiet run of silence_duration_ms; speech restarts it. Mid-speech any loud frame
+            // does (speech has short dips); in a pause, only `resume_frames` of loud frames in a row do, and a shorter
+            // burst counts as quiet.
+            if (!loud) {
+                v.burst = 0;
+                v.quiet_run += 1;
+            } else if (v.burst > 0 or v.quiet_run >= pause_min_frames) {
+                if (v.burst == 0) v.before_burst = v.quiet_run;
+                v.burst += 1;
+                v.quiet_run = if (v.burst >= resume_frames) 0 else v.before_burst + v.burst;
+                if (v.burst >= resume_frames) v.burst = 0;
+            } else v.quiet_run = 0;
             if (v.pause_frames > 0 and v.quiet_run == v.pause_frames and v.pause_frames < v.silence_frames) try out.append(gpa, .{ .kind = .speech_paused, .ms = v.msAtFrame(v.frames - v.quiet_run) });
-            if (v.quiet_run >= v.silence_frames) {
+            if (!loud and v.quiet_run >= v.silence_frames) { // never inside a burst: it may yet be speech
                 v.reset();
                 try out.append(gpa, .{ .kind = .speech_stopped, .ms = v.msAtFrame(v.frames) });
             }
@@ -261,6 +280,43 @@ test "two turns apart are two pairs; a short pause does not split a turn" {
         .{ .kind = .speech_started, .ms = 1200 },
         .{ .kind = .speech_stopped, .ms = 3100 },
     }, ev.items);
+}
+
+test "the wait restarts on speech, never adds up, and a blip in it is not speech" {
+    const gpa = std.testing.allocator;
+    var buf: std.ArrayList(i16) = .empty;
+    defer buf.deinit(gpa);
+    // Three pauses of 400 ms under the 500 ms wait: one turn, ending 500 ms after the last word.
+    try tone(&buf, 400, null);
+    for (0..3) |_| {
+        try quiet(&buf, 400, null);
+        try tone(&buf, 300, null);
+    }
+    try quiet(&buf, 700, null);
+    var a: std.ArrayList(Event) = .empty;
+    defer a.deinit(gpa);
+    try run(buf.items, test_rate / 10, &a);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 400 + 3 * 700 + 500 } }, a.items);
+    // A 40 ms click 300 ms into the quiet does not restart it: the turn ends 500 ms after the speech, not the click.
+    buf.clearRetainingCapacity();
+    try tone(&buf, 600, null);
+    try quiet(&buf, 300, null);
+    try tone(&buf, 40, null);
+    try quiet(&buf, 800, null);
+    var b: std.ArrayList(Event) = .empty;
+    defer b.deinit(gpa);
+    try run(buf.items, test_rate / 10, &b);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 600 + 500 } }, b.items);
+    // Speech going on 450 ms into the 500 ms wait is still the same turn (its first frames do not end it).
+    buf.clearRetainingCapacity();
+    try tone(&buf, 600, null);
+    try quiet(&buf, 450, null);
+    try tone(&buf, 300, null);
+    try quiet(&buf, 700, null);
+    var c: std.ArrayList(Event) = .empty;
+    defer c.deinit(gpa);
+    try run(buf.items, test_rate / 10, &c);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 600 + 450 + 300 + 500 } }, c.items);
 }
 
 test "reset returns to silence and keeps the position" {

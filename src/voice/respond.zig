@@ -34,33 +34,9 @@ pub const Response = struct {
     spoken: std.ArrayList(session.Item.Spoken) = .empty, // gpa: moves to the item
     audio_ms: u64 = 0, // sent so far
     marks: timing.Marks = .{},
-    // A speculative response (`speculate`): made while the speaker is quiet, before the turn it answers has ended.
-    // While `held`, its events wait in `outbox` (gpa) and it is not in the history; `adopt` sends them when the turn
-    // ends as drafted, else it is cancelled and its thread drops it unseen.
-    held: bool = false,
-    adopted: bool = false,
-    outbox: std.ArrayList([]const u8) = .empty,
-    turn_id: []const u8 = "", // the user item it answers
-    key: u64 = 0, // the pause (draft) it answers
-    changes: u64 = 0, // Session.changes when it was made
-    held_audio: bool = false, // audio waited in the outbox: first_audio is when it was sent
-    held_voiced: bool = false,
 
     const Chunk = struct { text: []const u8, text_end: usize };
 };
-
-/// Under the lock: an event of response `r` to the client, or to its outbox while `r` is held.
-fn emitR(s: *Session, r: *Response, a: std.mem.Allocator, typ: []const u8, fields: anytype) void {
-    if (!r.held) return s.emit.send(a, typ, fields);
-    const text = s.emit.format(a, typ, fields) catch return;
-    r.outbox.append(s.gpa, s.gpa.dupe(u8, text) catch return) catch {};
-}
-
-fn freeOutbox(s: *Session, r: *Response) void {
-    for (r.outbox.items) |t| s.gpa.free(t);
-    r.outbox.deinit(s.gpa);
-    r.outbox = .empty;
-}
 
 /// The worker loop: one task at a time until the session closes.
 pub fn work(s: *Session) void {
@@ -76,7 +52,6 @@ pub fn work(s: *Session) void {
         defer t.free(s.gpa);
         switch (t) {
             .partial => |h| hear(s, h, .partial),
-            .draft => |h| hear(s, h, .draft),
             .final => |h| hear(s, h, .final),
             .respond => |ask| run(s, ask),
             .warm => warm(s),
@@ -86,7 +61,7 @@ pub fn work(s: *Session) void {
 
 // ---------------------------------------------------------------- transcription
 
-const Pass = enum { partial, draft, final };
+const Pass = enum { partial, final };
 
 /// Under the lock: the chat server reads the conversation as the next turn's request will begin it (the same system
 /// prompt, tools and history; `max_tokens` 1, the reply discarded), so that request finds it in the server's prefix
@@ -115,6 +90,7 @@ fn primeChat(s: *Session) void {
     };
     s.mutex.unlock(s.io);
     req.max_tokens = 1;
+    std.log.info("voice {s}: chat prime (the conversation so far, no new turn; max_tokens 1)", .{s.id});
     var why: backend.Why = .{};
     _ = s.backend.stream(a, &req, .{ .ctx = s, .text = discard }, &s.close_stop, &why) catch {};
     s.mutex.lockUncancelable(s.io);
@@ -154,14 +130,6 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
         s.mutex.unlock(s.io);
         return;
     }
-    if (pass == .draft and !s.draftWanted(h)) return s.mutex.unlock(s.io); // superseded, or the speaker went on
-    if (pass == .final) {
-        if (s.reuseDraft(a, h)) |text| { // the turn ended on the pause its draft began at
-            defer s.mutex.unlock(s.io);
-            s.stt_draft = true;
-            return completed(s, a, h.item_id, text, &why);
-        }
-    }
     const st = &s.settings;
     const language = if (st.language.len > 0) st.language else s.heardLanguage(); // no detection pass on each turn
     const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "", .greedy = s.voice.greedy_transcripts };
@@ -187,22 +155,19 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
             const turn = s.turn orelse return;
             if (std.mem.eql(u8, turn.item_id, h.item_id)) s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = std.mem.trim(u8, t, " \t\r\n") });
         },
-        .draft => if (text) |t| s.drafted(a, h, t, began, worker_ms) else |_| {},
         .final => {
             s.stt_start_ns = began;
             s.stt_end_ns = s.clock();
             s.stt_worker_ms = worker_ms;
-            s.stt_draft = false;
             completed(s, a, h.item_id, text, &why);
         },
     }
 }
 
 /// Under the lock: the final transcript of user item `item_id` (deleted meanwhile: nothing).
-pub fn completed(s: *Session, a: std.mem.Allocator, item_id: []const u8, text: backend.Error![]const u8, why: *const backend.Why) void {
+fn completed(s: *Session, a: std.mem.Allocator, item_id: []const u8, text: backend.Error![]const u8, why: *const backend.Why) void {
     const it = s.find(item_id) orelse return;
     it.pending = false;
-    s.changes += 1;
     if (text) |t| {
         it.text = it.arena.allocator().dupe(u8, std.mem.trim(u8, t, " \t\r\n")) catch "";
         if (it.text.len > 0) s.fresh = true;
@@ -226,6 +191,7 @@ fn run(s: *Session, ask: Task.Ask) void {
     var req: chat.Request = undefined;
     var say: backend.Say = undefined;
     if (!begin(s, r, ask, &req, &say)) return;
+    if (r.marks.from_turn) std.log.info("voice {s}: chat request for {s}, {d} ms after the turn ended", .{ s.id, r.id, @divTrunc(s.clock() - r.marks.t0, std.time.ns_per_ms) }) else std.log.info("voice {s}: chat request for {s}", .{ s.id, r.id });
     var why: backend.Why = .{};
     const result = stream(s, r, &req, say, &why);
     finish(s, r, result, &why);
@@ -245,104 +211,6 @@ fn stream(s: *Session, r: *Response, req: *chat.Request, say: backend.Say, why: 
     return result;
 }
 
-/// Under the lock: a reply to the open turn as drafted so far (`text`, the pause at `key`), made on its own thread and
-/// held back: its chat and speech run while the speaker is quiet, so the reply is ready when the quiet ends the turn.
-/// Session.takeSpec decides at the turn's end whether it answers that turn (`adopt`); if not, it is cancelled (the
-/// backends' cancel: the chat stream is closed, a speech job is soft-cancelled) and dropped unseen.
-pub fn speculate(s: *Session, turn_id: []const u8, key: u64, text: []const u8) void {
-    const r = s.gpa.create(Response) catch return;
-    r.* = .{ .arena = .init(s.gpa), .held = true, .key = key, .changes = s.changes };
-    if (!startSpec(s, r, turn_id, text)) {
-        freeOutbox(s, r);
-        r.arena.deinit();
-        s.gpa.destroy(r);
-    }
-}
-
-fn startSpec(s: *Session, r: *Response, turn_id: []const u8, text: []const u8) bool {
-    var tmp: std.heap.ArenaAllocator = .init(s.gpa);
-    defer tmp.deinit();
-    const ea = tmp.allocator();
-    const a = r.arena.allocator();
-    r.turn_id = a.dupe(u8, turn_id) catch return false;
-    r.audio = s.settings.audio;
-    r.id = s.newId(a, "resp") catch return false;
-    r.item_id = s.newId(a, "item") catch return false;
-    const req = requestWith(s, a, .{ .auto = true }, text) catch return false;
-    const say: backend.Say = .{ .model = a.dupe(u8, s.settings.speech_model) catch return false, .voice = a.dupe(u8, s.settings.voice) catch return false };
-    // What `begin` announces, waiting in the outbox: the assistant item follows the turn's user item.
-    var it: session.Item = .{ .arena = .init(s.gpa), .id = r.item_id, .kind = .assistant, .pending = true, .response_id = r.id };
-    defer it.arena.deinit();
-    const item = session.itemValue(ea, &it, r.audio) catch return false;
-    emitR(s, r, ea, "response.created", .{ .response = responseValue(r, "in_progress", null, &.{}) });
-    emitR(s, r, ea, "response.output_item.added", .{ .response_id = r.id, .output_index = 0, .item = item });
-    emitR(s, r, ea, "conversation.item.created", .{ .previous_item_id = r.turn_id, .item = item });
-    emitR(s, r, ea, "response.content_part.added", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .part = part(ea, r.audio, "") });
-    s.spec = r;
-    s.spec_live += 1;
-    const t = std.Thread.spawn(.{}, specMain, .{ s, r, req, say }) catch {
-        s.spec = null;
-        s.spec_live -= 1;
-        return false;
-    };
-    t.detach();
-    return true;
-}
-
-/// A speculative response's thread: chat and speech while held, then the response's end once adopted, or nothing.
-fn specMain(s: *Session, r: *Response, req: chat.Request, say: backend.Say) void {
-    var q = req;
-    var why: backend.Why = .{};
-    const result = stream(s, r, &q, say, &why);
-    s.mutex.lockUncancelable(s.io);
-    while (!r.adopted and !r.stop.cancelled() and !s.closing) r.cond.waitUncancelable(s.io, &s.mutex);
-    const adopted = r.adopted;
-    if (!adopted and s.spec == r) s.spec = null; // closing
-    const sent = r.audio_ms;
-    s.mutex.unlock(s.io);
-    if (!adopted) std.log.info("voice {s}: a held reply was dropped unseen ({d} ms of audio made, none sent): the speaker went on or the turn changed", .{ s.id, sent });
-    if (adopted) finish(s, r, result, &why);
-    s.mutex.lockUncancelable(s.io);
-    freeOutbox(s, r);
-    s.spec_live -= 1;
-    s.cond.broadcast(s.io);
-    s.mutex.unlock(s.io);
-    r.spoken.deinit(s.gpa);
-    r.arena.deinit();
-    s.gpa.destroy(r);
-}
-
-/// Under the lock, at the end of the turn `r` answers (its user item committed and transcribed just now): `r` becomes
-/// the session's response, its held events go out in order, and what it sends from here goes out as it comes.
-pub fn adopt(s: *Session, r: *Response) void {
-    const it = s.addItem(.assistant, r.item_id) catch {
-        r.stop.set(s.io);
-        r.cond.broadcast(s.io);
-        return;
-    };
-    it.response_id = it.arena.allocator().dupe(u8, r.id) catch "";
-    it.pending = true;
-    s.fresh = false;
-    s.resp = r;
-    r.marks.from_turn = true;
-    r.marks.t0 = s.stop_ns;
-    r.marks.speech_end = s.speech_end_ns;
-    r.marks.stt_start = s.stt_start_ns;
-    r.marks.stt_end = s.stt_end_ns;
-    r.marks.stt_worker_ms = s.stt_worker_ms;
-    r.marks.stt_draft = s.stt_draft;
-    r.marks.early_end = s.early_end;
-    r.marks.speculative = true;
-    s.stop_ns = 0;
-    for (r.outbox.items) |text| s.emit.out.send(s.emit.out.ctx, text);
-    freeOutbox(s, r);
-    if (r.held_audio) r.marks.first_audio = s.clock();
-    if (r.held_voiced) r.marks.first_voiced = s.clock();
-    r.held = false;
-    r.adopted = true;
-    r.cond.broadcast(s.io);
-}
-
 /// Under the lock: copies what the response needs, adds the assistant item and announces the response.
 fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *backend.Say) bool {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
@@ -359,9 +227,7 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
         r.marks.stt_start = s.stt_start_ns;
         r.marks.stt_end = s.stt_end_ns;
         r.marks.stt_worker_ms = s.stt_worker_ms;
-        r.marks.stt_draft = s.stt_draft;
         r.marks.speech_end = s.speech_end_ns;
-        r.marks.early_end = s.early_end;
     }
     s.stop_ns = 0;
     r.id = s.newId(a, "resp") catch return false;
@@ -420,7 +286,7 @@ const Feed = struct {
         if (r.stop.cancelled()) return;
         if (visible.len > 0) {
             r.text.appendSlice(a, visible) catch return;
-            emitR(s, r, tmp.allocator(), if (r.audio) "response.audio_transcript.delta" else "response.text.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = visible });
+            s.emit.send(tmp.allocator(), if (r.audio) "response.audio_transcript.delta" else "response.text.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = visible });
             if (r.audio) f.chunks.push(visible) catch return;
         }
         if (!r.audio) return;
@@ -451,7 +317,7 @@ const Feed = struct {
         if (f.r.stop.cancelled()) return;
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
-        emitR(f.s, f.r, tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
+        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
     }
 };
 
@@ -488,7 +354,7 @@ fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool
         if (err == error.Cancelled) return false;
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
-        if (!r.stop.cancelled()) emitR(s, r, a, "error", .{ .@"error" = .{ .type = "server_error", .code = "speech_failed", .message = why.message, .param = @as(?[]const u8, null), .event_id = @as(?[]const u8, null) } });
+        if (!r.stop.cancelled()) s.emit.fail(a, "server_error", "speech_failed", why.message, null);
         return false;
     };
     if (!out.finish()) return false;
@@ -553,10 +419,10 @@ const Voice = struct {
             s.mutex.lockUncancelable(s.io);
             defer s.mutex.unlock(s.io);
             if (r.stop.cancelled()) return false; // barge-in: not one more piece after speech_started
-            emitR(s, r, v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
-            if (r.held) r.held_audio = true else if (r.marks.first_audio == 0) r.marks.first_audio = s.clock();
-            if (r.marks.first_voiced == 0 and !r.held_voiced) if (timing.firstLoud(samples)) |i| {
-                if (r.held) r.held_voiced = true else r.marks.first_voiced = s.clock(); // held: when adopt sends it
+            s.emit.send(v.a, "response.audio.delta", .{ .response_id = r.id, .item_id = r.item_id, .output_index = 0, .content_index = 0, .delta = b64 });
+            if (r.marks.first_audio == 0) r.marks.first_audio = s.clock();
+            if (r.marks.first_voiced == 0) if (timing.firstLoud(samples)) |i| {
+                r.marks.first_voiced = s.clock();
                 r.marks.voiced_audio_ms = r.audio_ms + i * 1000 / session.rate;
             };
             r.audio_ms += n * 1000 / session.rate;
@@ -601,7 +467,6 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
     var outputs: std.ArrayList(Value) = .empty;
     if (s.find(r.item_id)) |it| {
         it.text = it.arena.allocator().dupe(u8, kept) catch "";
-        s.changes += 1;
         it.pending = false;
         it.spoken = r.spoken;
         r.spoken = .empty;
@@ -676,11 +541,6 @@ const manage_tools =
 
 /// Under the lock: the chat request from the settings and the conversation, copied into `a`.
 fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
-    return requestWith(s, a, ask, null);
-}
-
-/// `request`, with `turn` as the user's next message (a speculative reply: the turn is not an item yet).
-fn requestWith(s: *Session, a: std.mem.Allocator, ask: Task.Ask, turn: ?[]const u8) !chat.Request {
     const st = &s.settings;
     var msgs: std.ArrayList(chat.Message) = .empty;
     const base = ask.instructions orelse st.instructions;
@@ -688,7 +548,6 @@ fn requestWith(s: *Session, a: std.mem.Allocator, ask: Task.Ask, turn: ?[]const 
     const instructions = if (manage) try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ base, model_skill }) else base;
     if (instructions.len > 0) try msgs.append(a, .{ .role = "system", .content = try a.dupe(u8, instructions) });
     try history(s, a, &msgs);
-    if (turn) |t| try msgs.append(a, .{ .role = "user", .content = try a.dupe(u8, t) });
     trim(&msgs, s.voice.max_history_chars, if (instructions.len > 0) 1 else 0);
     var tools: std.ArrayList(chat.Tool) = .empty;
     const offer = s.backend.offer();
