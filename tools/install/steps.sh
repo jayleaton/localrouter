@@ -73,6 +73,7 @@ drama3_config() {
         tools: [.tools[] | select(.id == "fishaudio/drama-3")]}' > "$out.tmp"
   jq -e '.tools | length == 1' "$out.tmp" > /dev/null || die "no fishaudio/drama-3 tool in deploy/jarvis/config.json.in"
   mv "$out.tmp" "$out"
+  : >> "$J/qualify-drama3/gpu.lock"   # qualify takes it (its assets step checks the file exists)
   echo "wrote $out"
 }
 

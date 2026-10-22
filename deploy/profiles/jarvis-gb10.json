@@ -92,7 +92,7 @@
      "gpu": true, "min_free_gib": 64,
      "run": "$STEPS free 64 && bash $REPO/tools/chat/qwen38-27b/qualify.sh $CHAT_ROOT $LR_BIN $J/qualify-chat/run-$(date -u +%Y%m%dT%H%M%SZ) $CHAT_MARKER",
      "done": "$STEPS qualified $CHAT_MARKER $REPO/tools/chat/qwen38-27b/pins.json",
-     "fix": "not enough free memory: stop what holds the GPU (doctor.sh says what). A failed check: OUT/status.json and the step logs in the run directory under $J/qualify-chat/ say which; report it with them"}
+     "fix": "the run directory named in the log (under $J/qualify-chat/) has status.json, which says which step failed, and each step's log: not enough free memory: stop what holds the GPU (doctor.sh says what); anything else: report it with those logs"}
    ]},
   {"key": "tts", "id": "fishaudio/drama-3", "warm": true,
    "title": "Fish Audio Drama 3 text to speech (TensorFold native engine, six named voices, streamed 44.1 kHz)",
@@ -124,7 +124,7 @@
      "gpu": true, "min_free_gib": 88, "needs_accept": true,
      "run": "$STEPS free 88 && bash $REPO/tools/speech/drama3/qualify.sh $DRAMA_ROOT $J/qualify-drama3/config.json $J/qualify-drama3/run-$(date -u +%Y%m%dT%H%M%SZ) --reference $J/qualify-drama3/reference --accept-native-numerics",
      "done": "$STEPS qualified $DRAMA_MARKER $REPO/tools/speech/drama3/pins.json",
-     "fix": "not enough free memory (the accuracy oracle needs 88 GiB): stop what holds the GPU. A failed step: status.json and the step logs in the run directory under $J/qualify-drama3/; report it with them"}
+     "fix": "the run directory named on the last line (under $J/qualify-drama3/) has status.json, which says which step failed, and each step's log (assets.log, e2e.log, ...): not enough free memory (the accuracy oracle needs 88 GiB): stop what holds the GPU; anything else: report it with those logs"}
    ]},
   {"key": "stt", "id": "whisper-large-v3-turbo", "warm": true,
    "title": "Whisper large-v3-turbo speech to text (PyTorch, fp16 on the GPU, Silero VAD)",
