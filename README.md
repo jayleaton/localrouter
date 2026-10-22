@@ -47,7 +47,22 @@ More models, and more kinds (music, 3D), come as adapters: see [Adding a model](
 - **Small.** One Zig binary. The idle daemon uses a few MB and no GPU memory. Every loaded model is its own process,
   so unloading returns all of its memory and a crash costs one job.
 
-## Install on a DGX Spark
+## Install the Jarvis box (chat, voice, image, video) on a DGX Spark
+
+Ask your coding agent (Claude Code, Codex, T3, ...) to "set up LocalRouter Jarvis on this box" and point it at
+[INSTALL.md](INSTALL.md): a step-by-step guide it can follow without judgement calls. Or run it yourself:
+
+```bash
+git clone https://github.com/jayleaton/localrouter && cd localrouter
+tools/install/bootstrap.sh --profile jarvis-gb10 --dry-run    # the plan: steps, downloads, disk, memory, licences
+tools/install/bootstrap.sh --profile jarvis-gb10 --accept     # after reading the licences it lists
+```
+
+It installs every model of [deploy/profiles/jarvis-gb10.json](deploy/profiles/jarvis-gb10.json), checks every download
+against its pin, qualifies chat and Drama 3 on the GPU, and leaves one systemd user service on `127.0.0.1:8190`
+(`/voice`, `/v1`, `/mcp`). `tools/install/doctor.sh --profile jarvis-gb10` says what is missing, with the fix.
+
+## Install on a DGX Spark (image and video only, in Docker)
 
 ```bash
 git clone <this repo> localrouter && bash localrouter/tools/spark/install.sh

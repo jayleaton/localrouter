@@ -84,7 +84,7 @@ echo "memory: $(gib $warm) GiB for the warm models$([ $peak -gt 0 ] && echo ", p
 if [ ${#accepts[@]} -gt 0 ]; then
   echo "needs acceptance (ask the user; with their yes, run with --accept):"
   for a in "${accepts[@]}"; do echo "  - $a"; done
-  jq -r --arg keys " ${keys[*]} " '.models[] | select(.accept and ($keys | contains(" " + .key + " "))) | "    \(.key) licence: \(.licence.name): \(.licence.url)"' "$p"
+  jq -r --arg keys " ${keys[*]} " '.models[] | select(.accept and (.key as $k | $keys | contains(" " + $k + " "))) | "    \(.key) licence: \(.licence.name): \(.licence.url)"' "$p"
 fi
 [ "$free" -ge $((need_disk + margin)) ] || { echo "not enough free disk under $PREFIX: $(gib "$free") GiB, needs $(gib $((need_disk + margin))) GiB"; [ $dry = 1 ] || exit 1; }
 if [ $dry = 1 ]; then echo "dry run: nothing changed. To install: ${again}"; exit 0; fi

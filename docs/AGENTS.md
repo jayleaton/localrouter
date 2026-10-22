@@ -10,6 +10,9 @@ By default the daemon listens on `127.0.0.1` only, so `<host>` is `127.0.0.1` on
 other machines the operator starts it with `--host tailscale` (the tailnet address; `<host>` is then the machine's
 tailnet name or IP), or `--host all` / an IP (`host` in the config takes the same values).
 
+To install LocalRouter on a box (the whole Jarvis stack on a DGX Spark), follow [INSTALL.md](../INSTALL.md): one
+deterministic sequence of commands, with what to check and what to ask the user at each step.
+
 ## MCP (the easy way)
 
 The same server speaks the Model Context Protocol at `http://<host>:8190/mcp` (Streamable HTTP, stateless):
