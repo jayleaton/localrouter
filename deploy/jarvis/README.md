@@ -5,12 +5,12 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | | |
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
-| Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm |
-| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 90, kept warm; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), priority 50, kept warm |
+| Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
+| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane; `kitten-tts-2-graphs`: the fallback (qualified, CUDA-graph decode), priority 50, kept warm, on the `main` lane: its reload (about 30 s with the graph capture) would otherwise hold the realtime lane and Drama 3's speech behind it |
 | Image, video | `qwen-image-2.1-turbo` (idle 60 s), `minimax-h3` (idle 30 s), on demand |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
-Measured with everything warm: 41.8 GiB `MemAvailable` of about 115. An image job takes the fallback voice's memory
+Measured with everything warm: 42.4 GiB `MemAvailable` of about 115. A 1024x1024 image evicts only Kitten (the image needs 36 GiB plus the 8 GiB reserve; the lowest `MemAvailable` during it was 14 GiB); Drama 3 and Whisper stay, and the first voice turn after it reached first audio in 951 ms. The image job takes the fallback voice's memory
 (Kitten), and a video job takes part of the voice set. The scheduler brings the kept models back as soon as it is
 idle, within about 30 s of a clip.
 

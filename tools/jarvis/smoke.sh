@@ -2,7 +2,9 @@
 # Smoke test of a live Jarvis deployment (deploy/jarvis): every capability once, pass/fail and seconds each, memory
 # before and after. Runs on the host, against the daemon's loopback URL, under the host's exclusive lock.
 #   tools/jarvis/smoke.sh [--quick] [--url URL] [--out DIR]
-# --quick (about 1 min) skips the video and the barge-in; the full run (under 10 min) has both, then waits for the
+# Voice: warm turns must reach first audio in 1.2 s (median), and the first turns after an image job in 1.5 s with Drama 3
+# and Whisper kept. --quick (about 1 min) skips the video, the barge-in and the after-image turns; the full run (under
+# 10 min) has them, then waits for the
 # kept-warm models to be back. Exit 0 only when every check passed. Writes OUT/results.jsonl, OUT/summary.json and
 # each check's files (replies, audio, image, video, the voice driver's events).
 # Env: CHAT, DRAMA, KITTEN, STT, IMAGE, VIDEO (model ids; the deploy's defaults), STT_FIXTURE (the pinned LibriSpeech
@@ -113,27 +115,39 @@ record tts_drama_stream "$([ "${fa%% *}" = 200 ] && [ "$(stat -c %s "$out/tts-dr
 tts tts_drama "$DRAMA"
 tts tts_kitten "$KITTEN"
 
-# a realtime voice turn (and, in the full run, barge-in), by the e2e driver over /v1/realtime
-t=$(now)
-python3 -I "$here/../spark/jarvis/voice_e2e.py" --smoke $([ $quick = 1 ] && echo --skip-barge) --url "$url" --out "$out/voice" \
-  --tts "$DRAMA" --stt "$STT" --chat "$CHAT" > "$out/voice.log" 2>&1
-rc=$?
-for c in $(jq -r '.checks[] | @base64' "$out/voice/results.json" 2> /dev/null); do
-  c=$(base64 -d <<< "$c")
-  record "voice: $(jq -r .check <<< "$c" | cut -c1-40)" "$(jq .ok <<< "$c")" 0 "$(jq -c .detail <<< "$c")"
-done
-cap=$(jq -r '.turns.capital | "first audio \(.speech_end_to_first_audio_ms) ms, heard \(.transcript | tojson), reply \(.reply | tojson)"' "$out/voice/results.json" 2> /dev/null)
-record voice_turn "$([ $rc = 0 ] && echo true || echo false)" "$(secs $t)" "${cap:-driver exit $rc, see voice.log}"
+# voice NAME OUT_SUBDIR DRIVER_ARGS...: the e2e driver over /v1/realtime; its checks recorded as NAME: ...
+voice() {
+  local name=$1 dir=$2 t rc c med
+  shift 2
+  t=$(now)
+  python3 -I "$here/../spark/jarvis/voice_e2e.py" --smoke "$@" --url "$url" --out "$out/$dir" \
+    --tts "$DRAMA" --stt "$STT" --chat "$CHAT" > "$out/$dir.log" 2>&1
+  rc=$?
+  for c in $(jq -r '.checks[] | @base64' "$out/$dir/results.json" 2> /dev/null); do
+    c=$(base64 -d <<< "$c")
+    record "$name: $(jq -r .check <<< "$c" | cut -c1-36)" "$(jq .ok <<< "$c")" 0 "$(jq -c .detail <<< "$c")"
+  done
+  med=$(jq -r '.first_audio_ms | "first audio median \(.median) ms, turns \(.turns | tojson)"' "$out/$dir/results.json" 2> /dev/null)
+  record "$name" "$([ $rc = 0 ] && echo true || echo false)" "$(secs $t)" "${med:-driver exit $rc, see $dir.log}"
+}
+
+# warm voice turns (median first audio <= 1.2 s) and, in the full run, barge-in
+voice voice_warm voice --max-median-ms 1200 $([ $quick = 1 ] && echo --skip-barge)
 [ $quick = 1 ] || record barge_in "$(jq -e '.barge_in.cut_status == "cancelled" and .barge_in.audio_deltas_after_speech_started == 0' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
   "$(jq -c '.barge_in // "missing"' "$out/voice/results.json" 2> /dev/null)"
 
-# image: generate, then fetch the file it names
+# image (1024x1024, as the client asks): generate, fetch the file it names; what it unloaded
 t=$(now)
-r=$(post /v1/images/generations "{\"model\":\"$IMAGE\",\"prompt\":\"a red fox sitting in fresh snow\",\"size\":\"512x512\",\"seed\":1,\"response_format\":\"url\"}" 600)
+r=$(post /v1/images/generations "{\"model\":\"$IMAGE\",\"prompt\":\"a red fox sitting in fresh snow\",\"size\":\"1024x1024\",\"seed\":1,\"response_format\":\"url\"}" 600)
 iu=$(jq -r '.data[0].url // ""' <<< "$r")
 code=$( [ -n "$iu" ] && curl -s -m 60 -o "$out/image.png" -w '%{http_code}' "$iu")
 record image "$([ "$code" = 200 ] && [ "$(head -c 8 "$out/image.png" | od -An -tx1 | tr -d ' ')" = 89504e470d0a1a0a ] && echo true || echo false)" "$(secs $t)" \
   "${iu:-$(head -c 200 <<< "$r")}"
+memory after-image
+down=$(jq -r '[.tools[] | select(.state != "ready") | .id] - ["'"$IMAGE"'", "'"$VIDEO"'"] | join(" ")' "$out/memory-after-image.json")
+record image_kept_voice "$(! grep -qE "$DRAMA|$STT" <<< "$down" && echo true || echo false)" 0 "not ready right after the image: ${down:-none}"
+# the first voice turns after it (the first counts; full run): the voice set must not have to reload
+[ $quick = 1 ] || voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
 
 # video (full run): a 1 s clip, then its MP4
 if [ $quick = 0 ]; then
