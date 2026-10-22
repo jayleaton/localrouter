@@ -84,10 +84,21 @@ done < <(prereqs "$p" "${keys[@]}")
 
 # ---- 2. the plan: each step, done or to do; what the rest needs
 mapfile -t todo < <(steps "$p" "${keys[@]}")
-need_dl=0 need_disk=0 warm=0 peak=0 accepts=()
+need_dl=0 need_disk=0 warm=0 peak=0 accepts=() saved=0 reuse_lines=() reusing=" "
+for k in "${keys[@]}"; do   # what the store already has: linked, not downloaded
+  while read -r r; do
+    [ -n "$r" ] || continue
+    b=$(du -s --apparent-size -B1 "$STORE/$r" 2> /dev/null | awk '{print $1}')
+    reusing+="$k "
+    reuse_lines+=("$(printf '  %-5s %-16s %s: %s GiB already present, reusing (hard links; checked against the pins)' reuse "$k" "$STORE/$r" "$(gib "${b:-0}")")")
+  done < <(reusable "$k")
+done
 for s in "${todo[@]}"; do   # what the steps still to do (in this run: not the GPU ones with --no-gpu) download and leave on disk
   is_done "$s" && continue
   [ $nogpu = 1 ] && [ "$(jq -r '.gpu // false' <<< "$s")" = true ] && continue
+  if [ "$(jq -r '.reused // false' <<< "$s")" = true ] && [[ $reusing == *" $(jq -r .model <<< "$s") "* ]]; then
+    saved=$((saved + $(jq '.download_bytes // 0' <<< "$s"))); continue   # the store has its result
+  fi
   need_dl=$((need_dl + $(jq '.download_bytes // 0' <<< "$s"))); need_disk=$((need_disk + $(jq '.disk_bytes // 0' <<< "$s")))
 done
 for k in "${keys[@]}"; do
@@ -96,21 +107,12 @@ for k in "${keys[@]}"; do
   if [ "$(jq .warm <<< "$m")" = true ]; then warm=$((warm + b)); elif [ "$b" -gt "$peak" ]; then peak=$b; fi
   while read -r a; do [ -n "$a" ] && accepts+=("$k: $a"); done < <(jq -r '.accept[]? // empty' <<< "$m")
 done
-saved=0 reuse_lines=()   # what the store already has: linked, not downloaded
-for k in "${keys[@]}"; do
-  while read -r r; do
-    [ -n "$r" ] || continue
-    b=$(du -s --apparent-size -B1 "$STORE/$r" 2> /dev/null | awk '{print $1}')
-    saved=$((saved + ${b:-0}))
-    reuse_lines+=("$(printf '  %-5s %-16s %s: %s GiB already present, reusing (hard links; checked against the pins)' reuse "$k" "$STORE/$r" "$(gib "${b:-0}")")")
-  done < <(reusable "$k")
-done
-need_dl=$((need_dl > saved ? need_dl - saved : 0)); need_disk=$((need_disk > saved ? need_disk - saved : 0))
 free=$(hw_disk_free "$PREFIX") margin=$(($(jq .disk_margin_gib "$p") * 1073741824))
 echo "plan:"
 for l in "${reuse_lines[@]}"; do echo "$l"; done
 for s in "${todo[@]}"; do
-  printf '  %-5s %-16s %s%s\n' "$(is_done "$s" && echo done || echo todo)" "$(step_id "$s")" "$(jq -r .title <<< "$s")" \
+  st=todo; [ "$(jq -r '.reused // false' <<< "$s")" = true ] && [[ $reusing == *" $(jq -r .model <<< "$s") "* ]] && st=reuse; is_done "$s" && st=done
+  printf '  %-5s %-16s %s%s\n' "$st" "$(step_id "$s")" "$(jq -r .title <<< "$s")" \
     "$(jq -r 'if .gpu then " [GPU, \(.min_free_gib) GiB free]" else "" end' <<< "$s")"
 done
 printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on 127.0.0.1:$PORT), then start.sh until the warm models are ready"
