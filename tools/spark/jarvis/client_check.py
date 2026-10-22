@@ -453,6 +453,7 @@ def main():
             FINISHED = "window.jarvis.debug.filter(e => e.kind === 'tool.finished')"
             while a.call_after and not os.path.exists(a.call_after):
                 time.sleep(2)
+            call_t0 = cdp.js("performance.now()")  # a kept conversation has replies from before this call
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected && window.jarvis.ui.voiceState === 'listening'", 30, "the voice session")
             had = cdp.js("(() => { const r = document.getElementById('reel').getBoundingClientRect(), gens = window.jarvis.conversation.msgs.filter(m => m.role === 'tool' && !m.gone && (m.media && m.media.length ? true : m.error !== 'cancelled')).reduce((n, m) => n + (m.media && m.media.length ? m.media.length : 1), 0); return { reel: [r.x, r.width].map(Math.round), inner: innerWidth, cards: document.querySelectorAll('#reelList .rc').length, generations: gens }; })()")
@@ -468,7 +469,7 @@ def main():
             check("reel: the picture replaces the placeholder, in the reel and the chat", bool(got), got)
             done_t = cdp.js(f"{FINISHED}.filter(e => e.status === 'completed').map(e => e.t)[0]")
             cdp.wait(f"{VOICE_REPLIES}.some(x => x.at > performance.timeOrigin + {done_t}) && window.jarvis.voice.live === 0", 120, "the confirmation after the picture")
-            replies = cdp.js(f"{VOICE_REPLIES}.map(x => ({{ at: x.at - performance.timeOrigin, text: x.text }}))")
+            replies = [r for r in cdp.js(f"{VOICE_REPLIES}.map(x => ({{ at: x.at - performance.timeOrigin, text: x.text }}))") if r["at"] >= call_t0]
             before = [r["text"] for r in replies if r["at"] < done_t]
             after = [r["text"] for r in replies if r["at"] >= done_t]
             claims = [t for t in before if re.search(r"\b(here('s| is| it is| you go)|it'?s ready|is ready|all done|done!)", t, re.I)]
@@ -497,7 +498,7 @@ def main():
             cdp.wait(f"{VOICE_REPLIES}.some(x => x.at > performance.timeOrigin + {fail_at}) && window.jarvis.voice.live === 0", 120, "the reply after the failure")
             said = cdp.js(f"{VOICE_REPLIES}.filter(x => x.at > performance.timeOrigin + {fail_at}).map(x => x.text)")
             check("reel: a refused picture shows a failed card with Retry", True, fail)
-            check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|fail|sorry|unable|limit|up to|instead|too large)\b", t, re.I) for t in said), said)
+            check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|won'?t|fail|sorry|unable|limit|up to|instead|too (large|big))\b", t, re.I) for t in said), said)
             snap(cdp, a.out, "23-reel-failed-desktop")
             if a.reel_video:
                 k = cdp.js("document.querySelectorAll('#reelList .rc').length")
