@@ -52,7 +52,7 @@ a failure, do what it says and run it again. Models already on the box are reuse
 | --- | --- |
 | `/voice` | The web app. A full-duplex voice conversation: barge-in, spoken picture requests, and a voice picker with previews |
 | `/v1` | OpenAI-compatible API: chat completions (whole or streamed, with tools), audio speech and transcriptions, images, videos, and the Realtime API at `/v1/realtime` |
-| `/mcp` | Every tool over MCP: `chat`, `synthesize_speech`, `transcribe_audio`, `generate_image`, `generate_video`, `list_models`, jobs. See [docs/AGENTS.md](docs/AGENTS.md#mcp-the-easy-way) |
+| `/mcp` | Every tool over MCP: `chat`, `synthesize_speech`, `transcribe_audio`, `generate_image`, `generate_video`, `list_models`, `list_voices`, jobs. Setup for Claude Code, Codex, Cursor and any client: [docs/MCP.md](docs/MCP.md) |
 
 ```bash
 claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp
@@ -110,8 +110,21 @@ only under the Qwen Research License.
 ## Connect an agent
 
 Any MCP client: `{"mcpServers": {"localrouter": {"type": "http", "url": "http://<host>:8190/mcp"}}}`. For clients that
-only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`. The HTTP API, field by field, is in
-[docs/AGENTS.md](docs/AGENTS.md), and an agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
+only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
+
+| MCP tool | Does |
+| --- | --- |
+| `list_models`, `list_voices` | the models (what each can do, `default_for`, state, memory) and the speech voices |
+| `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id; edit inputs are refused by the current engines |
+| `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
+| `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
+| `synthesize_speech`, `transcribe_audio` | speech as WAV (inline and a link) in any listed voice; the transcript of a URL, base64 audio or a file on the box |
+| `get_job`, `cancel_job` | follow or stop a long job |
+| `release_models` | unload everything now |
+
+Config snippets for every client, an example call for every tool and the security note are in [docs/MCP.md](docs/MCP.md).
+The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an agent skill is in
+[skill/localrouter](skill/localrouter/SKILL.md).
 
 ## Configuration
 

@@ -73,7 +73,7 @@ else
   commit=$(cat "$repo/COMMIT" 2> /dev/null) || die "neither a git checkout nor a COMMIT file in $repo"
 fi
 src=$DEPLOY/src/$commit
-mkdir -p "$DEPLOY/src" "$DEPLOY/data" "$DEPLOY/logs"
+mkdir -p "$DEPLOY/src" "$DEPLOY/data" "$DEPLOY/logs" "$DEPLOY/inbox"
 if [ "${SKIP_BUILD:-0}" != 1 ] || [ ! -x "$src/zig-out/bin/localrouter" ]; then
   echo "== build $commit"
   rm -rf "$src.tmp" && mkdir -p "$src.tmp"
