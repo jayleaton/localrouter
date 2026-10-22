@@ -3,9 +3,9 @@
 # before and after. Runs on the host, against the daemon's loopback URL, under the host's exclusive lock.
 #   tools/jarvis/smoke.sh [--quick] [--url URL] [--out DIR]
 # The warm set is chat, Drama 3, Whisper and the image model. Drama 3 is the only speech model listed, and each of its
-# voices speaks (the settings page's previews). Voice: warm turns reach first audio in 1.2 s (median); an image job on
+# voices speaks (the settings page's previews). Voice: warm turns reach first audio in 1.4 s (median, the 500 ms wait included); an image job on
 # the warm image model unloads nothing; a video unloads only the image model; the first voice turns after an image or
-# a video reach first audio in 1.5 s (after the video in a session that names the voice "default", which no model has);
+# a video reach first audio in 1.7 s (after the video in a session that names the voice "default", which no model has);
 # and the image model comes back.
 # --quick (about 1 min) skips the video, the barge-in, the picture turn and the after-image turns; the full run
 # (under 10 min) has them, then waits for the warm set to be whole again. Exit 0 only when every check passed. Writes
@@ -177,9 +177,10 @@ want="$CHAT $DRAMA $STT $IMAGE"
 miss=""; for m in $want; do grep -q "$m=ready" <<< "$kept" || miss="$miss $m"; done
 record warm_set "$([ -z "$miss" ] && echo true || echo false)" 0 "$kept${miss:+; not warm:$miss}"
 
-# warm voice turns (median first audio <= 1.2 s); in the full run, barge-in and a spoken picture request
+# warm voice turns (median first audio <= 1.4 s from the end of speech: the 500 ms wait, then the whole turn's STT, chat
+# and speech, which start only when the wait ends); in the full run, barge-in and a spoken picture request
 extra=(--skip-barge); [ $quick = 1 ] || extra=(--picture --picture-prompt "Generate a picture of a dog.")
-voice voice_warm voice --max-median-ms 1200 "${extra[@]}"
+voice voice_warm voice --max-median-ms 1400 "${extra[@]}"
 if [ $quick = 0 ]; then
   record barge_in "$(jq -e '.barge_in.cut_status == "cancelled" and .barge_in.audio_deltas_after_speech_started == 0' "$out/voice/results.json" > /dev/null 2>&1 && echo true || echo false)" 0 \
     "$(jq -c '.barge_in // "missing"' "$out/voice/results.json" 2> /dev/null)"
@@ -197,7 +198,7 @@ record image "$([ "$code" = 200 ] && [ "$(head -c 8 "$out/image.png" | od -An -t
 w=$(watch_stop image); echo "image: lowest MemAvailable ${w%%|*} GiB"
 only_lost image_evicted_nothing "${w#*|}"
 if [ $quick = 0 ]; then
-  voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1500
+  voice voice_after_image voice-after-image --skip-barge --count-warmup --max-median-ms 1700
   first_turn first_turn_after_image voice-after-image
 fi
 
@@ -215,7 +216,7 @@ if [ $quick = 0 ]; then
   record video "$([ "$st" = completed ] && [ "$(head -c 8 "$out/video.mp4" 2> /dev/null | tail -c 4)" = ftyp ] && echo true || echo false)" "$(secs $t)" "job ${id:-none}: $st, $(stat -c %s "$out/video.mp4" 2> /dev/null || echo 0) B"
   w=$(watch_stop video); echo "video: lowest MemAvailable ${w%%|*} GiB"
   only_lost video_evicted_only_image "${w#*|}" "$IMAGE"
-  voice voice_after_video voice-after-video --voice default --skip-barge --count-warmup --max-median-ms 1500
+  voice voice_after_video voice-after-video --voice default --skip-barge --count-warmup --max-median-ms 1700
   first_turn first_turn_after_video voice-after-video
   # then the warm set must be whole again (the image model back)
   t=$(now); state=""
