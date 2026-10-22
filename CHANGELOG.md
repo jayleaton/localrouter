@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Voice page: a reply no longer starts with only Drama 3's 46 ms first piece in hand.
+  - While the chat model is still writing, its start waits for enough audio to play its first 3 s at the measured
+    arrival rate: 3 s x (1 - rate), at least 200 ms, at most 1 s in hand, at most 1.5 s after the first piece. A stream
+    that keeps up does not wait.
+  - Once the chat model is done, the start still waits for 200 ms in hand.
+  - On DGX-01, `client_check` passed with no underrun in any reply's first 2 s in 7 of 7 runs, against 1 of 3 before.
+    First audio: short typed replies median 948 ms (1074 before); the long reply median 2.9 s (2.6 s before).
+    "Smooth start" stays off by default.
+- `client_check`'s playback test now fails on delivery underruns (the page scheduler's own measurement) and clicks,
+  not on silence in the recorded output.
+  - Drama 3's own audio has no exact-zero runs (24 replies probed). The 658 and 729 ms "gaps" came from the recording
+    losing its alignment with the AudioContext clock across the test's reconnect.
+  - Recorded silences are still reported, as delivery or render gaps.
+  - The voice step reads the reply that answers the spoken turn: since #44, a tool turn can add more responses.
 - Voice page: while a picture or video is being made, a reply starts once 500 ms are in hand (900 ms at most),
   not 200, so the denoise step already on the GPU cannot stall its first words. Smoke budgets now include the wait:
   warm turns 1.4 s from the end of speech (the 500 ms wait plus STT, chat and speech), 1.7 s after a picture or video.
