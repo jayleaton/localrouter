@@ -108,7 +108,10 @@ pub const Vad = struct {
         const loud = db > @max(v.floor + v.margin, loud_min);
         v.frames += 1;
         if (v.active) {
-            v.quiet_run = if (loud) 0 else v.quiet_run + 1;
+            // The quiet run that ends the turn restarts only on speech: `min_speech_ms` of loud frames in a row, as
+            // speech must be to start a turn. A shorter loud run (a click, a knock, a breath) counts as quiet.
+            v.loud_run = if (loud) v.loud_run + 1 else 0;
+            v.quiet_run = if (v.loud_run >= v.speech_frames) 0 else v.quiet_run + 1;
             if (v.pause_frames > 0 and v.quiet_run == v.pause_frames and v.pause_frames < v.silence_frames) try out.append(gpa, .{ .kind = .speech_paused, .ms = v.msAtFrame(v.frames - v.quiet_run) });
             if (v.quiet_run >= v.silence_frames) {
                 v.reset();
@@ -261,6 +264,33 @@ test "two turns apart are two pairs; a short pause does not split a turn" {
         .{ .kind = .speech_started, .ms = 1200 },
         .{ .kind = .speech_stopped, .ms = 3100 },
     }, ev.items);
+}
+
+test "the wait restarts on speech, never adds up, and a blip in it is not speech" {
+    const gpa = std.testing.allocator;
+    var buf: std.ArrayList(i16) = .empty;
+    defer buf.deinit(gpa);
+    // Three pauses of 400 ms under the 500 ms wait: one turn, ending 500 ms after the last word.
+    try tone(&buf, 400, null);
+    for (0..3) |_| {
+        try quiet(&buf, 400, null);
+        try tone(&buf, 300, null);
+    }
+    try quiet(&buf, 700, null);
+    var a: std.ArrayList(Event) = .empty;
+    defer a.deinit(gpa);
+    try run(buf.items, test_rate / 10, &a);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 400 + 3 * 700 + 500 } }, a.items);
+    // A 40 ms click 300 ms into the quiet does not restart it: the turn ends 500 ms after the speech, not the click.
+    buf.clearRetainingCapacity();
+    try tone(&buf, 600, null);
+    try quiet(&buf, 300, null);
+    try tone(&buf, 40, null);
+    try quiet(&buf, 800, null);
+    var b: std.ArrayList(Event) = .empty;
+    defer b.deinit(gpa);
+    try run(buf.items, test_rate / 10, &b);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 600 + 500 } }, b.items);
 }
 
 test "reset returns to silence and keeps the position" {
