@@ -286,11 +286,11 @@ def main():
     except Exception as e:  # a failed step is a failed check, with its reason
         check(f"no step failed: {type(e).__name__}", False, str(e))
         try:
+            shot(cdp, a.out, "99-failure", 1280, 900, False)
             results["console_errors"] = console[:20]
-            results["debug_tail"] = cdp.js("window.jarvis.debug.slice(-80)")
             results["websocket"] = [{"method": e["method"], **{k: v for k, v in e["params"].items() if k in ("errorMessage", "response", "url")}}
                                     for e in cdp.events if e.get("method", "").startswith("Network.webSocket") and "Frame" not in e["method"]][:20]
-            shot(cdp, a.out, "99-failure", 1280, 900, False)
+            results["debug_tail"] = cdp.js("window.jarvis && window.jarvis.debug.slice(-80)")
         except Exception:
             pass
     finally:

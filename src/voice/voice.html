@@ -108,7 +108,7 @@
     <select id="conv" aria-label="Conversation"></select>
     <button id="new" class="icon" title="New conversation">＋</button>
     <span class="grow"></span>
-    <button id="copylog" class="icon" title="Copy the debug log">Copy log</button>
+    <button id="copylog" class="icon" title="Copy the debug log (the last events, for a bug report)">Log</button>
     <button id="gear" class="icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
   <div id="strip" aria-live="off"></div>
@@ -461,7 +461,8 @@ async function loadModels() {
   const chats = models.filter(m => m.kind === 'chat');
   fillSelect($('chatmodel'), [['', 'default'], ...chats.map(m => [m.id, short(m)])], S.chatModel);
   const speech = models.filter(m => m.kind === 'speech');
-  fillSelect($('speech'), [['', 'default speech'], ...speech.map(m => [m.id, short(m)])], S.speechModel);
+  const tts = speech.find(m => (m.default_for || []).includes('text_to_speech'));
+  fillSelect($('speech'), [['', tts ? `${short(tts)} (default)` : 'default speech'], ...speech.map(m => [m.id, short(m)])], S.speechModel);
   fillVoices();
   renderStrip();
 }
@@ -1199,7 +1200,7 @@ $('copylog').onclick = async () => {
     t.remove();
   }
   $('copylog').textContent = ok ? `Copied ${Math.min(debug.length, S.logN)}` : 'Copy failed';
-  setTimeout(() => { $('copylog').textContent = 'Copy log'; }, 1800);
+  setTimeout(() => { $('copylog').textContent = 'Log'; }, 1800);
 };
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { pollTools(); if (V.ws && !V.lock && navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {}); }
