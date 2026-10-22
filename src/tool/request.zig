@@ -42,8 +42,8 @@ pub const Image = struct {
 pub const Video = struct {
     prompt: []const u8,
     negative_prompt: []const u8 = "",
-    width: u32 = 1344,
-    height: u32 = 768,
+    width: u32 = 0, // 0 (with height 0): the model's own size, filled in by `engine.fill` before validation
+    height: u32 = 0,
     seconds: u32 = 5,
     fps: u32 = 24,
     seed: u64 = 0,

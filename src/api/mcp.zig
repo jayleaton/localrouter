@@ -174,9 +174,9 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "768x448", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
-    const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+    const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
     var why: routes.Refusal = .{};
     const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
@@ -412,7 +412,7 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits.","default":"768x448"},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omit it for the model's own size."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
     \\"fps":{"type":"integer","default":24},
     \\"seed":{"type":"integer","minimum":0},

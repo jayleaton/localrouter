@@ -22,7 +22,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 | --- | --- |
 | `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, whether each is loaded, and `qualified` for a model gated on this machine's GPU |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
-| `generate_video` | `prompt`, `size`, `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
+| `generate_video` | `prompt`, `size` (omit it for the model's own size), `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
 | `transcribe_audio` | `audio` (base64, data URL or URL), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
@@ -101,6 +101,10 @@ curl -s -X DELETE $BASE/videos/$id  # cancel
 ```
 
 Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (true by default). Poll every few seconds.
+
+Any job, of any kind, can be looked up by its id: `GET $BASE/jobs/{id}` returns `{id, kind, status, progress, phase,
+urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `completed`. The voice loop's
+`localrouter.job.created` and `localrouter.job.done` events carry the same id.
 
 Image to video: add `input_reference`, a file in a multipart body (`-F input_reference=@frame.png`, with the other
 fields as form fields) or a base64 string, data URL or URL in a JSON body. The model must list `image_to_video`.

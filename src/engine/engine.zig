@@ -61,7 +61,24 @@ pub const Entry = struct {
     /// Refuses a request this model cannot serve (a step count its schedule lacks, a size past its buffers) before it
     /// is queued or loaded, writing why to `why`. Pure and cheap, like `needs`. Null: whatever `request.validate` passes.
     check: ?*const fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool = null,
+    /// Fills what the request left to the model (a video's size, 0 x 0) with this model's own choice. See `fill`.
+    defaults: ?*const fn (cfg: *const ToolConfig, req: *Request) void = null,
 };
+
+/// The size a video request without one gets when its engine has no `defaults`.
+pub const default_video_size = [2]u32{ 1344, 768 };
+
+/// Fills what `req` left to the model, before validation: the engine's `defaults`, then `default_video_size`.
+pub fn fill(cfg: *const ToolConfig, req: *Request) void {
+    if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
+    switch (req.*) {
+        .video => |*v| if (v.width == 0 and v.height == 0) {
+            v.width = default_video_size[0];
+            v.height = default_video_size[1];
+        },
+        .image, .speech, .transcription, .chat => {},
+    }
+}
 
 pub const entries = [_]Entry{
     @import("../engines/testpattern.zig").entry,

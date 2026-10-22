@@ -1,6 +1,7 @@
 //! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
 //! /v1/chat/completions (`chat.zig`)
-//! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/tools for residency, and /mcp
+//! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
+//! /v1/tools for residency, and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
 
@@ -58,6 +59,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a);
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
+    if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..]);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
     return h.fail(req, a, 404, "invalid_request_error", "no such route");
@@ -268,10 +270,13 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
 /// Why `enqueue` refused: the HTTP status, OpenAI's error type and a message (which may point into `buf`).
 pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_request_error", message: []const u8 = "", buf: [512]u8 = undefined };
 
-/// Validates and queues `r` for `tool` (the HTTP routes and the MCP tools share it), saving `files` in its job
-/// directory first; null with `why` set on refusal. A model without the capability the request needs is refused.
-pub fn enqueue(app: *App, tool: usize, r: request.Request, files: []const inputs.File, why: *Refusal) ?*jobs.Job {
+/// Fills in the model's defaults, then validates and queues `asked` for `tool` (the HTTP routes and the MCP tools share
+/// it), saving `files` in its job directory first; null with `why` set on refusal. A model without the capability the
+/// request needs is refused.
+pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const inputs.File, why: *Refusal) ?*jobs.Job {
     const cfg = app.scheduler.slots[tool].tool.config();
+    var r = asked;
+    engine.fill(cfg, &r); // what the request left to the model (a video's size)
     if (!engine.supports(cfg, r.capability())) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' cannot do {s} (its capabilities: {s}); pick a model that lists {s} in list_models", .{ cfg.id, @tagName(r.capability()), capabilityNames(&why.buf, cfg), @tagName(r.capability()) }) catch "the model lacks a capability this request needs";
         return null;
@@ -343,7 +348,7 @@ const VideoBody = struct {
     model: ?[]const u8 = null,
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
-    size: []const u8 = "1344x768",
+    size: []const u8 = "", // "": the model's own size
     seconds: []const u8 = "5", // OpenAI sends seconds as a string
     fps: u32 = 24,
     seed: ?u64 = null,
@@ -359,7 +364,7 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     var raws: std.ArrayList([]const u8) = .empty;
     const b = parseBody(VideoBody, app, a, host, text, ctype, &.{"input_reference"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
-    const wh = request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
+    const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
@@ -388,6 +393,27 @@ fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8
         },
         else => return h.fail(req, a, 405, "invalid_request_error", "method not allowed"),
     }
+}
+
+/// GET /v1/jobs/{id}: any job's state and, once done, its output URLs (a client that lost a job's result event, such as a
+/// voice session that reconnected while its picture was made, asks here).
+fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8) !void {
+    const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such job");
+    const Err = struct { code: []const u8, message: []const u8 };
+    try app.table.mutex.lock(app.io);
+    defer app.table.mutex.unlock(app.io);
+    const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
+    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "/v1/files/{s}/{s}", .{ j.id, j.files[i] });
+    try h.jsonValue(req, a, .ok, .{
+        .id = j.id,
+        .object = "job",
+        .kind = @tagName(j.kind()),
+        .status = @tagName(j.status),
+        .progress = j.percent,
+        .phase = try a.dupe(u8, j.phaseName()),
+        .urls = urls,
+        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+    });
 }
 
 fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !void {
