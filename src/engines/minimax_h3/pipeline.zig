@@ -428,7 +428,10 @@ pub const Pipeline = struct {
                 .{ .role = "x", .ptr = x, .bytes = n * 4 },
             });
             cur = 1 - cur;
-            if (progress) |pr| pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            if (progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
+                try p.s.synchronize();
+                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            }
         }
         try p.hops.scale32(p.s, xa, audio_scale_out, sh.n_audio); // process_latent_out
         try p.pre("latents", &.{});
@@ -442,6 +445,7 @@ pub const Pipeline = struct {
         try p.s.synchronize();
         try p.d.check(p.d.api.cuMemcpyDtoH_v2(audio_out.ptr, wav, sh.audioFloats() * 4), "cuMemcpyDtoH");
         p.times.audio = try clock.lap();
+        if (progress) |pr| pr.report(pr.ctx, "decode", 1, 1); // a pause point before the VAE (speech first)
 
         // ---- the video VAE: fp16 latents (the VAE's own cast of the fp32 state, round to nearest even), uint8 frames
         {

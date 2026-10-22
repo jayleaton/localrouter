@@ -277,9 +277,13 @@ pub const Pipeline = struct {
             const dt: f32 = @floatCast(@as(f64, sig[i + 1]) - @as(f64, sig[i])); // Python floats, then float32
             try p.dit.euler("euler", lat, vel, nxt, n, dt);
             std.mem.swap(u64, &lat, &nxt);
-            if (progress) |pr| pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            if (progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
+                try p.s.synchronize();
+                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            }
         }
         p.times.sample = try clock.lap();
+        if (progress) |pr| pr.report(pr.ctx, "decode", 1, 1); // a pause point before the VAE (speech first)
         const px = try p.bufs[3].at(0);
         try p.vae.decode(lat, h, w, px);
         try p.d.check(p.d.api.cuMemcpyDtoH_v2(pixels.ptr, px, pixels.len), "cuMemcpyDtoH");
