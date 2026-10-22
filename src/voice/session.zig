@@ -517,6 +517,17 @@ pub const Session = struct {
         if (given) |g| if (s.find(g) != null) return s.emit.fail(a, "invalid_request_error", "duplicate_item_id", "an item with this id exists", eid);
         const id = if (given) |g| try a.dupe(u8, g) else try s.newId(a, "item");
         const prev = s.lastId();
+        if (eql(typ, "function_call")) { // a call made earlier (a client seeding history): the model sees how it used its tools
+            const call = events.str(io_.get("call_id") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call needs call_id", eid);
+            const name = events.str(io_.get("name") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call needs name", eid);
+            const args = events.str(io_.get("arguments") orelse .null) orelse "{}";
+            const it = try s.addItem(.function_call, id);
+            const ia = it.arena.allocator();
+            it.call_id = try ia.dupe(u8, call);
+            it.name = try ia.dupe(u8, name);
+            it.arguments = try ia.dupe(u8, args);
+            return s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = try itemValue(a, it, s.settings.audio) });
+        }
         if (eql(typ, "function_call_output")) {
             const call = events.str(io_.get("call_id") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call_output needs call_id", eid);
             const out = events.str(io_.get("output") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call_output needs output (a string)", eid);
@@ -526,7 +537,7 @@ pub const Session = struct {
             s.fresh = true;
             return s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = try itemValue(a, it, s.settings.audio) });
         }
-        if (!eql(typ, "message")) return s.emit.fail(a, "invalid_request_error", "invalid_item", try std.fmt.allocPrint(a, "item type {s} is not supported: send a message or a function_call_output", .{typ}), eid);
+        if (!eql(typ, "message")) return s.emit.fail(a, "invalid_request_error", "invalid_item", try std.fmt.allocPrint(a, "item type {s} is not supported: send a message, a function_call or a function_call_output", .{typ}), eid);
         const role = events.str(io_.get("role") orelse .null) orelse "user";
         const kind: Kind = if (eql(role, "user")) .user else if (eql(role, "system")) .system else if (eql(role, "assistant")) .assistant else return s.emit.fail(a, "invalid_request_error", "invalid_item", "role must be user, assistant or system", eid);
         var text: std.ArrayList(u8) = .empty;

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Voice: a call in a conversation that already has pictures makes new ones. The page seeded the history as text
+  only, so the model saw requests answered without a tool call. It then said "Making you one now!" and called nothing,
+  and no card appeared. The page now seeds each generation as a `function_call` and its output, and the realtime
+  session accepts `function_call` items (as OpenAI's does). `client_check.py --profile` keeps the profile's
+  conversations and closes Chrome cleanly, so its storage is kept.
 - Voice mode shows a reel of the conversation's pictures and videos beside the orb (a bottom strip on phones).
   - Cards: a placeholder as the tool call starts, the thumbnail when the job is done, and a failed state with Retry.
     Each card has download and copy-prompt actions.

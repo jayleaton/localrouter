@@ -1730,9 +1730,21 @@ function sessionUpdate() {
   vsend({ type: 'session.update', session: s });
 }
 // The conversation so far goes into the voice session, so a spoken turn continues a typed one.
+// The conversation so far. A picture or video goes in as its function_call and output: seeded as text alone ("make me
+// a cow", "here's your cow"), the model copied that and promised pictures without calling the tool.
 function seed() {
-  const recent = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant') && splitThink(m.text || '').answer).slice(-40);
+  const said = m => (m.role === 'user' || m.role === 'assistant') && splitThink(m.text || '').answer;
+  const recent = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'tool' || said(m))).slice(-40);
   for (const m of recent) {
+    if (m.role === 'tool') {
+      const video = m.kind === 'video' || !!(m.media && m.media[0] && m.media[0].kind === 'video');
+      const call = m.callId || `call_${m.id}`;
+      const prompt = (m.args && m.args.prompt) || (m.failed && m.failed.prompt) || toolPrompt(m);
+      vsend({ type: 'conversation.item.create', item: { type: 'function_call', call_id: call, name: video ? 'generate_video' : 'generate_image', arguments: JSON.stringify({ prompt }) } });
+      const out = m.media && m.media.length ? { status: 'completed', urls: m.media.map(x => x.url) } : m.error ? { status: 'failed', error: m.error } : null;
+      if (out) vsend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: call, output: JSON.stringify(out) } });
+      continue;
+    }
     const text = m.role === 'user' ? m.text : splitThink(m.text).answer;
     vsend({ type: 'conversation.item.create', item: { type: 'message', role: m.role, content: [{ type: m.role === 'user' ? 'input_text' : 'text', text }] } });
   }
