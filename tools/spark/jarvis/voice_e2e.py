@@ -13,6 +13,7 @@ Python 3 standard library only (it runs on the GPU host with `python3 -I`). Step
      checked), and a spoken follow-up.
   6. Recovery: a short video job runs (POST /v1/videos); then chat, speech to text and text to speech must be ready
      again, and a new session's turn is answered (its latency recorded).
+--smoke (tools/jarvis/smoke.sh): only the warm-up and one turn, then barge-in (--skip-barge: the turns only).
 Writes OUT/results.json, OUT/events.jsonl, OUT/prompts/*.wav, OUT/replies/*.wav, OUT/image.png. Exit 0 only when every
 check passed (fail closed: a missing measurement is a failed check).
 """
@@ -490,6 +491,25 @@ def leak_probe(args, extra, n):
     return {"requests": n, "leaks": leaks, "samples": samples[:3], "extra": extra}
 
 
+def smoke_end(args, results, checks, turns, sess, events):
+    """--smoke: the turns' latency and the leak checks, written as results.json (the session closes in main's finally)."""
+    events.close()
+    lat = {n: t["speech_end_to_first_audio_ms"] for n, t in turns.items() if n != "warmup"}
+    for n, ms in lat.items():
+        limit = args.max_barge_ms if n == "interrupt" else args.max_median_ms
+        checks.append({"check": f"latency: {n} first audio <= {limit} ms", "ok": ms is not None and ms <= limit, "detail": ms})
+    replies = {n: t["reply"] for n, t in turns.items()}
+    checks.append({"check": "replies: none contains a think> tag", "ok": not any("think>" in r for r in replies.values()), "detail": None})
+    results["checks"] = checks
+    results["passed"] = all(c["ok"] for c in checks)
+    with open(f"{args.out}/results.json", "w") as f:
+        json.dump(results, f, indent=1)
+    for c in checks:
+        print(("PASS " if c["ok"] else "FAIL ") + c["check"] + ("" if c["ok"] else f"  ({c['detail']})"))
+    print("voice smoke:", "PASSED" if results["passed"] else "FAILED")
+    return 0 if results["passed"] else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
@@ -497,14 +517,21 @@ def main():
     ap.add_argument("--tts", required=True, help="the speech model that records the prompts")
     ap.add_argument("--stt", required=True)
     ap.add_argument("--chat", required=True)
-    ap.add_argument("--video", required=True)
+    ap.add_argument("--video", default="minimax-h3")
     ap.add_argument("--video-size", default="768x448")
     ap.add_argument("--eviction-free-gib", type=int, default=30, help="MemAvailable left by the ballast in the eviction case")
     ap.add_argument("--ballast-floor-gib", type=int, default=6, help="the ballast lets go if MemAvailable falls below this")
     ap.add_argument("--max-median-ms", type=int, default=2500)
     ap.add_argument("--max-barge-ms", type=int, default=4000)
     ap.add_argument("--leak-probe", type=int, default=20, help="streamed chat requests per variant in the reasoning-leak probe (0: none)")
+    ap.add_argument("--smoke", action="store_true", help="a deployment smoke test: the warm-up and one turn, then barge-in; no tool, video, eviction or leak probe")
+    ap.add_argument("--skip-barge", action="store_true", help="with --smoke: the turns only")
     args = ap.parse_args()
+    barge = not (args.smoke and args.skip_barge)
+    if args.smoke:  # only what a deployment check needs
+        for name in [n for n in PROMPTS if n not in ("warmup", "capital") + (("story", "interrupt") if barge else ())]:
+            del PROMPTS[name]
+        args.leak_probe = 0
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
     os.makedirs(f"{args.out}/replies", exist_ok=True)
     results, checks = {"turns": {}}, []
@@ -527,9 +554,11 @@ def main():
     try:
         sess.pump(1.0)
         # 2. Plain turns (the first warms every path and is reported apart).
-        for name in ("warmup", "capital", "tips"):
+        for name in ("warmup", "capital") + (() if args.smoke else ("tips",)):
             turn(sess, name, mic[name], turns, checks)
             sess.pump(1.0)
+        if not barge:
+            return smoke_end(args, results, checks, turns, sess, events)
 
         # 4. Barge-in: talk over a long answer once a second of it has arrived.
         mark = len(sess.events)
@@ -559,6 +588,8 @@ def main():
         checks.append({"check": "barge-in: no audio of it after speech_started", "ok": not late, "detail": len(late)})
         checks.append({"check": "barge-in: speech detected within 1 s", "ok": results["barge_in"]["speech_start_after_barge_ms"] <= 1000, "detail": results["barge_in"]["speech_start_after_barge_ms"]})
         sess.pump(1.0)
+        if args.smoke:
+            return smoke_end(args, results, checks, turns, sess, events)
 
         # 5. A tool call that makes an image.
         mark = len(sess.events)
