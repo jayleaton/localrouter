@@ -302,7 +302,7 @@ def assets(args):
     except (OSError, ValueError) as e:
         rep.add("engine_json", False, error=f"{engine_path}: {e}")
         return rep.write(args.out, pins_sha256=kw.sha256_file(kw.PINS))
-    want = pins["tensorfold"]["patched_head"]
+    want = pins["engine_patches"]["head"]  # upstream's series, then LocalRouter's engine patches (build.sh)
     rep.add("engine_patched_head", engine.get("patched_head") == want, engine=engine.get("patched_head"), pinned=want)
     rep.add("engine_upstream_commit", engine.get("upstream_commit") == pins["upstream"]["commit"],
             engine=engine.get("upstream_commit"), pinned=pins["upstream"]["commit"])
@@ -999,7 +999,7 @@ def marker(args):
     engine = read_json(os.path.join(os.path.realpath(args.root), "engine.json"))
     native = tool_paths(tool)["native_bin"]
     digest = kw.sha256_file(native)
-    if digest != engine.get("native_sha256") or engine.get("patched_head") != pins["tensorfold"]["patched_head"]:
+    if digest != engine.get("native_sha256") or engine.get("patched_head") != pins["engine_patches"]["head"]:
         print(f"qualify.py: {native} sha256 {digest} is not engine.json's {engine.get('native_sha256')}; no marker",
               file=sys.stderr)
         return 1

@@ -167,6 +167,27 @@
       ]
     }
   },
+  "engine_patches": {
+    "dir": "patches/engine",
+    "note": "LocalRouter's own engine patches, applied by build.sh after upstream's series (git am, the same fixed committer) to head: the voice prefix cache (a referenced prompt's system rows prefilled once per voice and resumed from; DRAMA_PREFIX_CACHE entries, default 2)",
+    "files": {
+      "0001-drama-a-voice-s-reference-rows-are-prefilled-once-an.patch": "eda63f1b80ab71b6c665aa0054f2550f20ff4487d5be16c16c8845db00b8495d"
+    },
+    "head": "efc6c2f82a4a12726e36dce66b0969c1d3aee3f7"
+  },
+  "voices": {
+    "dir": "voices",
+    "path": "voices",
+    "note": "Drama 3's named voices (voices/SOURCES.md: model-invented), installed by fetch.sh into ROOT/voices, the server's --voices directory",
+    "files": {
+      "Arlo.json": "46598d8ff922cb34ca99952a96d4a63479fe23465a4278f7e3ea92d453a58b8e",
+      "Ezra.json": "73ccdf19a2cb014148e1feda9f168dcb2d2fe4ba2ec5801bb555df1a2a2c5265",
+      "Mae.json": "f0882e7af17aaf85f62403c0332e830b0028472ee84de06f47e61e273558ef50",
+      "Nora.json": "a6bb78e495dbac589c6213616a1c54fc7cc9d2b983a10b51b697ae87059991de",
+      "Theo.json": "6652cc95b220858aab99bb4498c9bb8ebc4365ccb27eb3b808ebd5db14c62acc",
+      "Wren.json": "d972d6c33fb6bf51f4b0bd012c0d847cd9f0d66bfb64d9385ba50b343c64d6d7"
+    }
+  },
   "toolchain": {
     "zig": "0.17.0",
     "cuda": "13"
