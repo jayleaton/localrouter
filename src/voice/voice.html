@@ -2078,7 +2078,8 @@ function schedule(item, { buf, loudAt, rms }) {
   src.connect(V.out || V.ctx.destination);
   const start = V.nextTime;
   src.start(start);
-$1  if (V.rec) { const sp = V.rec.spans.get(item) || V.rec.spans.set(item, { a: start, b: start }).get(item); sp.b = V.nextTime; }
+  V.nextTime = start + buf.duration;
+  if (V.rec) { const sp = V.rec.spans.get(item) || V.rec.spans.set(item, { a: start, b: start }).get(item); sp.b = V.nextTime; }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
