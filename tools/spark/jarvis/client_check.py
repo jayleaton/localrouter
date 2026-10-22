@@ -284,7 +284,8 @@ def main():
             cdp.wait("window.jarvis && window.jarvis.ready", 60, "the page after a reload")
             kept = cdp.js("({ speechModel: window.jarvis.settings.speechModel, voices: window.jarvis.settings.voices })")
             check("settings: a voice or engine the daemon no longer lists is dropped", kept["speechModel"] == "" and "default" not in (kept["voices"] or {}).values() and "retired-tts-model" not in (kept["voices"] or {}), kept)
-        cdp.js("localStorage.clear(); document.getElementById('newChat').click(); true")
+        if not a.profile:  # a kept profile keeps its conversations: the reel must show what they already made
+            cdp.js("localStorage.clear(); document.getElementById('newChat').click(); true")
         snap(cdp, a.out, "01-empty-desktop-light")
         unnamed = cdp.js(UNNAMED)
         check("a11y: every visible control has an accessible name", not unnamed, unnamed)
@@ -538,6 +539,13 @@ def main():
         except Exception:
             pass
     finally:
+        if a.profile:  # a kept profile: let Chrome commit its storage (a SIGTERM can drop the last seconds of localStorage)
+            try:
+                time.sleep(3)
+                Cdp(json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version"))["webSocketDebuggerUrl"]).call("Browser.close")
+                chrome.wait(15)
+            except Exception:
+                pass
         chrome.terminate()
         try:
             chrome.wait(10)

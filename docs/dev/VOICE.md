@@ -75,8 +75,11 @@ neither (the tool entries are the adapters' own, abbreviated):
 ## Events
 
 Client to server: `session.update`, `input_audio_buffer.append` / `.commit` / `.clear`, `conversation.item.create`
-(`message` with `input_text`, or `function_call_output`), `conversation.item.truncate`, `conversation.item.delete`,
-`response.create`, `response.cancel`. Anything else is an `error` event; the session stays open.
+(`message` with `input_text`, `function_call` or `function_call_output`), `conversation.item.truncate`,
+`conversation.item.delete`, `response.create`, `response.cancel`. Anything else is an `error` event; the session stays
+open. A `function_call` item is history: it starts no job. The Jarvis page seeds a conversation's pictures and videos
+as a `function_call` and its output. Seeded as text alone ("make me a cow", "here's your cow"), the model copied the
+pattern and promised pictures without calling the tool.
 
 Server to client, one voice turn:
 

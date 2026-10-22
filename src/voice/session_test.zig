@@ -395,6 +395,34 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     try testing.expectEqualStrings("Your picture is ready.", rig.fake.spoke.items[rig.fake.spoke.items.len - 1]);
 }
 
+test "a client seeds its history with a tool call and its output: the chat sees them as a call, nothing runs again" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false });
+    defer rig.stop();
+    const s = rig.s;
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"a cow please\"}]}}");
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_s1\",\"name\":\"generate_image\",\"arguments\":\"{\\\"prompt\\\":\\\"a cow\\\"}\"}}");
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call_output\",\"call_id\":\"call_s1\",\"output\":\"{\\\"status\\\":\\\"completed\\\",\\\"urls\\\":[\\\"/v1/files/img_9/0.png\\\"]}\"}}");
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Here is your cow.\"}]}}");
+    const call = try rig.rec.get(a, try rig.rec.wait("conversation.item.created", 1));
+    try testing.expectEqualStrings("function_call", call.object.get("item").?.object.get("type").?.string);
+    try testing.expectEqualStrings("call_s1", call.object.get("item").?.object.get("call_id").?.string);
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call\",\"name\":\"generate_image\"}}");
+    const e = try rig.rec.get(a, try rig.rec.wait("error", 0));
+    try testing.expectEqualStrings("invalid_item", e.object.get("error").?.object.get("code").?.string);
+    s.handle("{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}}");
+    s.handle("{\"type\":\"response.create\"}");
+    _ = try rig.rec.wait("response.done", 0);
+    const body = rig.fake.requests.items[rig.fake.requests.items.len - 1];
+    try testing.expect(contains(body, "\"tool_calls\":[{\"id\":\"call_s1\""));
+    try testing.expect(contains(body, "\"tool_call_id\":\"call_s1\""));
+    try testing.expect(contains(body, "/v1/files/img_9/0.png"));
+    try testing.expectEqual(@as(usize, 0), rig.fake.specs.items.len); // a seeded call is history: no job
+}
+
 test "error paths, push to talk and a text-only response" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
