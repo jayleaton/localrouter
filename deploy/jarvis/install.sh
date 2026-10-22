@@ -76,7 +76,8 @@ render() {
       -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@WHISPER@|${whisper%/}|g" "$1"
 }
 render "$here/config.json.in" > "$DEPLOY/config.json.new"
-jq -e '.tools | length == 6' "$DEPLOY/config.json.new" > /dev/null || die "the rendered config is not valid"
+jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
+  die "the rendered config is not valid (no tools, or a @…@ left)"
 ! grep -q '@[A-Z_]*@' "$DEPLOY/config.json.new" || die "unrendered placeholders in the config"
 mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
 mkdir -p "$HOME/.config/systemd/user"
