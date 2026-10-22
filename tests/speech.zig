@@ -152,6 +152,11 @@ test "text to speech: HTTP and MCP, formats, voices, speed and refusals" {
     try expectStatus(default_voice, .ok, &.{});
     try testing.expectEqualSlices(u8, default_voice.body, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"fixed\",\"input\":\"hi\",\"seed\":4,\"voice\":\"Rosie\"}")).body);
     try testing.expect(!std.mem.eql(u8, default_voice.body, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"fixed\",\"input\":\"hi\",\"seed\":4,\"voice\":\"Bruno\"}")).body));
+    // A voice without a model goes to the speech model that lists it (the default, tone, has no Bruno).
+    const by_voice = try d.call(a, .POST, "/v1/audio/speech", "{\"input\":\"hi\",\"seed\":4,\"voice\":\"Bruno\"}");
+    try expectStatus(by_voice, .ok, &.{});
+    try testing.expectEqualSlices(u8, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"fixed\",\"input\":\"hi\",\"seed\":4,\"voice\":\"Bruno\"}")).body, by_voice.body);
+    try expectStatus(try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\",\"voice\":\"Bruno\"}"), .bad_request, &.{"model 'tone' has no voice 'Bruno'"});
     // Raw PCM says what it is in headers: rate, channels, and 16-bit little-endian samples.
     const head = try headers(&d, a, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\",\"response_format\":\"pcm\"}");
     for ([_][]const u8{ "content-type: audio/pcm", "x-sample-rate: 24000", "x-channels: 1", "x-sample-format: s16le" }) |n| if (std.mem.indexOf(u8, head, n) == null) {
