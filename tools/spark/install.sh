@@ -21,7 +21,9 @@
 # and voice come first on this box; 1: keep it loaded, for an image-only box), IMAGE_IDLE_TTL_S
 # (60) and VIDEO_IDLE_TTL_S (30): seconds an idle image or video model stays loaded. Short, so the memory comes back to
 # kept-warm models (chat, speech) soon after a job: they reload only once it fits without unloading anything, and a
-# reload costs about 9 s (image) or 8 s (video) on GB10. LOCALROUTER_SKIP_SMOKE=1.
+# reload costs about 9 s (image) or 8 s (video) on GB10. LOCALROUTER_SKIP_SMOKE=1. WEIGHTS_ONLY=1: steps 1 and 2 only (the
+# packs, for a box that serves them some other way, such as deploy/jarvis); no compose, no service, no bind question.
+# DOWNLOAD_ONLY=1 (with WEIGHTS_ONLY=1): the checkpoints only, no pack (prepare.sh).
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 LOCALROUTER_HOME=${LOCALROUTER_HOME:-/data/localrouter}
@@ -49,6 +51,7 @@ export IMAGE_KEEP_WARM IMAGE_IDLE_TTL_S VIDEO_IDLE_TTL_S
 
 # ---- who may connect: LOCALROUTER_BIND, else what an earlier run saved, else (on a terminal) ask, else this machine only
 BIND_MODE=${LOCALROUTER_BIND:-$(envsaved LOCALROUTER_BIND_MODE)}
+[[ ${WEIGHTS_ONLY:-0} == 1 ]] && BIND_MODE=localhost
 if [[ -z $BIND_MODE ]]; then
     BIND_MODE=localhost
     if [[ -t 0 && -t 1 ]]; then
@@ -82,7 +85,7 @@ step "checks"
 command -v nvidia-smi > /dev/null || die "no nvidia-smi: this needs an NVIDIA GPU and its driver"
 command -v docker > /dev/null || die "no docker"
 docker info --format '{{json .Runtimes}}' | grep -q nvidia || die "Docker has no nvidia runtime (install the NVIDIA Container Toolkit)"
-docker compose version > /dev/null 2>&1 || die "no 'docker compose' (the compose plugin)"
+[[ ${WEIGHTS_ONLY:-0} == 1 ]] || docker compose version > /dev/null 2>&1 || die "no 'docker compose' (the compose plugin)"
 mkdir -p "$LOCALROUTER_HOME" 2> /dev/null || sudo install -d -o "$(id -u)" -g "$(id -g)" "$LOCALROUTER_HOME"
 free_gb=$(df -BG --output=avail "$LOCALROUTER_HOME" | tail -1 | tr -dc 0-9)
 need=0   # what is still to make: images about 110 GB (checkpoint, packs, caches), video about 90 GB more (61 GB of checkpoints, the pack, scratch)
@@ -102,8 +105,16 @@ for d in tools/twin:twin kernels:kernels .:repo; do   # the container's copy of 
     tar -C "$REPO/$src" --exclude=.zig-cache --exclude=zig-out --exclude=zig-pkg --exclude=results --exclude=__pycache__ \
         --exclude=.git -cf - . | tar -C "$LOCALROUTER_HOME/$dst" -xf -
 done
-docker run --rm --gpus all --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" -e IMAGE_MODELS="$IMAGE_MODELS" \
+# the container's host memory (its cgroup; GB10 device memory is not counted there): LR_PREPARE_MEMORY, by default 8g for
+# DOWNLOAD_ONLY (downloads and venvs beside a running service: a download that wants more fails in the container
+# instead of the box's OOM killer taking a running model) and no cap for the pack builds (they need the box)
+mem=${LR_PREPARE_MEMORY:-$([[ ${DOWNLOAD_ONLY:-0} == 1 ]] && echo 8g || true)}
+# one container at a time: a re-run replaces one an earlier run left behind (its client killed, the container still going)
+name=localrouter-prepare-$(id -u)-$(echo "$LOCALROUTER_HOME" | sha256sum | cut -c1-8)
+docker rm -f "$name" > /dev/null 2>&1 || true
+docker run --rm --name "$name" --gpus all ${mem:+--memory $mem --memory-swap $mem} -v /etc/localtime:/etc/localtime:ro --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" -e IMAGE_MODELS="$IMAGE_MODELS" -e DOWNLOAD_ONLY="${DOWNLOAD_ONLY:-0}" \
     -v "$LOCALROUTER_HOME":/workspace/localrouter "$NGC" bash /workspace/localrouter/repo/tools/spark/prepare.sh
+[[ ${WEIGHTS_ONLY:-0} == 1 ]] && { step "weights done (WEIGHTS_ONLY=1: no service)"; exit 0; }
 
 # ---- 3. the service
 step "config"

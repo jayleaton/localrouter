@@ -1,0 +1,17 @@
+{
+  "repo_id": "Qwen/Qwen-Image-2.1-Turbo",
+  "revision": "d65dbc9a7e8f6b5479e33dee6030eaab2a906509",
+  "note": "what tools/spark/prepare.sh builds into weights/qwen-image-2.1 for the qwen-image-2.1-turbo tool (IMAGE_MODELS=qwen-image-2.1-turbo, PRECISIONS=fp8s): the Turbo DiT pack and the shared text-encoder and VAE packs, from the pinned sources (packs/sources/); built on DGX-01 (GB10) 2026-10-21. The per-GPU Triton cubins (turbo-fp8s/triton/) are compiled on the box and not listed. Checked by tools/package/verify_assets.py",
+  "selected_files": [
+    {"path": "te/manifest.json", "size_bytes": 67306, "sha256": "217b16e9030bac68e8b31355bf3eb45c65e0d10f96f554e8e1b1237220d6ee7d"},
+    {"path": "te/tokenizer.json", "size_bytes": 11422650, "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"},
+    {"path": "te/tokenizer/chat_template.jinja", "size_bytes": 5292, "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4"},
+    {"path": "te/tokenizer/tokenizer.json", "size_bytes": 11422650, "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"},
+    {"path": "te/tokenizer/tokenizer_config.json", "size_bytes": 734, "sha256": "7ce86d685d3fb775073b9b1c0f576dd89b7943194c771dd2573cc10e5cae4a48"},
+    {"path": "te/weights.safetensors", "size_bytes": 15136839544, "sha256": "d82fefb368a1fc2702690795d85a15c8c3a7af6dc8429cb0ae971349e08e751c"},
+    {"path": "turbo-fp8s/manifest.json", "size_bytes": 80748, "sha256": "45395ca1376276e7e9e3f2734884da0b4ae0041dc809a229c46338c5d2a12b77"},
+    {"path": "turbo-fp8s/weights.safetensors", "size_bytes": 7250989136, "sha256": "22dcafe3294de88330e036286efd0937170b815ffd1ebd453dbf8cd0ff3be8b3"},
+    {"path": "vae/manifest.json", "size_bytes": 33861, "sha256": "03c598677b3042adaeeb3404f7ed25fca091cd0ef3b384213ace76aa2f5a9e82"},
+    {"path": "vae/weights.safetensors", "size_bytes": 506156560, "sha256": "593313e405e10cf03797affebd4cbfb9068167163c7b7e6f6387d1fe977e7e4f"}
+  ]
+}

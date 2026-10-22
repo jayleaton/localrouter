@@ -4,85 +4,110 @@
 > [!WARNING]
 > **Early preview.** LocalRouter is new and under active development: expect bugs and breaking changes. Please [open an issue](https://github.com/jayleaton/localrouter/issues) if something doesn't work.
 
-**LocalRouter runs generative models on your own GPU box and hands them to your agents.** One small daemon owns the
-machine: an agent asks for an image or a video over MCP (or an OpenAI-style HTTP API), LocalRouter loads the model
-that can do it, makes room for it if it has to, runs the job and unloads the model when it goes idle. Nothing is held
-in memory that nobody is using, and the models you care about can stay warm.
+**LocalRouter turns one NVIDIA DGX Spark into a full-duplex "Jarvis" box.** You talk to it and it talks back. You can
+interrupt it mid-sentence, and it can make a picture or a video while you talk. Everything runs on the box:
 
-It starts on the NVIDIA DGX Spark with two hand-built engines, written in Zig with their own GPU kernels and checked
-bit for bit against reference implementations of the same models, and a chat model served by its own runtime as an
-always-warm worker:
+- **Chat:** Qwen3.8 27B on TensorFold, with the DFlash2 drafter.
+- **Voice:** Fish Audio Drama 3, streamed as it speaks, with six fixed voices.
+- **Hearing:** Whisper large-v3-turbo with the Silero VAD.
+- **Images:** Qwen-Image 2.1 Turbo.
+- **Video with audio:** MiniMax H3.
 
-| Model | Can do | On a DGX Spark (GB10) |
-| --- | --- | --- |
-| **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
-| **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
-| **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
-| **Qwen3.8 27B** (chat; TensorFold 1.1.1's own server, MLX 4-bit with the DFlash2 drafter, run as a worker) | chat completions, whole and streamed: tools, structured output, reasoning on or off | refused until `tools/chat/qwen38-27b/qualify.sh` passes on the machine; not yet measured on GB10 ([docs/dev/CHAT.md](docs/dev/CHAT.md)) |
+One small Zig daemon owns the machine. It keeps the voice loop and chat warm, loads the other models when asked,
+makes room for them, and hands every tool to your agents over MCP and an OpenAI-compatible API.
 
-The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
-their input-image ports land. Check each model's advertised capabilities before submitting a job.
+## Quick start
 
-Speech comes as optional adapters that run a model's own implementation as a worker:
+Tell your coding agent (Claude Code, Codex, T3, ...):
 
-| Speech model | Can do | Status |
-| --- | --- | --- |
-| **Fish Audio Drama 3** (`fishaudio/drama-3`, [setup](docs/dev/DRAMA3.md)): plotarmordev's [drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) native server on TensorFold. Built with Fish Audio | text to 44.1 kHz speech, whole or streamed as it is made; voice files and inline voice references; long-form replies | qualified on DGX-01 (GB10): first audio 0.14 s streamed, RTF 0.66, 40.4 GiB, also beside the warm chat model; refused on any other host until `tools/speech/drama3/qualify.sh` passes there |
-| **Kitten TTS 2** ([setup](docs/dev/KITTEN-TTS2.md)) | text to 24 kHz speech, 47 voices | CPU checked bit for bit; GB10 CUDA not yet qualified |
-| **Whisper large-v3-turbo** | speech to text | checked against its recipe on GB10 |
+> *Read INSTALL.md and set up LocalRouter Jarvis on this box.*
 
-More models, and more kinds (music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
-
-## Why
-
-- **One door for every agent.** MCP clients and your own scripts add one MCP server and get
-  `generate_image` and `generate_video`, with the outputs inline or as links.
-- **Memory is managed for you.** Each model says what it needs before it loads. If it does not fit, idle models are
-  unloaded: lowest priority first, then least recently used. A model can be marked `keep_loaded` to stay warm
-  (an image model and a voice model side by side) and still give way when a video job needs the whole machine.
-- **Fast.** The engines read their weights at the drive's speed (direct I/O, about 12 GB/s on the Spark), run
-  NVFP4 / FP8 / INT8 kernels written for the GPU they ship on, and capture each sampling step as a CUDA graph.
-- **Correct.** Every engine is verified operation by operation against a Python reference of the model, then from
-  prompt to pixels and audio samples, on the hardware it runs on. Speed work keeps those bits or it does not ship.
-- **Small.** One Zig binary. The idle daemon uses a few MB and no GPU memory. Every loaded model is its own process,
-  so unloading returns all of its memory and a crash costs one job.
-
-## Install on a DGX Spark
+[INSTALL.md](INSTALL.md) is written for agents. It is a deterministic sequence of commands, with what to check at each
+step and what to ask you: which licences you accept, and whether the GPU may be used. To run it yourself:
 
 ```bash
-git clone <this repo> localrouter && bash localrouter/tools/spark/install.sh
+git clone https://github.com/jayleaton/localrouter && cd localrouter
+tools/install/bootstrap.sh --profile jarvis-gb10 --dry-run   # the plan: steps, downloads, disk, memory, licences
+tools/install/bootstrap.sh --profile jarvis-gb10 --accept    # after reading the licences the plan lists
 ```
 
-The installer checks the machine (GPU, Docker with the NVIDIA runtime, disk), downloads the official checkpoints and
-converts them inside NVIDIA's PyTorch container (the first run takes a while and needs about 200 GB free; the converted
-image DiT weights are verified against committed reference digests), builds and starts the service (it restarts with the machine), makes
-one image and a one-second clip through MCP as a check (printing the clip's wall time), and prints how to connect
-agents. `MODELS=image` or `MODELS=video` installs just one (about 110 GB free for images only; the default, both,
-needs about 200 GB). The image model is FP8 (`qwen-image-2.1`, kept warm); `PRECISIONS="fp8s nvfp4"` also builds the
-faster NVFP4 pack and serves it as `qwen-image-2.1-nvfp4`. Qwen-Image 2.1 Turbo is installed beside it as
-`qwen-image-2.1-turbo` (about 25 GB more: only its DiT differs, the text encoder and VAE are shared) and becomes the
-image model a request gets when it names none, kept warm; `IMAGE_MODELS=qwen-image-2.1` installs the base model only,
-`IMAGE_DEFAULT=qwen-image-2.1` keeps it the default. LocalRouter listens on `127.0.0.1` only unless you say
-otherwise: on a terminal the installer asks "Make LocalRouter reachable from your tailnet? [y/N]" once, and remembers the
-answer in `.env` under `LOCALROUTER_HOME`. Re-running it updates the service using the existing packs. The complete two-model installer still needs an
-end-to-end check on a DGX Spark; the video installation path has only been exercised with stubs.
+**What it does.** It installs every model of [deploy/profiles/jarvis-gb10.json](deploy/profiles/jarvis-gb10.json), checks
+every download against its pin and qualifies chat and Drama 3 on the GPU. It leaves one systemd user service on
+`127.0.0.1:8190`, which starts at boot and is reachable on your tailnet through `tailscale serve`. It is resumable: after
+a failure, do what it says and run it again. Models already on the box are reused, not downloaded again.
+`tools/install/doctor.sh --profile jarvis-gb10` lists anything missing, with its fix.
 
-Prebuilt Qwen-Image 2.1 packs are available as an optional download from
+**A fresh install on DGX-01** (measured 2026-10-22):
+
+| Part | Measured |
+| --- | --- |
+| Downloads and builds | 31.5 min, 175.7 GB downloaded |
+| Chat qualification on the GPU | 113 s |
+| Drama 3 qualification on the GPU | 20.5 min |
+| Image and video pack builds | not yet timed end to end |
+
+## What you get
+
+| Where | What |
+| --- | --- |
+| `/voice` | The web app. A full-duplex voice conversation: barge-in, spoken picture requests, and a voice picker with previews |
+| `/v1` | OpenAI-compatible API: chat completions (whole or streamed, with tools), audio speech and transcriptions, images, videos, and the Realtime API at `/v1/realtime` |
+| `/mcp` | Every tool over MCP: `chat`, `synthesize_speech`, `transcribe_audio`, `generate_image`, `generate_video`, `list_models`, `list_voices`, jobs. Setup for Claude Code, Codex, Cursor and any client: [docs/MCP.md](docs/MCP.md) |
+
+```bash
+claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp
+```
+
+## Measured on a DGX Spark
+
+DGX-01, NVIDIA GB10, 2026-10-22. Only figures we measured are listed.
+
+| What | Measured |
+| --- | --- |
+| Voice turn: end of speech to first audio | about 0.9 s median (916 to 959 ms across today's smoke runs); 0.72 to 0.95 s for the first turn after an image or a video |
+| Drama 3: first audio | 0.14 s p50, 0.18 s p95. Real-time factor 0.68. From its GPU qualification |
+| Chat: first content | 0.15 s for a short prompt, streamed |
+| "Generate a picture of a dog", spoken | picture done 8.1 to 10.2 s after the end of speech; spoken confirmation 8.8 to 11.4 s |
+| Image: Qwen-Image 2.1 Turbo, 1024x1024 | 6.3 s warm |
+| Video: MiniMax H3, 768x448 with audio | a 1 s clip in about 24 s; a 5 s clip in 54 s warm |
+| Memory with chat, Drama 3, Whisper and the image model warm | 24 + 42 + 3.6 + 35.2 GiB resident; 13.7 GiB still available after a start, 11 to 12 GiB in use, of 121.7 GiB |
+
+A video job unloads only the image model while it runs, and the image model comes back after it. Chat, Drama 3 and
+Whisper are never unloaded for an image or a video.
+
+## Hardware
+
+| Need | jarvis-gb10 (the tested profile) |
+| --- | --- |
+| Box | NVIDIA DGX Spark (GB10, `aarch64`): 128 GB unified memory, at least 110 GiB visible to the OS |
+| Software | DGX OS / Ubuntu 24.04, NVIDIA driver 580 or newer, CUDA 13 (`nvcc`), Docker with the NVIDIA runtime (for the image and video packs), systemd user services |
+| Disk | about 250 GiB free for a fresh install (216 GiB plus a 30 GiB margin). `--dry-run` prints the exact figure |
+| Network | HTTPS to huggingface.co, github.com, ziglang.org, pypi.org, download.pytorch.org and nvcr.io during the install |
+
+No other profile is tested yet. The chat and Drama 3 engines here are GB10 builds, and their qualification refuses
+other GPUs.
+
+## How it works
+
+- **One door for every agent.** Add one MCP server, or point any OpenAI client at `/v1`.
+- **Memory is managed for you.** Each model says what it needs before it loads. If it does not fit, idle models of
+  lower priority give way. Kept-warm models (the voice set and chat) come back by themselves, and only with room to
+  spare.
+- **Correct.** The image and video engines are LocalRouter's own, written in Zig with their own GPU kernels. They are
+  verified operation by operation against a Python reference of each model, then from prompt to pixels and audio
+  samples. Chat and Drama 3 are qualified on the box's own GPU before the service serves them.
+- **Small.** One Zig binary. Every loaded model is its own process, so unloading returns all of its memory and a crash
+  costs one job.
+
+## Image and video only (Docker)
+
+`bash tools/spark/install.sh` installs just the image and video models as a Docker service. The script's header
+documents it: `MODELS`, `PRECISIONS` (FP8 by default, NVFP4 optional), `IMAGE_MODELS`, and binding with
+`LOCALROUTER_BIND=localhost|tailscale|all`. Prebuilt Qwen-Image 2.1 packs are optional, from
 [Hugging Face](https://huggingface.co/jayleaton/localrouter-qwen-image-2.1), for non-commercial research or evaluation
-only under the Qwen Research License. The installer still converts the official checkpoint locally by default.
-
-## Expose it to your tailnet
-
-By default LocalRouter listens on `127.0.0.1`, so only this machine can reach it. To serve your Tailscale network:
-`LOCALROUTER_BIND=tailscale bash tools/spark/install.sh` (or `localrouter serve --host tailscale` without Docker). It
-listens on the machine's tailnet address (100.64.0.0/10) and nothing else, and starts correctly at boot even when Docker
-comes up before Tailscale. `LOCALROUTER_BIND` also takes `localhost`, `all` (every interface) or an IPv4 address.
+only under the Qwen Research License.
 
 ## Connect an agent
-
-```bash
-localrouter mcp-stdio --url http://<host>:8190
-```
 
 Any MCP client: `{"mcpServers": {"localrouter": {"type": "http", "url": "http://<host>:8190/mcp"}}}`. For clients that
 only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
@@ -97,11 +122,9 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 | `get_job`, `cancel_job` | follow or stop a long job |
 | `release_models` | unload everything now |
 
-The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`,
-`/v1/audio/...`, `/v1/chat/completions` whole or streamed):
-[docs/AGENTS.md](docs/AGENTS.md). Config snippets for Claude Code, Codex, Cursor and any MCP client, an example call for every
-tool, and the security note (there is no authentication: keep it on loopback or the tailnet) are in
-[docs/MCP.md](docs/MCP.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
+Config snippets for every client, an example call for every tool and the security note are in [docs/MCP.md](docs/MCP.md).
+The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an agent skill is in
+[skill/localrouter](skill/localrouter/SKILL.md).
 
 ## Configuration
 
@@ -144,7 +167,8 @@ tool, and the security note (there is no authentication: keep it on loopback or 
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
-(see "Expose it to your tailnet") and never `all` on an untrusted network.
+(the Jarvis install puts `tailscale serve` HTTPS in front of it; `--host tailscale` binds the tailnet address) and never
+`all` on an untrusted network.
 
 ## Build and test
 
@@ -169,23 +193,36 @@ milestones are in [docs/dev](docs/dev/).
 
 ## Credits
 
-LocalRouter stands on [**TensorFold**](https://github.com/ashhart/TensorFold) by **Ash Hart**: its CUDA runtime, its
-NVFP4 kernels and its Python model implementations were the baselines these engines were ported from and verified
-against. Thank you, Ash. We expect to contribute parts of the Zig work back upstream.
+LocalRouter stands on the work of these projects and teams:
 
-The Drama 3 speech tool runs [**drama-tensorfold**](https://github.com/plotarmordev/drama-tensorfold) by **plotarmordev**
-(Apache-2.0), which ports Fish Audio Drama 3 to TensorFold. Built with Fish Audio.
+- [**TensorFold**](https://github.com/ashhart/TensorFold) by **Ash Hart**. Its CUDA runtime, NVFP4 kernels and Python
+  model implementations were the baselines our image and video engines were ported from and verified against. Its
+  native server runs the chat model, and Drama 3 runs on it. Thank you, Ash; we expect to contribute parts of the Zig
+  work back upstream.
+- **Qwen** (Alibaba): Qwen3.8 27B for chat, and Qwen-Image 2.1 and 2.1 Turbo for images.
+- **z-lab**: the [DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) speculative drafter for Qwen3.8 27B.
+- **Fish Audio**: [Drama 3](https://huggingface.co/fishaudio/drama-3), the voice. Built with Fish Audio.
+- [**drama-tensorfold**](https://github.com/plotarmordev/drama-tensorfold) by **plotarmordev** (Apache-2.0), which ports
+  Drama 3 to TensorFold.
+- **OpenAI**: [Whisper](https://github.com/openai/whisper) large-v3-turbo, for speech to text.
+- [**Silero VAD**](https://github.com/snakers4/silero-vad): voice activity detection.
+- **MiniMax**: MiniMax H3, video with audio.
+- **NVIDIA**: the DGX Spark (GB10) and the NGC PyTorch container the packs are built in. The INT8 attention kernels
+  are SageAttention's, as shipped in NVIDIA's comfy-kitchen.
 
-The INT8 attention kernels are SageAttention's, as shipped in NVIDIA's comfy-kitchen. Qwen-Image is by the Qwen team
-and MiniMax H3 by MiniMax; their weights are downloaded from their publishers under their own licenses.
-Qwen-Image 2.1 is restricted to non-commercial research or evaluation under its
-[Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
-MiniMax H3's [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU,
-UK and South Korea and imposes downstream use conditions. Check these terms before installing or using either model.
-Fish Audio Drama 3's weights are under the [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE):
-commercial use only under USD 500,000 annual revenue, and no Hosted Service (letting third parties generate speech
-through an API) without a separate licence from Fish Audio, so keep LocalRouter on loopback for it
-([details](docs/dev/DRAMA3.md#licences)). Built with Fish Audio.
+The weights are downloaded from their publishers under their own licences. Check these terms before installing or
+using a model:
+
+- **Qwen-Image 2.1** is restricted to non-commercial research or evaluation under its
+  [Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
+- **MiniMax H3**'s [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US,
+  EU, UK and South Korea, and imposes downstream use conditions.
+- **Fish Audio Drama 3**'s weights are under the
+  [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE).
+  It allows commercial use only under USD 500,000 annual revenue, and no Hosted Service (letting third parties
+  generate speech through an API) without a separate licence from Fish Audio. So keep LocalRouter on loopback or your
+  tailnet for it ([details](docs/dev/DRAMA3.md#licences)).
+
 The Apache-2.0 licence below covers the software. See [NOTICE](NOTICE).
 
 ## License

@@ -7,6 +7,7 @@ export MODEL=/tmp/localrouter/models/Qwen-Image-2.1          # local NVMe copy, 
 export HF_HOME=$STK/hf-cache
 export TORCH_EXTENSIONS_DIR=$STK/torch-ext       # TensorFold's JIT kernels, built once per GPU architecture
 export TFIMAGE_REV=f91845527f095bbc1b87bd9b3960f893e7c9efc1   # jayleaton/qwen-image21-tensorfold-rtx
+export QWEN_IMAGE_REV=${QWEN_IMAGE_REV:-d26bb61231c349cf6b7896fa83353113880e1ba3}  # Qwen/Qwen-Image-2.1 (files: packs/sources/)
 export TENSORFOLD_TAG=v0.6.1                      # ashhart/TensorFold, 17c73e1
 export PYTHONPATH=$TWIN:$STK/src/qwen-image21-tensorfold-rtx${PYTHONPATH:+:$PYTHONPATH}
 export PYTHONUNBUFFERED=1

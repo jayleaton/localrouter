@@ -1,0 +1,47 @@
+{
+  "repo_id": "Qwen/Qwen-Image-2.1-Turbo",
+  "revision": "d65dbc9a7e8f6b5479e33dee6030eaab2a906509",
+  "note": "the files tools/spark/prepare.sh downloads, as Hugging Face served them at this revision (size, and LFS sha256 or git blob sha1); checked by tools/package/verify_assets.py",
+  "selected_files": [
+    {
+      "path": "LICENSE",
+      "size_bytes": 7831,
+      "git_blob_sha1": "13ae08d5a5828f508cf0e852b1b316c0c0bbb9b3"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 15116,
+      "git_blob_sha1": "92e132ef6e98a7b4150e582bcd4281a0a2d882cd"
+    },
+    {
+      "path": "model_index.json",
+      "size_bytes": 578,
+      "git_blob_sha1": "cdc1dae2997ff637225c42c388196b38a9bbaae8"
+    },
+    {
+      "path": "scheduler/scheduler_config.json",
+      "size_bytes": 486,
+      "git_blob_sha1": "72837792c1944182b3707415cdaeb825e6bf5598"
+    },
+    {
+      "path": "transformer/config.json",
+      "size_bytes": 370,
+      "git_blob_sha1": "b3f8d1cf08a94a1d4ec09e2bfeb5344af25f2983"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "size_bytes": 9968332504,
+      "lfs_sha256": "6cccd922767f01694461bdcf1f34ea7b771f3442e4d5e338ea9aa55277431cc0"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "size_bytes": 4261951904,
+      "lfs_sha256": "69f53ebb063d2f606bdaff7e22e0e2144f28d978d73dc75e6e4293fc5982eab5"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+      "size_bytes": 30283,
+      "git_blob_sha1": "bd64579cfd093a6a4ea8fb492217790018c53c0d"
+    }
+  ]
+}

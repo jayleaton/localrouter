@@ -10,6 +10,8 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=@DEPLOY@
 Environment=PATH=@J@/bin:/usr/local/bin:/usr/bin:/bin
+# this install's own paths for the scripts the unit runs (leftovers.sh): another prefix's Drama 3 server is not ours
+Environment=JARVIS=@J@ DEPLOY=@DEPLOY@ PORT=@PORT@ DRAMA_ROOT=@DRAMA_ROOT@
 ExecStart=@DEPLOY@/current/zig-out/bin/localrouter serve --config @DEPLOY@/config.json --host 127.0.0.1 --port @PORT@ --data @DEPLOY@/data
 # Workers are in this unit's cgroup: stopping it stops every model. GB10 memory is unified; 112 GiB leaves the host room.
 KillMode=control-group

@@ -1,0 +1,13 @@
+{
+  "repo_id": "Comfy-Org/MiniMax-H3",
+  "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+  "note": "what tools/spark/prepare.sh builds into weights/minimax-h3 for the minimax-h3 tool (MODELS=video): the Turbo-LoRA NVFP4 pack, and the encoder and VAEs it reads beside the pack (hard links to the pinned downloads, packs/sources/minimax-h3.json); built on DGX-01 (GB10) 2026-10-21. Checked by tools/package/verify_assets.py",
+  "selected_files": [
+    {"path": "h3-turbo-nvfp4/manifest.json", "size_bytes": 193963, "sha256": "17b236d1dc130de3b954a766a417a7677691ffffb731f9c18841bfdeb9b5ebbf"},
+    {"path": "h3-turbo-nvfp4/tokenizer.json", "size_bytes": 11424242, "sha256": "216ff8dfcf1779298be9209f507e9547ca7435f4f53ec6e5bbd4c1f270926f1a"},
+    {"path": "h3-turbo-nvfp4/weights.safetensors", "size_bytes": 12616973976, "sha256": "c2b026caf68ba9b12b1b66c47612e6bc7514f926cfbe28fc6ebd910bfeb4e7e9"},
+    {"path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "size_bytes": 15687142551, "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"},
+    {"path": "vae/minimax_h3_audio_vae_fp32.safetensors", "size_bytes": 605254808, "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"},
+    {"path": "vae/minimax_h3_video_vae_fp16.safetensors", "size_bytes": 5207808496, "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"}
+  ]
+}

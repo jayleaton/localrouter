@@ -23,6 +23,9 @@ Memory, measured on DGX-01 (2026-10-22):
 
 ## Install, start, stop
 
+From nothing, every model and then these scripts: `tools/install/bootstrap.sh --profile jarvis-gb10` ([INSTALL.md](../../INSTALL.md)).
+Once the models are installed and qualified:
+
 ```sh
 deploy/jarvis/install.sh   # preflight, build into ~/jarvis/deploy/src/<commit>, config, unit, tailscale serve
 deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and the image model are warm
@@ -35,8 +38,9 @@ tools/jarvis/smoke.sh [--quick]                       # every capability against
 `install.sh` refuses unless each qualified model's marker says `"qualified": true` and was made from the pins in
 this tree. When a model's `pins.json` changes, re-run that model's `qualify.sh` first. Re-running `install.sh` on a
 new commit builds it and restarts the running service onto it, once no voice call is open (`voice_sessions` in
-`/v1/tools`; it waits up to `IDLE_WAIT_S`, 30 min). The unit restarts on failure, and lingering keeps it
-running without a login.
+`/v1/tools`; it waits up to `IDLE_WAIT_S`, 30 min); on the same commit with the same config it changes nothing. The
+unit restarts on failure, and lingering keeps it running without a login. `TOOLS` (tool ids) serves a subset;
+`BUILD_ONLY=1` only builds.
 
 Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) and `HTTPS_PORT` (10443).
 
