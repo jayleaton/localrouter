@@ -33,7 +33,7 @@ def log(kind, **kw):
     print(json.dumps(kw)[:400], flush=True)
 
 
-def http(method, path, body=None, timeout=900):
+def request(method, path, body=None, timeout=900):
     c = http.client.HTTPConnection(URL.hostname, URL.port, timeout=timeout)
     c.request(method, path, json.dumps(body) if body is not None else None, {"Content-Type": "application/json"})
     r = c.getresponse()
@@ -45,7 +45,7 @@ def http(method, path, body=None, timeout=900):
 
 
 def mcp(name, arguments, timeout=1800):
-    _, j = http("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}, timeout)
+    _, j = request("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}, timeout)
     if "error" in j:
         return False, json.dumps({"error": j["error"].get("message")})
     res = j["result"]
@@ -53,7 +53,7 @@ def mcp(name, arguments, timeout=1800):
 
 
 def models():
-    _, j = http("GET", "/v1/tools")
+    _, j = request("GET", "/v1/tools")
     return {t["id"]: t["state"] for t in j["data"]}, j
 
 
@@ -144,7 +144,7 @@ MODEL_TOOLS = [
 
 
 def chat_loop(user_text, rounds=8):
-    _, skill = http("GET", "/v1/skills/model-manager")
+    _, skill = request("GET", "/v1/skills/model-manager")
     record["skill_enabled"] = skill.get("enabled")
     msgs = [{"role": "system", "content": f"{DEFAULT_SYSTEM}\n\n{skill['text']}" if skill.get("enabled") else DEFAULT_SYSTEM},
             {"role": "user", "content": user_text}]
@@ -152,7 +152,7 @@ def chat_loop(user_text, rounds=8):
     for _ in range(rounds):
         body = {"messages": msgs, "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none",
                 "tools": CHAT_TOOLS + (MODEL_TOOLS if skill.get("enabled") else []), "tool_choice": "auto", "max_tokens": 600}
-        st, j = http("POST", "/v1/chat/completions", body)
+        st, j = request("POST", "/v1/chat/completions", body)
         if st != 200:
             log("chat_error", status=st, body=str(j)[:400])
             break
