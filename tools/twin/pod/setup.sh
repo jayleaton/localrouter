@@ -16,7 +16,7 @@ if [[ ! -d $STK/src/qwen-image21-tensorfold-rtx ]]; then
     git clone -q https://github.com/jayleaton/qwen-image21-tensorfold-rtx $STK/src/qwen-image21-tensorfold-rtx
     git -C $STK/src/qwen-image21-tensorfold-rtx checkout -q $TFIMAGE_REV
 fi
-[[ -f $MODEL_VOL/.complete ]] || { hf download Qwen/Qwen-Image-2.1 --local-dir $MODEL_VOL --max-workers 16 > /dev/null && touch $MODEL_VOL/.complete; }
+[[ -f $MODEL_VOL/.complete ]] || { hf download Qwen/Qwen-Image-2.1 --revision $QWEN_IMAGE_REV --local-dir $MODEL_VOL --max-workers 16 > /dev/null && touch $MODEL_VOL/.complete; }
 python - <<'PY'
 import torch, triton, diffusers, transformers, tensorfold
 print({"torch": torch.__version__, "triton": triton.__version__, "diffusers": diffusers.__version__,

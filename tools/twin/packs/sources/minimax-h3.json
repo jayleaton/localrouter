@@ -1,0 +1,32 @@
+{
+  "repo_id": "Comfy-Org/MiniMax-H3",
+  "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+  "note": "the files tools/spark/prepare.sh downloads, as Hugging Face served them at this revision (size, and LFS sha256 or git blob sha1); checked by tools/package/verify_assets.py",
+  "selected_files": [
+    {
+      "path": "diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors",
+      "size_bytes": 40225724176,
+      "lfs_sha256": "a32572fb90b5508b201ec7c2eddcc184b13ddfd3c6f6d2cf06a0b46535d541b4"
+    },
+    {
+      "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "size_bytes": 1956193000,
+      "lfs_sha256": "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
+    },
+    {
+      "path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size_bytes": 15687142551,
+      "lfs_sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+    },
+    {
+      "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size_bytes": 605254808,
+      "lfs_sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    {
+      "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size_bytes": 5207808496,
+      "lfs_sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    }
+  ]
+}

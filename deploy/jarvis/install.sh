@@ -12,8 +12,11 @@
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (sudo; other serve entries are
 #    left as they are). The daemon itself listens on 127.0.0.1 only: LocalRouter has no API keys, so the tailnet (its
 #    ACLs) is who may connect; nothing binds 0.0.0.0.
-# Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER).
-# Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), NVCC, SM (121).
+# Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, UNIT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER,
+# DRAMA_PORT).
+# Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), BUILD_ONLY=1 (preflight of the tools and step 2 only: the
+# binary that the models' qualify.sh runs), TOOLS (the tool ids to serve, space separated; default: every tool in
+# config.json.in), NVCC, SM (121).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -25,6 +28,10 @@ nvidia-smi -L | grep -q GB10 || die "no GB10"
 for t in jq curl python3 sha256sum systemctl systemd-run zig; do command -v $t > /dev/null || die "needs $t (zig: under $J/bin)"; done
 nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
 [ -x "$nvcc" ] || die "no nvcc at $nvcc"
+all=$(sed 's/@DRAMA_PORT@/0/' "$here/config.json.in" | jq -r '[.tools[].id] | join(" ")')
+TOOLS=${TOOLS:-$all}
+for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; config.json.in has: $all"; done
+wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
 # marker FILE PINS NAME: qualified, and qualified with this tree's pins
 marker() {
   [ -f "$1" ] || die "$3: no qualification marker $1 (run its qualify.sh on this machine)"
@@ -35,14 +42,28 @@ marker() {
   [ "$got" = "$want" ] || die "$3: $1 was qualified with pins $got, this tree has $want: re-qualify first"
   echo "  $3: qualified ($(basename "$1") sha256 $(sha256sum "$1" | cut -c1-12), pins match)"
 }
-echo "== preflight"
-marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
-marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3"
-[ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
-[ -d "$DRAMA_ROOT" ] || die "no Drama 3 install at $DRAMA_ROOT"
-whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | head -1)
-[ -n "$whisper" ] && [ -x "$J/venvs/whisper/bin/python" ] && [ -f "$J/models/vad/silero_vad.jit" ] || die "Whisper is not set up under $J"
-[ -d "$J/lr/weights/qwen-image-2.1" ] && [ -d "$J/lr/weights/minimax-h3" ] || die "no image and video packs under $J/lr/weights"
+whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1')
+whisper=${whisper%/}
+if [ "${BUILD_ONLY:-0}" != 1 ]; then
+  echo "== preflight: $TOOLS"
+  if wanted qwen3.8-27b; then
+    marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
+    [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
+  fi
+  if wanted fishaudio/drama-3; then
+    marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3"
+    [ -d "$DRAMA_ROOT" ] || die "no Drama 3 install at $DRAMA_ROOT"
+  fi
+  if wanted whisper-large-v3-turbo; then
+    [ -n "$whisper" ] && [ -x "$J/venvs/whisper/bin/python" ] && [ -f "$J/models/vad/silero_vad.jit" ] || die "Whisper is not set up under $J"
+  fi
+  if wanted qwen-image-2.1-turbo; then
+    [ -f "$J/lr/weights/qwen-image-2.1/turbo-fp8s/manifest.json" ] || die "no image pack under $J/lr/weights/qwen-image-2.1"
+  fi
+  if wanted minimax-h3; then
+    [ -f "$J/lr/weights/minimax-h3/h3-turbo-nvfp4/manifest.json" ] || die "no video pack under $J/lr/weights/minimax-h3"
+  fi
+fi
 
 # ---- 2. the tree and the build
 if git -C "$repo" rev-parse --git-dir > /dev/null 2>&1; then
@@ -68,20 +89,32 @@ if [ "${SKIP_BUILD:-0}" != 1 ] || [ ! -x "$src/zig-out/bin/localrouter" ]; then
   rm -rf "$src" && mv "$src.tmp" "$src"
 fi
 sha256sum "$src/zig-out/bin/localrouter"
+[ "${BUILD_ONLY:-0}" = 1 ] && { echo "built $commit: $src/zig-out/bin/localrouter (BUILD_ONLY=1: nothing else changed)"; exit 0; }
 
 # ---- 3. config and unit, rendered and checked first; nothing the running service uses changes until it is idle
 render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
-      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@WHISPER@|${whisper%/}|g" "$1"
+      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@WHISPER@|${whisper:-unused}|g" "$1"
 }
-render "$here/config.json.in" > "$DEPLOY/config.json.new"
+# the selected tools only (TOOLS), and the voice and defaults that name them
+render "$here/config.json.in" | jq --arg t " $TOOLS " '
+  def kept: . as $id | $t | contains(" " + $id + " ");
+  .tools |= map(select(.id | kept)) | .voice.speech_models |= map(select(kept))
+  | .defaults |= with_entries(select(.value | kept))' > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
 mkdir -p "$HOME/.config/systemd/user"
 render "$here/localrouter-jarvis.service.in" > "$DEPLOY/$UNIT.service.new"
 ! grep -q '@[A-Z_]*@' "$DEPLOY/$UNIT.service.new" || die "unrendered placeholders in the unit"
 running=0; systemctl --user is-active -q "$UNIT" && running=1
+if [ $running = 1 ] && [ "$(readlink "$DEPLOY/current")" = "src/$commit" ] && cmp -s "$DEPLOY/config.json.new" "$DEPLOY/config.json" &&
+   cmp -s "$DEPLOY/$UNIT.service.new" "$HOME/.config/systemd/user/$UNIT.service"; then
+  # nothing to change: a re-run leaves the running service alone
+  rm -f "$DEPLOY/config.json.new" "$DEPLOY/$UNIT.service.new"
+  echo "== unchanged: $UNIT already runs $commit with this config; not restarting"
+  running=unchanged
+fi
 if [ $running = 1 ]; then
   # never under a live call: wait until no voice session is open (/v1/tools, else, on an older build, no connection
   # to the daemon's port), IDLE_WAIT_S at most (default 1800; FORCE_RESTART=1 skips the wait)
@@ -96,11 +129,13 @@ if [ $running = 1 ]; then
     sleep 10
   done
 fi
-ln -sfn "src/$commit" "$DEPLOY/current.new" && mv -T "$DEPLOY/current.new" "$DEPLOY/current"
-mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
-mv "$DEPLOY/$UNIT.service.new" "$HOME/.config/systemd/user/$UNIT.service"
-systemctl --user daemon-reload
-systemctl --user enable "$UNIT" > /dev/null 2>&1
+if [ $running != unchanged ]; then
+  ln -sfn "src/$commit" "$DEPLOY/current.new" && mv -T "$DEPLOY/current.new" "$DEPLOY/current"
+  mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
+  mv "$DEPLOY/$UNIT.service.new" "$HOME/.config/systemd/user/$UNIT.service"
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT" > /dev/null 2>&1
+fi
 [ "$(loginctl show-user "$(id -un)" -p Linger --value 2> /dev/null)" = yes ] ||
   echo "warning: lingering is off: the service stops at logout (sudo loginctl enable-linger $(id -un))" >&2
 if [ $running = 1 ]; then

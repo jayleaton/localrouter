@@ -50,7 +50,7 @@ fetch() { # REPO FILE SUBDIR
     local dst=$VMODELS/$3/$(basename $2)
     [[ -f $dst ]] && return 0
     if [[ -f $VMODELS_VOL/$3/$(basename $2) ]]; then mkdir -p $VMODELS/$3; cp $VMODELS_VOL/$3/$(basename $2) $dst; return; fi
-    hf download $1 $2 --local-dir $VMODELS/.dl > /dev/null && mkdir -p $VMODELS/$3 && mv $VMODELS/.dl/$2 $dst
+    hf download $1 $2 --revision $H3_REV --local-dir $VMODELS/.dl > /dev/null && mkdir -p $VMODELS/$3 && mv $VMODELS/.dl/$2 $dst
 }
 fetch Comfy-Org/MiniMax-H3 diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors diffusion_models &
 fetch Comfy-Org/MiniMax-H3 text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors text_encoders &
