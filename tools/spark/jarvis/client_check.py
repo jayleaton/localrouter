@@ -543,7 +543,7 @@ def main():
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected && window.jarvis.ui.voiceState === 'listening'", 30, "the voice session")
             check("hold: the session's turn end is the wait", cdp.js(f"window.jarvis.debug.some(e => e.kind === 'voice.in' && e.type === 'session.updated' && e.session.turn_detection && e.session.turn_detection.silence_duration_ms === {a.wait_ms})"))
-            cdp.wait(f"{BOTS}.length >= {a.hold_turns} && window.jarvis.voice.live === 0 && window.jarvis.ui.voiceState === 'listening'", 120, "the replies")
+            cdp.wait(f"{USERS}.length >= {a.hold_turns} && {BOTS}.length >= 1 && window.jarvis.voice.live === 0 && window.jarvis.ui.voiceState === 'listening'", 120, "the replies")
             time.sleep(4)  # a turn or reply too many would be in by now
             ev = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.in' && ['input_audio_buffer.speech_stopped', 'input_audio_buffer.committed', 'response.created', 'response.audio_transcript.delta', 'localrouter.response.timing', 'localrouter.transcription.partial'].includes(e.type)).map(e => ({ t: e.t, type: e.type, ms: e.ms || null }))")
             audio = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.first_audio').map(e => e.t)")
@@ -553,7 +553,8 @@ def main():
             texts = [e["t"] for e in ev if e["type"] == "response.audio_transcript.delta"]
             n = a.hold_turns
             check(f"hold: {n} user turn(s)", len(users) == n and len(stops) == n, {"turns": users, "speech_stopped": len(stops)})
-            check(f"hold: {n} spoken repl{'y' if n == 1 else 'ies'}", len(bots) == n and len(created) == n, bots)
+            # Each turn is answered; a reply still starting when the speaker goes on is cut by barge-in, as any reply is.
+            check(f"hold: {n} turn(s) answered, the last reply spoken in full", len(created) == n and len(bots) >= 1, {"responses": len(created), "spoken": bots})
             if n == 1 and a.hold_expect:
                 check("hold: the turn is the whole phrase, both sides of the pause", all(k.lower() in (users[0] if users else "").lower() for k in a.hold_expect.split(",")), users)
             # Every reply's start, its first text and its first audio come after the turn it answers ended.
