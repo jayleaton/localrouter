@@ -86,6 +86,37 @@ figure must cover the server's peak. TensorFold's CUDA server also sizes its win
 `--context 32768`, `--parallel 1` and `--prompt-cache-gib 4` bound it. `qualify.sh` samples `MemAvailable` every 0.5 s
 during both of its server runs and reports the largest drop in `report.json`.
 
+## Expected speed
+
+Measured on DGX-01 (GB10) on 2026-10-22 against the live Jarvis service, with `tools/spark/jarvis/chat_speed.py`.
+It sends the web client's request shape (its system prompt, the image and video tools, thinking off, no temperature)
+and reads TensorFold's own `tensorfold` and `speculative` figures. Each user turn has a fresh nonce, so only the shared
+prefix comes from the prompt cache.
+
+| State | Prose (client request) | Code | TTFT |
+| --- | --- | --- | --- |
+| Chat with Drama 3, Whisper and Kitten loaded but idle (the GPU is at 0% while they idle, so this is also chat alone) | 34–39 tok/s, 3.2–3.4 tokens a drafter round | 70–87 tok/s, 6.7–7.6 a round | 0.14–0.16 s |
+| The same through the daemon (`/v1/chat/completions` on :8190), identical greedy requests | 39.0 vs 38.9 tok/s direct | 86.5 vs 86.9 | the same |
+| While Drama 3 synthesizes | 14–19 tok/s, 2.8–3.7 a round | 34–38 tok/s | 0.32–0.55 s (1.4 s once) |
+
+- **Prose against code.** A drafter round costs about 90 ms either way. DFlash2's drafts are accepted about 3.3
+  tokens a round on prose and about 7.5 on code. Qualification's 83 tok/s came from short, predictable answers; open
+  prose runs at about 35–39 tok/s, and that is the model and drafter's lossless speed on this GPU. Without the drafter it
+  is 13 tok/s (JARVIS-BRINGUP.md). TensorFold's CUDA engine has no other drafting setting, and it refuses a bf16
+  drafter (`--drafter-bits 0`).
+- **Sampling.** The client sends no temperature, so the server samples (`"sampling": "exact"`): about 8% slower than
+  greedy (`temperature: 0`), which accepts more drafts. The client keeps sampling.
+- **The prompt cache works.** The client's system prompt and tools (384 of about 480 prompt tokens) and a voice
+  conversation's history (512–640) come from the cache on every turn. The voice loop's one-token primes keep it warm.
+- **The daemon costs nothing measurable.** Thinking is off by default in the client, which sets no `max_tokens` (the
+  server's 4096). Typed chat never calls text to speech: the client speaks only in voice mode and for voice previews.
+- **Contention.** Two processes on the GPU time-slice it; TensorFold exposes no priority between processes. While
+  Drama 3 synthesizes, chat runs at about 40% of its speed (drafter acceptance is unchanged), and Drama 3 slows too:
+  its real-time factor goes from 0.66 alone to 1.47–1.52 while chat decodes, that is, slower than playback. In a voice
+  turn chat is still about four times faster than speech. What suffers is the audio, while the two overlap: a long reply
+  decoding while the first sentences are spoken can starve playback. Typed chat is slowed only when something else
+  (a voice turn, a test batch) is using the GPU at the same time.
+
 ## Priority and eviction
 
 A chat tool defaults to `keep_loaded: true` and `priority: 100` (every other tool defaults to 0): it is loaded when the
