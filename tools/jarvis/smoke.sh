@@ -106,10 +106,11 @@ fi
 # text to speech: Drama 3 streamed (time to first audio), whole, and in each of its voices as the settings page's
 # previews ask for them
 tts() { # NAME MODEL [VOICE]
-  local t r bytes dur
+  local t r bytes dur text="Good evening. The smoke test is speaking now."
+  [ -n "${3:-}" ] && text="Hi, I'm $3. This is how I sound."
   t=$(now)
   r=$(curl -s -m 300 -o "$out/$1.wav" -w '%{http_code}' -H 'content-type: application/json' "$url/v1/audio/speech" \
-      -d "{\"model\":\"$2\",\"voice\":\"${3:-}\",\"input\":\"${3:+Hi, I'm $3. This is how I sound.}${3:-Good evening. The smoke test is speaking now.}\",\"response_format\":\"wav\"}")
+      -d "{\"model\":\"$2\",\"voice\":\"${3:-}\",\"input\":\"$text\",\"response_format\":\"wav\"}")
   bytes=$(stat -c %s "$out/$1.wav" 2> /dev/null || echo 0)
   dur=$(python3 -I -c 'import sys, wave; w = wave.open(sys.argv[1]); print(round(w.getnframes() / w.getframerate(), 2))' "$out/$1.wav" 2> /dev/null || echo 0)
   record "$1" "$([ "$r" = 200 ] && [ "$(head -c 4 "$out/$1.wav")" = RIFF ] && awk -v d="$dur" 'BEGIN{exit !(d > 1)}' && echo true || echo false)" "$(secs $t)" "HTTP $r, $dur s of audio, $bytes B"
