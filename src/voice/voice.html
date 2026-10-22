@@ -210,8 +210,9 @@
   #vbarText { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
   /* ------------------------------------------------ voice mode */
-  #vm { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; flex-direction: column;
-        padding: calc(8px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
+  #vm { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; }
+  .vm-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
+             padding: calc(8px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
   #vm[hidden] { display: none; }
   .vm-top { display: flex; align-items: center; gap: 8px; }
   .vm-top .grow { flex: 1; }
@@ -255,6 +256,57 @@
   #talk[data-s="talking"] { transform: scale(.97); box-shadow: 0 0 0 6px var(--amber-soft); }
   #talk svg { width: 24px; height: 24px; }
 
+  /* ------------------------------------------------ the generations reel (voice mode): docked right, a bottom strip on phones */
+  .reel { width: 320px; flex: none; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border);
+          padding: calc(8px + env(safe-area-inset-top)) 0 calc(8px + env(safe-area-inset-bottom)); }
+  .reel-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 16px; min-height: 52px; }
+  .reel-h h2 { margin: 0; font-size: 15px; }
+  .reel-n { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--raised); color: var(--muted);
+            font-size: 12px; display: inline-grid; place-items: center; font-weight: 700; }
+  #reelToggle { display: none; }
+  .reel-empty { margin: 4px 16px; color: var(--dim); font-size: 13px; }
+  .reel:not([data-empty="1"]) .reel-empty { display: none; }
+  #reelList { flex: 1; overflow-y: auto; padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 12px; overscroll-behavior: contain; }
+  .rc { margin: 0; flex: none; border: 1px solid var(--border); border-radius: 16px; overflow: hidden; background: var(--bg); }
+  .rc-thumb { position: relative; display: block; width: 100%; aspect-ratio: 4 / 3; background: var(--raised); color: var(--muted); }
+  .rc-thumb img, .rc-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+  .rc-play { position: absolute; left: 8px; bottom: 8px; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+             background: rgba(21, 23, 24, .7); color: #fff; }
+  .rc-play svg { width: 16px; height: 16px; fill: currentColor; stroke: none; }
+  .rc.pending .rc-thumb { display: grid; place-items: center; overflow: hidden; font-size: 13px; }
+  .rc.failed .rc-thumb { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 10px;
+                        text-align: center; font-size: 12.5px; color: var(--red); }
+  .rc.failed .btn { min-height: 36px; color: var(--text); }
+  .rc.pending .rc-thumb::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+                                 background: linear-gradient(100deg, transparent 20%, var(--amber-soft) 50%, transparent 80%); animation: shimmer 1.6s infinite; }
+  .rc figcaption { display: flex; align-items: center; gap: 2px; padding: 2px 4px 2px 12px; font-size: 12.5px; color: var(--muted); }
+  .rc figcaption span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rc .icon-btn { width: 40px; height: 40px; }
+  .rc.fresh { animation: fresh 2.4s ease-out; }
+  @keyframes fresh { 0% { box-shadow: 0 0 0 3px var(--amber); transform: scale(1.02); } 100% { box-shadow: 0 0 0 0 transparent; transform: none; } }
+  @media (max-width: 860px) {
+    #vm { flex-direction: column; }
+    .vm-main { padding-bottom: 8px; min-height: 0; }
+    .reel { width: auto; border-left: 0; border-top: 1px solid var(--border); padding: 0 0 env(safe-area-inset-bottom); }
+    .reel[data-empty="1"] { display: none; }
+    .reel-h { min-height: 44px; padding: 2px 4px 2px 16px; }
+    #reelToggle { display: inline-grid; }
+    .reel.collapsed #reelToggle svg { transform: rotate(180deg); }
+    #reelList { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 0 12px 10px; scroll-snap-type: x proximity; }
+    .reel.collapsed #reelList { display: none; }
+    .rc { width: 128px; scroll-snap-align: start; }
+    .rc-thumb { aspect-ratio: 1; }
+    .rc figcaption span { display: none; }
+    .rc figcaption { justify-content: flex-end; padding: 0 2px; }
+    #vm:has(.reel:not([data-empty="1"]):not(.collapsed)) .orb { width: min(44vw, 26vh); }
+  }
+  #lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; color: #fff; }
+  #lightbox::backdrop { background: rgba(10, 11, 12, .82); }
+  .lb-media img, .lb-media video { display: block; max-width: 96vw; max-height: 78vh; border-radius: 14px; margin: 0 auto; background: #000; }
+  .lb-cap { margin: 10px auto 0; max-width: min(720px, 92vw); text-align: center; font-size: 14px; color: #e8e2d6; }
+  .lb-voice { display: inline-flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 999px; background: rgba(254, 185, 62, .18);
+              border: 1px solid #feb93e; min-height: 44px; font-size: 13px; }
+  .lb-voice .btn { min-height: 36px; background: #feb93e; color: #151718; }
   /* ------------------------------------------------ drawer, lightbox, toast */
   dialog { color: var(--text); }
   dialog::backdrop { background: var(--scrim); }
@@ -301,9 +353,7 @@
   .play[data-playing="1"] { background: var(--amber); color: var(--amber-ink); }
   .play svg { width: 18px; height: 18px; }
   .note-s { color: var(--muted); font-size: 12.5px; }
-  #lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; }
-  #lightbox img { display: block; max-width: 96vw; max-height: 86vh; border-radius: 14px; }
-  #lightbox .lb { display: flex; justify-content: center; gap: 10px; margin-top: 10px; }
+  #lightbox .lb { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
   #toast { position: fixed; left: 50%; bottom: calc(110px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
            background: var(--text); color: var(--bg); border-radius: 14px; padding: 8px 8px 8px 16px; display: flex; align-items: center;
            gap: 10px; box-shadow: var(--shadow); font-size: 14px; }
@@ -371,6 +421,7 @@
 </div>
 
 <section id="vm" hidden aria-label="Voice mode">
+ <div class="vm-main">
   <div class="vm-top">
     <button class="icon-btn" id="vmMin" aria-label="Back to the chat (voice stays on)"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
     <button class="chip" id="vmVoice" aria-label="Choose the voice"><svg viewBox="0 0 24 24"><path d="M3 10v4M7 6v12M11 3v18M15 8v8M19 11v2"/></svg><span id="vmVoiceName">Voice</span></button>
@@ -392,6 +443,15 @@
     </div>
     <button id="talk" data-s="listening"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg><span><span id="talkLbl">Listening</span><small id="talkSub">Tap to mute</small></span></button>
   </div>
+ </div>
+ <aside class="reel" id="reel" aria-labelledby="reelTitle" data-empty="1">
+  <div class="reel-h">
+    <h2 id="reelTitle">Generations</h2><span class="reel-n" id="reelCount">0</span><span class="grow"></span>
+    <button class="icon-btn" id="reelToggle" aria-expanded="true" aria-controls="reelList" aria-label="Hide the generations"><svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
+  </div>
+  <p class="reel-empty">Pictures and videos you ask for appear here, newest first.</p>
+  <div id="reelList" role="list" aria-label="Generated pictures and videos, newest first"></div>
+ </aside>
 </section>
 
 <dialog class="drawer" id="drawer" aria-labelledby="drawerTitle">
@@ -431,9 +491,13 @@
   </div>
 </dialog>
 
-<dialog id="lightbox" aria-label="Image">
-  <img id="lbImg" alt="">
-  <div class="lb"><a class="btn" id="lbDl" download>Download</a><button class="btn primary" id="lbClose">Close</button></div>
+<dialog id="lightbox" aria-labelledby="lbCap">
+  <div class="lb-media"><img id="lbImg" alt=""><video id="lbVid" controls playsinline hidden></video></div>
+  <p class="lb-cap" id="lbCap"></p>
+  <div class="lb">
+    <span class="lb-voice" id="lbVoice" hidden><span class="dot" data-s="ready"></span><span id="lbVoiceText">On a call</span><button class="btn" id="lbHush">Interrupt</button></span>
+    <button class="btn" id="lbCopy">Copy prompt</button><a class="btn" id="lbDl" download>Download</a><button class="btn primary" id="lbClose">Close</button>
+  </div>
 </dialog>
 <div id="toast" role="status" hidden><span id="toastText"></span><button id="toastUndo">Undo</button></div>
 
@@ -495,7 +559,9 @@ const saveSettings = () => store.set('settings', S);
 
 const debug = [];
 function dbg(kind, data) {
-  debug.push({ t: Math.round(performance.now()), at: new Date().toISOString(), kind, ...data });
+  const e = { t: Math.round(performance.now()), at: new Date().toISOString(), ...data, kind }; // the entry's kind wins
+  if (data && data.kind !== undefined) e.event_kind = data.kind; // an event's own `kind` (a job's image or video)
+  debug.push(e);
   if (debug.length > 2000) debug.splice(0, debug.length - 2000);
 }
 window.addEventListener('error', e => dbg('page.error', { message: e.message, at: `${e.filename}:${e.lineno}` }));
@@ -581,13 +647,14 @@ function deleteConv(c) {
   toast(`Deleted “${(c.title || 'New chat').slice(0, 40)}”`, () => { convs.splice(at, 0, c); store.set('convs', convs); openConv(c.id); });
 }
 let toastTimer = 0;
-function toast(text, undo) {
+function toast(text, undo, label = 'Undo', ms = 5000) {
   $('toastText').textContent = text;
   $('toastUndo').hidden = !undo;
+  $('toastUndo').textContent = label;
   $('toastUndo').onclick = () => { $('toast').hidden = true; undo && undo(); };
   $('toast').hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { $('toast').hidden = true; }, 5000);
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, ms);
 }
 function renderTitle() { $('title').textContent = (cur && cur.title) || 'New chat'; }
 function openConv(id) {
@@ -596,7 +663,9 @@ function openConv(id) {
   store.set('current', cur.id);
   els.clear();
   $('log').replaceChildren();
+  reelLive = false;
   for (const m of cur.msgs) drawNow(m);
+  resetReel();
   renderEmpty();
   renderSide();
   renderTitle();
@@ -810,7 +879,7 @@ function drawNow(m) {
     el.querySelector('.via').textContent = m.via === 'voice' ? '🎙 voice' : '';
     return;
   }
-  if (m.role === 'tool') return drawTool(m, el);
+  if (m.role === 'tool') { drawTool(m, el); return renderReel(); }
   const { reasoning, answer } = splitThink(m.text || '');
   const why = ((m.reasoning || '') + reasoning).trim();
   const think = el.querySelector('.think');
@@ -852,7 +921,14 @@ function drawTool(m, el) {
   if (cards._key === key) return;
   cards._key = key;
   cards.replaceChildren();
-  el.querySelector('.err').textContent = m.error ? m.text || m.error : '';
+  const err = el.querySelector('.err');
+  err.textContent = m.error ? m.text || m.error : '';
+  if (m.failed) {
+    const rt = Object.assign(document.createElement('button'), { className: 'btn', textContent: 'Retry' });
+    rt.style.marginLeft = '8px';
+    rt.onclick = () => retryTool(m);
+    err.append(rt);
+  }
   if (m.media && m.media.length) for (const x of m.media) cards.append(card(x));
   else if (!m.error) {
     const f = Object.assign(document.createElement('figure'), { className: 'card pending' });
@@ -887,7 +963,7 @@ function card(x) {
     img.onload = () => scrollDown();
     mediaSrc(h, u => { img.src = u; });
     b.append(img);
-    b.onclick = () => { $('lbImg').src = img.src; $('lbImg').alt = img.alt; $('lbDl').href = img.src; $('lbDl').download = name; $('lightbox').showModal(); };
+    b.onclick = () => openMedia(x);
     f.append(b);
   }
   const cap = document.createElement('figcaption');
@@ -904,6 +980,129 @@ function card(x) {
   cap.append(dl);
   f.append(cap);
   return f;
+}
+// One lightbox for every picture and video, from the chat or the reel. It opens over voice mode without touching the
+// call: the session, the microphone and barge-in by voice go on, and its call pill can interrupt the reply.
+let lbItem = null;
+function openMedia(x) {
+  const h = href(x.url);
+  if (!h) return;
+  lbItem = x;
+  const img = $('lbImg'), vid = $('lbVid');
+  img.hidden = x.kind === 'video';
+  vid.hidden = x.kind !== 'video';
+  if (x.kind === 'video') { img.removeAttribute('src'); mediaSrc(h, u => { vid.src = u; vid.play().catch(() => {}); }); }
+  else { vid.pause(); vid.removeAttribute('src'); mediaSrc(h, u => { img.src = u; }); img.alt = x.prompt || 'generated image'; }
+  $('lbCap').textContent = x.prompt || (x.kind === 'video' ? 'Video' : 'Picture');
+  $('lbDl').download = x.kind === 'video' ? 'jarvis-video.mp4' : 'jarvis-image.png';
+  mediaSrc(h, u => { $('lbDl').href = u; });
+  $('lbCopy').hidden = !x.prompt;
+  renderLightboxVoice();
+  if (!$('lightbox').open) $('lightbox').showModal();
+  dbg('lightbox', { kind: x.kind, url: h, call: !!V.ws });
+}
+function renderLightboxVoice() {
+  const pill = $('lbVoice');
+  pill.hidden = !V.ws;
+  if (!V.ws) return;
+  const s = voiceState();
+  $('lbVoiceText').textContent = `On a call · ${STATE_TEXT[s][0].toLowerCase()}`;
+  pill.querySelector('.dot').dataset.s = s === 'speaking' || s === 'hearing' ? 'busy' : s === 'connecting' ? 'loading' : 'ready';
+  $('lbHush').hidden = !(s === 'speaking' || s === 'thinking');
+}
+
+// The reel: every picture and video in the conversation (typed or spoken), newest first, from the same messages the
+// chat draws its cards from. A generation shows as a card the moment its tool call starts and turns into its thumbnail
+// when done; a new card pulses once.
+const reelEls = new Map();
+let reelLive = false; // false while a conversation's existing cards are first drawn: no pulse for those
+function reelItems() {
+  const out = [];
+  for (const m of cur.msgs) {
+    if (m.role !== 'tool' || m.gone) continue;
+    if (m.media && m.media.length) m.media.forEach((x, i) => out.push({ key: `${m.id}:${i}`, x: { ...x, prompt: x.prompt || toolPrompt(m) }, m }));
+    else if (m.error && m.error !== 'cancelled') out.push({ key: `${m.id}:f`, failed: true, m });
+    else if (!m.error) out.push({ key: `${m.id}:p`, pending: true, m });
+  }
+  return out.reverse();
+}
+const toolPrompt = m => (m.text || '').replace(/^making [^:]*:\s*/, '').replace(/^\S+ \(\d+%\):\s*/, '');
+function reelCard(it) {
+  const waiting = it.pending || it.failed;
+  const f = Object.assign(document.createElement('figure'), { className: 'rc' + (it.pending ? ' pending' : it.failed ? ' failed' : '') });
+  f.setAttribute('role', 'listitem');
+  f.dataset.key = it.key;
+  const kind = waiting ? (it.m.kind || (/video/.test(it.m.text || '') ? 'video' : 'image')) : it.x.kind;
+  const prompt = waiting ? (it.m.failed && it.m.failed.prompt) || toolPrompt(it.m) : it.x.prompt || '';
+  const b = Object.assign(document.createElement(waiting ? 'div' : 'button'), { className: 'rc-thumb' });
+  if (it.pending) {
+    b.setAttribute('role', 'status');
+    b.textContent = kind === 'video' ? 'Creating a video…' : 'Creating a picture…';
+  } else if (it.failed) {
+    b.setAttribute('role', 'status');
+    b.append(Object.assign(document.createElement('span'), { textContent: `Couldn't make ${kind === 'video' ? 'the video' : 'the picture'}: ${it.m.error}` }));
+    const rt = Object.assign(document.createElement('button'), { className: 'btn', textContent: 'Retry' });
+    rt.setAttribute('aria-label', `Retry: ${prompt || kind}`);
+    rt.onclick = () => retryTool(it.m);
+    b.append(rt);
+  } else {
+    b.setAttribute('aria-label', `Open the ${kind === 'video' ? 'video' : 'picture'}: ${prompt || 'untitled'}`);
+    const h = href(it.x.url);
+    if (kind === 'video') {
+      const v = Object.assign(document.createElement('video'), { muted: true, playsInline: true, preload: 'metadata' });
+      mediaSrc(h, u => { v.src = u + '#t=0.5'; });
+      b.append(v, Object.assign(document.createElement('span'), { className: 'rc-play', innerHTML: I.play, ariaHidden: 'true' }));
+    } else {
+      const img = Object.assign(document.createElement('img'), { alt: '', decoding: 'async' });
+      mediaSrc(h, u => { img.src = u; });
+      b.append(img);
+    }
+    b.onclick = () => openMedia(it.x);
+  }
+  const cap = document.createElement('figcaption');
+  cap.append(Object.assign(document.createElement('span'), { textContent: prompt || (kind === 'video' ? 'Video' : 'Picture'), title: prompt }));
+  if (prompt) {
+    const cp = Object.assign(document.createElement('button'), { className: 'icon-btn', innerHTML: I.copy });
+    cp.setAttribute('aria-label', 'Copy the prompt');
+    cp.onclick = async () => flash(cp, await copyText(prompt));
+    cap.append(cp);
+  }
+  if (!waiting) {
+    const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, download: kind === 'video' ? 'jarvis-video.mp4' : 'jarvis-image.png' });
+    dl.setAttribute('aria-label', 'Download');
+    mediaSrc(href(it.x.url), u => { dl.href = u; });
+    cap.append(dl);
+  }
+  f.append(b, cap);
+  return f;
+}
+function renderReel() {
+  if (!cur) return;
+  const items = reelItems();
+  const keep = new Set(items.map(it => it.key));
+  for (const [k, el] of reelEls) if (!keep.has(k)) { el.remove(); reelEls.delete(k); }
+  const nodes = items.map(it => {
+    let el = reelEls.get(it.key);
+    if (!el) {
+      el = reelCard(it);
+      reelEls.set(it.key, el);
+      if (reelLive) { el.classList.add('fresh'); dbg('reel.card', { key: it.key, pending: !!it.pending }); }
+    } else if (it.pending) {
+      el.querySelector('figcaption span').textContent = toolPrompt(it.m) || 'Picture';
+    }
+    return el;
+  });
+  const list = $('reelList');
+  if (nodes.length !== list.children.length || nodes.some((n, i) => list.children[i] !== n)) list.replaceChildren(...nodes);
+  $('reelCount').textContent = String(items.length);
+  $('reel').dataset.empty = items.length ? '' : '1';
+}
+function resetReel() {
+  for (const el of reelEls.values()) el.remove();
+  reelEls.clear();
+  reelLive = false;
+  renderReel();
+  reelLive = true;
 }
 function scrollDown(force) {
   const s = $('scroll');
@@ -1168,54 +1367,124 @@ async function streamReply(am, signal) {
   renderStatus();
   return calls.filter(c => c && c.name).map((c, i) => ({ ...c, id: c.id || `call_${Date.now()}_${i}` }));
 }
+// A picture or a video over HTTP (the chat's own tool calls, and Retry): its URLs, or an Error with the server's reason.
+async function generate(kind, args, signal, progress) {
+  const prompt = String(args.prompt || '');
+  if (kind === 'image') {
+    const req = { prompt, response_format: 'url' };
+    if (args.size) req.size = String(args.size);
+    const r = await api('/v1/images/generations', { json: req, signal });
+    if (!r.ok) throw new Error(await errorText(r));
+    return ((await r.json()).data || []).map(d => d.url).filter(Boolean).map(href);
+  }
+  const req = { prompt };
+  if (args.seconds) req.seconds = String(Math.max(1, Math.min(20, Math.round(+args.seconds) || 5)));
+  const r = await api('/v1/videos', { json: req, signal });
+  if (!r.ok) throw new Error(await errorText(r));
+  let v = await r.json();
+  while (v.status === 'queued' || v.status === 'in_progress') {
+    if (progress) progress(v.progress || 0);
+    await new Promise((ok, no) => { const t = setTimeout(ok, 3000); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); no(new DOMException('aborted', 'AbortError')); }, { once: true }); });
+    v = await (await api(`/v1/videos/${encodeURIComponent(v.id)}`, { signal })).json();
+  }
+  if (v.status !== 'completed') throw new Error((v.error && v.error.message) || v.status);
+  return [`/v1/videos/${encodeURIComponent(v.id)}/content`];
+}
 async function runTool(call, signal) {
   const name = call.function.name;
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
   const kind = name === 'generate_video' ? 'video' : 'image';
-  const tm = addMsg({ role: 'tool', kind, callId: call.id, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
-  const done = (result, media, error) => {
-    tm.result = JSON.stringify(result);
-    tm.media = media;
-    tm.error = error || '';
-    if (error) tm.text = `The ${kind} failed: ${error}`;
-    draw(tm);
-    saveConv();
-  };
+  const tm = addMsg({ role: 'tool', kind, callId: call.id, args, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
   dbg('tool.start', { name, args });
+  if (name !== 'generate_image' && name !== 'generate_video') return jobFinished(tm, 'failed', [], `unknown tool ${name}`, kind);
   try {
-    if (name === 'generate_image') {
-      const req = { prompt: String(args.prompt || ''), response_format: 'url' };
-      if (args.size) req.size = String(args.size);
-      const r = await api('/v1/images/generations', { json: req, signal });
-      if (!r.ok) { const e = await errorText(r); return done({ status: 'failed', error: e }, [], e); }
-      const j = await r.json();
-      const urls = (j.data || []).map(d => d.url).filter(Boolean).map(href);
-      dbg('tool.done', { name, urls });
-      return done({ status: 'completed', urls }, urls.map(url => ({ kind: 'image', url, prompt: req.prompt })));
-    }
-    if (name === 'generate_video') {
-      const req = { prompt: String(args.prompt || '') };
-      if (args.seconds) req.seconds = String(Math.max(1, Math.min(20, Math.round(+args.seconds) || 5)));
-      const r = await api('/v1/videos', { json: req, signal });
-      if (!r.ok) { const e = await errorText(r); return done({ status: 'failed', error: e }, [], e); }
-      let v = await r.json();
-      while (v.status === 'queued' || v.status === 'in_progress') {
-        tm.text = `making a video (${v.progress || 0}%): ${req.prompt}`;
-        draw(tm);
-        await new Promise((ok, no) => { const t = setTimeout(ok, 3000); signal.addEventListener('abort', () => { clearTimeout(t); no(new DOMException('aborted', 'AbortError')); }, { once: true }); });
-        v = await (await api(`/v1/videos/${encodeURIComponent(v.id)}`, { signal })).json();
-      }
-      if (v.status !== 'completed') return done({ status: v.status, error: (v.error && v.error.message) || '' }, [], (v.error && v.error.message) || v.status);
-      const url = `/v1/videos/${encodeURIComponent(v.id)}/content`;
-      dbg('tool.done', { name, url });
-      return done({ status: 'completed', urls: [url] }, [{ kind: 'video', url, prompt: req.prompt }]);
-    }
-    done({ status: 'failed', error: `unknown tool ${name}` }, [], `unknown tool ${name}`);
+    const urls = await generate(kind, args, signal, p => { tm.progress = p; tm.text = `making a video (${p}%): ${args.prompt || ''}`; draw(tm); });
+    dbg('tool.done', { name, urls });
+    jobFinished(tm, 'completed', urls, '', kind);
   } catch (e) {
-    if (e.name === 'AbortError') { done({ status: 'cancelled' }, [], 'cancelled'); throw e; }
-    done({ status: 'failed', error: e.message }, [], e.message);
+    if (e.name === 'AbortError') { jobFinished(tm, 'cancelled', [], 'cancelled', kind); throw e; }
+    jobFinished(tm, 'failed', [], e.message, kind);
   }
+}
+// A generation's outcome, from whichever path learnt it first (the session's job.done, the chat's own call, a poll).
+function jobFinished(m, status, urls, error, kind) {
+  if (m.media && m.media.length) return;
+  kind = m.kind || (kind === 'video' ? 'video' : 'image');
+  const prompt = toolPrompt(m) || (m.args && m.args.prompt) || '';
+  m.result = JSON.stringify({ status, urls: urls || [], error: error || '' });
+  if (status === 'completed' && (urls || []).length) {
+    m.media = urls.map(u => ({ kind, url: href(u), prompt })).filter(x => x.url);
+    m.error = '';
+  } else {
+    m.error = error || status || 'failed';
+    m.failed = { prompt, kind };
+    m.text = `The ${kind === 'video' ? 'video' : 'picture'} failed: ${m.error}`;
+  }
+  dbg('tool.finished', { kind, status, error: m.error || '', urls: urls || [] });
+  draw(m);
+  saveConv();
+}
+// A voice generation never waits on one event: if job.done is late (the socket was replaced, the tab slept), the job is
+// asked for by id; a job that never started, or makes no progress, fails with a reason instead of spinning for ever.
+const NEVER_STARTED_MS = 45000, STALL_MS = { image: 240000, video: 1500000 };
+async function watchJobs() {
+  if (!cur || document.hidden) return;
+  const now = Date.now();
+  for (const m of cur.msgs) {
+    if (m.role !== 'tool' || m.via !== 'voice' || (m.media && m.media.length) || m.error || m.polling) continue;
+    const kind = m.kind === 'video' ? 'video' : 'image';
+    if (!m.jobId) {
+      if (now - m.at > NEVER_STARTED_MS) jobFinished(m, 'failed', [], 'the job did not start', kind);
+      continue;
+    }
+    if (now - (m.seenAt || m.at) < 10000) continue;
+    m.polling = true;
+    try {
+      const r = await api(`/v1/jobs/${encodeURIComponent(m.jobId)}`);
+      if (r.status === 404) jobFinished(m, 'failed', [], 'the job is gone (the server restarted?)', kind);
+      else if (r.ok) {
+        const j = await r.json();
+        if (j.status === 'completed') jobFinished(m, 'completed', j.urls, '', kind);
+        else if (j.status === 'failed' || j.status === 'cancelled') jobFinished(m, j.status, [], (j.error && j.error.message) || j.status, kind);
+        else {
+          if (j.progress !== m.progress) { m.progress = j.progress; m.progressAt = now; draw(m); }
+          if (now - (m.progressAt || m.at) > STALL_MS[kind]) jobFinished(m, 'failed', [], 'no progress for too long', kind);
+        }
+      }
+    } catch (e) { dbg('tool.poll', { job: m.jobId, error: e.message }); }
+    m.polling = false;
+  }
+}
+// Retry: the same prompt again, over HTTP; the card shows it in progress, then the result.
+async function retryTool(m) {
+  const f = m.failed || { prompt: toolPrompt(m), kind: m.kind || 'image' };
+  m.error = '';
+  m.failed = null;
+  m.media = null;
+  m.jobId = null;
+  m.via = 'retry';
+  m.text = `making ${f.kind === 'video' ? 'a video' : 'a picture'}: ${f.prompt}`;
+  draw(m);
+  dbg('tool.retry', { kind: f.kind, prompt: f.prompt });
+  try { jobFinished(m, 'completed', await generate(f.kind, { prompt: f.prompt }), '', f.kind); }
+  catch (e) { jobFinished(m, 'failed', [], e.message, f.kind); }
+}
+const voiceListed = (id, v) => {
+  const m = models.find(x => x.id === id);
+  return !!m && (m.voices || []).some(x => (typeof x === 'string' ? x : x && (x.id || x.name)) === v);
+};
+// A tab left open across a deploy keeps running the old page (sending settings the server no longer knows): when the
+// served page changes, say so and offer a reload.
+let pageSum = null;
+async function checkPage() {
+  try {
+    const t = await (await fetch(location.pathname, { cache: 'no-store' })).text();
+    let h = 0;
+    for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+    if (pageSum === null) pageSum = h;
+    else if (h !== pageSum && !V.ws) toast('A new version of Jarvis is available', () => location.reload(), 'Reload', 60000);
+  } catch {}
 }
 function regenerate() {
   if (busy || V.ws || !cur.msgs.length) return;
@@ -1436,7 +1705,7 @@ function sessionUpdate() {
   const s = { modalities: ['audio', 'text'], turn_detection: turnDetection() };
   if (S.speechModel) s.speech_model = S.speechModel;
   const v = voiceOf(engine());
-  if (v) s.voice = v;
+  if (v && voiceListed(engine(), v)) s.voice = v; // never a voice the model does not list (the server would fall back)
   if (S.chatModel) s.model = S.chatModel;
   if (S.instructions.trim()) s.instructions = S.instructions.trim();
   vsend({ type: 'session.update', session: s });
@@ -1890,13 +2159,14 @@ function handle(ev) {
         saveConv();
       }
       break;
+    case 'localrouter.job.created': {
+      const m = V.byCall.get(ev.call_id);
+      if (m) { m.jobId = ev.job_id; m.seenAt = Date.now(); saveConv(); }
+      break;
+    }
     case 'localrouter.job.done': {
-      const m = V.byCall.get(ev.call_id) || addMsg({ role: 'tool', text: '', via: 'voice' });
-      const prompt = (m.text || '').replace(/^making [^:]*:\s*/, '');
-      if (ev.status === 'completed') m.media = (ev.urls || []).map(u => ({ kind: ev.kind === 'video' ? 'video' : 'image', url: href(u), prompt })).filter(x => x.url);
-      else { m.error = ev.error || ev.status; m.text = `The ${ev.kind || 'job'} ${ev.status || 'failed'}: ${ev.error || ''}`; }
-      draw(m);
-      saveConv();
+      const m = V.byCall.get(ev.call_id) || cur.msgs.find(x => x.role === 'tool' && x.jobId && x.jobId === ev.job_id) || addMsg({ role: 'tool', text: '', via: 'voice' });
+      jobFinished(m, ev.status, ev.urls, ev.error, ev.kind);
       break;
     }
     case 'localrouter.response.timing': {
@@ -1956,6 +2226,7 @@ const STATE_TEXT = {
 };
 function renderVoice() {
   const s = voiceState();
+  if ($('lightbox').open) renderLightboxVoice();
   window.jarvis.ui.voiceState = s;
   $('mic').dataset.on = V.ws ? '1' : '';
   $('mic').setAttribute('aria-label', V.ws ? 'Open voice mode' : 'Start voice mode');
@@ -2140,14 +2411,18 @@ document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (!$('statusPop').hidden) togglePop(false);
   else if ($('app').classList.contains('side-open')) closeSide();
-  else if (V.open && !$('drawer').open) showVoice(false);
+  else if (V.open && !$('drawer').open && !$('lightbox').open) showVoice(false);
 });
 $('lbClose').onclick = () => $('lightbox').close();
 $('lightbox').addEventListener('click', e => { if (e.target === $('lightbox') || e.target === $('lbImg')) $('lightbox').close(); });
+$('lightbox').addEventListener('close', () => { $('lbVid').pause(); lbItem = null; dbg('lightbox.closed', { call: !!V.ws }); if (V.open) $('orb').focus({ preventScroll: true }); });
+$('lbCopy').onclick = async () => { if (lbItem) { const ok = await copyText(lbItem.prompt || ''); $('lbCopy').textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { $('lbCopy').textContent = 'Copy prompt'; }, 1400); } };
+$('lbHush').onclick = () => bargeIn(true);
+$('reelToggle').onclick = () => { const c = $('reel').classList.toggle('collapsed'); $('reelToggle').setAttribute('aria-expanded', String(!c)); $('reelToggle').setAttribute('aria-label', c ? 'Show the generations' : 'Hide the generations'); };
 document.addEventListener('pointerup', () => { if (V.ctx && V.ctx.state === 'suspended') V.ctx.resume(); });
 if (navigator.audioSession) try { navigator.audioSession.type = 'play-and-record'; } catch {} // iOS: audible with the ringer off
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { pollTools(); if (V.ws && !V.lock && navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {}); }
+  if (!document.hidden) { pollTools(); watchJobs(); checkPage(); if (V.ws && !V.lock && navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {}); }
 });
 // The composer stays above the on-screen keyboard: the app is as tall as the visual viewport.
 if (window.visualViewport) {
@@ -2158,9 +2433,10 @@ if (window.visualViewport) {
 }
 
 // A test or another script can see the state without scraping the page.
-window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
+window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, socket: V.ws ? V.ws.readyState : null, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
                   output: outputStats, recordOutput: false,
                   get engine() { return engine(); },
+                  say: text => { $('text').value = text; sendText(); }, // a turn in the call, as typed
                   dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },
                   debug, settings: S, ui: { voiceState: 'off' }, ready: false };
 
@@ -2169,6 +2445,9 @@ renderControls();
 renderVoice();
 loadModels().then(pollTools);
 setInterval(pollTools, 4000);
+setInterval(watchJobs, 3000);
+checkPage();
+setInterval(checkPage, 10 * 60 * 1000);
 setInterval(renderSide, 60000);
 </script>
 </body>

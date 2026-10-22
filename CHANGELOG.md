@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Voice mode shows a reel of the conversation's pictures and videos beside the orb (a bottom strip on phones).
+  - Cards: a placeholder as the tool call starts, the thumbnail when the job is done, and a failed state with Retry.
+    Each card has download and copy-prompt actions.
+  - The lightbox opens over the call without ending or muting it.
+  - Generations can no longer spin for ever: the client asks the new `GET /v1/jobs/{id}` when a result event is
+    missing, and fails a job that never starts or stalls.
+  - The voice tools tell the model to say it is making the picture, not that it is ready, until the result arrives,
+    and to admit a failure.
+  - A voice the model does not list is never sent.
+  - A tab running a page older than the deploy offers a reload.
+- A video request without a size gets the model's own size: 768x448 for MiniMax H3 by default, from its `max_width`
+  and `max_height`. Before this, voice, the web client and `/v1/videos` asked for 1344x768. H3 evicted the image
+  model to load, then failed with a bare "generate failed: Refused". H3 now refuses a size, length, frame rate or
+  first frame it cannot serve before it loads, and says why. `engine.Entry.defaults` is the new hook for this.
 - Voice: the session sends `localrouter.response.text_done` when the chat model stops writing a reply. The client's
   new "smooth start" setting (off by default) uses it to hold a slow reply's start, so long answers don't stutter
   while speech shares the GPU with chat decoding. It costs about 1.5 s of first audio on such replies.

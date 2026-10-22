@@ -526,10 +526,10 @@ fn statusDetails(a: std.mem.Allocator, typ: []const u8, reason: []const u8, mess
 // ---------------------------------------------------------------- the chat request
 
 const builtin_tools =
-    \\[{"type": "function", "function": {"name": "generate_image", "description": "Make a picture on this machine from a detailed description. The user gets the file; say briefly that it is being made.",
+    \\[{"type": "function", "function": {"name": "generate_image", "description": "Start making a picture on this machine from a detailed description. It takes several seconds and the user sees it when it is done. When you call this, only say briefly that you are making it (for example: Making that now). Never say or imply it is ready, and do not describe it: you get the result later as the tool output, and then you say it is ready, or that it failed.",
     \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "what to draw, in detail"},
     \\  "size": {"type": "string", "description": "WIDTHxHEIGHT in multiples of 16, e.g. 1024x1024 (default) or 1344x768"}}, "required": ["prompt"]}}},
-    \\ {"type": "function", "function": {"name": "generate_video", "description": "Make a short video clip with sound on this machine from a description. It takes minutes; say so.",
+    \\ {"type": "function", "function": {"name": "generate_video", "description": "Start making a short video clip with sound on this machine from a description. It takes minutes. When you call this, only say that you are making it and that it takes a few minutes. Never say it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
     \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "what happens, in detail"},
     \\  "seconds": {"type": "integer", "description": "length, 1 to 20 (default 5)"}}, "required": ["prompt"]}}}]
 ;

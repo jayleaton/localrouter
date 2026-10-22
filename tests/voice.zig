@@ -272,6 +272,14 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     const png = try d.call(a, .GET, path, null);
     try testing.expectEqual(std.http.Status.ok, png.status);
     try testing.expectEqualSlices(u8, "\x89PNG", png.body[0..4]);
+    // The same job by its id (what a client that lost the event asks): completed, with the same file.
+    const looked = try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/jobs/{s}", .{job.object.get("job_id").?.string}), null);
+    try testing.expectEqual(std.http.Status.ok, looked.status);
+    const jo = try std.json.parseFromSliceLeaky(std.json.Value, a, looked.body, .{});
+    try testing.expectEqualStrings("completed", jo.object.get("status").?.string);
+    try testing.expectEqualStrings(path, jo.object.get("urls").?.array.items[0].string);
+    const missing = try d.call(a, .GET, "/v1/jobs/img_nope", null);
+    try testing.expectEqual(std.http.Status.not_found, missing.status);
     _ = try w.until(a, "response.done", &seen);
     const st = try chat.stats(&d, a);
     const follow = st[st.len - 1].messages;

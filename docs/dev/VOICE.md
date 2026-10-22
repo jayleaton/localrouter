@@ -253,6 +253,29 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
 - An echo guard sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a row say
   someone is talking over it.
 - Minimizing keeps the session on: a bar above the composer shows its state, and typed messages get spoken replies.
+- **Generations reel.** Voice mode shows every picture and video in the conversation, typed or spoken, newest first,
+  next to the orb.
+  - **Layout:** on a wide screen it is a column docked on the right. On a phone it is a strip along the bottom edge,
+    below the orb and the controls, and it can be collapsed.
+  - **Same items as the chat:** the reel reads the same tool messages as the chat's inline cards, so it is a second
+    view of them, not a separate store.
+  - **Progress:** a card appears the moment the tool call starts ("Creating a picture…"), turns into its thumbnail
+    when the job is done, and pulses once. A refused or failed job shows its reason and **Retry**, which runs the
+    same prompt again over HTTP.
+  - **Cards:** each card has download and copy-prompt actions.
+  - **Lightbox:** a card opens over voice mode, with the image full size or the video playing. The call goes on:
+    barge-in by voice works, a call pill in the lightbox can interrupt the reply, and closing it returns to the orb.
+- **Generations never spin for ever.**
+  - The client keeps each job's id from `localrouter.job.created`. If `localrouter.job.done` is late (for example the
+    socket was replaced, or the tab slept), it asks `GET /v1/jobs/{id}`.
+  - A job that never starts (45 s), or makes no progress (image 4 min, video 25 min), fails with its reason.
+  - The voice tools' descriptions tell the model to say only that it is making the picture when it calls the tool,
+    and to say it is ready, or that it failed, when the result comes back as the tool output. Measured on DGX-01:
+    "Absolutely, let me make that for you." at the call, then "Done! Here's your penguin." 7.7 s later, after
+    `job.done`. A 2048×2048 request the image model refuses (1664 px at most) comes back failed and is admitted aloud.
+- **New version notice.** A tab left open across a deploy keeps running the old page. The page compares itself with
+  the one served (at load, every 10 minutes and when shown again) and offers **Reload** when they differ, except
+  during a call.
 - **Reconnects.** When the connection closes without being asked to (the service restarting, a proxy dropping it),
   the page opens a new session after 1, 2, 4 and up to 15 s, sends the settings and the conversation again, and keeps
   the microphone and the view. Per-item state is reset, since a new session numbers its items from 1. Voice ends only

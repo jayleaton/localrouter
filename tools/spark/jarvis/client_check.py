@@ -19,6 +19,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import select
 import shutil
 import socket
@@ -215,7 +216,8 @@ def main():
                                       "Then show a three-line Python example in a fenced code block.")
     ap.add_argument("--image", default="Please make me a picture of a red fox sitting in fresh snow.")
     ap.add_argument("--timeout", type=int, default=600, help="for the image (a cold image model loads first)")
-    ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker and voice to run, in that order")
+    ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker, voice and reel (its own --wav: a spoken picture request) to run, in that order")
+    ap.add_argument("--reel-video", action="store_true", help="in the reel step, also generate and play a video (minutes)")
     ap.add_argument("--start-wait-ms", type=int, help="the client's hold on a reply's start (0: start on the first piece, as before)")
     ap.add_argument("--slow-cap-ms", type=int, help="the client's hold on a slow stream's start (0: none, as in #28)")
     ap.add_argument("--preview-max", type=int, default=8, help="voices to preview in the picker step")
@@ -431,6 +433,80 @@ def main():
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
             check("voice: no playback gap over 30 ms or click in the first 2 s of any reply", not bad, bad or onsets)
             click(cdp, "vbarEnd")
+        # The reel, in a call: the fake microphone asks for a picture. The reel (and the chat) show a placeholder, then the
+        # picture; nothing before it says it is ready, and a confirmation is spoken after it. A request the image model
+        # refuses shows a failed card and is admitted aloud. The picture opens in the lightbox while a turn is answered;
+        # then a video plays. The realtime socket stays open throughout.
+        if a.wav and "reel" in steps:
+            theme(cdp, True)
+            size(cdp, 1440, 900, False)
+            VOICE_REPLIES = "window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text)"
+            FINISHED = "window.jarvis.debug.filter(e => e.kind === 'tool.finished')"
+            click(cdp, "mic")
+            cdp.wait("window.jarvis.voice.connected && window.jarvis.ui.voiceState === 'listening'", 30, "the voice session")
+            cdp.wait("!!(document.querySelector('#reelList .rc.pending') && document.querySelector('#log .card.pending'))", 90, "a placeholder in the reel and the chat")
+            check("reel: the spoken request shows a placeholder in the reel and in the chat", True)
+            snap(cdp, a.out, "20-reel-placeholder-desktop")
+            got = cdp.wait("(() => { const i = document.querySelector('#reelList .rc:first-child img'), c = [...document.querySelectorAll('#log .card img')].pop(); return i && i.complete && i.naturalWidth > 0 && c && c.naturalWidth > 0 ? [i.naturalWidth, c.naturalWidth] : null; })()", a.timeout, "the picture in the reel and the chat")
+            check("reel: the picture replaces the placeholder, in the reel and the chat", bool(got), got)
+            done_t = cdp.js(f"{FINISHED}.filter(e => e.status === 'completed').map(e => e.t)[0]")
+            cdp.wait(f"{VOICE_REPLIES}.some(x => x.at > performance.timeOrigin + {done_t}) && window.jarvis.voice.live === 0", 120, "the confirmation after the picture")
+            replies = cdp.js(f"{VOICE_REPLIES}.map(x => ({{ at: x.at - performance.timeOrigin, text: x.text }}))")
+            before = [r["text"] for r in replies if r["at"] < done_t]
+            after = [r["text"] for r in replies if r["at"] >= done_t]
+            claims = [t for t in before if re.search(r"\b(here('s| is| it is| you go)|it'?s ready|is ready|all done|done!)", t, re.I)]
+            results["reel_speech"] = {"before_picture": before, "after_picture": after}
+            check("reel: nothing said before the picture claims it is ready", not claims, claims or before)
+            check("reel: a confirmation is spoken after the picture is ready", bool(after), after)
+            snap(cdp, a.out, "21-voice-reel-desktop")
+            click(cdp, selector="#reelList .rc:first-child .rc-thumb")
+            cdp.wait("document.getElementById('lightbox').open && document.getElementById('lbImg').naturalWidth > 0", 20, "the lightbox")
+            state = cdp.js("({ socket: window.jarvis.voice.socket, vm: !document.getElementById('vm').hidden, pill: !document.getElementById('lbVoice').hidden })")
+            check("reel: a click opens the lightbox with the call still connected", state["socket"] == 1 and state["vm"] and state["pill"], state)
+            snap(cdp, a.out, "22-lightbox-during-call-desktop")
+            n = cdp.js(f"{VOICE_REPLIES}.length")
+            cdp.js("window.jarvis.say('Say the word hello, nothing else.'); true")
+            cdp.wait(f"{VOICE_REPLIES}.length > {n} && window.jarvis.voice.live === 0", 90, "a turn with the lightbox open")
+            check("reel: a turn during the lightbox is answered aloud", cdp.js("document.getElementById('lightbox').open && window.jarvis.voice.socket === 1"))
+            cdp.js("document.getElementById('lbClose').click(); true")
+            time.sleep(0.3)
+            check("reel: closing the lightbox returns to the orb", cdp.js("!document.getElementById('lightbox').open && !document.getElementById('vm').hidden && document.activeElement === document.getElementById('orb')"))
+            # A request the image model refuses (over its size limit): the failed card, and the reply admits it.
+            nf = cdp.js(f"{FINISHED}.length")
+            n = cdp.js(f"{VOICE_REPLIES}.length")
+            cdp.js("window.jarvis.say('Make me a big poster of a penguin, size 2048x2048.'); true")
+            fail = cdp.wait(f"{FINISHED}.slice({nf}).find(e => e.status !== 'completed')", 120, "the refused picture")
+            cdp.wait("!!document.querySelector('#reelList .rc.failed .btn')", 10, "the failed card")
+            cdp.wait(f"{VOICE_REPLIES}.length >= {n} + 2 && window.jarvis.voice.live === 0", 120, "the reply after the failure")
+            said = cdp.js(f"{VOICE_REPLIES}.slice({n}).map(x => x.text)")
+            check("reel: a refused picture shows a failed card with Retry", True, fail)
+            check("reel: the reply after it admits the failure", any(re.search(r"\b(only|can'?t|cannot|couldn'?t|fail|sorry|unable|limit|up to|instead|too large)\b", t, re.I) for t in said[1:]), said)
+            snap(cdp, a.out, "23-reel-failed-desktop")
+            if a.reel_video:
+                k = cdp.js("document.querySelectorAll('#reelList .rc').length")
+                cdp.js("window.jarvis.say('Please make a two second video of ocean waves at sunset.'); true")
+                cdp.wait(f"document.querySelectorAll('#reelList .rc').length > {k} && !!document.querySelector('#reelList .rc:first-child.pending')", 120, "a video placeholder")
+                got = cdp.wait("(() => { const r = document.querySelector('#reelList .rc:first-child'), v = r && r.querySelector('video'); return r && r.classList.contains('failed') ? 'failed' : v && v.readyState >= 1 ? 'video' : null; })()", 1500, "the video in the reel")
+                check("reel: the video arrives in the reel", got == "video", got if got == "video" else cdp.js(f"{FINISHED}.slice(-1)[0]"))
+                if got != "video":
+                    raise RuntimeError("the video failed")
+                click(cdp, selector="#reelList .rc:first-child .rc-thumb")
+                cdp.wait("(() => { const v = document.getElementById('lbVid'); return document.getElementById('lightbox').open && !v.hidden && v.currentTime > 0.2; })()", 30, "the video playing")
+                check("reel: the video plays in the lightbox with the call connected", cdp.js("window.jarvis.voice.socket === 1"))
+                snap(cdp, a.out, "24-lightbox-video-during-call-desktop")
+                cdp.js("document.getElementById('lbClose').click(); true")
+            size(cdp, 390, 844, True)
+            time.sleep(0.6)
+            orb = cdp.js("(() => { const o = document.getElementById('orb').getBoundingClientRect(), r = document.getElementById('reel').getBoundingClientRect(); return { orb_bottom: Math.round(o.bottom), reel_top: Math.round(r.top), visible: r.height > 0 }; })()")
+            check("reel: on a phone the reel sits below the orb, not over it", orb["visible"] and orb["orb_bottom"] <= orb["reel_top"], orb)
+            snap(cdp, a.out, "25-voice-reel-phone")
+            closes = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.closed').length")
+            back = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.reconnected').length")
+            voices = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.in' && e.type === 'session.updated').map(e => e.session && e.session.voice)")
+            check("reel: the call stayed on throughout (any dropped connection reconnected)", closes == back and cdp.js("window.jarvis.voice.socket") == 1, {"drops": closes, "reconnects": back})
+            check("voice: the session is never given a voice the model lacks (no 'default')", "default" not in voices, voices)
+            results["reel"] = {"cards": cdp.js("[...document.querySelectorAll('#reelList .rc')].map(r => r.dataset.key + ' ' + r.className)"), "phone": orb}
+            click(cdp, "vmEnd")
         results["console_errors"] = console[:20]
         check("page: no script errors", not [c for c in console if "Uncaught" in c or "Error" in c], console[:5])
         results["debug_tail"] = cdp.js("window.jarvis.debug.slice(-60)")
@@ -441,7 +517,7 @@ def main():
             results["console_errors"] = console[:20]
             results["websocket"] = [{"method": e["method"], **{k: v for k, v in e["params"].items() if k in ("errorMessage", "response", "url")}}
                                     for e in cdp.events if e.get("method", "").startswith("Network.webSocket") and "Frame" not in e["method"]][:20]
-            results["debug_tail"] = cdp.js("window.jarvis && window.jarvis.debug.slice(-80)")
+            results["debug_tail"] = cdp.js("window.jarvis && window.jarvis.debug.slice(-250)")
         except Exception:
             pass
     finally:
