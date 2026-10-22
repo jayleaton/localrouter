@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$profile" ] || die "--profile is required (have: $(profiles))"
 for t in jq curl sha256sum awk; do command -v $t > /dev/null || die "needs $t first: sudo apt-get install -y jq curl coreutils gawk"; done
-p=$(profile_file "$profile")
+p=$(profile_file "$profile") || exit 1
 mapfile -t keys < <(selected "$p" "$list")
 [ ${#keys[@]} -gt 0 ] || die "no models selected"
 step_env "$p"

@@ -13,6 +13,8 @@ profiles() { (cd "$repo/deploy/profiles" && ls *.json | sed 's/\.json$//' | tr '
 profile_file() {
   local f="$repo/deploy/profiles/$1.json"
   [ -f "$f" ] || die "no profile '$1' (have: $(profiles))"
+  jq -e '.models | length > 0' "$f" > /dev/null ||
+    die "the profile manifest $f is not valid (jq says why above): a bug in this checkout, not on this box; report it"
   echo "$f"
 }
 

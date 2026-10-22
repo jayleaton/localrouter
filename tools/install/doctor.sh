@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$profile" ] || die "--profile is required (have: $(profiles))"
 command -v jq > /dev/null || { echo "MISSING jq"; echo "  fix: sudo apt-get install -y jq"; exit 1; }
-p=$(profile_file "$profile")
+p=$(profile_file "$profile") || exit 1
 mapfile -t keys < <(selected "$p" "$list")
 step_env "$p"
 boot="tools/install/bootstrap.sh --profile $profile --models $(IFS=,; echo "${keys[*]}") --prefix $PREFIX --port $PORT --https-port $HTTPS_PORT --unit $UNIT"

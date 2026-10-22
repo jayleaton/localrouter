@@ -139,6 +139,9 @@ the user the log.
 
 `STOP ... needs the user's acceptance` means step 5 was skipped. Go back to it.
 
+If it exits with an error but no `FAILED` line (for example `bootstrap.sh: the profile manifest ... is not valid`),
+the checkout itself is broken: stop and give the user the last lines it printed.
+
 ## 8. Check it
 
 ```sh

@@ -19,6 +19,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig"
           tar -xJf /tmp/zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: the installer's scripts and manifests parse, and its plan runs (INSTALL.md)
+        run: |
+          for f in tools/install/*.sh deploy/jarvis/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
+          for f in deploy/profiles/*.json tools/twin/packs/sources/*.json tools/twin/packs/built/*.json; do jq empty "$f"; done
+          for p in deploy/profiles/*.json; do tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
       - run: zig build
       - run: zig build test
         timeout-minutes: 20
