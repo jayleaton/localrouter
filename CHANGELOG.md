@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Voice: "Wait before replying" (0.5, 0.8, 1, 1.5 or 2 s; default 0.8 s) is the end of the turn, end to end.
+  - Nothing is committed, transcribed into the conversation, written or spoken until the speaker has been quiet that
+    long. Speech within it is the same turn.
+  - A finished sentence ends the turn early only at 0.5 s. It used to end it 300 ms after any finished sentence, so
+    the reply's text came at once and only its audio waited.
+  - The reply is made during the pause and held back unseen. It is sent when the wait ends, or dropped if the speaker
+    goes on (`voice.speculate`).
+  - The setting replaces "Pause before I reply", and stored values start again at 0.8 s.
 - Voice: a call in a conversation that already has pictures makes new ones. The page seeded the history as text
   only, so the model saw requests answered without a tool call. It then said "Making you one now!" and called nothing,
   and no card appeared. The page now seeds each generation as a `function_call` and its output, and the realtime

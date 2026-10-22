@@ -344,6 +344,53 @@ test "a pause starts a draft transcript: one ending a sentence ends the turn ear
     try testing.expectEqual(@as(u32, 3), rig.fake.hears); // no warm-up: it transcribed just now
 }
 
+test "the wait is the speaker's: a pause under it keeps the turn open, the reply made in it is dropped, and nothing shows before the turn ends" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false });
+    defer rig.stop();
+    const s = rig.s;
+    s.handle("{\"type\":\"session.update\",\"session\":{\"turn_detection\":{\"type\":\"server_vad\",\"silence_duration_ms\":1000}}}");
+    _ = try rig.rec.wait("session.updated", 0);
+    rig.heard("What is two plus two?"); // a finished sentence: at the fast setting it would end the turn after 300 ms
+    try rig.audio(300, false);
+    try rig.audio(600, true);
+    try rig.audio(700, false); // a pause under the wait: the draft is made and a reply to it starts, held back
+    for (0..1000) |_| { // the held reply ran (its chat request is in)
+        rig.fake.mutex.lockUncancelable(rig.fake.io);
+        const n = rig.fake.requests.items.len;
+        rig.fake.mutex.unlock(rig.fake.io);
+        if (n >= 1) break;
+        Io.sleep(rig.fake.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    Io.sleep(rig.fake.io, .fromMilliseconds(200), .awake) catch {}; // long enough for it to finish, were it sent
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("input_audio_buffer.speech_stopped", 0));
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("input_audio_buffer.committed", 0));
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.created", 0));
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.audio_transcript.delta", 0));
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.audio.delta", 0));
+    try rig.audio(400, true); // the speaker goes on: the same turn
+    try rig.audio(1100, false);
+    const done = try rig.rec.wait("response.done", 0);
+    Io.sleep(rig.fake.io, .fromMilliseconds(100), .awake) catch {};
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("input_audio_buffer.speech_stopped", 0));
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("input_audio_buffer.committed", 0));
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("response.created", 0));
+    const stopped_at = try rig.rec.wait("input_audio_buffer.speech_stopped", 0);
+    const stopped = try rig.rec.get(a, stopped_at);
+    try testing.expect(@abs(stopped.object.get("audio_end_ms").?.integer - (300 + 600 + 700 + 400 + 1000)) <= 40);
+    try testing.expect(try rig.rec.wait("response.created", 0) > stopped_at);
+    try testing.expect(try rig.rec.wait("response.audio.delta", 0) > stopped_at);
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("conversation.item.input_audio_transcription.completed", 0));
+    const d = try rig.rec.get(a, done);
+    try testing.expectEqualStrings("completed", d.object.get("response").?.object.get("status").?.string);
+    const timing = try rig.rec.get(a, try rig.rec.wait("localrouter.response.timing", 0));
+    try testing.expect(timing.object.get("speculative").?.bool); // the reply sent was the one made in the last pause
+    try testing.expectEqual(@as(usize, 2), rig.fake.requests.items.len); // the dropped one, then the one sent
+}
+
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

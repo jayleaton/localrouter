@@ -63,8 +63,10 @@ pub const Voice = struct {
     // (max_tokens 1, discarded), so the next turn's request finds it in its prefix cache
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
     // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
-    early_end_ms: u32 = 300, // a draft that ends a sentence ends the turn after this much quiet, not silence_duration_ms;
-    // 0: never
+    early_end_ms: u32 = 300, // a draft that ends a sentence ends the turn after this much quiet, not silence_duration_ms,
+    // when that is the fast setting (500 ms or less); 0: never
+    speculate: bool = true, // the reply to a draft starts during the pause, held back (no text, audio or history)
+    // until the quiet reaches silence_duration_ms; dropped if the speaker goes on
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
