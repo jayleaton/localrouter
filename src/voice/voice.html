@@ -1806,6 +1806,7 @@ function connect(my) {
   let opened = false;
   sock.onopen = () => {
     opened = true;
+    V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
     for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone']) V[k].clear();
     V.slow = null;
@@ -2079,7 +2080,7 @@ function schedule(item, { buf, loudAt, rms }) {
   const start = V.nextTime;
   src.start(start);
   V.nextTime = start + buf.duration;
-  if (V.rec) { const sp = V.rec.spans.get(item) || V.rec.spans.set(item, { a: start, b: start }).get(item); sp.b = V.nextTime; }
+  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
