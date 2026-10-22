@@ -508,7 +508,17 @@ pub const Scheduler = struct {
                 if (below) |p| if (slot.tool.config().priority >= p) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
-            s.unloadSlot(victim orelse return false);
+            const v = victim orelse return false;
+            // the journal says what evicted what: on a box that keeps models warm an unload is never silent
+            std.log.info("evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB available of which {d} MiB is the reserve", .{
+                v.tool.config().id,
+                v.tool.config().priority,
+                s.slots[target].tool.config().id,
+                extra >> 20,
+                (memory.available() orelse 0) >> 20,
+                s.cfg.reserve_bytes >> 20,
+            });
+            s.unloadSlot(v);
         }
     }
 

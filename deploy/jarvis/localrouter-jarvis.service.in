@@ -14,7 +14,9 @@ ExecStart=@DEPLOY@/current/zig-out/bin/localrouter serve --config @DEPLOY@/confi
 # Workers are in this unit's cgroup: stopping it stops every model. GB10 memory is unified; 112 GiB leaves the host room.
 KillMode=control-group
 MemoryMax=112G
-TimeoutStopSec=90
+# Drama 3's worker stops its server unit (up to 120 s) before it exits: give it the time, then clean up after a kill.
+TimeoutStopSec=180
+ExecStopPost=-@DEPLOY@/current/deploy/jarvis/leftovers.sh
 Restart=on-failure
 RestartSec=10
 

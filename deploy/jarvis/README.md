@@ -20,7 +20,7 @@ idle, within about 30 s of a clip.
 deploy/jarvis/install.sh   # preflight, build into ~/jarvis/deploy/src/<commit>, config, unit, tailscale serve
 deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and Kitten are warm (about 40 s)
 deploy/jarvis/status.sh    # unit, build, each model's state and memory, URLs
-deploy/jarvis/stop.sh      # stop every model; --disable also keeps it off at boot
+deploy/jarvis/stop.sh      # stop every model (and a Drama 3 server a killed worker left); --disable: off at boot too
 journalctl --user -u localrouter-jarvis -f          # the daemon; models log to ~/jarvis/deploy/data/logs/
 tools/jarvis/smoke.sh [--quick]                       # every capability against the live service
 ```
