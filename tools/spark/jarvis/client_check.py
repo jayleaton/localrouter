@@ -9,7 +9,7 @@ Python 3 standard library only (it runs on the GPU host with `python3 -I`, next 
      Phone layout: nothing wider than the screen, touch targets large enough. Voice picker: engines, voices, a preview.
   4. Voice (with --wav): Chrome's fake microphone plays WAV once (padded with silence); start voice hands-free and
      see the transcript, a spoken reply and its measured "speech end to first audio"; each voice-view state photographed.
-     Then three typed one-sentence prompts in voice mode; the page's own output is recorded after its mixer, and no
+     Then typed prompts in voice mode (three one-sentence replies and one longer, contended one); the page's own output is recorded after its mixer, and no
      reply may have a playback gap over 30 ms or a click in its first 2 s. --start-wait-ms 0 measures the old start.
 Screenshots (desktop and phone width) and results.json go to OUT. Exit 0 only when every check passed.
 
@@ -217,7 +217,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="for the image (a cold image model loads first)")
     ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker and voice to run, in that order")
     ap.add_argument("--start-wait-ms", type=int, help="the client's hold on a reply's start (0: start on the first piece, as before)")
-    ap.add_argument("--replies", type=int, default=3, help="typed prompts spoken in voice mode after the spoken turn, for playback stats")
+    ap.add_argument("--slow-cap-ms", type=int, help="the client's hold on a slow stream's start (0: none, as in #28)")
+    ap.add_argument("--replies", type=int, default=4, help="typed prompts spoken in voice mode after the spoken turn, for playback stats")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     results, checks = {"base": a.base, "page": a.page or "(the daemon's)"}, []
@@ -353,7 +354,8 @@ def main():
         if a.wav and "voice" in steps:
             theme(cdp, True)
             size(cdp, 390, 844, True)
-            cdp.js("window.jarvis.recordOutput = true" + (f"; window.jarvis.settings.startWaitMs = {a.start_wait_ms}" if a.start_wait_ms is not None else ""))
+            cdp.js("window.jarvis.recordOutput = true" + (f"; window.jarvis.settings.startWaitMs = {a.start_wait_ms}" if a.start_wait_ms is not None else "")
+                   + (f"; window.jarvis.settings.slowCapMs = {a.slow_cap_ms}" if a.slow_cap_ms is not None else ""))
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected", 20, "the voice session")
             seen, order = {}, ["connecting", "listening", "hearing", "thinking", "speaking"]
@@ -389,10 +391,11 @@ def main():
             click(cdp, "vmMin")
             snap(cdp, a.out, "18-chat-with-voice-phone-light")
             # Playback: typed prompts in voice mode get spoken replies too; the page's own output is analysed per reply.
-            # One-sentence replies: the chat model has finished before the speech streams, so a gap is the client's.
-            # (A longer reply streams slower than it plays while the chat model still decodes on the same GPU.)
+            # Three one-sentence replies, then a three-sentence one: the chat model still decodes it while its first sentence
+            # is spoken, and speech shares the GPU with it (slower than playback), so the client must hold its start.
             for n, text in enumerate(["Say good morning in one sentence.", "Name two colours of the rainbow, in a few words.",
-                                      "What is two plus two? Answer in one short sentence."][:a.replies]):
+                                      "What is two plus two? Answer in one short sentence.",
+                                      "Tell me a little about lighthouses, in three sentences."][:a.replies]):
                 before = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length")
                 send(cdp, text)
                 cdp.wait(f"window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).length > {before} && window.jarvis.voice.live === 0", 120, f"spoken reply {n + 1}")
@@ -401,7 +404,7 @@ def main():
             gaps = cdp.js("window.jarvis.voice.gaps")
             lat = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && x.lat && x.lat.firstAudio != null).map(x => x.lat.firstAudio)")
             bad = [o for o in onsets if o["gaps_over"] or o["longest_gap_ms"] > 30 or o["clicks"]]
-            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "arrivals": cdp.js("window.jarvis.arrivals")}
+            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "slow_cap_ms": a.slow_cap_ms, "slow_starts": cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.slow_start').length"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
             check("voice: no playback gap over 30 ms or click in the first 2 s of any reply", not bad, bad or onsets)
             click(cdp, "vbarEnd")

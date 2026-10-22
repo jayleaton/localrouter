@@ -314,9 +314,15 @@ const Feed = struct {
         const rest = f.think.flush(f.s.gpa, f.r.arena.allocator()) catch "";
         f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), rest, true) catch rest, true);
         f.s.mutex.lockUncancelable(f.s.io);
+        defer f.s.mutex.unlock(f.s.io);
         f.r.closed = true;
         f.r.cond.signal(f.s.io);
-        f.s.mutex.unlock(f.s.io);
+        // The chat model has stopped writing: from here speech has the GPU to itself (it shares it while chat decodes, and
+        // runs slower than playback then), so a client can stop holding the reply's start (docs/dev/VOICE.md).
+        if (f.r.stop.cancelled()) return;
+        var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
+        defer tmp.deinit();
+        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
     }
 };
 
