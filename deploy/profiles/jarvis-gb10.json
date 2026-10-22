@@ -158,7 +158,7 @@
      "needs_accept": true,
      "run": "LOCALROUTER_HOME=$J/lr WEIGHTS_ONLY=1 DOWNLOAD_ONLY=1 MODELS=image IMAGE_MODELS=qwen-image-2.1-turbo PRECISIONS=fp8s bash $REPO/tools/spark/install.sh && $STEPS stamp image-download $REPO/tools/twin/packs/sources/qwen-image-2.1.json $REPO/tools/twin/packs/sources/qwen-image-2.1-turbo.json",
      "done": "$STEPS stamped image-download $REPO/tools/twin/packs/sources/qwen-image-2.1.json $REPO/tools/twin/packs/sources/qwen-image-2.1-turbo.json && [ -f $J/lr/models/Qwen-Image-2.1/.verified ] && [ -f $J/lr/models/Qwen-Image-2.1-Turbo/.verified ]",
-     "fix": "network: run again (finished files are kept, hf resumes the rest). 'differs from': the named directory's .verify.log lists the file; delete it and run again. Docker errors: doctor.sh"},
+     "fix": "exit 137 (killed): the box ran short of memory; the download container is capped at 8 GiB (LR_PREPARE_MEMORY), so free that much (INSTALL.md step 6) and run again. Network: run again (finished files are kept, hf resumes the rest). 'differs from': the named directory's .verify.log lists the file; delete it and run again. Docker errors: doctor.sh"},
     {"id": "packs", "download_bytes": 0, "disk_bytes": 23000000000, "title": "the FP8 Turbo, text-encoder and VAE packs (checked against their pins) and the Triton kernels for this GPU (about 30 minutes)",
      "gpu": true, "min_free_gib": 64, "needs_accept": true,
      "run": "$STEPS free 64 && LOCALROUTER_HOME=$J/lr WEIGHTS_ONLY=1 MODELS=image IMAGE_MODELS=qwen-image-2.1-turbo PRECISIONS=fp8s bash $REPO/tools/spark/install.sh && python3 -I $REPO/tools/package/verify_assets.py $REPO/tools/twin/packs/built/qwen-image-2.1-turbo.json $J/lr/weights/qwen-image-2.1 && $STEPS stamp image-packs $REPO/tools/twin/packs/built/qwen-image-2.1-turbo.json",
@@ -177,12 +177,12 @@
      "needs_accept": true,
      "run": "LOCALROUTER_HOME=$J/lr WEIGHTS_ONLY=1 DOWNLOAD_ONLY=1 MODELS=video bash $REPO/tools/spark/install.sh && $STEPS stamp video-download $REPO/tools/twin/packs/sources/minimax-h3.json",
      "done": "$STEPS stamped video-download $REPO/tools/twin/packs/sources/minimax-h3.json && [ -f $J/lr/models/minimax-h3/.verified ]",
-     "fix": "network: run again (finished files are kept). 'differs from': $J/lr/models/minimax-h3.verify.log lists the file; delete it and run again. Docker errors: doctor.sh"},
+     "fix": "exit 137 (killed): the box ran short of memory; the download container is capped at 8 GiB (LR_PREPARE_MEMORY), so free that much (INSTALL.md step 6) and run again. Network: run again (finished files are kept). 'differs from': $J/lr/models/minimax-h3.verify.log lists the file; delete it and run again. Docker errors: doctor.sh"},
     {"id": "packs", "download_bytes": 0, "disk_bytes": 13000000000, "title": "the Turbo-LoRA NVFP4 pack (calibrated on the GPU, about 15 minutes) and the engine's layout, checked against their pins",
      "gpu": true, "min_free_gib": 64, "needs_accept": true,
      "run": "$STEPS free 64 && LOCALROUTER_HOME=$J/lr WEIGHTS_ONLY=1 MODELS=video bash $REPO/tools/spark/install.sh && python3 -I $REPO/tools/package/verify_assets.py $REPO/tools/twin/packs/built/minimax-h3.json $J/lr/weights/minimax-h3 && $STEPS stamp video-packs $REPO/tools/twin/packs/built/minimax-h3.json",
      "done": "$STEPS stamped video-packs $REPO/tools/twin/packs/built/minimax-h3.json && [ -f $J/lr/weights/minimax-h3/h3-turbo-nvfp4/manifest.json ]",
-     "fix": "network: run again (finished downloads are kept). 'differs from': delete the named file and run again. Docker errors: doctor.sh"}
+     "fix": "exit 137 (killed): as for image/download. Network: run again (finished downloads are kept). 'differs from': delete the named file and run again. Docker errors: doctor.sh"}
    ]}
  ],
  "deploy": {

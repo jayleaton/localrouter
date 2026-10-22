@@ -36,7 +36,7 @@ hw_disk_free() {
 }
 version_ge() { [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | first)" = "$2" ]; }
 hw_summary() {
-  echo "$(hw_arch), $(hw_os), GPU '$(hw_gpu)' (driver $(hw_driver)), CUDA $(hw_cuda), memory $(gib "$(hw_mem)") GiB$([ "$(hw_vram)" = 0 ] && echo " unified"), $(gib "$(hw_avail)") GiB available"
+  echo "$(hw_arch), $(hw_os), GPU '$(hw_gpu)' (driver $(hw_driver)), CUDA $(hw_cuda), memory $(gib "$(hw_mem)") GiB$([ "$(hw_vram)" = 0 ] && [ -n "$(hw_gpu)" ] && echo " unified"), $(gib "$(hw_avail)") GiB available"
 }
 
 # hw_match PROFILE_FILE: one line a requirement the box misses (none: it matches); "warning:" lines do not block

@@ -105,7 +105,14 @@ for d in tools/twin:twin kernels:kernels .:repo; do   # the container's copy of 
     tar -C "$REPO/$src" --exclude=.zig-cache --exclude=zig-out --exclude=zig-pkg --exclude=results --exclude=__pycache__ \
         --exclude=.git -cf - . | tar -C "$LOCALROUTER_HOME/$dst" -xf -
 done
-docker run --rm --gpus all --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" -e IMAGE_MODELS="$IMAGE_MODELS" -e DOWNLOAD_ONLY="${DOWNLOAD_ONLY:-0}" \
+# the container's host memory (its cgroup; GB10 device memory is not counted there): LR_PREPARE_MEMORY, by default 8g for
+# DOWNLOAD_ONLY (downloads and venvs beside a running service: a download that wants more fails in the container
+# instead of the box's OOM killer taking a running model) and no cap for the pack builds (they need the box)
+mem=${LR_PREPARE_MEMORY:-$([[ ${DOWNLOAD_ONLY:-0} == 1 ]] && echo 8g || true)}
+# one container at a time: a re-run replaces one an earlier run left behind (its client killed, the container still going)
+name=localrouter-prepare-$(id -u)-$(echo "$LOCALROUTER_HOME" | sha256sum | cut -c1-8)
+docker rm -f "$name" > /dev/null 2>&1 || true
+docker run --rm --name "$name" --gpus all ${mem:+--memory $mem --memory-swap $mem} -v /etc/localtime:/etc/localtime:ro --ipc host --ulimit memlock=-1 --ulimit stack=67108864 -e PRECISIONS="$PRECISIONS" -e MODELS="$MODELS" -e IMAGE_MODELS="$IMAGE_MODELS" -e DOWNLOAD_ONLY="${DOWNLOAD_ONLY:-0}" \
     -v "$LOCALROUTER_HOME":/workspace/localrouter "$NGC" bash /workspace/localrouter/repo/tools/spark/prepare.sh
 [[ ${WEIGHTS_ONLY:-0} == 1 ]] && { step "weights done (WEIGHTS_ONLY=1: no service)"; exit 0; }
 

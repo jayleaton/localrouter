@@ -62,8 +62,9 @@ done < <(prereqs "$p" "${keys[@]}")
 # ---- 2. the plan: each step, done or to do; what the rest needs
 mapfile -t todo < <(steps "$p" "${keys[@]}")
 need_dl=0 need_disk=0 warm=0 peak=0 accepts=()
-for s in "${todo[@]}"; do   # what the steps still to do download and leave on disk
+for s in "${todo[@]}"; do   # what the steps still to do (in this run: not the GPU ones with --no-gpu) download and leave on disk
   is_done "$s" && continue
+  [ $nogpu = 1 ] && [ "$(jq -r '.gpu // false' <<< "$s")" = true ] && continue
   need_dl=$((need_dl + $(jq '.download_bytes // 0' <<< "$s"))); need_disk=$((need_disk + $(jq '.disk_bytes // 0' <<< "$s")))
 done
 for k in "${keys[@]}"; do
@@ -86,7 +87,7 @@ for s in "${todo[@]}"; do
   [ "$(jq -r '.gpu // false' <<< "$s")" = true ] && ! is_done "$s" && [ "$(jq '.min_free_gib // 0' <<< "$s")" -gt $gpu_need ] && gpu_need=$(jq .min_free_gib <<< "$s")
 done
 avail_gib=$(($(hw_avail) / 1073741824))
-[ $gpu_need -gt 0 ] && [ $avail_gib -lt $gpu_need ] &&
+[ $nogpu = 0 ] && [ $gpu_need -gt 0 ] && [ $avail_gib -lt $gpu_need ] &&
   echo "warning: only $avail_gib GiB of memory is available; the GPU steps need $gpu_need GiB free (INSTALL.md step 6: free the GPU, or run with --no-gpu now)"
 if [ ${#accepts[@]} -gt 0 ]; then
   echo "needs acceptance (ask the user; with their yes, run with --accept):"
