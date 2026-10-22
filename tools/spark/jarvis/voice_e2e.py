@@ -494,10 +494,16 @@ def leak_probe(args, extra, n):
 def smoke_end(args, results, checks, turns, sess, events):
     """--smoke: the turns' latency and the leak checks, written as results.json (the session closes in main's finally)."""
     events.close()
-    lat = {n: t["speech_end_to_first_audio_ms"] for n, t in turns.items() if n != "warmup"}
-    for n, ms in lat.items():
-        limit = args.max_barge_ms if n == "interrupt" else args.max_median_ms
-        checks.append({"check": f"latency: {n} first audio <= {limit} ms", "ok": ms is not None and ms <= limit, "detail": ms})
+    plain = [t["speech_end_to_first_audio_ms"] for n, t in turns.items()
+             if n not in ("interrupt",) and (args.count_warmup or n != "warmup")]
+    known = sorted(ms for ms in plain if ms is not None)
+    median = known[len(known) // 2] if known and len(known) == len(plain) else None  # of two: the slower
+    results["first_audio_ms"] = {"turns": {n: t["speech_end_to_first_audio_ms"] for n, t in turns.items()}, "median": median}
+    checks.append({"check": f"latency: median first audio <= {args.max_median_ms} ms", "ok": median is not None and median <= args.max_median_ms,
+                   "detail": {"median": median, "turns": plain}})
+    if "interrupt" in turns:
+        ms = turns["interrupt"]["speech_end_to_first_audio_ms"]
+        checks.append({"check": f"latency: interrupt first audio <= {args.max_barge_ms} ms", "ok": ms is not None and ms <= args.max_barge_ms, "detail": ms})
     replies = {n: t["reply"] for n, t in turns.items()}
     checks.append({"check": "replies: none contains a think> tag", "ok": not any("think>" in r for r in replies.values()), "detail": None})
     results["checks"] = checks
@@ -526,10 +532,11 @@ def main():
     ap.add_argument("--leak-probe", type=int, default=20, help="streamed chat requests per variant in the reasoning-leak probe (0: none)")
     ap.add_argument("--smoke", action="store_true", help="a deployment smoke test: the warm-up and one turn, then barge-in; no tool, video, eviction or leak probe")
     ap.add_argument("--skip-barge", action="store_true", help="with --smoke: the turns only")
+    ap.add_argument("--count-warmup", action="store_true", help="with --smoke: the first turn counts in the latency (the turn after another model's job)")
     args = ap.parse_args()
     barge = not (args.smoke and args.skip_barge)
     if args.smoke:  # only what a deployment check needs
-        for name in [n for n in PROMPTS if n not in ("warmup", "capital") + (("story", "interrupt") if barge else ())]:
+        for name in [n for n in PROMPTS if n not in ("warmup", "capital", "tips") + (("story", "interrupt") if barge else ())]:
             del PROMPTS[name]
         args.leak_probe = 0
     os.makedirs(f"{args.out}/prompts", exist_ok=True)
@@ -554,7 +561,7 @@ def main():
     try:
         sess.pump(1.0)
         # 2. Plain turns (the first warms every path and is reported apart).
-        for name in ("warmup", "capital") + (() if args.smoke else ("tips",)):
+        for name in ("warmup", "capital", "tips"):
             turn(sess, name, mic[name], turns, checks)
             sess.pump(1.0)
         if not barge:
