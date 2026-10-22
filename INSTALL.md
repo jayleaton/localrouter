@@ -34,8 +34,13 @@ A second script, [`tools/install/doctor.sh`](tools/install/doctor.sh), says what
 git clone https://github.com/jayleaton/localrouter ~/localrouter && cd ~/localrouter
 ```
 
-Use `main`, or the tag the user names. Keep the checkout clean: the build refuses uncommitted changes. Run every
-command below from this directory.
+Use `main`, or the tag the user names. If `INSTALL.md` and `tools/install/` are not in your checkout, it is not a
+version this guide is for. Keep the checkout clean: the build refuses uncommitted changes. Run every command below from
+this directory.
+
+The commands below use the defaults: prefix `~/jarvis`, port 8190, tailnet HTTPS port 10443 and unit
+`localrouter-jarvis`. If the user wants others, add the same `--prefix DIR --port N --https-port N --unit NAME` to
+**every** `bootstrap.sh` and `doctor.sh` command ([Options](#options)).
 
 ## 2. Look at the box
 
@@ -56,7 +61,7 @@ The same facts by hand, if the doctor cannot run:
 | memory | `grep MemTotal /proc/meminfo` | at least 110 GiB |
 | CUDA | `/usr/local/cuda/bin/nvcc --version` | release 13.x |
 | OS | `. /etc/os-release; echo $ID $VERSION_ID` | tested on `ubuntu 24.04` (DGX OS) |
-| disk | `df -h ~` | about 290 GB free (step 4 gives the exact figure) |
+| disk | `df -h ~` | about 290 GiB free (step 4 gives the exact figure) |
 
 ## 3. Pick the profile
 
@@ -99,7 +104,7 @@ nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv
 grep MemAvailable /proc/meminfo
 ```
 
-The qualification steps need 64 GiB free (88 GiB for Drama 3), and the warm stack takes about 107 GiB. If the GPU is
+The qualification steps need 64 GiB free (88 GiB for Drama 3), and the warm models take about 107 GiB. If the GPU is
 busy, ask the user. Either:
 
 - they free it, and you go on to step 7; or
@@ -112,8 +117,15 @@ busy, ask the user. Either:
 tools/install/bootstrap.sh --profile jarvis-gb10 --accept
 ```
 
-It takes about 1.5 to 3 hours, mostly downloads (about 200 GiB) and the GPU steps. Run it where it can keep going,
-such as `tmux` or `nohup ... &`, and read its log as it goes. Each step prints `run`, then `ok` or `FAILED`. A
+It takes about 1.5 to 3 hours, mostly downloads (about 200 GiB) and the GPU steps. Run it so that it outlives your
+session, and read its log as it goes. Over ssh, `systemd-run --user` keeps it going after the connection drops:
+
+```sh
+systemd-run --user --unit jarvis-bootstrap bash -lc "cd $PWD && tools/install/bootstrap.sh --profile jarvis-gb10 --accept > ~/jarvis-bootstrap.log 2>&1; echo EXIT=\$? >> ~/jarvis-bootstrap.log"
+tail -f ~/jarvis-bootstrap.log    # until a line EXIT=0 (done) or EXIT=1 (see the FAILED lines above it)
+```
+
+In a terminal of your own, `tmux` works as well. Each step prints `run`, then `ok` or `FAILED`. A
 finished step prints `ok ... (done)` and is skipped.
 
 On `FAILED`, the script prints:

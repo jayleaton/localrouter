@@ -81,13 +81,26 @@ done
 printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on 127.0.0.1:$PORT), then start.sh until the warm models are ready"
 echo "needs: download $(gib $need_dl) GiB, disk $(gib $need_disk) GiB + $(gib $margin) margin (free: $(gib "$free") GiB)"
 echo "memory: $(gib $warm) GiB for the warm models$([ $peak -gt 0 ] && echo ", plus up to $(gib $peak) GiB for an on-demand one (it unloads the image model to fit)") of $(gib "$(hw_mem)") GiB"
+gpu_need=0   # the most free memory a GPU step still to do needs
+for s in "${todo[@]}"; do
+  [ "$(jq -r '.gpu // false' <<< "$s")" = true ] && ! is_done "$s" && [ "$(jq '.min_free_gib // 0' <<< "$s")" -gt $gpu_need ] && gpu_need=$(jq .min_free_gib <<< "$s")
+done
+avail_gib=$(($(hw_avail) / 1073741824))
+[ $gpu_need -gt 0 ] && [ $avail_gib -lt $gpu_need ] &&
+  echo "warning: only $avail_gib GiB of memory is available; the GPU steps need $gpu_need GiB free (INSTALL.md step 6: free the GPU, or run with --no-gpu now)"
 if [ ${#accepts[@]} -gt 0 ]; then
   echo "needs acceptance (ask the user; with their yes, run with --accept):"
   for a in "${accepts[@]}"; do echo "  - $a"; done
   jq -r --arg keys " ${keys[*]} " '.models[] | select(.accept and (.key as $k | $keys | contains(" " + $k + " "))) | "    \(.key) licence: \(.licence.name): \(.licence.url)"' "$p"
 fi
 [ "$free" -ge $((need_disk + margin)) ] || { echo "not enough free disk under $PREFIX: $(gib "$free") GiB, needs $(gib $((need_disk + margin))) GiB"; [ $dry = 1 ] || exit 1; }
-if [ $dry = 1 ]; then echo "dry run: nothing changed. To install: ${again}"; exit 0; fi
+[ ${#accepts[@]} -gt 0 ] && [[ " $again " != *" --accept "* ]] && again="$again --accept   (only with the user's yes to the list above)"
+if [ $dry = 1 ]; then
+  hint=""
+  [ ${#accepts[@]} -gt 0 ] && [[ " $again " != *" --accept"* ]] && hint=" --accept   (--accept only with the user's yes to the list above)"
+  echo "dry run: nothing changed. To install: ${again}${hint}"
+  exit 0
+fi
 [ $missing = 0 ] || die "install the missing prerequisites first (each 'fix' above), then run again: $again"
 
 # ---- 3. the steps
@@ -111,6 +124,7 @@ for s in "${todo[@]}"; do
   if [ $rc != 0 ] || ! is_done "$s"; then
     echo "FAILED $id (exit $rc). The end of $log:" >&2
     tail -n 15 "$log" | sed 's/^/  | /' >&2
+    [ "$(grep -vc '^== ' "$log")" = 0 ] && echo "  (the step printed nothing before it stopped: a bug in the step, not on this box; report it with the log)" >&2
     echo "next: $(jq -r .fix <<< "$s")" >&2
     echo "then run the same command again (it resumes here): $again" >&2
     exit 1

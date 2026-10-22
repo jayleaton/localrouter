@@ -38,6 +38,7 @@ while read -r line; do
 done < <(hw_match "$p")
 avail=$(hw_disk_free "$PREFIX")
 echo "        disk free under $PREFIX: $(gib "$avail") GiB"
+[ $(($(hw_avail) / 1073741824)) -ge 88 ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to 88 GiB free and the warm models about 107 GiB" "see what holds it: nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv (INSTALL.md step 6)"
 
 echo "== prerequisites"
 while read -r q; do
@@ -47,7 +48,7 @@ done < <(prereqs "$p" "${keys[@]}")
 echo "== install steps (under $PREFIX)"
 while read -r s; do
   if is_done "$s"; then ok "$(step_id "$s"): $(jq -r .title <<< "$s")"
-  else miss "$(step_id "$s"): $(jq -r .title <<< "$s")" "$boot   (or this step alone: $(jq -r .run <<< "$s"))"; fi
+  else miss "$(step_id "$s"): $(jq -r .title <<< "$s")" "$boot   (it resumes at the first step not done)"; fi
 done < <(steps "$p" "${keys[@]}")
 
 echo "== service $UNIT on 127.0.0.1:$PORT"
