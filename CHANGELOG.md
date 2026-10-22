@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Voice: the session sends `localrouter.response.text_done` when the chat model stops writing a reply. The client's
+  new "smooth start" setting (off by default) uses it to hold a slow reply's start, so long answers don't stutter
+  while speech shares the GPU with chat decoding. It costs about 1.5 s of first audio on such replies.
 - Jarvis client voice fixes:
   - A voice call survives the connection closing (a service restart): it reconnects with backoff and goes on. It used
     to show "Voice disconnected" and stop.

@@ -420,6 +420,7 @@
       <label class="field"><span>Pause before I reply: <b id="silenceV"></b></span><input type="range" id="silence" min="200" max="1500" step="50">
         <span class="range-row"><span>Snappy</span><span>Patient</span></span></label>
       <label class="switch"><span>Echo guard<small>Ignore my own voice from the speaker</small></span><input type="checkbox" id="gate"></label>
+      <label class="switch"><span>Smooth start for long replies<small>Waits up to about a second more so a long answer does not stutter while it is still being written</small></span><input type="checkbox" id="smooth"></label>
     </section>
     <section class="sect" aria-labelledby="hAdv">
       <h3 id="hAdv">Advanced</h3>
@@ -487,7 +488,7 @@ const store = {
   },
 };
 const S = Object.assign({ chatModel: '', think: false, speechModel: '', voices: {}, mode: 'vad', silence: 500, threshold: 0.5,
-  tools: true, gate: true, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
+  tools: true, gate: true, smoothStart: false, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
 if (S.voice && S.speechModel && !S.voices[S.speechModel]) S.voices[S.speechModel] = S.voice; // the earlier single voice
 delete S.voice;
 const saveSettings = () => store.set('settings', S);
@@ -1412,7 +1413,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), slow: null, textDone: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1463,7 +1464,8 @@ function connect(my) {
   sock.onopen = () => {
     opened = true;
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone']) V[k].clear();
+    V.slow = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
     V.retries = 0;
@@ -1625,6 +1627,7 @@ function silence() {
   V.held = [];
   clearTimeout(V.holdTimer);
   V.holdTimer = 0;
+  V.slow = null;
 }
 function playedMs(item, now) {
   let ms = V.doneMs.get(item) || 0;
@@ -1650,7 +1653,7 @@ function bargeIn(cancel) {
 // A reply's audio is held at its start until START_MS of it is in hand, or START_WAIT_MS after its first piece came,
 // then scheduled back to back on the AudioContext clock. Drama 3 streams a 46 ms first piece and then a 186 ms burst
 // every ~125 ms: started at once, playback ran dry after the first syllable for 30 to 90 ms (measured on DGX-01).
-const START_MS = 200, START_WAIT_MS = 150;
+const START_MS = 200, START_WAIT_MS = 150, SLOW_CAP_MS = 1000;
 function decode(b64) {
   const bytes = fromB64(b64);
   const n = bytes.length >> 1;
@@ -1676,14 +1679,33 @@ function play(item, b64) {
   const wait = S.startWaitMs ?? START_WAIT_MS;
   V.held.push({ item, ...piece });
   if (wait <= 0) return release(item, 0.05);
-  const have = V.held.filter(p => p.item === item).reduce((s, p) => s + p.buf.duration, 0) * 1000;
-  if (have >= (S.startMs ?? START_MS)) return release(item, 0.01);
-  if (!V.holdTimer) V.holdTimer = setTimeout(() => release(item, 0.01), wait);
+  if (have(item) >= (V.slow === item ? slowCap() : S.startMs ?? START_MS)) return release(item, 0.01);
+  if (!V.holdTimer && V.slow !== item) V.holdTimer = setTimeout(() => startOrWait(item), wait);
+}
+// The slow-start hold is the "smooth start" setting (off by default): it removes a long reply's stutter for about a
+// second more before its first word (measured on DGX-01: replies with a gap in their first 2 s 8/10 -> 0/10, first
+// audio median +1.6 s). window.jarvis.settings.slowCapMs overrides it for tests.
+const slowCap = () => S.slowCapMs ?? (S.smoothStart ? SLOW_CAP_MS : 0);
+const have = item => V.held.filter(p => p.item === item).reduce((s, p) => s + p.buf.duration, 0) * 1000;
+// The start window is over. A stream that keeps up has START_MS in hand by now; one that does not is speech sharing the
+// GPU with the chat model still writing the reply, slower than playback (0.67x real time against 1.49x alone on
+// DGX-01). Then the start waits for the chat model to finish (localrouter.response.text_done: speech has the GPU again
+// and catches up) or SLOW_CAP_MS in hand, whichever is first: one short wait instead of a stutter every few words.
+function startOrWait(item) {
+  V.holdTimer = 0;
+  if (V.textDone.has(item) || have(item) >= (S.startMs ?? START_MS) || slowCap() <= 0) return release(item, 0.01);
+  V.slow = item;
+  dbg('voice.slow_start', { item, have_ms: Math.round(have(item)) });
+}
+function textDone(item) {
+  V.textDone.add(item);
+  if (V.slow === item && V.held.some(p => p.item === item)) release(item, 0.01);
 }
 // The held start of `item` goes out, `lead` s from now.
 function release(item, lead) {
   clearTimeout(V.holdTimer);
   V.holdTimer = 0;
+  if (V.slow === item) V.slow = null;
   if (!V.ctx || V.cut.has(item)) { V.held = []; return; }
   V.started.add(item);
   const held = V.held.filter(p => p.item === item);
@@ -1837,6 +1859,9 @@ function handle(ev) {
       draw(m);
       break;
     }
+    case 'localrouter.response.text_done':
+      textDone(ev.item_id);
+      break;
     case 'response.created':
       V.resp = ev.response && ev.response.id;
       V.audioLogged = false;
@@ -2032,6 +2057,7 @@ function openDrawer(section) {
   $('silence').value = S.silence;
   $('silenceV').textContent = `${(S.silence / 1000).toFixed(2)} s`;
   $('gate').checked = S.gate;
+  $('smooth').checked = S.smoothStart;
   $('key').value = S.key;
   $('logn').value = S.logN;
   renderVoices();
@@ -2043,6 +2069,7 @@ $('chatmodel').addEventListener('change', () => { S.chatModel = $('chatmodel').v
 $('thinkSw').addEventListener('change', () => { S.think = $('thinkSw').checked; saveSettings(); renderControls(); });
 $('tools').addEventListener('change', () => { S.tools = $('tools').checked; saveSettings(); });
 $('gate').addEventListener('change', () => { S.gate = $('gate').checked; saveSettings(); });
+$('smooth').addEventListener('change', () => { S.smoothStart = $('smooth').checked; saveSettings(); });
 live('maxtok', e => { S.maxTokens = Number(e.value) || 0; });
 live('instructions', e => { S.instructions = e.value; });
 live('sens', e => { S.threshold = Math.round((0.8 - Number(e.value) / 100 * 0.6) * 100) / 100; });
