@@ -64,7 +64,7 @@ t=$(now)
 curl -sN -m 120 -H 'content-type: application/json' "$url/v1/chat/completions" \
   -d "{\"model\":\"$CHAT\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Count from one to five in words.\"}],\"max_tokens\":64,\"temperature\":0,\"chat_template_kwargs\":{\"enable_thinking\":false}}" |
   while IFS= read -r line; do printf '%s %s\n' "$(now)" "$line"; done > "$out/chat-stream.txt"
-first=$(grep -m1 '"content":"[^"]' "$out/chat-stream.txt" | cut -d' ' -f1)
+first=$(grep -m1 -E '"content": ?"[^"]' "$out/chat-stream.txt" | cut -d' ' -f1)
 text=$(sed -n 's/^[0-9.]* data: //p' "$out/chat-stream.txt" | grep -v '^\[DONE\]' | jq -rj '.choices[0].delta.content // ""' 2> /dev/null)
 done_=$(grep -c 'data: \[DONE\]' "$out/chat-stream.txt")
 record chat_stream "$([ -n "$first" ] && [ "$done_" = 1 ] && grep -qi five <<< "$text" && echo true || echo false)" "$(secs $t)" \
