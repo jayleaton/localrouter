@@ -115,6 +115,7 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 | MCP tool | Does |
 | --- | --- |
 | `list_models`, `list_voices` | the models (what each can do, `default_for`, state, memory) and the speech voices |
+| `reserve_for`, `unload_model`, `load_model` | make room for a heavy job (what it unloads comes back after it), unload or load one model; never the chat model. The procedure is a skill: [skills/jarvis-model-manager](skills/jarvis-model-manager/SKILL.md) |
 | `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id; edit inputs are refused by the current engines |
 | `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
 | `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |

@@ -95,34 +95,61 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
     const name = str(params.object.get("name")) orelse return rpcError(req, a, id, -32602, "no tool name");
     const args: Value = params.object.get("arguments") orelse .{ .object = .empty };
     var out: std.ArrayList(Content) = .empty;
-    calling = name;
-    const result: ToolError!bool = if (eql(name, "list_models"))
-        listModels(app, a, &out)
-    else if (eql(name, "list_voices"))
-        listVoices(app, a, &out)
-    else if (eql(name, "generate_image"))
-        generateImage(app, a, host, args, &out)
-    else if (eql(name, "generate_video"))
-        generateVideo(app, a, host, args, &out)
-    else if (eql(name, "transcribe_audio"))
-        transcribeAudio(app, a, host, args, &out)
-    else if (eql(name, "synthesize_speech"))
-        synthesizeSpeech(app, a, host, args, &out)
-    else if (eql(name, "chat"))
-        chatTool(app, a, args, &out)
-    else if (eql(name, "get_job"))
-        getJob(app, a, host, args, &out)
-    else if (eql(name, "cancel_job"))
-        cancelJob(app, a, host, args, &out)
-    else if (eql(name, "release_models"))
-        release(app, a, &out)
-    else
+    const result = invoke(app, a, host, name, args, &out) orelse
         return rpcError(req, a, id, -32602, try std.fmt.allocPrint(a, "unknown tool '{s}'; tools/list names them: {s}", .{ name, tool_names }));
     const ok = result catch |err| switch (err) {
         error.ToolFailed, error.BadArguments => false, // the reason is already in `out`
         error.OutOfMemory => return error.OutOfMemory,
     };
     try reply(req, a, id, .{ .content = out.items, .isError = !ok });
+}
+
+/// The text a tool call returns (its text contents, one a line) and whether it failed; for callers outside MCP (the
+/// voice session's model tools). Null for an unknown tool.
+pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
+    var out: std.ArrayList(Content) = .empty;
+    const result = invoke(app, a, host, name, args, &out) orelse return null;
+    const ok = if (result) |x| x else |_| false;
+    var w: Io.Writer.Allocating = .init(a);
+    for (out.items) |c| if (c.text) |t| {
+        if (w.written().len > 0) w.writer.writeByte('\n') catch {};
+        w.writer.writeAll(t) catch {};
+    };
+    return .{ .ok = ok, .text = w.written() };
+}
+
+/// Runs tool `name` into `out`; null when there is no such tool.
+fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value, out: *std.ArrayList(Content)) ?ToolError!bool {
+    calling = name;
+    const r: ToolError!bool = if (eql(name, "list_models"))
+        listModels(app, a, out)
+    else if (eql(name, "load_model"))
+        loadModel(app, a, args, out)
+    else if (eql(name, "unload_model"))
+        unloadModel(app, a, args, out)
+    else if (eql(name, "reserve_for"))
+        reserveFor(app, a, args, out)
+    else if (eql(name, "list_voices"))
+        listVoices(app, a, out)
+    else if (eql(name, "generate_image"))
+        generateImage(app, a, host, args, out)
+    else if (eql(name, "generate_video"))
+        generateVideo(app, a, host, args, out)
+    else if (eql(name, "transcribe_audio"))
+        transcribeAudio(app, a, host, args, out)
+    else if (eql(name, "synthesize_speech"))
+        synthesizeSpeech(app, a, host, args, out)
+    else if (eql(name, "chat"))
+        chatTool(app, a, args, out)
+    else if (eql(name, "get_job"))
+        getJob(app, a, host, args, out)
+    else if (eql(name, "cancel_job"))
+        cancelJob(app, a, host, args, out)
+    else if (eql(name, "release_models"))
+        release(app, a, out)
+    else
+        return null;
+    return r;
 }
 
 const ToolError = error{ ToolFailed, BadArguments, OutOfMemory };
@@ -145,18 +172,18 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
         if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
     }
-    const memory = .{ .mem_available_bytes = sched_memory.available() orelse 0, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes };
+    const memory = .{ .mem_available_bytes = sched_memory.available() orelse 0, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_paused = app.scheduler.voicePaused() };
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine, .memory = memory }, .{ .emit_null_optional_fields = false }) });
     return true;
 }
@@ -175,6 +202,136 @@ fn listVoices(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
     }
     if (list.items.len == 0) return fail(a, out, "no speech model is configured on this machine", .{});
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .speech_models = list.items }, .{ .emit_null_optional_fields = false }) });
+    return true;
+}
+
+// ---------------------------------------------------------------- model management (load_model, unload_model, reserve_for)
+
+/// A control running on its own thread, so a tool call returns after `wait_s` even when a load takes longer; whichever
+/// of the waiter and the thread finishes last frees it.
+const Pending = struct {
+    c: sched.Control,
+    gone: std.atomic.Value(bool) = .init(false),
+    gpa: std.mem.Allocator,
+    s: *sched.Scheduler,
+
+    fn run(p: *Pending) void {
+        p.s.control(&p.c) catch {
+            p.c.failed = true;
+            p.c.message = "the scheduler is shutting down or its queue is full";
+            p.c.done.set(p.s.io);
+        };
+        if (p.gone.swap(true, .acq_rel)) p.gpa.destroy(p);
+    }
+
+    const Result = struct { finished: bool, failed: bool, message: []const u8, plan: sched.Plan };
+
+    /// Starts `c`; waits up to `wait_s`. The copy of the result is in `a`; finished false when it is still running.
+    fn start(app: *App, a: std.mem.Allocator, c: sched.Control, wait_s: u32) !Result {
+        const p = try app.gpa.create(Pending);
+        p.* = .{ .c = c, .gpa = app.gpa, .s = app.scheduler };
+        const t = std.Thread.spawn(.{}, run, .{p}) catch |err| {
+            app.gpa.destroy(p);
+            return err;
+        };
+        t.detach();
+        const deadline = std.Io.Clock.awake.now(app.io).addDuration(.fromSeconds(@min(wait_s, max_wait_s)));
+        while (!p.c.done.isSet() and std.Io.Clock.awake.now(app.io).nanoseconds < deadline.nanoseconds)
+            std.Io.sleep(app.io, .fromMilliseconds(100), .awake) catch break;
+        const finished = p.c.done.isSet();
+        const r: Result = .{ .finished = finished, .failed = finished and p.c.failed, .message = try a.dupe(u8, if (finished) p.c.message else ""), .plan = p.c.plan };
+        if (p.gone.swap(true, .acq_rel)) app.gpa.destroy(p);
+        return r;
+    }
+};
+
+fn modelIndex(app: *App, a: std.mem.Allocator, name: []const u8, out: *std.ArrayList(Content)) ToolError!usize {
+    return routes.toolIndex(app, name) orelse fail(a, out, "no model '{s}' on this machine; list_models names them", .{name});
+}
+
+fn loadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(struct { model: []const u8, wait_s: u32 = 300 }, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    if (app.scheduler.slots[i].tool.state() == .ready) return done(a, out, .{ .model = b.model, .state = "ready", .message = "already loaded" });
+    const plan = app.scheduler.plan(i, null);
+    if (!plan.fits) return fail(a, out, "{s} does not fit without unloading the chat model: it needs {d} MiB, {d} MiB is free beyond the reserve", .{ b.model, plan.needed >> 20, plan.available >> 20 });
+    std.log.info("load_model {s}: on request", .{b.model});
+    const r = Pending.start(app, a, .{ .op = .load, .tool = i }, b.wait_s) catch return fail(a, out, "could not start the load", .{});
+    if (r.failed) return fail(a, out, "{s} did not load: {s}", .{ b.model, r.message });
+    const st = @tagName(app.scheduler.slots[i].tool.state());
+    return done(a, out, .{ .model = b.model, .state = st, .message = if (r.finished) "loaded" else "still loading: call list_models or load_model again later" });
+}
+
+fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(struct { model: []const u8, hold_s: u32 = 120 }, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    if (app.scheduler.slots[i].tool.state() == .unloaded) return done(a, out, .{ .model = b.model, .state = "unloaded", .message = "it was not loaded" });
+    if (app.scheduler.displaceNow(i, @min(b.hold_s, 3600))) |why| return fail(a, out, "{s} was not unloaded: {s}", .{ b.model, why });
+    return done(a, out, .{ .model = b.model, .state = "unloaded", .comes_back_in_s = @min(b.hold_s, 3600), .message = "unloaded; it loads again by itself after hold_s, or call load_model to bring it back sooner" });
+}
+
+fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, dry_run: bool = false, hold_s: u32 = 600, wait_s: u32 = 300 };
+    const b = try parseArgs(Args, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    const cfg = app.scheduler.slots[i].tool.config();
+    var r: request.Request = switch (cfg.kind) {
+        .image => .{ .image = .{ .prompt = "" } },
+        .video => .{ .video = .{ .prompt = "", .seconds = if (b.seconds > 0) b.seconds else 5 } },
+        .speech => .{ .speech = .{ .input = "" } },
+        .transcription => .{ .transcription = .{ .audio = "" } },
+        .chat => .{ .chat = .{ .body = "" } },
+    };
+    if (b.size.len > 0) {
+        const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+        switch (r) {
+            .image => |*v| {
+                v.width = wh[0];
+                v.height = wh[1];
+            },
+            .video => |*v| {
+                v.width = wh[0];
+                v.height = wh[1];
+            },
+            else => {},
+        }
+    }
+    engine.fill(cfg, &r);
+    const plan = if (b.dry_run) app.scheduler.plan(i, r) else blk: {
+        std.log.info("reserve_for {s}: on request (hold {d} s)", .{ b.model, b.hold_s });
+        const res = Pending.start(app, a, .{ .op = .reserve, .tool = i, .request = r, .hold_s = @min(b.hold_s, 3600) }, b.wait_s) catch return fail(a, out, "could not start the reservation", .{});
+        if (res.failed) return fail(a, out, "no room for {s}: {s}. Free memory now: {d} MiB beyond the reserve; it needs {d} MiB", .{ b.model, res.message, res.plan.available >> 20, res.plan.needed >> 20 });
+        if (!res.finished) return done(a, out, .{ .model = b.model, .state = "reserving", .message = "still unloading and loading: call list_models later" });
+        break :blk res.plan;
+    };
+    const names = try a.alloc([]const u8, plan.count);
+    var voice = false;
+    var ms: u64 = 0;
+    for (names, plan.list()) |*n, v| {
+        const c = app.scheduler.slots[v].tool.config();
+        n.* = c.id;
+        voice = voice or c.kind == .speech or c.kind == .transcription;
+        ms +|= app.scheduler.slots[v].resident;
+    }
+    if (b.dry_run and !plan.fits) return fail(a, out, "{s} does not fit even after unloading every idle model but the chat model: it needs {d} MiB, {d} MiB is free beyond the reserve", .{ b.model, plan.needed >> 20, plan.available >> 20 });
+    return done(a, out, .{
+        .model = b.model,
+        .dry_run = b.dry_run,
+        .needed_bytes = plan.needed,
+        .available_bytes = plan.available,
+        .fits_now = plan.count == 0,
+        .unloads = names,
+        .unloads_bytes = ms,
+        .pauses_voice = voice,
+        .message = if (b.dry_run)
+            (if (plan.count == 0) "it fits now: nothing needs unloading" else "these would be unloaded; they come back by themselves after the job")
+        else if (plan.count == 0) "it fits; loaded and held for its job" else "unloaded these, loaded and held the model; run its job now: they come back by themselves when it is done",
+    });
+}
+
+/// A tool's JSON result as its one text content.
+fn done(a: std.mem.Allocator, out: *std.ArrayList(Content), value: anytype) ToolError!bool {
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, value, .{}) });
     return true;
 }
 
@@ -447,6 +604,28 @@ const tool_list = [_]Tool{
     } },
     .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices, default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
+    } },
+    .{ .name = "reserve_for", .title = "Make room for a model", .description = "Before a heavy job (a video), make room for its model: unloads idle models other than the chat model, lowest priority first (the image model, then voice models), loads the target and holds it for its next job. What it unloads comes back by itself when that job is done (or after hold_s). dry_run: true only says what it would unload, how much the model needs and how much is free, so you can tell the user first (for example that voice pauses). Voice sessions are told before a voice model goes, and wait for it instead of failing. The chat model is never unloaded.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"The model the job needs, from list_models (e.g. the video model)."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT of the job, to price it; omit for the model's default."},
+    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; default 5."},
+    \\"dry_run":{"type":"boolean","default":false,"description":"true: unload nothing, only report what would go."},
+    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":600,"description":"The unloaded models come back after this even if the job never runs."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300,"description":"How long to wait for the unloads and the load."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "unload_model", .title = "Unload a model", .description = "Unloads one model now to free its memory; it loads again by itself after hold_s (or call load_model). Prefer reserve_for before a heavy job: it unloads exactly what is needed and restores it when the job is done. A voice model's sessions are told first and wait for it. The chat model cannot be unloaded this way: it is the one answering.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"A model id from list_models."},
+    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":120,"description":"It comes back by itself after this."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "load_model", .title = "Load a model", .description = "Loads a model now (unloading idle models of any priority if it needs the room, as a request would) and waits up to wait_s. Use it to bring back what you unloaded, or to warm a model before using it.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"A model id from list_models."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits up to wait_s (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server; past wait_s it returns the job id for get_job. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{

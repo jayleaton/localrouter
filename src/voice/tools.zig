@@ -1,5 +1,6 @@
-//! Built-in tool calls of a voice session: the image or video job a call asks for, a waiter thread a call that reports
-//! the result as `localrouter.job.done` and asks for a spoken follow-up.
+//! Built-in tool calls of a voice session: the image or video job a call asks for (a waiter thread reports the result
+//! as `localrouter.job.done` and asks for a spoken follow-up once voice is back), and the model management tools
+//! (list_models, reserve_for, unload_model, load_model), whose JSON answers the call.
 
 const std = @import("std");
 const session = @import("session.zig");
@@ -30,6 +31,12 @@ fn wait(s: *Session, c: Call) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
     const a = tmp.allocator();
+    if (!std.mem.eql(u8, c.name, "generate_image") and !std.mem.eql(u8, c.name, "generate_video")) {
+        // A model management tool (list_models, reserve_for, unload_model, load_model): its JSON is the output.
+        const m = s.backend.manage(a, c.name, c.arguments);
+        const text = if (m.ok) m.text else std.fmt.allocPrint(a, "{{\"error\": {s}}}", .{std.json.Stringify.valueAlloc(a, m.text, .{}) catch return}) catch return;
+        return answer(s, a, c, text);
+    }
     var why: backend.Why = .{};
     var job_id: []const u8 = "";
     const kind: backend.JobKind = if (std.mem.eql(u8, c.name, "generate_video")) .video else .image;
@@ -45,6 +52,25 @@ fn wait(s: *Session, c: Call) void {
     if (s.close_stop.cancelled()) return;
     const output = std.json.Stringify.valueAlloc(a, .{ .status = outcome.status, .job_id = job_id, .urls = outcome.urls, .@"error" = outcome.@"error" }, .{}) catch return;
     s.mutex.lockUncancelable(s.io);
+    if (!s.closing) s.emit.send(a, "localrouter.job.done", .{ .call_id = c.call_id, .job_id = job_id, .kind = @tagName(kind), .status = outcome.status, .urls = outcome.urls, .@"error" = outcome.@"error" });
+    s.mutex.unlock(s.io);
+    waitForVoice(s); // the models a video unloaded come back right after it: then say it is ready
+    answer(s, a, c, output);
+}
+
+/// Waits (without the session's lock) while a voice model is away making room, at most `tool_wait_s`, so the reply
+/// about a finished job is spoken rather than text only.
+fn waitForVoice(s: *Session) void {
+    var waited: u64 = 0;
+    while (s.backend.paused() and waited < @as(u64, s.voice.tool_wait_s) * 1000) : (waited += 250) {
+        if (s.close_stop.cancelled()) return;
+        std.Io.sleep(s.io, .fromMilliseconds(250), .awake) catch return;
+    }
+}
+
+/// Adds the call's output to the conversation and asks for the reply that reads it.
+fn answer(s: *Session, a: std.mem.Allocator, c: Call, output: []const u8) void {
+    s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (s.closing) return;
     const prev = s.lastId();
@@ -53,7 +79,6 @@ fn wait(s: *Session, c: Call) void {
     it.call_id = it.arena.allocator().dupe(u8, c.call_id) catch "";
     it.text = it.arena.allocator().dupe(u8, output) catch "";
     s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = session.itemValue(a, it, s.settings.audio) catch Value.null });
-    s.emit.send(a, "localrouter.job.done", .{ .call_id = c.call_id, .job_id = job_id, .kind = @tagName(kind), .status = outcome.status, .urls = outcome.urls, .@"error" = outcome.@"error" });
     s.fresh = true;
     s.push(.{ .respond = .{ .auto = true } }) catch {};
 }

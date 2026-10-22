@@ -139,7 +139,8 @@ fn tools(a: std.mem.Allocator, x: Value, why: *backend.Why) Invalid![]const u8 {
 }
 
 pub fn isBuiltin(name: []const u8) bool {
-    return std.mem.eql(u8, name, "generate_image") or std.mem.eql(u8, name, "generate_video");
+    for ([_][]const u8{ "generate_image", "generate_video", "list_models", "reserve_for", "unload_model", "load_model" }) |n| if (std.mem.eql(u8, name, n)) return true;
+    return false;
 }
 
 /// The client's tools in the chat API's nested shape, parsed into `a`.

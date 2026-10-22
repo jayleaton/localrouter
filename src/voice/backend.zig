@@ -34,6 +34,9 @@ pub const Outcome = struct {
     @"error": []const u8 = "",
 };
 
+/// A model management tool's result: its JSON (or the reason it failed) for the model to read.
+pub const Managed = struct { ok: bool, text: []const u8 };
+
 /// Which model a session setting names.
 pub const Role = enum { chat, speech, transcription };
 
@@ -52,7 +55,20 @@ pub const Backend = struct {
         wait_job: *const fn (ptr: *anyopaque, a: std.mem.Allocator, job: Job, timeout_s: u32, stop: *Stop) Outcome,
         offer: *const fn (ptr: *anyopaque) Offer,
         check: *const fn (ptr: *anyopaque, role: Role, name: []const u8, why: *Why) bool,
+        paused: ?*const fn (ptr: *anyopaque) bool = null, // a voice model is unloaded to make room (it comes back)
+        manage: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8) Managed = null,
     };
+
+    /// True while a voice model is unloaded to make room for another job; it comes back by itself.
+    pub fn paused(b: Backend) bool {
+        return if (b.vtable.paused) |f| f(b.ptr) else false;
+    }
+
+    /// Runs a model management tool (list_models, reserve_for, unload_model, load_model); its JSON text.
+    pub fn manage(b: Backend, a: std.mem.Allocator, name: []const u8, arguments: []const u8) Managed {
+        const f = b.vtable.manage orelse return .{ .ok = false, .text = "model management is not available here" };
+        return f(b.ptr, a, name, arguments);
+    }
 
     /// The text of 16 kHz mono speech, in `a`.
     pub fn transcribe(b: Backend, a: std.mem.Allocator, pcm16k: []const i16, o: Hear, stop: *Stop, why: *Why) Error![]const u8 {

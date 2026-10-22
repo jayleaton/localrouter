@@ -64,7 +64,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     // Every tool: a name, a description, an object schema that refuses unknown arguments.
     const listed = try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).body, .{});
     const list = listed.object.get("result").?.object.get("tools").?.array.items;
-    try testing.expectEqual(@as(usize, 10), list.len);
+    try testing.expectEqual(@as(usize, 13), list.len);
     var names: std.ArrayList(u8) = .empty;
     for (list) |t| {
         const schema = t.object.get("inputSchema").?.object;
@@ -74,7 +74,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
         try names.appendSlice(a, t.object.get("name").?.string);
         try names.append(a, ' ');
     }
-    for ([_][]const u8{ "list_models", "list_voices", "generate_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models" }) |n|
+    for ([_][]const u8{ "list_models", "list_voices", "reserve_for", "unload_model", "load_model", "generate_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models" }) |n|
         try testing.expect(std.mem.indexOf(u8, names.items, n) != null);
 
     // list_models: each model's state, resident bytes and lane, and the machine's memory.

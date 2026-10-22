@@ -13,11 +13,60 @@ const Local = @import("voice_local.zig").Local;
 const App = routes.App;
 const page_html = @embedFile("../voice/voice.html");
 
-/// The open sessions' sockets, so shutdown can end their reads.
+/// The open sessions' sockets, so shutdown can end their reads, and the sessions themselves, so they hear when a voice
+/// model is unloaded to make room (`localrouter.voice.paused`, then `localrouter.voice.resumed`).
 pub const Registry = struct {
     mutex: Io.Mutex = .init,
     list: std.ArrayList(std.posix.fd_t) = .empty,
+    sessions: std.ArrayList(*Session) = .empty,
     closed: bool = false,
+    io: ?Io = null, // set by `notifier`
+    gpa: ?std.mem.Allocator = null,
+
+    fn bind(r: *Registry, io: Io, gpa: std.mem.Allocator, s: *Session) void {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        r.sessions.append(gpa, s) catch {};
+    }
+
+    fn unbind(r: *Registry, io: Io, s: *Session) void {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        for (r.sessions.items, 0..) |x, i| if (x == s) {
+            _ = r.sessions.swapRemove(i);
+            return;
+        };
+    }
+
+    /// The scheduler's hook: every open session hears it before a voice model goes and when they are all back.
+    pub fn notifier(r: *Registry, io: Io, gpa: std.mem.Allocator) @import("../sched/scheduler.zig").Notify {
+        r.io = io;
+        r.gpa = gpa;
+        return .{ .ctx = r, .paused = paused, .resumed = resumed };
+    }
+
+    fn paused(ctx: *anyopaque, model: []const u8, for_model: []const u8) void {
+        const r: *Registry = @ptrCast(@alignCast(ctx));
+        r.broadcast("localrouter.voice.paused", .{ .model = model, .for_model = for_model, .message = "voice is paused while a model makes room; it comes back by itself when the job is done" });
+    }
+
+    fn resumed(ctx: *anyopaque) void {
+        const r: *Registry = @ptrCast(@alignCast(ctx));
+        r.broadcast("localrouter.voice.resumed", .{ .message = "voice is back" });
+    }
+
+    fn broadcast(r: *Registry, comptime typ: []const u8, fields: anytype) void {
+        const io = r.io orelse return;
+        var arena: std.heap.ArenaAllocator = .init(r.gpa orelse return);
+        defer arena.deinit();
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        for (r.sessions.items) |s| {
+            s.mutex.lockUncancelable(io);
+            defer s.mutex.unlock(io);
+            if (!s.closing) s.emit.send(arena.allocator(), typ, fields);
+        }
+    }
 
     fn add(r: *Registry, io: Io, gpa: std.mem.Allocator, fd: std.posix.fd_t) bool {
         r.mutex.lockUncancelable(io);
@@ -53,6 +102,7 @@ pub const Registry = struct {
 
     pub fn deinit(r: *Registry, gpa: std.mem.Allocator) void {
         r.list.deinit(gpa);
+        r.sessions.deinit(gpa);
     }
 };
 
@@ -129,6 +179,15 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, if (model.len > 0) model else Local.defaultChatModel(app)) catch
         return c.close(1011, "could not start the session");
     defer s.destroy();
+    app.voice.bind(app.io, app.gpa, s);
+    defer app.voice.unbind(app.io, s);
+    if (app.scheduler.voicePaused()) { // it opened while a voice model is away
+        var tmp: std.heap.ArenaAllocator = .init(app.gpa);
+        defer tmp.deinit();
+        s.mutex.lockUncancelable(app.io);
+        s.emit.send(tmp.allocator(), "localrouter.voice.paused", .{ .model = "", .for_model = "", .message = "voice is paused while a model makes room; it comes back by itself when the job is done" });
+        s.mutex.unlock(app.io);
+    }
     while (true) {
         const m = c.read() catch |err| {
             if (err == error.TooLarge) std.log.warn("voice session: a client message over 4 MiB, closed", .{});

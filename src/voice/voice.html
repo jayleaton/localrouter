@@ -541,6 +541,29 @@ const CHAT_TOOLS = {
     parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what happens, in detail' },
       seconds: { type: 'integer', description: 'length, 1 to 20 (default 5)' } }, required: ['prompt'] } } },
 };
+// Model management (the server's voice.manage_models): the same tools and procedure as the voice session's, run through
+// /mcp, so their guardrails (never the chat model; voice told before it pauses; every unload logged) hold here too.
+const MODEL_TOOLS = [
+  { type: 'function', function: { name: 'list_models', description: "This machine's models: state (ready, unloaded), needs_bytes, displaced (unloaded to make room, coming back), and memory.mem_available_bytes.", parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'reserve_for', description: 'Make room for a model before its job: dry_run true says what it would unload; false unloads that (never you), loads the model and holds it for its job. What it unloads comes back by itself after the job.',
+    parameters: { type: 'object', properties: { model: { type: 'string' }, seconds: { type: 'integer' }, dry_run: { type: 'boolean' } }, required: ['model'] } } },
+  { type: 'function', function: { name: 'unload_model', description: 'Unload one model now (never you, the chat model); it comes back by itself after hold_s seconds.',
+    parameters: { type: 'object', properties: { model: { type: 'string' }, hold_s: { type: 'integer' } }, required: ['model'] } } },
+  { type: 'function', function: { name: 'load_model', description: 'Load a model now, for example one you unloaded.', parameters: { type: 'object', properties: { model: { type: 'string' } }, required: ['model'] } } },
+];
+const MODEL_TOOL_NAMES = new Set(MODEL_TOOLS.map(t => t.function.name));
+let MM = { enabled: false, text: '' }; // /v1/skills/model-manager
+async function loadSkill() {
+  try { const r = await api('/v1/skills/model-manager'); if (r.ok) MM = await r.json(); } catch {}
+}
+// A model tool call through /mcp: its JSON text (or the reason it failed).
+async function modelTool(name, args, signal) {
+  const r = await api('/mcp', { json: { jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: args } }, signal });
+  const j = await r.json();
+  if (j.error) return JSON.stringify({ error: j.error.message });
+  const text = ((j.result && j.result.content) || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+  return j.result && j.result.isError ? JSON.stringify({ error: text }) : text;
+}
 const SUGGEST = [
   ['Explain something', 'How does a GPU speed up neural networks?'],
   ['Make a picture', 'Make me a picture of a red fox sitting in fresh snow.'],
@@ -1256,10 +1279,14 @@ async function copyLog() {
 
 let busy = null; // {ctl} while a chat reply streams
 function apiMessages() {
-  const msgs = [{ role: 'system', content: S.instructions.trim() || DEFAULT_SYSTEM }];
-  const list = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool'));
+  const base = S.instructions.trim() || DEFAULT_SYSTEM;
+  const msgs = [{ role: 'system', content: MM.enabled && S.tools ? `${base}\n\n${MM.text}` : base }];
+  const list = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool' || (m.role === 'sys' && m.callId)));
   for (const m of list) {
     if (m.role === 'user' && m.text) msgs.push({ role: 'user', content: m.text });
+    else if (m.role === 'sys') { // a model tool's answer
+      if (msgs.some(x => x.tool_calls && x.tool_calls.some(c => c.id === m.callId))) msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result || '' });
+    }
     else if (m.role === 'assistant') {
       const content = splitThink(m.text || '').answer;
       if (m.calls && m.calls.length) msgs.push({ role: 'assistant', content: content || null, tool_calls: m.calls });
@@ -1287,6 +1314,7 @@ function chatBody() {
   if (S.think) b.chat_template_kwargs = { enable_thinking: true };
   else { b.chat_template_kwargs = { enable_thinking: false }; b.reasoning_effort = 'none'; }
   const offered = S.tools ? [has('image') && CHAT_TOOLS.image, has('video') && CHAT_TOOLS.video].filter(Boolean) : [];
+  if (S.tools && MM.enabled) offered.push(...MODEL_TOOLS);
   if (offered.length) { b.tools = offered; b.tool_choice = 'auto'; }
   return b;
 }
@@ -1295,7 +1323,7 @@ async function chatTurn() {
   busy = { ctl };
   renderControls();
   try {
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < (MM.enabled ? 8 : 4); round++) { // model management: check, reserve, make, confirm
       const am = addMsg({ role: 'assistant', text: '', reasoning: '', streaming: true, via: 'text' });
       const calls = await streamReply(am, ctl.signal);
       am.streaming = false;
@@ -1402,6 +1430,19 @@ async function runTool(call, signal) {
   const name = call.function.name;
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
+  if (MODEL_TOOL_NAMES.has(name)) {
+    const nm = note(`${name.replace('_', ' ')}${args.model ? ' ' + args.model : ''}${args.dry_run ? ' (checking)' : ''}…`);
+    dbg('tool.start', { name, args });
+    nm.callId = call.id;
+    nm.result = await modelTool(name, args, signal);
+    let r = {};
+    try { r = JSON.parse(nm.result); } catch {}
+    nm.text = r.error ? `${name}: ${r.error}` : r.message ? `${name}${args.model ? ' ' + args.model : ''}: ${r.message}${r.unloads && r.unloads.length ? ' (' + r.unloads.join(', ') + ')' : ''}` : `${name}: done`;
+    nm.error = !!r.error;
+    draw(nm);
+    saveConv();
+    return;
+  }
   const kind = name === 'generate_video' ? 'video' : 'image';
   const tm = addMsg({ role: 'tool', kind, callId: call.id, args, owner: PAGE_ID, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
   dbg('tool.start', { name, args });
@@ -2182,8 +2223,22 @@ function handle(ev) {
       botMsg(ev.item_id);
       play(ev.item_id, ev.delta);
       break;
+    case 'localrouter.voice.paused':
+      if (!V.paused) note(`Voice paused: ${ev.model ? ev.model + ' is unloaded' : 'a voice model is unloaded'}${ev.for_model ? ' to make room for ' + ev.for_model : ''}. It comes back by itself.`);
+      V.paused = true;
+      renderVoice();
+      break;
+    case 'localrouter.voice.resumed':
+      if (V.paused) note('Voice is back.');
+      V.paused = false;
+      renderVoice();
+      break;
     case 'response.output_item.done':
-      if (ev.item && ev.item.type === 'function_call') {
+      if (ev.item && ev.item.type === 'function_call' && MODEL_TOOL_NAMES.has(ev.item.name)) {
+        let args = {};
+        try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
+        note(`${ev.item.name.replace('_', ' ')}${args.model ? ' ' + args.model : ''}${args.dry_run ? ' (checking)' : ''}`);
+      } else if (ev.item && ev.item.type === 'function_call') {
         const kind = ev.item.name === 'generate_video' ? 'video' : 'image';
         let args = {};
         try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
@@ -2248,6 +2303,7 @@ function handle(ev) {
 function voiceState() {
   if (!V.ws) return 'off';
   if (V.ws.readyState === WebSocket.CONNECTING || !V.mic) return 'connecting';
+  if (V.paused) return 'paused';
   if (V.holding) return 'talking';
   if (V.userSpeaking) return 'hearing';
   if (V.live.length) return 'speaking';
@@ -2260,6 +2316,7 @@ const STATE_TEXT = {
   listening: ['Listening', 'Just talk; I answer when you pause'], hearing: ['Hearing you…', ''],
   thinking: ['Thinking…', 'Tap the orb to stop'], speaking: ['Speaking', 'Tap the orb or just talk to interrupt'],
   muted: ['Muted', 'Tap Unmute to talk'], ptt: ['Ready', 'Hold the button while you talk'], talking: ['Listening…', 'Release to send'],
+  paused: ['Voice paused, making video…', 'The voice models make room for a job and come back by themselves'],
 };
 function renderVoice() {
   const s = voiceState();
@@ -2480,6 +2537,7 @@ window.jarvis = { get conversation() { return cur; }, get voice() { return { con
 openConv(store.get('current', null) || ((convs.find(c => c.msgs.length) || {}).id));
 renderControls();
 renderVoice();
+loadSkill();
 loadModels().then(pollTools);
 setInterval(pollTools, 4000);
 setInterval(watchJobs, 3000);

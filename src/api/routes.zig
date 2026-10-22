@@ -60,6 +60,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..]);
+    if (m == .GET and eql(p, "/v1/skills/model-manager")) return h.jsonValue(req, a, .ok, .{ .enabled = app.cfg.voice.tools and app.cfg.voice.manage_models, .text = @import("../voice/skill.zig").model_skill });
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
     return h.fail(req, a, 404, "invalid_request_error", "no such route");
@@ -111,7 +112,7 @@ fn toolControl(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u
     return tools(app, req, a);
 }
 
-fn toolIndex(app: *App, id: []const u8) ?usize {
+pub fn toolIndex(app: *App, id: []const u8) ?usize {
     for (app.scheduler.slots, 0..) |slot, i| if (eql(slot.tool.config().id, id)) return i;
     return null;
 }

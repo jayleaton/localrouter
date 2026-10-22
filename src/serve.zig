@@ -74,6 +74,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var scheduler: sched.Scheduler = .{ .io = io, .gpa = gpa, .cfg = &cfg, .slots = slots, .table = &table };
     defer scheduler.deinit();
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
+    scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     defer app.voice.deinit(gpa);
 
     // `host` may be an IP, localhost, all or tailscale (see bind.zig); listen on the resolved address
