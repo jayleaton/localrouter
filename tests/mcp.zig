@@ -127,7 +127,7 @@ test "mcp transcribe_audio by path: only files inside local_files are read" {
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = outside, .data = try wav(a) });
     defer Io.Dir.cwd().deleteFile(io, outside) catch {};
 
-    const cfg = try std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"local_files\": [\"{s}\"], \"tools\": [" ++ tools ++ "]}}", .{root});
+    const cfg = try std.fmt.allocPrint(a, "{{{s}, \"local_files\": [\"{s}\"], \"tools\": [{s}]}}", .{ harness.reserve, root, tools });
     var d = try Daemon.start(testing.allocator, io, "mcp-files", cfg);
     defer d.stop();
 
