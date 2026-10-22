@@ -60,18 +60,20 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const jobs_dir = try std.fs.path.join(arena, &.{ cfg.data_dir, "jobs" });
     const log_dir = try std.fs.path.join(arena, &.{ cfg.data_dir, "logs" });
     try Io.Dir.cwd().createDirPath(io, jobs_dir);
+    const gate_path = try std.fs.path.join(arena, &.{ cfg.data_dir, "locks", "speech.gate" }); // speech first (sched/speech_gate.zig)
+    try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(gate_path).?);
 
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
     for (procs, slots, cfg.tools) |*p, *s, *t| {
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock }, t);
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path }, t);
         s.* = .{ .tool = p.asTool() };
     }
     defer for (procs) |*p| p.deinit();
 
     var table: jobs.Table = .{ .gpa = gpa };
     defer table.deinit();
-    var scheduler: sched.Scheduler = .{ .io = io, .gpa = gpa, .cfg = &cfg, .slots = slots, .table = &table };
+    var scheduler: sched.Scheduler = .{ .io = io, .gpa = gpa, .cfg = &cfg, .slots = slots, .table = &table, .speech = .init(gate_path) };
     defer scheduler.deinit();
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     defer app.voice.deinit(gpa);
