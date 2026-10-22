@@ -332,7 +332,7 @@ fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
         .unloads_bytes = ms,
         .pauses_voice = voice,
         .message = if (b.dry_run)
-            (if (plan.count == 0) "it fits now: nothing needs unloading" else "these would be unloaded; they come back by themselves after the job")
+            (if (plan.count == 0) "it fits now: nothing needs unloading" else "these would be unloaded; they come back by themselves after the job. Tell the user what pauses before you reserve")
         else if (plan.count == 0) "it fits; loaded and held for its job" else "unloaded these, loaded and held the model; run its job now: they come back by themselves when it is done",
     });
 }
