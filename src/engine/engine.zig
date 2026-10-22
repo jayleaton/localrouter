@@ -254,6 +254,11 @@ pub fn voices(cfg: *const ToolConfig) ?[]const std.json.Value {
     return optionList(cfg, "voices");
 }
 
+/// Whether the tool lists `voice` among its `voices`. A tool that lists none takes any voice, but is never chosen by one.
+pub fn hasVoice(cfg: *const ToolConfig, voice: []const u8) bool {
+    return listed(voices(cfg) orelse return false, voice);
+}
+
 /// An array option from the tool's `options` object, else null.
 pub fn optionList(cfg: *const ToolConfig, key: []const u8) ?[]const std.json.Value {
     const opts = cfg.options orelse return null;
@@ -292,6 +297,7 @@ test "a speech tool's voices are checked before it loads; cmd tools get their ki
     try std.testing.expect(check(tts, &.{ .speech = .{ .input = "hi" } }, &why));
     try std.testing.expect(!check(tts, &.{ .speech = .{ .input = "hi", .voice = "c" } }, &why));
     try std.testing.expectEqualStrings("model 'tts' has no voice 'c'; its voices: a, b", why.buffered());
+    try std.testing.expect(hasVoice(tts, "a") and !hasVoice(tts, "c") and !hasVoice(c.tool("stt").?, "a"));
 
     const k = try config.parse(arena.allocator(),
         \\{"tools": [{"id": "kitten", "kind": "speech", "cmd": ["x"], "options": {"voices": ["Bruno", "Rosie"], "default_voice": "Bruno",

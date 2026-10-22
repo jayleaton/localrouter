@@ -106,16 +106,17 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
 }
 
 /// The speech models to try, in order: the one the session or config names, else the configured `speech_models` that
-/// exist here and are qualified, else the text_to_speech default (null).
-fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8) ![]const ?[]const u8 {
+/// exist here and are qualified (those that list `voice` first, so a voice picked from any model's list is spoken in
+/// it), else the text_to_speech default (null).
+fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8, voice: []const u8) ![]const ?[]const u8 {
     if (named_model.len > 0) return a.dupe(?[]const u8, &.{named_model});
     var list: std.ArrayList(?[]const u8) = .empty;
     var buf: [512]u8 = undefined;
-    for (app.cfg.voice.speech_models) |id| {
+    for ([_]bool{ true, false }) |with_voice| for (app.cfg.voice.speech_models) |id| {
         const c = app.cfg.tool(id) orelse continue;
         if (!engine.supports(c, .text_to_speech) or engine.unqualified(app.io, a, c, &buf) != null) continue;
-        try list.append(a, id);
-    }
+        if ((voice.len > 0 and engine.hasVoice(c, voice)) == with_voice) try list.append(a, id);
+    };
     if (list.items.len == 0) try list.append(a, null);
     return list.items;
 }
@@ -137,11 +138,12 @@ const Counted = struct {
 fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     const l = self(ptr);
     const app = l.app;
-    const candidates = try speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model);
+    const wanted = if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+    const candidates = try speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model, wanted);
     var counted: Counted = .{ .sink = sink };
     const out: backend.PcmSink = .{ .ctx = &counted, .write = Counted.write };
     for (candidates, 0..) |model, n| {
-        const voice = if (n > 0) "" else if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+        const voice = if (n > 0) "" else wanted;
         speakWith(app, a, model, voice, text, out, stop, why) catch |err| {
             if (err != error.Failed or n + 1 == candidates.len or counted.samples > 0) return err;
             std.log.warn("voice: speech model {s} failed ({s}); trying {s}", .{ model orelse "default", why.message, candidates[n + 1] orelse "default" });
