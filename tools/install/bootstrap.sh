@@ -62,12 +62,12 @@ done < <(prereqs "$p" "${keys[@]}")
 # ---- 2. the plan: each step, done or to do; what the rest needs
 mapfile -t todo < <(steps "$p" "${keys[@]}")
 need_dl=0 need_disk=0 warm=0 peak=0 accepts=()
-for k in host "${keys[@]}"; do
-  left=0
-  for s in "${todo[@]}"; do [ "$(jq -r .model <<< "$s")" = "$k" ] && ! is_done "$s" && left=1; done
-  if [ $k = host ]; then m=$(jq -c .host "$p"); else m=$(model "$p" "$k"); fi
-  [ $left = 1 ] && { need_dl=$((need_dl + $(jq .download_bytes <<< "$m"))); need_disk=$((need_disk + $(jq .disk_bytes <<< "$m"))); }
-  [ $k = host ] && continue
+for s in "${todo[@]}"; do   # what the steps still to do download and leave on disk
+  is_done "$s" && continue
+  need_dl=$((need_dl + $(jq '.download_bytes // 0' <<< "$s"))); need_disk=$((need_disk + $(jq '.disk_bytes // 0' <<< "$s")))
+done
+for k in "${keys[@]}"; do
+  m=$(model "$p" "$k")
   b=$(jq '.memory_bytes + (.working_bytes // 0)' <<< "$m")
   if [ "$(jq .warm <<< "$m")" = true ]; then warm=$((warm + b)); elif [ "$b" -gt "$peak" ]; then peak=$b; fi
   while read -r a; do [ -n "$a" ] && accepts+=("$k: $a"); done < <(jq -r '.accept[]? // empty' <<< "$m")
