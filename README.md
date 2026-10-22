@@ -89,16 +89,19 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 
 | MCP tool | Does |
 | --- | --- |
-| `list_models` | the models, what each can do, which capabilities each serves by default (`default_for`), and whether it is loaded |
-| `generate_image` | text to image. Waits, returns the PNGs inline and as links; edit inputs are accepted by the API but refused by the current engines |
+| `list_models`, `list_voices` | the models (what each can do, `default_for`, state, memory) and the speech voices |
+| `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id; edit inputs are refused by the current engines |
 | `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
 | `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
-| `get_job`, `cancel_job` | follow or stop a video job |
+| `synthesize_speech`, `transcribe_audio` | speech as WAV (inline and a link) in any listed voice; the transcript of a URL, base64 audio or a file on the box |
+| `get_job`, `cancel_job` | follow or stop a long job |
 | `release_models` | unload everything now |
 
 The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`,
 `/v1/audio/...`, `/v1/chat/completions` whole or streamed):
-[docs/AGENTS.md](docs/AGENTS.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
+[docs/AGENTS.md](docs/AGENTS.md). Config snippets for Claude Code, Codex, Cursor and any MCP client, an example call for every
+tool, and the security note (there is no authentication: keep it on loopback or the tailnet) are in
+[docs/MCP.md](docs/MCP.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
 
 ## Configuration
 

@@ -1,6 +1,7 @@
 {
  "machine": "dgx-01",
  "reserve_bytes": 6442450944,
+ "local_files": ["@DEPLOY@/inbox"],
  "defaults": {"chat_completion": "qwen3.8-27b", "text_to_speech": "fishaudio/drama-3",
               "speech_to_text": "whisper-large-v3-turbo", "text_to_image": "qwen-image-2.1-turbo",
               "text_to_video": "minimax-h3"},

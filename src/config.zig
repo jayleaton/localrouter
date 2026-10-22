@@ -80,6 +80,7 @@ pub const Config = struct {
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
+    local_files: []const []const u8 = &.{}, // directories whose audio files MCP tools may read by path (`transcribe_audio` path); none by default: the API has no auth
     gpu_lock: []const u8 = "", // the host's GPU lock: the scheduler holds it (shared) while any tool is loaded, against GPU users outside LocalRouter
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     voice: Voice = .{},

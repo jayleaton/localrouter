@@ -12,7 +12,8 @@ tailnet name or IP), or `--host all` / an IP (`host` in the config takes the sam
 
 ## MCP (the easy way)
 
-The same server speaks the Model Context Protocol at `http://<host>:8190/mcp` (Streamable HTTP, stateless):
+The same server speaks the Model Context Protocol at `http://<host>:8190/mcp` (Streamable HTTP, stateless); [MCP.md](MCP.md) has
+the client configs, every tool with an example, and the security note:
 
 ```bash
 claude mcp add --transport http localrouter http://<host>:8190/mcp
@@ -23,7 +24,8 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp
 | `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, whether each is loaded, and `qualified` for a model gated on this machine's GPU |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `generate_video` | `prompt`, `size` (omit it for the model's own size), `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
-| `transcribe_audio` | `audio` (base64, data URL or URL), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
+| `list_voices` | each speech model's voices, its default voice, whether it is loaded and whether it is the default |
+| `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside the config's `local_files`), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
