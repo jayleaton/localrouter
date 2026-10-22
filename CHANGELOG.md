@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Web client (Jarvis) at `/voice`, with `/` redirecting to it: one embedded HTML file for chat and voice in one
+  conversation.
+  - Chat: streamed chat with Markdown, a reasoning switch, stop and regenerate.
+  - Voice: hands-free or push to talk over `/v1/realtime`, with interim and final transcripts, streamed audio, and
+    barge-in by voice or tap. You can choose the speech model and the voice.
+  - Images and videos from tool calls show inline, from chat and from voice.
+  - A status strip shows model state and per-turn latency.
+  - Conversations are kept in `localStorage`, and a "copy log" button copies the debug log.
+  - A voice session's draft transcript is now sent as `localrouter.transcription.partial`.
+  - `tools/spark/jarvis/client_check.py` checks the page in headless Chrome.
 - Chat: a new kind, `chat` (`chat_completion`), behind OpenAI's `POST /v1/chat/completions` (whole and server-sent
   events) and the MCP `chat` tool. The first model is Qwen3.8 27B on TensorFold 1.1.1's own server (MLX 4-bit with the
   DFlash2 drafter), run by the new `openai_server` worker engine, which supervises a model's OpenAI-compatible server

@@ -207,7 +207,7 @@ loaded. A model that is not yet qualified on this machine (`"qualified": false` 
 pcm16 at 24 kHz mono both ways (base64 in `input_audio_buffer.append` and `response.audio.delta`). Server VAD ends
 each turn; the turn is transcribed, answered by the chat model with the session's history, and spoken back sentence
 by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) stops its audio and cancels the reply.
-`http://127.0.0.1:8190/voice` is a browser client for it (microphone and speaker, no install).
+`http://127.0.0.1:8190/voice` (or `/`) is a browser client for chat and voice (no install; [VOICE.md](dev/VOICE.md#the-web-client)).
 
 | `session.update` field | Notes |
 | --- | --- |

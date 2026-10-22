@@ -2,117 +2,728 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LocalRouter voice</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#161618">
+<title>Jarvis · LocalRouter</title>
 <style>
   :root { color-scheme: light dark; --bg: #f6f6f5; --fg: #1d1d1f; --muted: #6e6e73; --panel: #fff; --line: #d8d8dc;
-          --user: #e3ecf8; --bot: #ececee; --accent: #2d6cdf; --err: #c62828; }
+          --user: #e3ecf8; --bot: #ececee; --accent: #2d6cdf; --err: #c62828; --ok: #2e9e5b; --warn: #d49b1f;
+          --live: #b05ad6; --code: #f0f0f2; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #161618; --fg: #e8e8ea; --muted: #9a9aa0; --panel: #1f1f22; --line: #343438;
-            --user: #22344f; --bot: #2a2a2e; --accent: #6b9cff; --err: #ff6b6b; }
+            --user: #22344f; --bot: #232327; --accent: #6b9cff; --err: #ff6b6b; --code: #2b2b30; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
-  main { max-width: 820px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
-         height: 100vh; }
-  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  h1 { font-size: 18px; margin: 0 auto 0 0; }
-  #status { color: var(--muted); }
-  #status::before { content: "\25CF"; margin-right: 6px; color: var(--line); }
-  #status[data-s="listening"]::before { color: #2e9e5b; }
-  #status[data-s="user speaking"]::before { color: var(--accent); }
-  #status[data-s="thinking"]::before { color: #d49b1f; }
-  #status[data-s="speaking"]::before { color: #b05ad6; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, sans-serif;
+         -webkit-text-size-adjust: 100%; }
+  main { max-width: 860px; margin: 0 auto; height: 100dvh; display: flex; flex-direction: column;
+         padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+  h1 { font-size: 17px; margin: 0; }
+  header select { flex: 1 1 auto; min-width: 0; max-width: 360px; }
+  select { min-width: 0; text-overflow: ellipsis; }
+  .grow { flex: 1; }
   button, input, select, textarea { font: inherit; color: inherit; background: var(--panel);
                                     border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
-  button { cursor: pointer; }
+  button { cursor: pointer; touch-action: manipulation; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button:disabled { opacity: .5; cursor: default; }
-  .note { border: 1px solid var(--err); color: var(--err); border-radius: 8px; padding: 8px 12px; }
-  details { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
-  summary { cursor: pointer; color: var(--muted); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .icon { padding: 6px 9px; }
+  #strip { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 12px 6px; font-size: 12px; color: var(--muted); }
+  @media (max-width: 640px) { #strip { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; } }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+  .chip::before { content: "\25CF"; margin-right: 4px; color: var(--line); }
+  .chip[data-s="ready"]::before { color: var(--ok); }
+  .chip[data-s="busy"]::before { color: var(--warn); }
+  .chip[data-s="loading"]::before { color: var(--accent); }
+  .chip[data-s="failed"]::before { color: var(--err); }
+  .chip.plain::before { content: none; }
+  .chip.lat { color: var(--fg); }
+  .note { margin: 0 12px 6px; border: 1px solid var(--err); color: var(--err); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px 12px 12px;
+         overscroll-behavior: contain; }
+  .msg { max-width: 88%; padding: 8px 12px; border-radius: 14px; word-wrap: break-word; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--user); white-space: pre-wrap; }
+  .msg.assistant { align-self: flex-start; background: var(--bot); }
+  .msg.partial { color: var(--muted); font-style: italic; }
+  .msg.tool { align-self: flex-start; background: none; padding: 0; max-width: 100%; }
+  .meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .msg.user .meta { text-align: right; }
+  .sys { align-self: center; color: var(--muted); font-size: 13px; text-align: center; max-width: 90%; }
+  .sys.error { color: var(--err); }
+  .body > :first-child { margin-top: 0; } .body > :last-child { margin-bottom: 0; }
+  .body p, .body ul, .body ol, .body pre, .body table, .body blockquote { margin: .45em 0; }
+  .body ul, .body ol { padding-left: 1.4em; }
+  .body h1, .body h2, .body h3, .body h4 { font-size: 1.05em; margin: .6em 0 .3em; }
+  .body code { background: var(--code); border-radius: 4px; padding: 0 4px; font: 13px ui-monospace, monospace; }
+  .body pre { background: var(--code); border-radius: 8px; padding: 8px 10px; overflow-x: auto; }
+  .body pre code { padding: 0; background: none; }
+  .body table { border-collapse: collapse; display: block; overflow-x: auto; }
+  .body th, .body td { border: 1px solid var(--line); padding: 3px 8px; }
+  .body blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
+  .body a { color: var(--accent); }
+  .body img { max-width: 100%; border-radius: 8px; }
+  details.think { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+  details.think summary { cursor: pointer; }
+  details.think div { white-space: pre-wrap; border-left: 2px solid var(--line); padding-left: 8px; margin-top: 4px; }
+  .media { display: flex; gap: 8px; flex-wrap: wrap; }
+  .media img { width: min(320px, 70vw); border-radius: 10px; border: 1px solid var(--line); display: block; }
+  .media video { width: min(420px, 85vw); border-radius: 10px; display: block; }
+  .tag { color: var(--muted); font-size: 12px; }
+  footer { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line);
+           display: flex; flex-direction: column; gap: 8px; background: var(--bg); }
+  .row { display: flex; gap: 8px; align-items: flex-end; }
+  #text { flex: 1; resize: none; min-height: 40px; max-height: 160px; line-height: 1.4; }
+  .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  .bar select { padding: 4px 8px; font-size: 13px; max-width: 42vw; }
+  #mic { width: 56px; height: 56px; border-radius: 50%; padding: 0; font-size: 22px; flex: none; position: relative;
+         -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
+  #mic::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 3px solid var(--ok);
+                opacity: 0; transform: scale(calc(1 + var(--lvl, 0) * .35)); transition: transform 80ms; }
+  #mic[data-s="listening"]::after, #mic[data-s="talking"]::after { opacity: .9; }
+  #mic[data-s="talking"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #mic[data-s="muted"] { color: var(--muted); }
+  #mic[data-s="connecting"] { opacity: .6; }
+  #vstate { color: var(--muted); min-width: 7em; }
+  #vstate[data-s="speaking"] { color: var(--live); }
+  #vstate[data-s="thinking"] { color: var(--warn); }
+  #vstate[data-s="you"] { color: var(--accent); }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--fg);
+           width: min(560px, 94vw); padding: 14px 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
   label.wide { grid-column: 1 / -1; }
-  textarea { min-height: 60px; resize: vertical; }
-  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px; }
-  .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
-  .user { align-self: flex-end; background: var(--user); }
-  .assistant { align-self: flex-start; background: var(--bot); }
-  .partial { color: var(--muted); font-style: italic; }
-  .tag { color: var(--muted); font-size: 12px; margin-left: 6px; }
-  .sys { align-self: center; color: var(--muted); font-size: 13px; text-align: center; }
-  .sys.error { color: var(--err); }
-  .media { align-self: flex-start; display: flex; gap: 8px; flex-wrap: wrap; }
-  .media img { width: 160px; height: 160px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
-  .media video { max-width: 360px; border-radius: 8px; }
-  form { display: flex; gap: 8px; }
-  form input { flex: 1; }
+  label.check { flex-direction: row; align-items: center; gap: 8px; }
+  dialog textarea { min-height: 70px; resize: vertical; }
+  dialog .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>LocalRouter voice</h1>
-    <span id="status" data-s="disconnected">disconnected</span>
-    <button id="mute" disabled>Mute</button>
-    <button id="start" class="primary">Start</button>
+    <h1>Jarvis</h1>
+    <select id="conv" aria-label="Conversation"></select>
+    <button id="new" class="icon" title="New conversation">＋</button>
+    <span class="grow"></span>
+    <button id="copylog" class="icon" title="Copy the debug log (the last events, for a bug report)">Log</button>
+    <button id="gear" class="icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
+  <div id="strip" aria-live="off"></div>
   <div id="insecure" class="note" hidden>This page is not a secure context, so the browser will not open the
-    microphone. Use https, or open it as http://127.0.0.1 on this machine.</div>
-  <details id="settings">
-    <summary>Settings</summary>
-    <div class="grid">
-      <label>Speech model <select id="speech"><option value="">default</option></select></label>
-      <label>Voice <select id="voice"><option value="">default</option></select></label>
-      <label>Chat model <input id="model" list="chats" placeholder="default"><datalist id="chats"></datalist></label>
-      <label>Silence before reply (ms) <input id="silence" type="number" min="100" max="5000" step="50" value="500"></label>
-      <label>VAD threshold <span id="thresholdv">0.5</span>
-        <input id="threshold" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-      <label class="wide">Instructions <textarea id="instructions" placeholder="the daemon's default"></textarea></label>
-    </div>
-  </details>
+    microphone. Use https, or http://127.0.0.1 on this machine. Chat still works.</div>
   <div id="log" aria-live="polite"></div>
-  <form id="typed">
-    <input id="text" placeholder="Type a message" autocomplete="off">
-    <button type="submit">Send</button>
-  </form>
+  <footer>
+    <div class="bar">
+      <button id="think" title="Let the model reason before it answers">Reasoning: off</button>
+      <button id="regen" title="Answer the last message again">Regenerate</button>
+      <span class="grow"></span>
+      <label class="check" title="Voice turns: the server hears when you stop, or you hold the mic"><select id="mode">
+        <option value="vad">Hands-free</option><option value="ptt">Push to talk</option></select></label>
+      <select id="speech" title="Speech model" aria-label="Speech model"></select>
+      <select id="voice" title="Voice" aria-label="Voice"></select>
+    </div>
+    <div class="row">
+      <button id="mic" title="Voice" aria-label="Voice">🎤</button>
+      <textarea id="text" rows="1" placeholder="Message" autocomplete="off"></textarea>
+      <button id="send" class="primary">Send</button>
+    </div>
+    <div class="bar"><span id="vstate" data-s="off">voice off</span><button id="hush" hidden>■ Stop speaking</button>
+      <button id="hangup" hidden>End voice</button></div>
+  </footer>
 </main>
+<dialog id="settings">
+  <form method="dialog">
+    <div class="grid">
+      <label>Chat model <select id="chatmodel"></select></label>
+      <label>Max reply tokens <input id="maxtok" type="number" min="16" max="32768" step="16" placeholder="model default"></label>
+      <label>Silence that ends a turn (ms) <input id="silence" type="number" min="100" max="5000" step="50"></label>
+      <label>VAD threshold <input id="threshold" type="number" min="0" max="1" step="0.05"></label>
+      <label class="check"><input id="tools" type="checkbox"> Offer image and video tools</label>
+      <label class="check"><input id="gate" type="checkbox"> Echo gate (hands-free, while it speaks)</label>
+      <label>Debug log lines to copy <input id="logn" type="number" min="20" max="2000" step="10"></label>
+      <label>API key <input id="key" type="password" autocomplete="off" placeholder="none"></label>
+      <label class="wide">Instructions (system prompt) <textarea id="instructions" placeholder="the default"></textarea></label>
+    </div>
+    <div class="acts">
+      <button type="button" id="wipe">Delete this conversation</button>
+      <span class="grow"></span>
+      <button value="ok" class="primary">Done</button>
+    </div>
+  </form>
+</dialog>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
 const RATE = 24000;
+const CHUNK = 960; // 40 ms of 24 kHz samples a microphone message
+const LOUD = 250 / 32768; // a reply sample above this is audible (about -42 dBFS), as the daemon's timing counts it
+const DEFAULT_SYSTEM = "You are Jarvis, a helpful assistant running on the user's own machine. Be concise.";
+const CHAT_TOOLS = {
+  image: { type: 'function', function: { name: 'generate_image', description: 'Make a picture on this machine from a detailed description. The user sees it inline.',
+    parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what to draw, in detail' },
+      size: { type: 'string', description: 'WIDTHxHEIGHT in multiples of 16, e.g. 1024x1024 (default) or 1344x768' } }, required: ['prompt'] } } },
+  video: { type: 'function', function: { name: 'generate_video', description: 'Make a short video clip with sound on this machine. It takes minutes.',
+    parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what happens, in detail' },
+      seconds: { type: 'integer', description: 'length, 1 to 20 (default 5)' } }, required: ['prompt'] } } },
+};
+
+// ---------------------------------------------------------------- storage, settings, debug log
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('jarvis.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) {
+    try { localStorage.setItem('jarvis.' + k, JSON.stringify(v)); } catch (e) {
+      if (k === 'convs' && convs.length > 1) { convs.sort((a, b) => b.updated - a.updated).pop(); store.set(k, convs); }
+      else dbg('storage', { error: e.message });
+    }
+  },
+};
+const S = Object.assign({ chatModel: '', think: false, speechModel: '', voice: '', mode: 'vad', silence: 500, threshold: 0.5,
+  tools: true, gate: true, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
+const saveSettings = () => store.set('settings', S);
+
+const debug = [];
+function dbg(kind, data) {
+  debug.push({ t: Math.round(performance.now()), at: new Date().toISOString(), kind, ...data });
+  if (debug.length > 2000) debug.splice(0, debug.length - 2000);
+}
+window.addEventListener('error', e => dbg('page.error', { message: e.message, at: `${e.filename}:${e.lineno}` }));
+window.addEventListener('unhandledrejection', e => dbg('page.rejection', { message: String(e.reason && e.reason.message || e.reason) }));
+
+// A key in the URL fragment (#key=...) is taken once and removed from the address bar.
+(function keyFromFragment() {
+  const m = /(?:^|[#&])key=([^&]+)/.exec(location.hash);
+  if (!m) return;
+  S.key = decodeURIComponent(m[1]);
+  saveSettings();
+  history.replaceState(null, '', location.pathname + location.search);
+})();
+
+// ---------------------------------------------------------------- conversations
+
+let convs = store.get('convs', []);
+let cur = null;
+const uid = p => p + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function newConv() {
+  cur = { id: uid('c'), title: 'New conversation', updated: Date.now(), msgs: [] };
+  convs.unshift(cur);
+  store.set('current', cur.id);
+  return cur;
+}
+function saveConv() {
+  if (!cur) return;
+  cur.updated = Date.now();
+  const first = cur.msgs.find(m => m.role === 'user' && m.text);
+  if (first) cur.title = first.text.slice(0, 48);
+  if (!convs.includes(cur)) convs.unshift(cur);
+  store.set('convs', convs);
+  fillConvs();
+}
+function fillConvs() {
+  $('conv').replaceChildren(...convs.slice().sort((a, b) => b.updated - a.updated).map(c =>
+    Object.assign(document.createElement('option'), { value: c.id, textContent: c.title || 'Untitled', selected: c === cur })));
+}
+function openConv(id) {
+  if (V.ws) voiceStop(); // the voice session holds the other conversation's history
+  cur = convs.find(c => c.id === id) || newConv();
+  store.set('current', cur.id);
+  els.clear();
+  $('log').replaceChildren();
+  for (const m of cur.msgs) draw(m);
+  fillConvs();
+  scrollDown(true);
+}
+const addMsg = m => { m.id = m.id || uid('m'); m.at = m.at || Date.now(); cur.msgs.push(m); draw(m); scrollDown(); return m; };
+
+// ---------------------------------------------------------------- markdown (escaped first; links http(s) or same-origin only)
+
+const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function href(u) {
+  try {
+    const url = new URL(u, location.href);
+    if (url.origin === location.origin || url.pathname.startsWith('/v1/files/') && /^https?:$/.test(url.protocol)) return url.pathname + url.search;
+    return /^https?:$/.test(url.protocol) ? url.href : null;
+  } catch { return null; }
+}
+function inline(s) {
+  return s.split(/(`[^`\n]+`)/).map((part, i) => {
+    if (i % 2) return `<code>${esc(part.slice(1, -1))}</code>`;
+    const keep = [];
+    let t = part.replace(/!?\[([^\]\n]*)\]\(([^)\s]+)\)/g, (all, label, u) => {
+      const h = href(u);
+      if (!h) return all;
+      keep.push(all[0] === '!' ? `<img src="${esc(h)}" alt="${esc(label)}">` : `<a href="${esc(h)}" target="_blank" rel="noopener">${esc(label)}</a>`);
+      return `\u0000${keep.length - 1}\u0000`;
+    });
+    t = esc(t)
+      .replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (all, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`)
+      .replace(/\*\*([^*\n][^\n]*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\*)/g, '$1<em>$2</em>')
+      .replace(/(^|[^\w])_([^_\s][^_\n]*?)_(?!\w)/g, '$1<em>$2</em>')
+      .replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    return t.replace(/\u0000(\d+)\u0000/g, (_, n) => keep[+n]);
+  }).join('');
+}
+function md(src) {
+  const lines = src.replace(/\r/g, '').split('\n');
+  const out = [];
+  const isList = l => /^\s*([-*+•]|\d+[.)])\s+/.test(l);
+  const isRule = l => /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
+  const isTableSep = l => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
+  const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => inline(c.trim()));
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    let m;
+    if ((m = /^\s*(```|~~~)\s*([\w+-]*)/.exec(l))) {
+      const body = [];
+      for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) body.push(lines[i]);
+      i++;
+      out.push(`<pre><code>${esc(body.join('\n'))}</code></pre>`);
+    } else if ((m = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(l))) {
+      const n = Math.min(m[1].length + 1, 4);
+      out.push(`<h${n}>${inline(m[2].replace(/\s#+$/, ''))}</h${n}>`);
+      i++;
+    } else if (isRule(l)) {
+      out.push('<hr>');
+      i++;
+    } else if (/^\s*>/.test(l)) {
+      const q = [];
+      for (; i < lines.length && /^\s*>/.test(lines[i]); i++) q.push(lines[i].replace(/^\s*>\s?/, ''));
+      out.push(`<blockquote>${md(q.join('\n'))}</blockquote>`);
+    } else if (l.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const head = cells(l);
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) rows.push(cells(lines[i]));
+      out.push(`<table><thead><tr>${head.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>${
+        rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+    } else if (isList(l)) {
+      const ordered = /^\s*\d+[.)]/.test(l);
+      const items = [];
+      for (; i < lines.length && (isList(lines[i]) || (/^\s+\S/.test(lines[i]) && items.length)); i++) {
+        if (isList(lines[i])) items.push(lines[i].replace(/^\s*([-*+•]|\d+[.)])\s+/, ''));
+        else items[items.length - 1] += ' ' + lines[i].trim();
+      }
+      const tag = ordered ? 'ol' : 'ul';
+      out.push(`<${tag}>${items.map(x => `<li>${inline(x)}</li>`).join('')}</${tag}>`);
+    } else if (!l.trim()) {
+      i++;
+    } else {
+      const p = [];
+      for (; i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !isList(lines[i]) && !isRule(lines[i]); i++) p.push(lines[i]);
+      if (!p.length) p.push(lines[i++]);
+      out.push(`<p>${p.map(inline).join('<br>')}</p>`);
+    }
+  }
+  return out.join('');
+}
+
+// A reply may carry its reasoning inline: <think>…</think>, or a stray </think> after reasoning written as plain text.
+function splitThink(text) {
+  const open = text.indexOf('<think>');
+  const close = text.indexOf('</think>');
+  if (open >= 0 && (close < 0 || close > open)) {
+    const end = close < 0 ? text.length : close;
+    return { reasoning: text.slice(open + 7, end), answer: (text.slice(0, open) + (close < 0 ? '' : text.slice(close + 8))).trim() };
+  }
+  if (close >= 0) return { reasoning: text.slice(0, close), answer: text.slice(close + 8).trim() };
+  return { reasoning: '', answer: text };
+}
+
+// ---------------------------------------------------------------- drawing messages
+
+const els = new Map();
+let drawQueued = new Set(), drawRaf = 0;
+function draw(m) {
+  drawQueued.add(m);
+  if (!drawRaf) drawRaf = requestAnimationFrame(() => { drawRaf = 0; const q = drawQueued; drawQueued = new Set(); q.forEach(drawNow); scrollDown(); });
+}
+function drawNow(m) {
+  let el = els.get(m.id);
+  if (m.gone) { if (el) el.remove(); els.delete(m.id); return; }
+  if (!el) {
+    el = document.createElement('div');
+    $('log').append(el);
+    els.set(m.id, el);
+  }
+  if (m.role === 'sys') {
+    el.className = 'sys' + (m.error ? ' error' : '');
+    el.textContent = m.text;
+    return;
+  }
+  if (m.role === 'tool') {
+    el.className = 'msg tool';
+    el.replaceChildren();
+    if (m.text && !(m.media && m.media.length)) el.append(Object.assign(document.createElement('div'), { className: 'sys' + (m.error ? ' error' : ''), textContent: m.text }));
+    if (m.media && m.media.length) el.append(mediaBox(m.media));
+    return;
+  }
+  el.className = `msg ${m.role}` + (m.partial ? ' partial' : '');
+  el.hidden = m.role === 'assistant' && !m.streaming && !m.text && !m.reasoning && !m.error && !m.interrupted && !!(m.calls && m.calls.length);
+  el.dataset.via = m.via || 'text';
+  el.replaceChildren();
+  if (m.role === 'user') {
+    el.append(document.createTextNode(m.text || (m.partial ? '…' : '')));
+  } else {
+    const { reasoning, answer } = splitThink(m.text || '');
+    const why = (m.reasoning || '') + reasoning;
+    if (why.trim()) {
+      const d = Object.assign(document.createElement('details'), { className: 'think', open: !answer && m.streaming });
+      d.append(Object.assign(document.createElement('summary'), { textContent: m.streaming && !answer ? 'Thinking…' : 'Reasoning' }),
+               Object.assign(document.createElement('div'), { textContent: why.trim() }));
+      el.append(d);
+    }
+    const body = Object.assign(document.createElement('div'), { className: 'body' });
+    body.innerHTML = md(answer) || (m.streaming && !why ? '<span class="tag">…</span>' : '');
+    el.append(body);
+  }
+  const meta = metaText(m);
+  if (meta) el.append(Object.assign(document.createElement('div'), { className: 'meta', textContent: meta }));
+}
+function metaText(m) {
+  const bits = [];
+  if (m.via === 'voice') bits.push('🎤');
+  if (m.interrupted) bits.push('interrupted');
+  if (m.error) bits.push(m.error);
+  const l = m.lat || {};
+  if (l.firstAudio != null) bits.push(`speech end → first audio ${l.firstAudio} ms`);
+  if (l.firstText != null && m.via === 'voice') bits.push(`first text ${l.firstText} ms`);
+  if (l.stages) bits.push(l.stages);
+  if (l.ttft != null) bits.push(`first token ${l.ttft} ms`);
+  if (l.tps) bits.push(`${l.tps} tok/s`);
+  return bits.join(' · ');
+}
+const blobs = new Map();
+function mediaSrc(url, set) {
+  if (!S.key) return set(url);
+  if (blobs.has(url)) return set(blobs.get(url));
+  api(url).then(r => r.ok ? r.blob() : Promise.reject(new Error(r.status))).then(b => {
+    const u = URL.createObjectURL(b);
+    blobs.set(url, u);
+    set(u);
+  }).catch(e => dbg('media', { url, error: e.message }));
+}
+function mediaBox(media) {
+  const box = Object.assign(document.createElement('div'), { className: 'media' });
+  for (const x of media) {
+    const h = href(x.url);
+    if (!h) continue;
+    if (x.kind === 'video') {
+      const v = box.appendChild(Object.assign(document.createElement('video'), { controls: true, playsInline: true, preload: 'metadata' }));
+      mediaSrc(h, u => { v.src = u; });
+    } else {
+      const a = box.appendChild(Object.assign(document.createElement('a'), { href: h, target: '_blank', rel: 'noopener' }));
+      const img = a.appendChild(Object.assign(document.createElement('img'), { alt: x.prompt || 'generated image', loading: 'lazy' }));
+      img.onload = () => scrollDown();
+      mediaSrc(h, u => { img.src = u; });
+    }
+  }
+  return box;
+}
+function scrollDown(force) {
+  const log = $('log');
+  if (force || log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
+}
+function note(text, error) { return addMsg({ role: 'sys', text, error: !!error }); }
+
+// ---------------------------------------------------------------- HTTP (the key, when one is set, as a bearer token)
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (S.key) headers.authorization = 'Bearer ' + S.key;
+  if (opts.json !== undefined) { headers['content-type'] = 'application/json'; opts.body = JSON.stringify(opts.json); }
+  const r = await fetch(path, { method: opts.method || (opts.body ? 'POST' : 'GET'), headers, body: opts.body, signal: opts.signal });
+  if (r.status === 401 && !opts.retried) {
+    const k = prompt('This LocalRouter needs an API key:', S.key || '');
+    if (k) { S.key = k.trim(); saveSettings(); return api(path, Object.assign({}, opts, { retried: true })); }
+  }
+  return r;
+}
+async function errorText(r) {
+  const t = await r.text().catch(() => '');
+  try { const j = JSON.parse(t); return (j.error && j.error.message) || t; } catch { return t || `HTTP ${r.status}`; }
+}
+
+// ---------------------------------------------------------------- models and the status strip
+
+let models = [], tools = { data: [] };
+async function loadModels() {
+  try {
+    const r = await api('/v1/models');
+    if (!r.ok) throw new Error(await errorText(r));
+    models = (await r.json()).data || [];
+  } catch (e) { note(`could not list models: ${e.message}`, true); return; }
+  const chats = models.filter(m => m.kind === 'chat');
+  fillSelect($('chatmodel'), [['', 'default'], ...chats.map(m => [m.id, short(m)])], S.chatModel);
+  const speech = models.filter(m => m.kind === 'speech');
+  const tts = speech.find(m => (m.default_for || []).includes('text_to_speech'));
+  fillSelect($('speech'), [['', tts ? `${short(tts)} (default)` : 'default speech'], ...speech.map(m => [m.id, short(m)])], S.speechModel);
+  fillVoices();
+  renderStrip();
+}
+function fillSelect(sel, pairs, chosen) {
+  sel.replaceChildren(...pairs.map(([value, label]) => Object.assign(document.createElement('option'), { value, textContent: label, selected: value === chosen })));
+}
+function fillVoices() {
+  const speech = models.filter(m => m.kind === 'speech');
+  const m = speech.find(x => x.id === S.speechModel) || speech.find(x => (x.default_for || []).includes('text_to_speech')) || speech[0];
+  const voices = ((m && m.voices) || []).map(v => (typeof v === 'string' ? v : v && (v.id || v.name))).filter(Boolean);
+  if (!voices.includes(S.voice)) S.voice = '';
+  fillSelect($('voice'), [['', (m && m.default_voice) ? `voice: ${m.default_voice}` : 'default voice'], ...voices.map(v => [v, v])], S.voice);
+  $('voice').hidden = voices.length < 2;
+}
+// "Fish Audio Drama 3 (TensorFold native, ...)" -> "Fish Audio Drama 3": the full name is in the chip's title.
+const short = m => (m.name || m.id).replace(/\s*[(,;].*$/, '') || m.id;
+const has = kind => models.some(m => m.kind === kind);
+async function pollTools() {
+  if (document.hidden) return;
+  try {
+    const r = await api('/v1/tools');
+    if (r.ok) tools = await r.json();
+  } catch {}
+  renderStrip();
+}
+const lastLat = { voice: null, chat: null };
+function renderStrip() {
+  const strip = $('strip');
+  const chips = [];
+  const name = id => short(models.find(x => x.id === id) || { id });
+  for (const t of tools.data || []) {
+    const st = t.state === 'unloaded' && t.last_error ? 'failed' : t.state;
+    const c = Object.assign(document.createElement('span'), { className: 'chip', textContent: name(t.id) });
+    c.dataset.s = st;
+    c.title = `${(models.find(x => x.id === t.id) || {}).name || t.id}, ${t.kind}: ${t.state}${t.keep_loaded ? ', kept warm' : ''}${t.last_error ? ' (' + t.last_error + ')' : ''}`;
+    chips.push(c);
+  }
+  if (tools.mem_available_bytes) chips.push(Object.assign(document.createElement('span'), { className: 'chip plain', textContent: `${(tools.mem_available_bytes / 2 ** 30).toFixed(0)} GiB free` }));
+  if (lastLat.voice) chips.push(Object.assign(document.createElement('span'), { className: 'chip plain lat', textContent: `voice: ${lastLat.voice}`, title: 'the last voice turn: end of your speech to the first audible reply audio, as this browser heard it' }));
+  if (lastLat.chat) chips.push(Object.assign(document.createElement('span'), { className: 'chip plain lat', textContent: `chat: ${lastLat.chat}` }));
+  strip.replaceChildren(...chips);
+}
+
+// ---------------------------------------------------------------- chat over /v1/chat/completions
+
+let busy = null; // {ctl} while a chat reply streams
+function apiMessages() {
+  const msgs = [{ role: 'system', content: S.instructions.trim() || DEFAULT_SYSTEM }];
+  const list = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool'));
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (m.role === 'user' && m.text) msgs.push({ role: 'user', content: m.text });
+    else if (m.role === 'assistant') {
+      const content = splitThink(m.text || '').answer;
+      if (m.calls && m.calls.length) msgs.push({ role: 'assistant', content: content || null, tool_calls: m.calls });
+      else if (content) msgs.push({ role: 'assistant', content });
+    } else if (m.role === 'tool') {
+      if (m.callId && msgs.some(x => x.tool_calls && x.tool_calls.some(c => c.id === m.callId))) msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result || m.text || '' });
+      else if (m.media && m.media.length) msgs.push({ role: 'system', content: `The ${m.media[0].kind} was made: ${m.media.map(x => x.url).join(' ')}` });
+    }
+  }
+  // A tool call that never got its result (the reply was stopped) still needs one, or the chat API refuses the history.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const calls = msgs[i].tool_calls;
+    if (!calls) continue;
+    let j = i + 1;
+    while (j < msgs.length && msgs[j].role === 'tool') j++;
+    const answered = new Set(msgs.slice(i + 1, j).map(x => x.tool_call_id));
+    msgs.splice(j, 0, ...calls.filter(c => !answered.has(c.id)).map(c => ({ role: 'tool', tool_call_id: c.id, content: '{"status":"cancelled"}' })));
+  }
+  return msgs;
+}
+function chatBody() {
+  const b = { messages: apiMessages(), stream: true, stream_options: { include_usage: true } };
+  if (S.chatModel) b.model = S.chatModel;
+  if (S.maxTokens > 0) b.max_tokens = S.maxTokens;
+  if (S.think) b.chat_template_kwargs = { enable_thinking: true };
+  else { b.chat_template_kwargs = { enable_thinking: false }; b.reasoning_effort = 'none'; }
+  const offered = S.tools ? [has('image') && CHAT_TOOLS.image, has('video') && CHAT_TOOLS.video].filter(Boolean) : [];
+  if (offered.length) { b.tools = offered; b.tool_choice = 'auto'; }
+  return b;
+}
+async function chatTurn() {
+  const ctl = new AbortController();
+  busy = { ctl };
+  renderControls();
+  try {
+    for (let round = 0; round < 4; round++) {
+      const am = addMsg({ role: 'assistant', text: '', reasoning: '', streaming: true, via: 'text' });
+      const calls = await streamReply(am, ctl.signal);
+      am.streaming = false;
+      draw(am);
+      saveConv();
+      if (!calls.length) break;
+      am.calls = calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } }));
+      saveConv();
+      for (const c of am.calls) await runTool(c, ctl.signal);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') note(`chat failed: ${e.message}`, true);
+  } finally {
+    const last = cur.msgs[cur.msgs.length - 1];
+    if (last && last.streaming) { last.streaming = false; if (ctl.signal.aborted) last.interrupted = true; draw(last); }
+    busy = null;
+    saveConv();
+    renderControls();
+  }
+}
+async function streamReply(am, signal) {
+  const body = chatBody();
+  dbg('chat.request', { messages: body.messages.length, think: S.think, tools: (body.tools || []).length });
+  const t0 = performance.now();
+  const r = await api('/v1/chat/completions', { json: body, signal });
+  if (!r.ok) { am.error = await errorText(r); dbg('chat.error', { status: r.status, error: am.error }); return []; }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', first = 0, last = 0, pieces = 0, usage = null, finish = '';
+  const calls = [];
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const event = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let j;
+        try { j = JSON.parse(data); } catch { continue; }
+        if (j.error) { am.error = j.error.message || 'the stream failed'; continue; }
+        if (j.usage) usage = j.usage;
+        const ch = (j.choices || [])[0];
+        if (!ch) continue;
+        const d = ch.delta || {};
+        if (d.content || d.reasoning_content || d.reasoning) {
+          if (!first) first = performance.now();
+          last = performance.now();
+          pieces++;
+          if (d.reasoning_content || d.reasoning) am.reasoning += d.reasoning_content || d.reasoning;
+          if (d.content) am.text += d.content;
+          draw(am);
+        }
+        for (const tc of d.tool_calls || []) {
+          const c = calls[tc.index || 0] || (calls[tc.index || 0] = { id: '', name: '', args: '' });
+          if (tc.id) c.id = tc.id;
+          if (tc.function && tc.function.name) c.name += tc.function.name;
+          if (tc.function && tc.function.arguments) c.args += tc.function.arguments;
+        }
+        if (ch.finish_reason) finish = ch.finish_reason;
+      }
+    }
+  }
+  const tokens = (usage && usage.completion_tokens) || pieces;
+  am.lat = { ttft: first ? Math.round(first - t0) : null, tps: last > first && tokens > 1 ? Math.round((tokens - 1) / ((last - first) / 1000)) : null };
+  lastLat.chat = `first token ${am.lat.ttft ?? '–'} ms${am.lat.tps ? ` · ${am.lat.tps} tok/s` : ''}`;
+  dbg('chat.done', { finish, ttft: am.lat.ttft, tps: am.lat.tps, tokens, calls: calls.length });
+  renderStrip();
+  return calls.filter(c => c && c.name).map((c, i) => ({ ...c, id: c.id || `call_${Date.now()}_${i}` }));
+}
+async function runTool(call, signal) {
+  const name = call.function.name;
+  let args = {};
+  try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
+  const kind = name === 'generate_video' ? 'video' : 'image';
+  const tm = addMsg({ role: 'tool', callId: call.id, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
+  const done = (result, media, error) => {
+    tm.result = JSON.stringify(result);
+    tm.media = media;
+    tm.error = error || '';
+    if (error) tm.text = `${kind} failed: ${error}`;
+    draw(tm);
+    saveConv();
+  };
+  dbg('tool.start', { name, args });
+  try {
+    if (name === 'generate_image') {
+      const req = { prompt: String(args.prompt || ''), response_format: 'url' };
+      if (args.size) req.size = String(args.size);
+      const r = await api('/v1/images/generations', { json: req, signal });
+      if (!r.ok) return done({ status: 'failed', error: await errorText(r) }, [], await errorText(r));
+      const j = await r.json();
+      const urls = (j.data || []).map(d => d.url).filter(Boolean).map(href);
+      dbg('tool.done', { name, urls });
+      return done({ status: 'completed', urls }, urls.map(url => ({ kind: 'image', url, prompt: req.prompt })));
+    }
+    if (name === 'generate_video') {
+      const req = { prompt: String(args.prompt || '') };
+      if (args.seconds) req.seconds = String(Math.max(1, Math.min(20, Math.round(+args.seconds) || 5)));
+      const r = await api('/v1/videos', { json: req, signal });
+      if (!r.ok) { const e = await errorText(r); return done({ status: 'failed', error: e }, [], e); }
+      let v = await r.json();
+      while (v.status === 'queued' || v.status === 'in_progress') {
+        tm.text = `making a video (${v.progress || 0}%): ${req.prompt}`;
+        draw(tm);
+        await new Promise((ok, no) => { const t = setTimeout(ok, 3000); signal.addEventListener('abort', () => { clearTimeout(t); no(new DOMException('aborted', 'AbortError')); }, { once: true }); });
+        v = await (await api(`/v1/videos/${encodeURIComponent(v.id)}`, { signal })).json();
+      }
+      if (v.status !== 'completed') return done({ status: v.status, error: (v.error && v.error.message) || '' }, [], (v.error && v.error.message) || v.status);
+      const url = `/v1/videos/${encodeURIComponent(v.id)}/content`;
+      dbg('tool.done', { name, url });
+      return done({ status: 'completed', urls: [url] }, [{ kind: 'video', url, prompt: req.prompt }]);
+    }
+    done({ status: 'failed', error: `unknown tool ${name}` }, [], `unknown tool ${name}`);
+  } catch (e) {
+    if (e.name === 'AbortError') { done({ status: 'cancelled' }, [], 'cancelled'); throw e; }
+    done({ status: 'failed', error: e.message }, [], e.message);
+  }
+}
+function regenerate() {
+  if (busy || !cur.msgs.length) return;
+  let i = cur.msgs.length - 1;
+  while (i >= 0 && cur.msgs[i].role !== 'user') i--;
+  if (i < 0) return;
+  for (const m of cur.msgs.splice(i + 1)) { m.gone = true; draw(m); }
+  saveConv();
+  chatTurn();
+}
+function sendText() {
+  const text = $('text').value.trim();
+  if (!text) return;
+  $('text').value = '';
+  autosize();
+  if (V.ws && V.ws.readyState === WebSocket.OPEN) {
+    const m = addMsg({ role: 'user', text, via: 'voice' });
+    saveConv();
+    vsend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+    vsend({ type: 'response.create' });
+    V.turnEnd = performance.now();
+    V.pendingTurn = { end: V.turnEnd };
+    V.thinking = true;
+    dbg('voice.typed', { id: m.id });
+    renderVoice();
+    return;
+  }
+  if (busy) return;
+  addMsg({ role: 'user', text, via: 'text' });
+  saveConv();
+  chatTurn();
+}
+
+// ---------------------------------------------------------------- voice over /v1/realtime
 
 const WORKLET = `
 class Pcm24k extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.step = sampleRate / ${RATE};
-    this.pos = 0;
-    this.last = 0;
-    this.fresh();
-  }
-  fresh() {
-    this.buf = new ArrayBuffer(1920);
-    this.view = new DataView(this.buf);
-    this.n = 0;
-  }
+  constructor() { super(); this.step = sampleRate / ${RATE}; this.pos = 0; this.last = 0; this.fresh(); }
+  fresh() { this.buf = new ArrayBuffer(${CHUNK * 2}); this.view = new DataView(this.buf); this.n = 0; }
   process(inputs) {
     const chans = inputs[0];
     if (!chans || !chans.length) return true;
     const len = chans[0].length;
     const mono = new Float32Array(len);
     for (const c of chans) for (let i = 0; i < len; i++) mono[i] += c[i] / chans.length;
-    // positions index [last, mono[0], ..., mono[len-1]]
     while (this.pos < len) {
       const i = Math.floor(this.pos);
       const a = i === 0 ? this.last : mono[i - 1];
       const v = Math.max(-1, Math.min(1, a + (mono[i] - a) * (this.pos - i)));
       this.view.setInt16(this.n * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
-      if (++this.n === 960) {
-        this.port.postMessage(this.buf, [this.buf]);
-        this.fresh();
-      }
+      if (++this.n === ${CHUNK}) { this.port.postMessage(this.buf, [this.buf]); this.fresh(); }
       this.pos += this.step;
     }
     this.pos -= len;
@@ -123,339 +734,487 @@ class Pcm24k extends AudioWorkletProcessor {
 registerProcessor('pcm24k', Pcm24k);
 `;
 
-let ws = null, ctx = null, mic = null, run = 0, muted = false;
-let userSpeaking = false, thinking = false;
-let live = [], nextTime = 0;
-const doneMs = new Map(), cut = new Set(), bubbles = new Map();
-let speechModels = [];
-let lastAssistant = null;
+const V = {
+  ws: null, ctx: null, mic: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
+  userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0,
+  doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
+  pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, pressConnects: false,
+};
+const vsend = obj => {
+  if (!V.ws || V.ws.readyState !== WebSocket.OPEN) return;
+  if (obj.type !== 'input_audio_buffer.append') dbg('voice.out', { type: obj.type });
+  V.ws.send(JSON.stringify(obj));
+};
+const toB64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
+const fromB64 = s => { const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+const rms16 = v => { let a = 0; for (let i = 0; i < v.length; i++) a += v[i] * v[i]; return Math.sqrt(a / Math.max(v.length, 1)) / 32768; };
 
-function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+function turnDetection() {
+  if (S.mode === 'ptt') return null;
+  return { type: 'server_vad', threshold: Number(S.threshold), silence_duration_ms: Number(S.silence) || 500, prefix_padding_ms: 300,
+           create_response: true, interrupt_response: true };
 }
-
-function toB64(bytes) {
-  let s = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(s);
+function sessionUpdate() {
+  const s = { modalities: ['audio', 'text'], turn_detection: turnDetection() };
+  if (S.voice) s.voice = S.voice;
+  if (S.speechModel) s.speech_model = S.speechModel;
+  if (S.chatModel) s.model = S.chatModel;
+  if (S.instructions.trim()) s.instructions = S.instructions.trim();
+  vsend({ type: 'session.update', session: s });
 }
-
-function fromB64(s) {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-function render() {
-  let s = 'listening';
-  if (!ws) s = 'disconnected';
-  else if (ws.readyState === WebSocket.CONNECTING) s = 'connecting';
-  else if (userSpeaking) s = 'user speaking';
-  else if (live.length) s = 'speaking';
-  else if (thinking) s = 'thinking';
-  $('status').textContent = s;
-  $('status').dataset.s = s;
-  $('start').textContent = ws ? 'Stop' : 'Start';
-  $('mute').disabled = !mic;
-  $('mute').textContent = muted ? 'Unmute' : 'Mute';
-}
-
-function add(el) {
-  const log = $('log');
-  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  log.append(el);
-  if (stick) log.scrollTop = log.scrollHeight;
-  return el;
-}
-
-function sys(text, error) {
-  return add(Object.assign(document.createElement('div'), { className: error ? 'sys error' : 'sys', textContent: text }));
-}
-
-function bubble(id, role) {
-  let b = id ? bubbles.get(id) : null;
-  if (!b) {
-    b = document.createElement('div');
-    b.className = 'msg ' + role;
-    b.text = b.appendChild(document.createElement('span'));
-    add(b);
-    if (id) bubbles.set(id, b);
+// The conversation so far goes into the voice session, so a spoken turn continues a typed one.
+function seed() {
+  const recent = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant') && splitThink(m.text || '').answer).slice(-40);
+  for (const m of recent) {
+    const text = m.role === 'user' ? m.text : splitThink(m.text).answer;
+    vsend({ type: 'conversation.item.create', item: { type: 'message', role: m.role, content: [{ type: m.role === 'user' ? 'input_text' : 'text', text }] } });
   }
-  return b;
+  dbg('voice.seed', { items: recent.length });
 }
 
-function appendText(id, delta) {
-  if (!delta) return;
-  const b = bubble(id, 'assistant');
-  b.text.textContent += delta;
-  lastAssistant = id;
-  const log = $('log');
-  log.scrollTop = log.scrollHeight;
+async function voiceStart() {
+  if (V.ws) return;
+  const my = ++V.run;
+  try { V.ctx = new (window.AudioContext || window.webkitAudioContext)(); V.ctx.resume(); } catch (e) { return note(`audio unavailable: ${e.message}`, true); }
+  const url = new URL('/v1/realtime', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (S.key) url.searchParams.set('api_key', S.key);
+  const sock = new WebSocket(url.href, ['realtime']);
+  V.ws = sock;
+  sock.onopen = () => { sessionUpdate(); seed(); renderVoice(); };
+  sock.onmessage = e => { if (V.ws === sock) handle(JSON.parse(e.data)); };
+  sock.onclose = e => {
+    if (V.ws !== sock) return;
+    dbg('voice.closed', { code: e.code, reason: e.reason });
+    note(`voice connection closed${e.reason ? ': ' + e.reason : ''}`, e.code !== 1000);
+    voiceStop();
+  };
+  openMic(my).then(renderVoice);
+  if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {});
+  renderVoice();
 }
-
-function interrupted(id) {
-  const b = id && bubbles.get(id);
-  if (!b || b.querySelector('.tag')) return;
-  b.append(Object.assign(document.createElement('span'), { className: 'tag', textContent: '(interrupted)' }));
+function voiceStop() {
+  V.run++;
+  if (V.ws) { const s = V.ws; V.ws = null; s.onclose = null; try { s.close(); } catch {} }
+  silence();
+  if (V.mic) V.mic.getTracks().forEach(t => t.stop());
+  V.mic = null;
+  if (V.ctx) V.ctx.close().catch(() => {});
+  V.ctx = null;
+  if (V.lock) V.lock.release().catch(() => {});
+  V.lock = null;
+  V.userSpeaking = V.thinking = V.holding = false;
+  V.resp = null;
+  for (const m of cur.msgs) if (m.partial || m.streaming) { m.partial = m.streaming = false; draw(m); }
+  renderVoice();
+  renderControls();
 }
-
-function safeUrl(u) {
+async function openMic(my) {
   try {
-    const url = new URL(u, location.href);
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
-  } catch {
-    return null;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (my !== V.run) return stream.getTracks().forEach(t => t.stop());
+    const src = V.ctx.createMediaStreamSource(stream);
+    const sink = V.ctx.createGain();
+    sink.gain.value = 0;
+    if (V.ctx.audioWorklet) {
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+      try { await V.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      if (my !== V.run) return stream.getTracks().forEach(t => t.stop());
+      const node = new AudioWorkletNode(V.ctx, 'pcm24k', { numberOfInputs: 1, numberOfOutputs: 1 });
+      node.port.onmessage = e => micChunk(new Int16Array(e.data));
+      src.connect(node);
+      node.connect(sink).connect(V.ctx.destination);
+    } else { // older Safari: a ScriptProcessor and the same linear resampling on the main thread
+      const node = V.ctx.createScriptProcessor(4096, 1, 1);
+      const step = V.ctx.sampleRate / RATE;
+      let pos = 0, last = 0, out = new Int16Array(CHUNK), n = 0;
+      node.onaudioprocess = e => {
+        const x = e.inputBuffer.getChannelData(0);
+        while (pos < x.length) {
+          const i = Math.floor(pos), a = i === 0 ? last : x[i - 1];
+          const v = Math.max(-1, Math.min(1, a + (x[i] - a) * (pos - i)));
+          out[n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+          if (n === CHUNK) { micChunk(out); out = new Int16Array(CHUNK); n = 0; }
+          pos += step;
+        }
+        pos -= x.length;
+        last = x[x.length - 1];
+      };
+      src.connect(node);
+      node.connect(sink).connect(V.ctx.destination);
+    }
+    V.mic = stream;
+  } catch (err) {
+    if (my === V.run) note(`microphone unavailable (${err.message}); typed messages still get spoken replies`, true);
   }
 }
-
-function jobDone(ev) {
-  if (ev.status !== 'completed') {
-    sys(`${ev.kind || 'job'} ${ev.status || 'failed'}: ${ev.error || 'no reason given'}`, true);
+function micChunk(pcm) {
+  const level = rms16(pcm);
+  $('mic').style.setProperty('--lvl', Math.min(level * 12, 1).toFixed(2));
+  if (level > 0.02) V.lastLoudMic = performance.now();
+  if (S.mode === 'ptt') {
+    if (V.holding || performance.now() < V.tailUntil) sendPcm(pcm);
     return;
   }
-  const box = Object.assign(document.createElement('div'), { className: 'media' });
-  for (const u of ev.urls || []) {
-    const href = safeUrl(u);
-    if (!href) continue;
-    if (ev.kind === 'video') {
-      const v = box.appendChild(document.createElement('video'));
-      v.controls = true;
-      v.src = href;
-    } else {
-      const a = box.appendChild(Object.assign(document.createElement('a'), { href, target: '_blank', rel: 'noopener' }));
-      a.append(Object.assign(document.createElement('img'), { src: href, alt: 'generated image' }));
-    }
+  if (V.muted) return;
+  // Echo gate: while the reply plays, a quiet chunk is sent as silence (it is most likely the reply's own echo), until
+  // three loud ones in a row say someone is talking over it; then the held ones go too, so no word is lost.
+  const g = V.gate;
+  if (S.gate && V.live.length && performance.now() > g.openUntil) {
+    const loud = level > Math.max(0.03, 1.5 * V.playRms);
+    g.held.push(pcm);
+    if (g.held.length > 6) g.held.shift();
+    g.loud = loud ? g.loud + 1 : 0;
+    if (g.loud >= 3) { g.openUntil = performance.now() + 700; g.held.forEach(sendPcm); g.held = []; g.loud = 0; dbg('voice.gate', { opened: level.toFixed(3) }); }
+    else sendPcm(new Int16Array(pcm.length));
+    return;
   }
-  add(box);
+  if (g.held.length) g.held = [];
+  sendPcm(pcm);
 }
+function sendPcm(pcm) { vsend({ type: 'input_audio_buffer.append', audio: toB64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)) }); }
 
-function playedMs(item, now) {
-  let ms = doneMs.get(item) || 0;
-  for (const e of live) if (e.item === item) ms += Math.min(Math.max(now - e.start, 0), e.dur) * 1000;
-  return ms;
+// Push to talk: pressing interrupts the reply and starts a turn; letting go (plus 200 ms of tail) commits it.
+function pttDown() {
+  if (!V.ws) return;
+  bargeIn(true);
+  vsend({ type: 'input_audio_buffer.clear' });
+  V.holding = true;
+  V.holdStart = performance.now();
+  V.userSpeaking = true;
+  renderVoice();
+}
+function pttUp() {
+  if (!V.holding) return;
+  V.holding = false;
+  V.userSpeaking = false;
+  const held = performance.now() - V.holdStart;
+  V.tailUntil = performance.now() + 200;
+  V.turnEnd = performance.now();
+  setTimeout(() => {
+    if (held < 250) { vsend({ type: 'input_audio_buffer.clear' }); note('hold the mic while you talk'); return renderVoice(); }
+    vsend({ type: 'input_audio_buffer.commit' });
+    vsend({ type: 'response.create' });
+    V.pendingTurn = { end: V.turnEnd };
+    V.thinking = true;
+    renderVoice();
+  }, 220);
+  renderVoice();
 }
 
 function silence() {
-  for (const e of live) {
-    e.src.onended = null;
-    try { e.src.stop(); } catch {}
-  }
-  live = [];
-  nextTime = 0;
+  for (const e of V.live) { e.src.onended = null; try { e.src.stop(); } catch {} }
+  V.live = [];
+  V.nextTime = 0;
 }
-
+function playedMs(item, now) {
+  let ms = V.doneMs.get(item) || 0;
+  for (const e of V.live) if (e.item === item) ms += Math.min(Math.max(now - e.start, 0), e.dur) * 1000;
+  return ms;
+}
+// Stops the reply's audio now, tells the server how much of it was heard, and (cancel) ends the response.
+function bargeIn(cancel) {
+  if (V.live.length && V.ctx) {
+    const now = V.ctx.currentTime;
+    const item = (V.live.find(e => e.start <= now) || V.live[0]).item;
+    const ms = Math.floor(playedMs(item, now));
+    silence();
+    V.cut.add(item);
+    vsend({ type: 'conversation.item.truncate', item_id: item, content_index: 0, audio_end_ms: ms });
+    const m = V.byItem.get(item);
+    if (m) { m.interrupted = true; draw(m); }
+  }
+  if (cancel && V.resp) vsend({ type: 'response.cancel' });
+  renderVoice();
+}
 function play(item, b64) {
-  if (!ctx || cut.has(item)) return;
+  if (!V.ctx || V.cut.has(item)) return;
   const bytes = fromB64(b64);
   const n = bytes.length >> 1;
   if (!n) return;
   const view = new DataView(bytes.buffer);
-  const buf = ctx.createBuffer(1, n, RATE);
+  const buf = V.ctx.createBuffer(1, n, RATE);
   const ch = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
-  const src = ctx.createBufferSource();
+  let acc = 0, loudAt = -1;
+  for (let i = 0; i < n; i++) {
+    const x = view.getInt16(i * 2, true) / 32768;
+    ch[i] = x;
+    acc += x * x;
+    if (loudAt < 0 && Math.abs(x) > LOUD) loudAt = i;
+  }
+  const src = V.ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
-  const start = Math.max(ctx.currentTime + 0.05, nextTime);
+  src.connect(V.ctx.destination);
+  const now = V.ctx.currentTime;
+  // A reply's first audio starts at once (50 ms to schedule it). Later audio that ran dry restarts with a lead that
+  // grows by how late it was (up to 0.5 s) and shrinks after each reply, so gaps inside a sentence stay rare.
+  const first = !V.doneMs.has(item) && !V.live.some(x => x.item === item);
+  if (!first && !V.live.length && V.nextTime && V.nextTime < now) V.lead = Math.min(0.5, V.lead + (now - V.nextTime));
+  const start = Math.max(now + (V.live.length ? 0 : first ? 0.05 : V.lead), V.nextTime);
   src.start(start);
-  nextTime = start + buf.duration;
-  const e = { src, item, start, dur: buf.duration };
-  live.push(e);
+  V.nextTime = start + buf.duration;
+  const e = { src, item, start, dur: buf.duration, rms: Math.sqrt(acc / n) };
+  V.live.push(e);
+  V.playRms = e.rms;
   src.onended = () => {
-    const i = live.indexOf(e);
-    if (i >= 0) live.splice(i, 1);
-    doneMs.set(item, (doneMs.get(item) || 0) + e.dur * 1000);
-    render();
+    const i = V.live.indexOf(e);
+    if (i >= 0) V.live.splice(i, 1);
+    V.doneMs.set(item, (V.doneMs.get(item) || 0) + e.dur * 1000);
+    if (!V.live.length) V.playRms = 0;
+    renderVoice();
   };
+  const m = V.byItem.get(item);
+  if (m && loudAt >= 0 && m.lat && m.lat.end && m.lat.firstAudio == null) {
+    const heardAt = performance.now() + (start - now + loudAt / RATE) * 1000;
+    m.lat.firstAudio = Math.round(heardAt - m.lat.end);
+    lastLat.voice = `speech end → first audio ${m.lat.firstAudio} ms`;
+    dbg('voice.first_audio', { item, ms: m.lat.firstAudio });
+    draw(m);
+    renderStrip();
+  }
 }
 
-function bargeIn() {
-  if (!live.length) return;
-  const now = ctx.currentTime;
-  const item = (live.find(e => e.start <= now) || live[0]).item;
-  const ms = Math.floor(playedMs(item, now));
-  silence();
-  cut.add(item);
-  send({ type: 'conversation.item.truncate', item_id: item, content_index: 0, audio_end_ms: ms });
+function userMsg(itemId) {
+  let m = V.byItem.get(itemId);
+  if (!m) { m = addMsg({ role: 'user', text: '', partial: true, via: 'voice' }); V.byItem.set(itemId, m); }
+  return m;
 }
-
+function botMsg(itemId) {
+  let m = V.byItem.get(itemId);
+  if (!m) {
+    const turn = V.pendingTurn;
+    V.pendingTurn = null;
+    m = addMsg({ role: 'assistant', text: '', streaming: true, via: 'voice', lat: turn ? { end: turn.end } : {} });
+    V.byItem.set(itemId, m);
+    if (turn && m.lat.end) m.lat.firstText = Math.round(performance.now() - m.lat.end);
+  }
+  return m;
+}
 function handle(ev) {
+  if (ev.type === 'response.audio.delta') {
+    if (!V.audioLogged) { dbg('voice.in', { type: ev.type, item_id: ev.item_id, bytes: (ev.delta || '').length }); V.audioLogged = true; }
+  } else {
+    dbg('voice.in', ev.type.endsWith('.delta') ? { type: ev.type, item_id: ev.item_id, delta: ev.delta } : ev);
+  }
   switch (ev.type) {
     case 'input_audio_buffer.speech_started':
-      userSpeaking = true;
-      bargeIn();
+      V.userSpeaking = true;
+      bargeIn(false); // the server cancels the response itself (interrupt_response)
+      userMsg(ev.item_id);
       break;
     case 'input_audio_buffer.speech_stopped':
-      userSpeaking = false;
+      V.userSpeaking = false;
+      // the end of speech is the last loud microphone chunk, not the VAD's decision after its hangover
+      V.turnEnd = V.lastLoudMic && performance.now() - V.lastLoudMic < 3000 ? V.lastLoudMic : performance.now();
+      V.pendingTurn = { end: V.turnEnd };
       break;
     case 'input_audio_buffer.committed':
-      thinking = true;
+      V.thinking = true;
+      if (S.mode === 'ptt') userMsg(ev.item_id);
       break;
     case 'localrouter.transcription.partial': {
-      const b = bubble(ev.item_id, 'user');
-      if (!b.final) {
-        b.text.textContent = ev.transcript || '';
-        b.classList.add('partial');
-      }
+      const m = userMsg(ev.item_id);
+      if (m.partial) { m.text = ev.transcript || ''; draw(m); }
       break;
     }
     case 'conversation.item.input_audio_transcription.completed': {
-      const b = bubble(ev.item_id, 'user');
-      b.final = true;
-      b.text.textContent = ev.transcript || '';
-      b.classList.remove('partial');
-      b.hidden = !ev.transcript;
+      const m = userMsg(ev.item_id);
+      m.partial = false;
+      m.text = ev.transcript || '';
+      if (!m.text) { m.gone = true; cur.msgs.splice(cur.msgs.indexOf(m), 1); V.pendingTurn = null; }
+      draw(m);
+      saveConv();
       break;
     }
-    case 'response.audio_transcript.delta':
-    case 'response.text.delta':
-      thinking = false;
-      appendText(ev.item_id, ev.delta);
+    case 'conversation.item.input_audio_transcription.failed': {
+      const m = userMsg(ev.item_id);
+      m.partial = false;
+      m.text = '(not heard)';
+      m.error = (ev.error && ev.error.message) || 'transcription failed';
+      draw(m);
       break;
+    }
+    case 'response.created':
+      V.resp = ev.response && ev.response.id;
+      V.audioLogged = false;
+      break;
+    case 'response.audio_transcript.delta':
+    case 'response.text.delta': {
+      V.thinking = false;
+      const m = botMsg(ev.item_id);
+      m.text += ev.delta || '';
+      draw(m);
+      break;
+    }
     case 'response.audio.delta':
-      thinking = false;
+      V.thinking = false;
+      botMsg(ev.item_id);
       play(ev.item_id, ev.delta);
       break;
     case 'response.output_item.done':
-      if (ev.item && ev.item.type === 'function_call') sys(`calling ${ev.item.name}(${ev.item.arguments || ''})`);
+      if (ev.item && ev.item.type === 'function_call') {
+        const kind = ev.item.name === 'generate_video' ? 'a video' : 'a picture';
+        let args = {};
+        try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
+        V.byCall.set(ev.item.call_id, addMsg({ role: 'tool', text: `making ${kind}: ${args.prompt || ''}`, via: 'voice' }));
+        saveConv();
+      }
       break;
-    case 'response.done': {
-      thinking = false;
-      const r = ev.response || {};
-      if (r.status === 'cancelled') {
-        const ids = (r.output || []).filter(o => o.type === 'message').map(o => o.id);
-        (ids.length ? ids : [lastAssistant]).forEach(interrupted);
+    case 'localrouter.job.done': {
+      const m = V.byCall.get(ev.call_id) || addMsg({ role: 'tool', text: '', via: 'voice' });
+      if (ev.status === 'completed') m.media = (ev.urls || []).map(u => ({ kind: ev.kind === 'video' ? 'video' : 'image', url: href(u) })).filter(x => x.url);
+      else { m.error = ev.error || ev.status; m.text = `${ev.kind || 'job'} ${ev.status || 'failed'}: ${ev.error || ''}`; }
+      draw(m);
+      saveConv();
+      break;
+    }
+    case 'localrouter.response.timing': {
+      const m = [...V.byItem.values()].reverse().find(x => x.role === 'assistant');
+      const t = ev.ms || {};
+      if (m && ev.from === 'speech_stopped') {
+        const d = (a, b) => (t[a] != null && t[b] != null ? t[a] - t[b] : null);
+        const parts = [['STT', d('stt_end', 'stt_start')], ['chat', d('first_token', 'chat_start')], ['TTS', d('tts_first_pcm', 'tts_start')]].filter(x => x[1] != null);
+        m.lat = Object.assign(m.lat || {}, { stages: parts.map(([k, v]) => `${k} ${v}`).join(' · '), server: ev });
+        draw(m);
       }
       break;
     }
+    case 'response.done': {
+      V.thinking = false;
+      V.resp = null;
+      V.lead = Math.max(0.1, V.lead * 0.8);
+      const r = ev.response || {};
+      for (const o of r.output || []) {
+        const m = V.byItem.get(o.id);
+        if (!m) continue;
+        m.streaming = false;
+        if (r.status === 'cancelled') m.interrupted = true;
+        if (r.status === 'failed') m.error = 'failed';
+        if (!m.text && !m.interrupted) { m.gone = true; cur.msgs.splice(cur.msgs.indexOf(m), 1); }
+        draw(m);
+      }
+      saveConv();
+      break;
+    }
     case 'error':
-      sys((ev.error && ev.error.message) || 'error', true);
-      break;
-    case 'localrouter.job.done':
-      jobDone(ev);
+      note((ev.error && ev.error.message) || 'error', true);
       break;
   }
-  render();
+  renderVoice();
 }
 
-function sessionUpdate() {
-  const s = {
-    modalities: ['audio', 'text'],
-    turn_detection: { type: 'server_vad', threshold: Number($('threshold').value),
-                      silence_duration_ms: Number($('silence').value) || 500, prefix_padding_ms: 300 },
-  };
-  if ($('voice').value) s.voice = $('voice').value;
-  if ($('speech').value) s.speech_model = $('speech').value;
-  const instructions = $('instructions').value.trim();
-  if (instructions) s.instructions = instructions;
-  const model = $('model').value.trim();
-  if (model) s.model = model;
-  send({ type: 'session.update', session: s });
-}
+// ---------------------------------------------------------------- controls
 
-async function openMic(my) {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
-      echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-    if (my !== run) return stream.getTracks().forEach(t => t.stop());
-    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
-    try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
-    if (my !== run) return stream.getTracks().forEach(t => t.stop());
-    const node = new AudioWorkletNode(ctx, 'pcm24k', { numberOfInputs: 1, numberOfOutputs: 1 });
-    node.port.onmessage = e => { if (!muted) send({ type: 'input_audio_buffer.append', audio: toB64(new Uint8Array(e.data)) }); };
-    const sink = ctx.createGain();
-    sink.gain.value = 0;
-    ctx.createMediaStreamSource(stream).connect(node);
-    node.connect(sink).connect(ctx.destination);
-    mic = stream;
-  } catch (err) {
-    if (my === run) sys(`microphone unavailable (${err.message}); typed messages still work`, true);
+function renderVoice() {
+  const mic = $('mic');
+  let s = 'off', label = 'voice off';
+  if (V.ws && V.ws.readyState === WebSocket.CONNECTING) { s = 'connecting'; label = 'connecting…'; }
+  else if (V.ws) {
+    if (V.holding) { s = 'talking'; label = 'listening (release to send)'; }
+    else if (S.mode === 'vad' && V.muted) { s = 'muted'; label = 'muted'; }
+    else { s = S.mode === 'vad' ? 'listening' : 'ready'; label = S.mode === 'vad' ? 'listening' : 'hold the mic to talk'; }
   }
+  mic.dataset.s = s;
+  mic.textContent = s === 'muted' ? '🔇' : '🎤';
+  mic.title = !V.ws ? 'Start voice' : S.mode === 'ptt' ? 'Hold to talk' : V.muted ? 'Unmute' : 'Mute';
+  let vs = V.ws ? (V.userSpeaking ? 'you' : V.live.length ? 'speaking' : V.thinking ? 'thinking' : s) : 'off';
+  $('vstate').dataset.s = vs;
+  $('vstate').textContent = vs === 'you' ? 'hearing you…' : vs === 'speaking' ? 'speaking' : vs === 'thinking' ? 'thinking…' : label;
+  $('hush').hidden = !(V.ws && (V.live.length || V.resp));
+  $('hangup').hidden = !V.ws;
+  $('text').placeholder = V.ws ? 'Type, and hear the reply' : 'Message';
 }
-
-function start() {
-  const my = ++run;
-  ctx = new AudioContext();
-  ctx.resume();
-  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/realtime', ['realtime']);
-  ws = sock;
-  sock.onopen = () => { sessionUpdate(); render(); };
-  sock.onmessage = e => { if (ws === sock) handle(JSON.parse(e.data)); };
-  sock.onclose = e => {
-    if (ws !== sock) return;
-    sys(`connection closed${e.reason ? ': ' + e.reason : ''}`, e.code !== 1000);
-    stop();
-  };
-  openMic(my).then(render);
-  render();
+function renderControls() {
+  $('send').textContent = busy ? 'Stop' : 'Send';
+  $('send').classList.toggle('primary', !busy);
+  $('regen').disabled = !!busy || !cur.msgs.some(m => m.role === 'user') || !!V.ws;
+  $('think').textContent = `Reasoning: ${S.think ? 'on' : 'off'}`;
+  $('think').classList.toggle('on', S.think);
 }
+function autosize() { const t = $('text'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight + 2, 160) + 'px'; }
 
-function stop() {
-  run++;
-  if (ws) {
-    const sock = ws;
-    ws = null;
-    sock.onclose = null;
-    sock.close();
+// The mic: off -> tap starts voice. Hands-free: tap mutes and unmutes. Push to talk: hold to talk.
+let pressAt = 0;
+$('mic').addEventListener('contextmenu', e => e.preventDefault());
+$('mic').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  pressAt = performance.now();
+  V.pressConnects = !V.ws;
+  if (!V.ws) return; // started on release: a touch is a user gesture (audio may start) only when it ends
+  if (S.mode === 'ptt') { try { $('mic').setPointerCapture(e.pointerId); } catch {} pttDown(); }
+});
+for (const t of ['pointerup', 'pointercancel']) $('mic').addEventListener(t, () => {
+  if (V.pressConnects) { V.pressConnects = false; if (t === 'pointerup') voiceStart(); return; }
+  if (!V.ws) return;
+  if (S.mode === 'ptt') return pttUp();
+  if (t === 'pointerup' && V.ws.readyState === WebSocket.OPEN && performance.now() - pressAt < 600) {
+    V.muted = !V.muted;
+    if (V.muted) vsend({ type: 'input_audio_buffer.clear' });
+    renderVoice();
   }
-  silence();
-  if (mic) mic.getTracks().forEach(t => t.stop());
-  mic = null;
-  if (ctx) ctx.close();
-  ctx = null;
-  userSpeaking = thinking = false;
-  render();
-}
-
-function fill(sel, pairs, chosen) {
-  sel.replaceChildren(...pairs.map(([value, label]) => {
-    return Object.assign(document.createElement('option'), { value, textContent: label, selected: value === chosen });
-  }));
-}
-
-function fillVoices() {
-  const id = $('speech').value;
-  const m = speechModels.find(x => x.id === id) || speechModels.find(x => (x.default_for || []).length) || speechModels[0];
-  const voices = ((m && m.voices) || []).map(v => (typeof v === 'string' ? v : v && (v.id || v.name))).filter(Boolean);
-  fill($('voice'), [['', 'default'], ...voices.map(v => [v, v])], (m && m.default_voice) || '');
-}
-
-async function loadModels() {
-  try {
-    const r = await fetch('/v1/models');
-    const list = (await r.json()).data || [];
-    speechModels = list.filter(m => m.kind === 'speech');
-    fill($('speech'), [['', 'default'], ...speechModels.map(m => [m.id, m.name || m.id])], '');
-    fill($('chats'), list.filter(m => m.kind === 'chat').map(m => [m.id, m.name || m.id]));
-    fillVoices();
-  } catch (err) {
-    sys(`could not list models: ${err.message}`, true);
-  }
-}
-
-$('start').onclick = () => (ws ? stop() : start());
-$('mute').onclick = () => { muted = !muted; render(); };
-$('threshold').oninput = () => { $('thresholdv').textContent = $('threshold').value; };
-$('settings').addEventListener('change', e => {
-  if (e.target.id === 'speech') fillVoices();
+});
+document.addEventListener('pointerup', () => { if (V.ctx && V.ctx.state === 'suspended') V.ctx.resume(); });
+if (navigator.audioSession) try { navigator.audioSession.type = 'play-and-record'; } catch {} // iOS: audible with the ringer off
+$('hush').onclick = () => bargeIn(true);
+$('hangup').onclick = () => voiceStop();
+$('send').onclick = () => (busy ? busy.ctl.abort() : sendText());
+$('text').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendText(); } });
+$('text').addEventListener('input', autosize);
+$('regen').onclick = regenerate;
+$('think').onclick = () => { S.think = !S.think; saveSettings(); renderControls(); };
+$('mode').value = S.mode;
+$('mode').onchange = () => { S.mode = $('mode').value; saveSettings(); V.holding = false; sessionUpdate(); renderVoice(); };
+$('speech').onchange = () => { S.speechModel = $('speech').value; fillVoices(); saveSettings(); sessionUpdate(); };
+$('voice').onchange = () => { S.voice = $('voice').value; saveSettings(); sessionUpdate(); };
+$('conv').onchange = () => { if (!busy) openConv($('conv').value); else $('conv').value = cur.id; };
+$('new').onclick = () => { if (busy) return; newConv(); openConv(cur.id); };
+$('gear').onclick = () => {
+  $('maxtok').value = S.maxTokens || ''; $('silence').value = S.silence; $('threshold').value = S.threshold; $('tools').checked = S.tools;
+  $('gate').checked = S.gate; $('logn').value = S.logN; $('key').value = S.key; $('instructions').value = S.instructions;
+  $('settings').showModal();
+};
+$('settings').addEventListener('close', () => {
+  Object.assign(S, { chatModel: $('chatmodel').value, maxTokens: Number($('maxtok').value) || 0, silence: Number($('silence').value) || 500,
+    threshold: Math.max(0, Math.min(1, Number($('threshold').value) || 0.5)), tools: $('tools').checked, gate: $('gate').checked,
+    logN: Number($('logn').value) || 300, key: $('key').value.trim(), instructions: $('instructions').value });
+  saveSettings();
   sessionUpdate();
 });
-$('typed').onsubmit = e => {
-  e.preventDefault();
-  const text = $('text').value.trim();
-  if (!text) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return sys('press Start first', true);
-  bubble(null, 'user').text.textContent = text;
-  send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
-  send({ type: 'response.create' });
-  thinking = true;
-  $('text').value = '';
-  render();
+$('wipe').onclick = () => {
+  if (!confirm('Delete this conversation from this browser?')) return;
+  convs = convs.filter(c => c !== cur);
+  store.set('convs', convs);
+  $('settings').close();
+  openConv((convs[0] || newConv()).id);
 };
+$('copylog').onclick = async () => {
+  const head = { page: location.pathname, ua: navigator.userAgent, settings: Object.assign({}, S, { key: S.key ? '(set)' : '' }),
+                 tools: (tools.data || []).map(t => [t.id, t.state]), voice: !!V.ws, lead_s: V.lead };
+  const text = [JSON.stringify(head), ...debug.slice(-S.logN).map(e => JSON.stringify(e))].join('\n');
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch {}
+  if (!ok) {
+    const t = Object.assign(document.createElement('textarea'), { value: text });
+    document.body.append(t); t.select();
+    try { ok = document.execCommand('copy'); } catch {}
+    t.remove();
+  }
+  $('copylog').textContent = ok ? `Copied ${Math.min(debug.length, S.logN)}` : 'Copy failed';
+  setTimeout(() => { $('copylog').textContent = 'Log'; }, 1800);
+};
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { pollTools(); if (V.ws && !V.lock && navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {}); }
+});
+
+// A test or another script can see the state without scraping the page.
+window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, live: V.live.length, thinking: V.thinking, lead: V.lead }; }, debug, settings: S };
+
 $('insecure').hidden = window.isSecureContext;
-loadModels();
-render();
+openConv(store.get('current', null) || (convs[0] && convs[0].id));
+renderControls();
+renderVoice();
+loadModels().then(pollTools);
+setInterval(pollTools, 4000);
 </script>
 </body>
 </html>

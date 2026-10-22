@@ -400,6 +400,9 @@ pub const Session = struct {
         d.start_ns = began;
         d.end_ns = s.clock();
         d.worker_ms = worker_ms;
+        // The draft is the turn so far: the client sees it as an interim transcript, at no cost to the final.
+        if (s.turn) |t| if (eql(t.item_id, h.item_id) and d.text.?.len > 0)
+            s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = d.text.? });
         s.maybeEndEarly(a) catch {};
     }
 

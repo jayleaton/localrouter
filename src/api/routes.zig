@@ -47,6 +47,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (eql(p, "/mcp")) return mcp.handle(app, req, a, host);
     if (m == .GET and eql(p, "/v1/realtime")) return realtime.serve(app, conn, req, a);
     if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
+    if (m == .GET and eql(p, "/")) return req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = "/voice" }} });
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models"))) return models(app, req, a);
     if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, ctype, false);
     if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, ctype, true);
