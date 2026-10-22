@@ -165,7 +165,10 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
 }
 
 /// Under the lock: the final transcript of user item `item_id` (deleted meanwhile: nothing).
-$1    if (text) |t| {
+fn completed(s: *Session, a: std.mem.Allocator, item_id: []const u8, text: backend.Error![]const u8, why: *const backend.Why) void {
+    const it = s.find(item_id) orelse return;
+    it.pending = false;
+    if (text) |t| {
         it.text = it.arena.allocator().dupe(u8, std.mem.trim(u8, t, " \t\r\n")) catch "";
         if (it.text.len > 0) s.fresh = true;
         s.emit.send(a, "conversation.item.input_audio_transcription.completed", .{ .item_id = it.id, .content_index = 0, .transcript = it.text });
@@ -464,7 +467,8 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
     }
     var outputs: std.ArrayList(Value) = .empty;
     if (s.find(r.item_id)) |it| {
-$1        it.pending = false;
+        it.text = it.arena.allocator().dupe(u8, kept) catch "";
+        it.pending = false;
         it.spoken = r.spoken;
         r.spoken = .empty;
         var item = session.itemValue(a, it, r.audio) catch Value.null;
