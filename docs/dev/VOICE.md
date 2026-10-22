@@ -211,55 +211,94 @@ is `TTS first samples`, about 130 ms.
 `src/voice/voice.html` is the page at `/voice`. It is one file, with no build step and no libraries, embedded in the
 binary, and it works in desktop Chrome and Safari and in phone browsers. Chat and voice share one conversation.
 
-- **Chat.**
-  - It streams `/v1/chat/completions`, rendering Markdown with a small built-in renderer: the text is escaped first,
-    and links must be http(s) or same-origin.
-  - **Reasoning** switches thinking on (`chat_template_kwargs.enable_thinking`) or off (plus `reasoning_effort:
-    none`). `delta.reasoning_content` and inline `<think>` text fold into a "Reasoning" block.
-  - **Stop** aborts the stream; **Regenerate** answers the last user message again.
-  - When image or video models exist, the page offers `generate_image` and `generate_video` and runs the calls
-    itself: `/v1/images/generations` with `response_format: url`, or `/v1/videos` polled until the clip is done. It
-    shows the results inline and returns them to the model as tool messages.
-- **Voice.**
-  - The mic button starts a `/v1/realtime` session. On a phone it starts on release, the only point at which a touch
-    lets the page play audio.
-  - **Hands-free** uses server VAD (a tap mutes). **Push to talk** sets `turn_detection: null`: you hold the button,
-    release, and the page commits the turn plus 200 ms of tail.
-  - The draft transcript appears as an interim line (`localrouter.transcription.partial`), then the final one.
-  - The reply plays as it streams. Speaking over it, pressing push-to-talk, or **Stop speaking** stops the audio,
-    sends `conversation.item.truncate` with what was heard, and (by tap) `response.cancel`.
-  - A light echo gate sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a
-    row say someone is talking over it. You can turn it off in the settings.
-  - You choose the speech model (Drama 3, Kitten) and the voice in the bar. A new voice session gets the typed
-    conversation so far as items, and typed messages during a voice session get spoken replies.
-  - Tool jobs from voice (`localrouter.job.done`) render inline like chat's.
-- **Status strip.**
-  - It shows each model's state from `/v1/tools` (ready, busy, loading, unloaded, failed), polled every 4 s, and the
-    free memory.
-  - Per turn it shows the latency. For voice, that is from the end of your speech (the last loud microphone chunk, not
-    the VAD's decision) to the first audible reply sample as this browser schedules it, plus the server's STT, chat
-    and TTS stages from `localrouter.response.timing`. For chat, it is the first token and tokens per second.
-- **Local only.**
-  - Conversations and settings live in `localStorage` (`jarvis.*`). Nothing is kept on the server beyond its usual
-    job outputs.
-  - An API key, if a proxy in front asks for one, comes from a prompt on the first 401, from the settings, or once
-    from `#key=` in the URL, which is removed from the address bar. It is then sent as `Authorization: Bearer` and as
-    `?api_key=` on the WebSocket (browsers cannot set headers there). Media is fetched with the key into blob URLs.
-- **Copy log** copies the last N events: chat requests and results, realtime events without audio payloads, tool
-  jobs and page errors, with the settings, the key redacted.
-- **For scripts.** `window.jarvis` exposes the conversation, the voice state and the debug log, so a test does not
-  need to scrape the page.
+**Layout and look.**
+- It uses Sidebud's visual language: charcoal, ivory and amber, system fonts, and soft 14 to 24 px radii.
+- Light and dark themes follow the system setting.
+- On a wide screen a sidebar lists the conversations, with new, rename and delete (delete can be undone). On a phone
+  the sidebar slides in as a drawer.
+- The main pane holds the conversation, an empty state with suggestions, and a composer:
+  - attachments, shown disabled for now;
+  - the reasoning toggle;
+  - a large mic button and the send button, which becomes stop while a reply streams.
+- On a phone the page is as tall as the visual viewport, so the composer stays above the keyboard. It respects
+  safe-area insets, and its touch targets are at least 44 px.
+- Focus rings and accessible names are on every control, and reduced motion is respected.
+
+**Chat.**
+- It streams `/v1/chat/completions`. Each message part (thinking, body, footer) is updated in place, so streaming does
+  not jump.
+- Markdown uses a small built-in renderer: the text is escaped first, and links must be http(s) or same-origin.
+- Code blocks are highlighted by a small tokenizer (keywords, strings, numbers, comments, calls) and have a copy
+  button.
+- Messages show their role, a timestamp, copy, and on the last reply, regenerate.
+- **Reasoning** turns thinking on (`chat_template_kwargs.enable_thinking`) or off (plus `reasoning_effort: none`).
+  `delta.reasoning_content` and inline `<think>` text go into a collapsible "Thinking… / Thought for N s" section.
+- When image or video models exist, the page offers `generate_image` and `generate_video` and runs the calls itself:
+  `/v1/images/generations` with `response_format: url`, or `/v1/videos` polled until the clip is done.
+- The results are cards. A picture shows a shimmer while it is made, enlarges on a click and has a download button;
+  a video plays inline and downloads. The results go back to the model as tool messages.
+
+**Voice mode.**
+- The mic button opens a full-screen view and starts a `/v1/realtime` session from that click, the user gesture that
+  lets a phone play audio.
+- An amber orb and Sidebud's 44-bar wave show each state: connecting, listening, hearing you, thinking (a turning
+  ring), speaking, muted, and push-to-talk ready. Both follow the live level: the reply's own audio through an
+  `AnalyserNode` while it speaks, the microphone otherwise.
+- The transcript runs underneath: the draft transcript (`localrouter.transcription.partial`), then the final one, and
+  the reply as it streams.
+- **Hands-free** uses server VAD, and the big button mutes. **Push to talk** sets `turn_detection: null`: hold the
+  button (or Space), release, and the turn is committed plus 200 ms of tail.
+- Barge-in: tap the orb while it thinks or speaks, just talk, or press push-to-talk. Each one stops the audio, sends
+  `conversation.item.truncate` with what was heard, and (by tap or press) `response.cancel`.
+- An echo guard sends quiet microphone chunks as silence while the reply plays, until three loud chunks in a row say
+  someone is talking over it.
+- Minimizing keeps the session on: a bar above the composer shows its state, and typed messages get spoken replies.
+
+**Voice picker.**
+- In the settings drawer you choose the speech engine (Drama 3, Kitten) and its voice.
+- The list comes from a voice-list API when the daemon has one (`GET /v1/audio/voices?model=ID`, then
+  `/v1/voices?model=ID`). The page reads an array, or `{data|voices: [...]}`, of names or of
+  `{id|voice, name, description, preview_url}`. Without such an API it uses the model's `voices` from `/v1/models`.
+- Each voice has a preview button, which plays `preview_url` or speaks a short line through `/v1/audio/speech`.
+- The choice is kept per engine and sent as the session's `voice`.
+
+**Settings drawer.**
+- Chat model, reasoning, tools, max tokens and instructions.
+- Engine and voice.
+- Hands-free sensitivity (VAD threshold 0.8 to 0.2), the pause before a reply (`silence_duration_ms`), and the echo
+  guard.
+- An API key (only for a proxy in front), the debug log and deleting all chats.
+
+**Status.**
+- A pill in the top bar sums up the models' state from `/v1/tools`, polled every 4 s: ready, working, warming up or a
+  problem. It also shows the last voice reply's latency.
+- Opening the pill lists each model, the free memory and the last turns. For voice, that is from the end of your
+  speech (the last loud microphone chunk, not the VAD's decision) to the first audible reply sample as this browser
+  schedules it, with the server's STT, chat and TTS stages from `localrouter.response.timing`. For chat, it is the
+  first token and tokens per second.
+- **Copy debug log** copies the last N events: chat requests and results, realtime events without audio payloads,
+  tool jobs and page errors, with the settings and the key redacted.
+
+**Local only.**
+- Conversations and settings live in `localStorage` (`jarvis.*`).
+- An API key comes from a prompt on the first 401, from the settings, or once from `#key=` in the URL, which is then
+  removed from the address bar. It is sent as `Authorization: Bearer` and as `?api_key=` on the WebSocket. Media is
+  then fetched with the key into blob URLs.
+- `window.jarvis` exposes the conversation, the voice and UI state and the debug log, so a test does not need to
+  scrape the page.
 
 `tools/spark/jarvis/client_check.py` checks the page in headless Chrome over the DevTools protocol, using only the
 Python standard library, on the GPU host. It works against any running daemon, and `--page` writes a branch's
-`voice.html` over the served page before it parses, keeping the real URL and CSP.
-
-1. It loads the page and sees the status strip.
-2. It sends a chat message and sees it stream.
-3. It asks for a picture and sees the PNG render.
-4. It checks that the phone layout fits the screen.
-5. With `--wav`, it starts hands-free voice with Chrome's fake microphone playing the WAV once, and sees the
-   transcript, a spoken reply and its measured latency.
+`voice.html` over the served page before it parses, keeping the real URL and CSP. It checks that:
+1. The page loads, with the status pill and its model list, and every visible control has an accessible name.
+2. A chat reply streams with Markdown, a highlighted code block with a copy button, a timestamp and actions, and the
+   light and dark themes follow the system.
+3. A picture renders as a card that enlarges and downloads.
+4. On a phone, nothing is wider than the screen and the touch targets are large enough.
+5. The voice picker lists engines and voices, and a preview plays.
+6. With `--wav`, Chrome's fake microphone plays the WAV once in hands-free voice mode. The check sees the transcript,
+   a spoken reply and its latency, and photographs the listening, hearing, thinking, speaking, muted and
+   push-to-talk views.
 
 It saves screenshots and `results.json`.
 

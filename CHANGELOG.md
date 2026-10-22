@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Jarvis web client, a UI pass in Sidebud's look, with system light and dark themes:
+  - a sidebar of conversations (rename, delete with undo);
+  - messages with roles, timestamps, copy and regenerate, highlighted code blocks with copy, and a collapsible
+    thinking section;
+  - image and video cards that enlarge and download;
+  - a full-screen voice mode with an orb and wave for listening, hearing, thinking, speaking, muted and push-to-talk,
+    a live transcript, tap-the-orb barge-in and big push-to-talk and hands-free controls;
+  - a voice picker with previews, read from a voice-list API when the daemon has one and from `/v1/models` otherwise;
+  - a settings drawer and a status pill in place of the debug strip;
+  - a mobile-first layout with 44 px targets and a composer that stays above the keyboard;
+  - focus states, accessible names and reduced-motion support.
 - Web client (Jarvis) at `/voice`, with `/` redirecting to it: one embedded HTML file for chat and voice in one
   conversation.
   - Chat: streamed chat with Markdown, a reasoning switch, stop and regenerate.

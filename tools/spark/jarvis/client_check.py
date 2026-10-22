@@ -3,10 +3,12 @@
 Python 3 standard library only (it runs on the GPU host with `python3 -I`, next to google-chrome). Steps:
   1. Load BASE/voice (optionally with PAGE written over it before it parses, so a branch's client is checked against the deployed
      daemon before it is deployed) and wait for the model list and the status strip.
-  2. Chat: send a message, see the reply stream (more than one piece) into an assistant message.
-  3. Image: ask for a picture, see the model call generate_image and the PNG render inline.
+  2. Chat: send a message, see the reply stream into an assistant message with Markdown and a highlighted code block;
+     light and dark themes; accessible names on every control.
+  3. Image: ask for a picture, see the model call generate_image and the PNG render as a card that enlarges and downloads.
+     Phone layout: nothing wider than the screen, touch targets large enough. Voice picker: engines, voices, a preview.
   4. Voice (with --wav): Chrome's fake microphone plays WAV once (padded with silence); start voice hands-free and
-     see the transcript, a spoken reply and its measured "speech end to first audio".
+     see the transcript, a spoken reply and its measured "speech end to first audio"; each voice-view state photographed.
 Screenshots (desktop and phone width) and results.json go to OUT. Exit 0 only when every check passed.
 
     python3 -I client_check.py --base https://host:10443 --out ~/jarvis/client-shots/RUN [--page voice.html] [--wav p.wav]
@@ -150,11 +152,8 @@ def padded_wav(src, dst, lead_s=1.5, tail_s=40):
         w.writeframes(b"\0" * int(rate * lead_s) * 2 * ch + frames + b"\0" * int(rate * tail_s) * 2 * ch)
 
 
-def shot(cdp, out, name, width, height, mobile):
-    cdp.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=2 if mobile else 1, mobile=mobile)
-    time.sleep(0.6)
-    cdp.js("document.getElementById('log').scrollTop = 1e9")
-    time.sleep(0.3)
+def snap(cdp, out, name):
+    """A screenshot of the page as it is now (no resize, so a moment in an animation is not lost)."""
     data = cdp.call("Page.captureScreenshot", format="png")["data"]
     path = os.path.join(out, name + ".png")
     with open(path, "wb") as f:
@@ -163,33 +162,58 @@ def shot(cdp, out, name, width, height, mobile):
     return path
 
 
+def size(cdp, width, height, mobile):
+    cdp.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=2 if mobile else 1, mobile=mobile)
+    time.sleep(0.6)
+
+
+def theme(cdp, dark):
+    cdp.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": "dark" if dark else "light"}])
+    time.sleep(0.3)
+
+
+def shot(cdp, out, name, width, height, mobile):
+    size(cdp, width, height, mobile)
+    cdp.js("document.getElementById('scroll').scrollTop = 1e9")
+    time.sleep(0.3)
+    return snap(cdp, out, name)
+
+
 LAST_ASSISTANT = """(() => { const m = window.jarvis.conversation.msgs.filter(x => x.role === 'assistant').pop();
   return m ? { text: m.text, streaming: !!m.streaming, error: m.error || '', lat: m.lat || {}, via: m.via } : null; })()"""
 
 
 def send(cdp, text):
-    cdp.js(f"(() => {{ const t = document.getElementById('text'); t.value = {json.dumps(text)}; document.getElementById('send').click(); }})()")
+    cdp.js(f"(() => {{ const t = document.getElementById('text'); t.value = {json.dumps(text)}; t.dispatchEvent(new Event('input')); document.getElementById('send').click(); }})()")
 
 
-def click(cdp, element_id):
+def click(cdp, element_id=None, selector=None):
     """A real mouse click (user activation, pointer events) in the middle of the element."""
-    box = cdp.js(f"(() => {{ const r = document.getElementById('{element_id}').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()")
+    q = f"document.getElementById('{element_id}')" if element_id else f"document.querySelector({json.dumps(selector)})"
+    box = cdp.js(f"(() => {{ const r = {q}.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()")
     for t in ("mousePressed", "mouseReleased"):
         cdp.call("Input.dispatchMouseEvent", type=t, x=box[0], y=box[1], button="left", clickCount=1)
         time.sleep(0.08)
+    time.sleep(0.2)
+
+
+UNNAMED = """[...document.querySelectorAll('button, a[href], input, select, textarea')].filter(e => e.offsetParent !== null
+  && !(e.getAttribute('aria-label') || e.textContent.trim() || e.labels && e.labels.length || e.getAttribute('title') || e.placeholder))
+  .map(e => e.outerHTML.slice(0, 80))"""
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", required=True, help="the daemon's origin, e.g. https://dgx-01.example.ts.net:10443")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--page", help="serve this file as /voice instead of the daemon's own (a branch's client)")
+    ap.add_argument("--page", help="write this file over the daemon's /voice before it parses (a branch's client)")
     ap.add_argument("--wav", help="a spoken prompt for the fake microphone (16-bit WAV); without it the voice step is skipped")
     ap.add_argument("--chrome", default=shutil.which("google-chrome") or shutil.which("chromium") or "google-chrome")
-    ap.add_argument("--chat", default="In two short sentences: what is a GPU, and why does it suit neural networks?")
+    ap.add_argument("--chat", default="In two short sentences: what is a GPU, and why does it suit neural networks? "
+                                      "Then show a three-line Python example in a fenced code block.")
     ap.add_argument("--image", default="Please make me a picture of a red fox sitting in fresh snow.")
     ap.add_argument("--timeout", type=int, default=600, help="for the image (a cold image model loads first)")
-    ap.add_argument("--steps", default="chat,image,voice", help="which of chat, image and voice to run, in that order")
+    ap.add_argument("--steps", default="chat,image,picker,voice", help="which of chat, image, picker and voice to run, in that order")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     results, checks = {"base": a.base, "page": a.page or "(the daemon's)"}, []
@@ -204,7 +228,7 @@ def main():
              "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--mute-audio"]
     if a.wav:
         padded = os.path.join(profile, "mic.wav")
-        padded_wav(a.wav, padded)
+        padded_wav(a.wav, padded, lead_s=3)
         flags.append(f"--use-file-for-fake-audio-capture={padded}%noloop")
     chrome = subprocess.Popen([a.chrome, *flags, "about:blank"], stdout=subprocess.DEVNULL, stderr=open(os.path.join(a.out, "chrome.log"), "w"))
     try:
@@ -228,15 +252,21 @@ def main():
             # old page is discarded before it parses. (A document made by Fetch.fulfillRequest cannot open WebSockets.)
             cdp.call("Page.addScriptToEvaluateOnNewDocument", source="if (location.pathname.replace(/\\/$/, '') === '/voice' && !window.__swapped) {"
                      " window.__swapped = 1; document.open(); document.write(%s); document.close(); }" % json.dumps(open(a.page).read()))
+        theme(cdp, False)
+        size(cdp, 1280, 860, False)
         cdp.call("Page.navigate", url=a.base.rstrip("/") + "/voice")
-        cdp.wait("window.jarvis && document.querySelectorAll('#strip .chip').length > 0", 60, "the page and the status strip")
-        results["strip"] = cdp.js("[...document.querySelectorAll('#strip .chip')].map(c => c.textContent + ':' + (c.dataset.s || ''))")
-        check("page: loads, lists the models and shows their state", len(results["strip"]) >= 2, results["strip"])
-        cdp.js("localStorage.clear(); document.getElementById('new').click(); true")
-        shot(cdp, a.out, "01-loaded-desktop", 1280, 900, False)
+        cdp.wait("window.jarvis && window.jarvis.ready", 60, "the page, the models and their state")
+        results["models"] = cdp.js("[...document.querySelectorAll('#statusPop .model')].map(m => m.textContent)")
+        check("page: loads, lists the models and shows their state", len(results["models"]) >= 2, results["models"])
+        results["pill"] = cdp.js("[document.getElementById('statusPill').dataset.s, document.getElementById('statusPill').textContent]")
+        check("page: the status pill shows the stack's state", results["pill"][0] in ("ready", "busy", "loading"), results["pill"])
+        cdp.js("localStorage.clear(); document.getElementById('newChat').click(); true")
+        snap(cdp, a.out, "01-empty-desktop-light")
+        unnamed = cdp.js(UNNAMED)
+        check("a11y: every visible control has an accessible name", not unnamed, unnamed)
 
         steps = set(a.steps.split(","))
-        # Chat: a streamed reply.
+        # Chat: a streamed reply, Markdown, a highlighted code block with its copy button.
         if "chat" in steps:
             t0 = time.monotonic()
             send(cdp, a.chat)
@@ -247,39 +277,113 @@ def main():
             check("chat: a streamed reply in the conversation", r["text"] and not r["error"] and (done or {}).get("tokens", 0) > 1,
                   results["chat"])
             check("chat: first token time measured", (r["lat"] or {}).get("ttft") is not None, r["lat"])
-            check("chat: the reply is rendered (markdown body)", cdp.js("!!document.querySelector('.msg.assistant .body p, .msg.assistant .body li')"))
-            shot(cdp, a.out, "02-chat-desktop", 1280, 900, False)
+            check("chat: the reply is rendered (markdown body)", cdp.js("!!document.querySelector('.row.assistant .md p, .row.assistant .md li')"))
+            code = cdp.js("(() => { const c = document.querySelector('.row.assistant .code'); return c ? { spans: c.querySelectorAll('.tk, .tf, .ts, .tn, .tc').length, copy: !!c.querySelector('[data-act=copy-code]'), lang: c.querySelector('.code-h span').textContent } : null; })()")
+            results["chat"]["code"] = code
+            check("chat: a code block, highlighted, with a copy button", code and code["spans"] > 0 and code["copy"], code)
+            check("chat: the reply has a timestamp and copy and regenerate actions",
+                  cdp.js("(() => { const r = [...document.querySelectorAll('.row.assistant')].pop(); return !!(r && r.querySelector('time') && r.querySelector('[data-act=copy]') && !r.querySelector('[data-act=regen]').hidden); })()"))
+            cdp.js("document.getElementById('scroll').scrollTop = 1e9")
+            time.sleep(0.3)
+            snap(cdp, a.out, "02-chat-desktop-light")
+            theme(cdp, True)
+            bg = cdp.js("getComputedStyle(document.body).backgroundColor")
+            theme(cdp, False)
+            bg_light = cdp.js("getComputedStyle(document.body).backgroundColor")
+            results["themes"] = {"light": bg_light, "dark": bg}
+            check("themes: light and dark follow the system setting", bg != bg_light, results["themes"])
+            theme(cdp, True)
+            snap(cdp, a.out, "03-chat-desktop-dark")
+            shot(cdp, a.out, "04-chat-phone-dark", 390, 844, True)
+            theme(cdp, False)
+            size(cdp, 1280, 860, False)
 
-        # Image: the model calls generate_image; the PNG renders inline.
+        # Image: the model calls generate_image; the PNG renders as a card that enlarges and downloads.
         if "image" in steps:
             send(cdp, a.image)
-            loaded = cdp.wait("(() => { const i = [...document.querySelectorAll('.media img')].pop(); return i && i.complete && i.naturalWidth > 0 ? [i.naturalWidth, i.naturalHeight, i.getAttribute('src')] : null; })()",
+            loaded = cdp.wait("(() => { const i = [...document.querySelectorAll('.card img')].pop(); return i && i.complete && i.naturalWidth > 0 ? [i.naturalWidth, i.naturalHeight, i.getAttribute('src')] : null; })()",
                               a.timeout, "the generated image")
             cdp.wait(LAST_ASSISTANT.replace("return m ?", "return m && !m.streaming ?"), 180, "the reply after the image")
             tool = cdp.js("window.jarvis.debug.filter(e => e.kind === 'tool.done').pop()")
-            results["image"] = {"size": loaded[:2], "src": loaded[2], "tool": tool, "after": cdp.js(LAST_ASSISTANT)}
+            results["image"] = {"size": loaded[:2], "src": loaded[2], "tool": tool, "after": cdp.js(LAST_ASSISTANT),
+                                "download": cdp.js("(() => { const a = [...document.querySelectorAll('.card a[download]')].pop(); return a ? a.getAttribute('href') : null; })()")}
             check("image: generate_image ran and the PNG renders inline", loaded[0] > 0 and (tool or {}).get("name") == "generate_image", results["image"])
-            shot(cdp, a.out, "03-image-desktop", 1280, 900, False)
-            shot(cdp, a.out, "04-image-phone", 390, 844, True)
+            check("image: the card has a download link", bool(results["image"]["download"]), results["image"]["download"])
+            shot(cdp, a.out, "05-image-card-desktop", 1280, 860, False)
+            cdp.js("[...document.querySelectorAll('.card .thumb')].pop().click(); true")
+            time.sleep(0.5)
+            check("image: a click enlarges it", cdp.js("document.getElementById('lightbox').open && document.getElementById('lbImg').naturalWidth > 0"))
+            snap(cdp, a.out, "06-image-enlarged")
+            cdp.js("document.getElementById('lightbox').close(); true")
+            shot(cdp, a.out, "07-image-card-phone", 390, 844, True)
 
-        # Voice: hands-free, the fake microphone says the prompt once.
+        size(cdp, 390, 844, True)
+        results["layout"] = cdp.js("[document.documentElement.scrollWidth, innerWidth]")
+        check("phone: nothing wider than the screen", results["layout"][0] <= results["layout"][1], results["layout"])
+        small = cdp.js("""[...document.querySelectorAll('.composer button, .top button')].filter(e => e.offsetParent !== null)
+            .map(e => e.getBoundingClientRect()).filter(r => r.width < 36 || r.height < 36).length""")
+        check("phone: the composer's and top bar's touch targets are large enough", small == 0, small)
+
+        # The voice picker: the engines, their voices (from a voice-list API when there is one), a preview.
+        if "picker" in steps:
+            cdp.js("document.getElementById('gear').click(); true")
+            cdp.wait("document.querySelectorAll('#engines .engine').length > 0 && document.querySelectorAll('#voices .vrow').length > 0", 20, "the voice picker")
+            engines = cdp.js("[...document.querySelectorAll('#engines .engine b')].map(b => b.textContent)")
+            pick = cdp.js("""(() => { const e = [...document.querySelectorAll('#engines .engine')]; const many = e.find(x => /kitten/i.test(x.textContent)) || e[e.length - 1]; many.click(); return many.textContent; })()""")
+            n = cdp.wait("document.querySelectorAll('#voices .vrow').length > 1 && document.querySelectorAll('#voices .vrow').length", 20, "the engine's voices")
+            cdp.js("document.getElementById('voiceSect').scrollIntoView(); true")
+            time.sleep(0.3)
+            snap(cdp, a.out, "08-voice-picker-phone")
+            mark = cdp.js("window.jarvis.debug.length")
+            cdp.js("document.querySelector('#voices .play').click(); true")
+            prev = cdp.wait(f"window.jarvis.debug.slice({mark}).find(e => e.kind === 'voice.preview')", 120, "a voice preview")
+            results["picker"] = {"engines": engines, "picked": pick, "voices": n, "preview": prev,
+                                 "sources": cdp.js("window.jarvis.debug.filter(e => e.kind === 'voices')")}
+            check("picker: engines and their voices are listed", len(engines) >= 1 and n > 1, results["picker"])
+            check("picker: a voice preview plays", prev and prev.get("bytes", 0) > 1000 and not prev.get("error"), prev)
+            cdp.js("""(() => { const p = document.querySelector('.play[data-playing="1"]'); if (p) p.click();
+                const e = [...document.querySelectorAll('#engines .engine')][0]; e.click(); document.getElementById('drawer').close(); return true; })()""")
+            time.sleep(0.4)
+
+        # Voice: hands-free, the fake microphone says the prompt once; each state of the voice view is photographed.
         if a.wav and "voice" in steps:
-            cdp.call("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=2, mobile=True)
-            time.sleep(0.8)
-            results["layout"] = cdp.js("[document.documentElement.scrollWidth, innerWidth]")
-            check("phone: nothing wider than the screen", results["layout"][0] <= results["layout"][1], results["layout"])
+            theme(cdp, True)
+            size(cdp, 390, 844, True)
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected", 20, "the voice session")
-            m = cdp.wait("""(() => { const c = window.jarvis.conversation.msgs; const u = c.filter(x => x.role === 'user' && x.via === 'voice' && !x.partial && x.text).pop();
+            seen, order = {}, ["connecting", "listening", "hearing", "thinking", "speaking"]
+            want = """(() => { const c = window.jarvis.conversation.msgs; const u = c.filter(x => x.role === 'user' && x.via === 'voice' && !x.partial && x.text).pop();
                 const b = c.filter(x => x.role === 'assistant' && x.via === 'voice' && !x.streaming && x.text).pop();
-                return u && b ? { heard: u.text, reply: b.text, lat: b.lat || {} } : null; })()""", 120, "a spoken turn and its reply")
-            cdp.wait("window.jarvis.voice.live === 0", 60, "the reply's audio to finish")
+                return u && b && window.jarvis.voice.live === 0 ? { heard: u.text, reply: b.text, lat: b.lat || {} } : null; })()"""
+            deadline, m = time.monotonic() + 150, None
+            while time.monotonic() < deadline:
+                st = cdp.js("window.jarvis.ui.voiceState")
+                if st in order and st not in seen:
+                    seen[st] = snap(cdp, a.out, f"1{order.index(st)}-voice-{st}-phone")
+                m = cdp.js(want)
+                if m and len(seen) >= 4:
+                    break
+                cdp.pump(0.08)
+            if not m:
+                m = cdp.wait(want, 30, "a spoken turn and its reply")
             partials = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.in' && e.type === 'localrouter.transcription.partial').length")
-            results["voice"] = {**m, "partials": partials, "lat": {k: v for k, v in m["lat"].items() if k != "server"}}
+            results["voice"] = {**m, "partials": partials, "states": sorted(seen), "lat": {k: v for k, v in m["lat"].items() if k != "server"}}
             check("voice: the spoken prompt is transcribed into the conversation", len(m["heard"]) > 3, m["heard"])
             check("voice: a spoken reply, with speech end to first audio measured", m["lat"].get("firstAudio") is not None, results["voice"]["lat"])
-            shot(cdp, a.out, "05-voice-phone", 390, 844, True)
-            click(cdp, "hangup")
+            check("voice: the view showed listening, hearing, thinking and speaking", {"listening", "hearing", "thinking", "speaking"} <= set(seen), sorted(seen))
+            click(cdp, "talk")
+            check("voice: the big button mutes", cdp.js("window.jarvis.ui.voiceState") == "muted")
+            snap(cdp, a.out, "15-voice-muted-phone")
+            click(cdp, "talk")
+            click(cdp, selector=".seg [data-mode=ptt]")
+            check("voice: push to talk is offered", cdp.js("window.jarvis.ui.voiceState") == "ptt")
+            snap(cdp, a.out, "16-voice-push-to-talk-phone")
+            click(cdp, selector=".seg [data-mode=vad]")
+            theme(cdp, False)
+            snap(cdp, a.out, "17-voice-listening-phone-light")
+            click(cdp, "vmMin")
+            snap(cdp, a.out, "18-chat-with-voice-phone-light")
+            click(cdp, "vbarEnd")
         results["console_errors"] = console[:20]
         check("page: no script errors", not [c for c in console if "Uncaught" in c or "Error" in c], console[:5])
         results["debug_tail"] = cdp.js("window.jarvis.debug.slice(-60)")
