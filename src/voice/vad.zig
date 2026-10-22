@@ -129,7 +129,7 @@ pub const Vad = struct {
                 if (v.burst >= resume_frames) v.burst = 0;
             } else v.quiet_run = 0;
             if (v.pause_frames > 0 and v.quiet_run == v.pause_frames and v.pause_frames < v.silence_frames) try out.append(gpa, .{ .kind = .speech_paused, .ms = v.msAtFrame(v.frames - v.quiet_run) });
-            if (v.quiet_run >= v.silence_frames) {
+            if (!loud and v.quiet_run >= v.silence_frames) { // never inside a burst: it may yet be speech
                 v.reset();
                 try out.append(gpa, .{ .kind = .speech_stopped, .ms = v.msAtFrame(v.frames) });
             }
@@ -307,6 +307,16 @@ test "the wait restarts on speech, never adds up, and a blip in it is not speech
     defer b.deinit(gpa);
     try run(buf.items, test_rate / 10, &b);
     try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 600 + 500 } }, b.items);
+    // Speech going on 450 ms into the 500 ms wait is still the same turn (its first frames do not end it).
+    buf.clearRetainingCapacity();
+    try tone(&buf, 600, null);
+    try quiet(&buf, 450, null);
+    try tone(&buf, 300, null);
+    try quiet(&buf, 700, null);
+    var c: std.ArrayList(Event) = .empty;
+    defer c.deinit(gpa);
+    try run(buf.items, test_rate / 10, &c);
+    try expectEvents(&.{ .{ .kind = .speech_started, .ms = 0 }, .{ .kind = .speech_stopped, .ms = 600 + 450 + 300 + 500 } }, c.items);
 }
 
 test "reset returns to silence and keeps the position" {
