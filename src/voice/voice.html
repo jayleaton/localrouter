@@ -2290,11 +2290,12 @@ function clickTest(fixtures) {
   }
   const key = Object.keys(audio).sort((a, b) => audio[b].samples.length - audio[a].samples.length)[0];
   const a = key && audio[key], s = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && rms(a.samples.slice(k - 240, k + 240)) > 0.05);
-  for (const [name, change] of [['stream, a step at a seam', y => { for (let j = s; j < s + 24; j++) y[j] += 0.3; return y; }],
-                                ['stream, the audio after a seam inverted', y => y.slice(0, s).concat(y.slice(s).map(v => -v))]]) {
-    if (s == null) { out.cases.push({ name, found: false }); continue; }
-    const y = change(a.samples.slice());
-    out.cases.push({ name, caught: seamClick(Float32Array.from(y), s) });
+  // Inverting the audio after a seam only breaks it where the wave is away from zero (at a zero crossing it joins).
+  const s2 = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && Math.abs(a.samples[k]) >= 0.15);
+  for (const [name, at, change] of [['stream, a step at a seam', s, (y, k) => { for (let j = k; j < k + 24; j++) y[j] += 0.3; return y; }],
+                                    ['stream, the audio after a seam inverted', s2, (y, k) => y.slice(0, k).concat(y.slice(k).map(v => -v))]]) {
+    if (at == null) { out.cases.push({ name, found: false }); continue; }
+    out.cases.push({ name, caught: seamClick(Float32Array.from(change(a.samples.slice(), at)), at) });
   }
   return out;
 }
