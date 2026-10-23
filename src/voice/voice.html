@@ -2289,7 +2289,10 @@ function clickTest(fixtures) {
     }
   }
   const key = Object.keys(audio).sort((a, b) => audio[b].samples.length - audio[a].samples.length)[0];
-  const a = key && audio[key], s = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && rms(a.samples.slice(k - 240, k + 240)) > 0.05);
+  // A step is judged against the steps around it: a seam in voiced speech (loud, small steps), not in a fricative,
+  // whose own steps mask one.
+  const meanStep = d => d.reduce((s, v, i) => s + (i ? Math.abs(v - d[i - 1]) : 0), 0) / Math.max(d.length - 1, 1);
+  const a = key && audio[key], s = a && a.starts.find(k => k > 240 && k < a.samples.length - 240 && rms(a.samples.slice(k - 240, k + 240)) > 0.05 && meanStep(a.samples.slice(k - 240, k + 240)) < 0.03);
   // Inverting the audio after a seam only breaks it where the wave is away from zero (at a zero crossing it joins).
   const s2 = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && Math.abs(a.samples[k]) >= 0.15);
   for (const [name, at, change] of [['stream, a step at a seam', s, (y, k) => { for (let j = k; j < k + 24; j++) y[j] += 0.3; return y; }],
