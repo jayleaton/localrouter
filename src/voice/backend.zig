@@ -37,6 +37,18 @@ pub const Outcome = struct {
 /// A model management tool's result: its JSON (or the reason it failed) for the model to read.
 pub const Managed = struct { ok: bool, text: []const u8 };
 
+/// A finished turn for a shadow decision: what the user said, the tools the chat model was offered and what it did
+/// (the tools it called, in order; none: it replied in speech). Borrowed: the hook copies what it keeps.
+pub const Shadow = struct {
+    session_id: []const u8,
+    response_id: []const u8,
+    words: []const u8,
+    previous: []const u8 = "", // the assistant's reply before this turn, for context
+    tools: []const chat.Tool,
+    called: []const []const u8,
+    turn_ms: u64 = 0, // from the end of the user's turn to the end of this reply
+};
+
 /// Which model a session setting names.
 pub const Role = enum { chat, speech, transcription };
 
@@ -64,6 +76,7 @@ pub const Backend = struct {
         paused: ?*const fn (ptr: *anyopaque) bool = null, // a voice model is unloaded to make room (it comes back)
         manage: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8) Managed = null,
         computer: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed = null,
+        shadow: ?*const fn (ptr: *anyopaque, turn: Shadow) void = null, // must not block: called under the session's lock
     };
 
     /// Runs a computer tool (computer_control, computer_use) for the user's words `utterance`, until the task ends
@@ -71,6 +84,12 @@ pub const Backend = struct {
     pub fn computer(b: Backend, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed {
         const f = b.vtable.computer orelse return .{ .ok = false, .text = "computer control is not available here" };
         return f(b.ptr, a, name, arguments, utterance, speaker, stop);
+    }
+
+    /// Asks the decision model how it would have routed a finished turn, and logs it beside what the chat model did.
+    /// Shadow only: returns at once, and nothing acts on the decision.
+    pub fn shadow(b: Backend, turn: Shadow) void {
+        if (b.vtable.shadow) |f| f(b.ptr, turn);
     }
 
     /// True while a voice model is unloaded to make room for another job; it comes back by itself.

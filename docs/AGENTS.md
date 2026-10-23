@@ -35,6 +35,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside the config's `local_files`), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
+| `decide` | `state`, `questions` (choice, noul, score), `model`: one line a question (the choice and its probability, the noul's probability, the expected level), then the model's checked reply |
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
 | `release_models` | unloads every model now |
@@ -51,9 +52,9 @@ agents is `skill/localrouter/SKILL.md`. The HTTP API below is the same jobs with
 curl -s $BASE/models | jq '.data[] | {id, kind, running}'
 ```
 
-`kind` is `image`, `video`, `speech`, `transcription` or `chat`. `running: true` means it is loaded now. `capabilities` lists
-what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`,
-`speech_to_text`, `chat_completion`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
+`kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now.
+`capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
+`text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
 `max_input_chars`, `stream` (whether `stream: true` works) and `references` (whether voice references do);
 transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
@@ -216,6 +217,36 @@ does not take (that refusal is a 400 with the server's message). For the Qwen3.8
 A streamed request the model refuses gets an ordinary JSON error, not a stream. If a stream breaks off after it began,
 it ends with `data: {"error": {...}}` and `data: [DONE]`. Closing the connection cancels the request; the model stays
 loaded. A model that is not yet qualified on this machine (`"qualified": false` in `/models`) is refused with a 503.
+
+## Decisions (the System One shape)
+
+A decision model answers typed questions about a state with probabilities, in one forward pass and without writing
+text: route a request, classify, check a statement. `POST /v1/systemone` takes TypeSafe's System One request, so a
+client written for it (SideBud's Jev client) only changes its base URL; a `model` that is not a decision model here
+(`jev-latest`) goes to the default one.
+
+```bash
+curl -s $BASE/systemone -H 'content-type: application/json' -d '{
+  "model": "jev-latest",
+  "state": {"user_said": "draw me a fox in the snow"},
+  "questions": {
+    "route": {"type": "choice", "instructions": "Which action does the user want?",
+              "criteria": {"generate_image": "make a picture", "generate_video": "make a clip", "reply": "just answer"}},
+    "two": {"type": "noul", "instructions": "Does the user ask for more than one thing?"},
+    "urgency": {"type": "score", "instructions": "How urgent is it?", "criteria": ["not at all", "somewhat", "very"]}}}'
+```
+
+| Question | `criteria` | Answer |
+| --- | --- | --- |
+| `choice` | option id -> what it means (or null), 2 to 255 | `choice` (an offered id), `confidence`, `probabilities` (every option) |
+| `noul` | `{"true": ..., "false": ...}`, optional | `noul`: the probability that it is true |
+| `score` | 2 to 10 levels, lowest first | `score` (the expected level, 0 = the first), `confidence`, `probabilities` keyed `"0"`... |
+
+At most 64 questions and 16 KB a request. The questions are checked before anything loads (400), and the model's
+answers against them before they are returned: every question answered with its own type, a choice that is one of the
+offered options, probabilities in [0, 1] that sum to 1. An answer that fails is the model's error (500), never a
+decision. A decision acts on nothing; what to do with it is your code. Calibration, option order and literal reading
+are the model's own: validate it on your own task before acting on its probabilities.
 
 ## Voice (OpenAI Realtime API)
 

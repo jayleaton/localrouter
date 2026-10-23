@@ -1,5 +1,5 @@
 //! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
-//! /v1/chat/completions (`chat.zig`)
+//! /v1/chat/completions (`chat.zig`), /v1/systemone (`decide.zig`, typed decisions)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
 //! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
@@ -17,6 +17,7 @@ const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
+const decide = @import("decide.zig");
 const realtime = @import("realtime.zig");
 const pair = @import("pair.zig");
 const desktop = @import("desktop.zig");
@@ -68,6 +69,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a);
     if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype);
     if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a);
+    if (m == .POST and eql(p, "/v1/systemone")) return decide.systemOne(app, req, a);
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..]);
@@ -180,6 +182,7 @@ fn article(k: request.Kind) []const u8 {
         .speech => "a speech",
         .transcription => "a transcription",
         .chat => "a chat",
+        .decision => "a decision",
     };
 }
 

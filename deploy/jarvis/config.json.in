@@ -4,12 +4,12 @@
  "local_files": ["@DEPLOY@/inbox"],
  "defaults": {"chat_completion": "qwen3.8-27b", "text_to_speech": "fishaudio/drama-3",
               "speech_to_text": "whisper-large-v3-turbo", "text_to_image": "qwen-image-2.1-turbo",
-              "text_to_video": "minimax-h3"},
+              "text_to_video": "minimax-h3", "typed_decision": "knowline-4b"},
  "voice": {
   "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"},
   "speech_models": ["fishaudio/drama-3"],
   "prime_chat": true, "greedy_transcripts": true,
-  "partial_interval_ms": 0, "tool_wait_s": 900, "manage_models": true
+  "partial_interval_ms": 0, "tool_wait_s": 900, "manage_models": true, "shadow_decisions": true
  },
  "tools": [
   {"id": "qwen3.8-27b", "kind": "chat", "name": "Qwen3.8 27B (TensorFold 1.1.1, MLX 4-bit + DFlash2 drafter)",
@@ -41,6 +41,13 @@
    "options": {"precision": "fp8s", "max_side": 1360, "max_pixels": 1048576, "resident_mb": 32256}},
   {"id": "minimax-h3", "kind": "video", "name": "MiniMax H3 (NVFP4, Turbo 8 steps, with audio)",
    "engine": "minimax_h3", "weights": "@J@/lr/weights/minimax-h3", "idle_ttl_s": 30, "priority": 0,
-   "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
+   "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}},
+  {"id": "knowline-4b", "kind": "decision", "name": "KnowLine-4B Gen5.5 (typed decisions, System One shape; bf16, transformers)",
+   "engine": "openai_server", "weights": "@J@/models/decide/knowline-4b-gen5.5",
+   "resident_bytes": 13290209280, "working_bytes": 0, "keep_loaded": false, "priority": 5, "idle_ttl_s": 600,
+   "load_timeout_s": 300, "generate_timeout_s": 60,
+   "options": {"server": ["@J@/venvs/decide/bin/python", "-I", "@SRC@/tools/decide/knowline/serve.py", "{weights}",
+                          "--port", "{port}", "--served-model-name", "{id}"],
+               "env": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}, "health": "/health"}}
  ]
 }

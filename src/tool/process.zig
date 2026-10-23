@@ -5,8 +5,8 @@
 //! the worker learns so: LOCALROUTER_GPU_LOCK_HELD=1, the host lock in LOCALROUTER_HOST_GPU_LOCK, and in
 //! LOCALROUTER_GPU_LOCK a lock file of its own (`<data>/locks/<id>.lock`), uncontended, for a launcher that insists on
 //! taking one; so no worker can keep another LocalRouter model out. A worker whose load reply names a `port`
-//! runs the model's own HTTP server there: chat requests are proxied to it (`proxy`), and cancelling one ends the request,
-//! not the worker.
+//! runs the model's own HTTP server there: chat and decision requests are proxied to it (`proxy`), and cancelling one ends
+//! the request, not the worker.
 
 const std = @import("std");
 const posix = std.posix;
@@ -145,7 +145,7 @@ pub const ProcessTool = struct {
     fn generate(ptr: *anyopaque, job: *const tool.Job, sink: tool.Sink, arena: std.mem.Allocator) tool.Error!tool.Output {
         const p = self(ptr);
         if (p.child == null) return tool.Error.WorkerDied;
-        if (job.request == .chat) {
+        if (job.request == .chat or job.request == .decision) {
             p.aborted.store(false, .seq_cst); // before `proxying`: an abort from here on is seen (`abort`, `proxy`)
             p.proxying.store(true, .seq_cst);
             defer p.proxying.store(false, .seq_cst);
@@ -186,20 +186,25 @@ pub const ProcessTool = struct {
         return s;
     }
 
-    /// A chat request, POSTed to the worker's own server on loopback; the reply goes into the job directory as it arrives:
-    /// `completion.json`, or the event stream in `completion.sse` (created once the server has accepted the request,
-    /// which is how the API knows to start streaming). The server's refusals keep its status: 4xx is the caller's (400),
-    /// 503 a busy server (503), anything else a failure (500). `generate_timeout_s` bounds each silence.
+    /// A chat or decision request, POSTed to the worker's own server on loopback; the reply goes into the job directory as
+    /// it arrives: `completion.json`, or the event stream in `completion.sse` (created once the server has accepted the
+    /// request, which is how the API knows to start streaming), or `decision.json` (to `options.decision_path`, default
+    /// /v1/systemone). The server's refusals keep its status: 4xx is the caller's (400), 503 a busy server (503),
+    /// anything else a failure (500). `generate_timeout_s` bounds each silence.
     fn proxy(p: *ProcessTool, job: *const tool.Job, arena: std.mem.Allocator) tool.Error!tool.Output {
-        const c = job.request.chat;
-        if (p.port == 0) return p.failed(.ready, tool.Error.GenerateFailed, "model '{s}' has no server to send chat requests to: its worker's load reply named no port", .{p.cfg.id});
+        const c: struct { body: []const u8, stream: bool, seed: u64, path: []const u8, name: []const u8 } = switch (job.request) {
+            .chat => |v| .{ .body = v.body, .stream = v.stream, .seed = v.seed, .path = "/v1/chat/completions", .name = if (v.stream) "completion.sse" else "completion.json" },
+            .decision => |v| .{ .body = v.body, .stream = false, .seed = v.seed, .path = engine.optionString(p.cfg, "decision_path", "/v1/systemone"), .name = "decision.json" },
+            else => unreachable, // `generate` proxies only these
+        };
+        if (p.port == 0) return p.failed(.ready, tool.Error.GenerateFailed, "model '{s}' has no server to send requests to: its worker's load reply named no port", .{p.cfg.id});
         const start = Io.Clock.awake.now(p.setup.io);
         const fd = upstream.connect(p.port) catch |err| return p.lost(err);
         defer _ = std.c.close(fd);
         p.upstream_fd.store(fd, .seq_cst);
         defer p.upstream_fd.store(-1, .seq_cst); // runs before the close above
         if (p.aborted.load(.seq_cst)) return p.lost(error.Closed);
-        upstream.send(fd, "POST", "/v1/chat/completions", c.body) catch |err| return p.lost(err);
+        upstream.send(fd, "POST", c.path, c.body) catch |err| return p.lost(err);
         const buf = arena.alloc(u8, 64 << 10) catch return tool.Error.OutOfMemory;
         var r: upstream.Reader = .{ .fd = fd, .buf = buf, .timeout_ms = @intCast(@min(@as(u64, p.cfg.generate_timeout_s) * 1000, std.math.maxInt(i32))) };
         const status = r.head() catch |err| return p.lost(err);
@@ -210,7 +215,7 @@ pub const ProcessTool = struct {
             p.st.store(.ready, .release);
             return tool.Error.GenerateFailed;
         }
-        const name = if (c.stream) "completion.sse" else "completion.json";
+        const name = c.name;
         const path = std.fs.path.join(arena, &.{ job.dir, name }) catch return tool.Error.OutOfMemory;
         const file = Io.Dir.cwd().createFile(p.setup.io, path, .{}) catch return p.failed(.ready, tool.Error.GenerateFailed, "could not write {s}", .{name});
         defer file.close(p.setup.io);

@@ -28,18 +28,19 @@ pub const ToolConfig = struct {
     // A file the model's qualify script writes on this machine. When set, the tool is listed but refused (503) until it
     // exists and holds `"qualified": true` (`engine.unqualified`); unset: no gate.
     qualification: []const u8 = "",
-    lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech, listen for transcription, chat for chat, else main
+    lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech, listen for transcription, chat for chat, decide for decisions, else main
 };
 
 /// The scheduler's executors: one job at a time on each. Speech runs beside a chat reply, a chat turn beside a video,
-/// and a transcription never waits behind a sentence of speech.
-pub const Lane = enum { main, realtime, chat, listen };
+/// a transcription never waits behind a sentence of speech, and a decision never waits behind a chat reply.
+pub const Lane = enum { main, realtime, chat, listen, decide };
 
 pub fn laneOf(t: *const ToolConfig) Lane {
     return t.lane orelse switch (t.kind) {
         .speech => .realtime,
         .transcription => .listen,
         .chat => .chat,
+        .decision => .decide,
         else => .main, // image, video, and every other kind
     };
 }
@@ -71,6 +72,8 @@ pub const Voice = struct {
     manage_models: bool = false, // offer list_models, reserve_for, unload_model and load_model to the chat model, with the
     // model management procedure (src/voice/model_skill.md) after its instructions; the web client reads the same
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
+    shadow_decisions: bool = false, // after each reply, ask the decision model (kind `decision`) how it would have routed the
+    // turn and log it beside what the chat model did (`voice shadow decision` lines); nothing acts on it
 };
 
 /// Device pairing (src/pair.zig): off by default, so every client that reaches the daemon may use it, as before.
@@ -124,6 +127,7 @@ pub const Defaults = struct {
     text_to_speech: ?[]const u8 = null,
     speech_to_text: ?[]const u8 = null,
     chat_completion: ?[]const u8 = null,
+    typed_decision: ?[]const u8 = null,
 
     pub fn get(d: Defaults, cap: Capability) ?[]const u8 {
         return switch (cap) {
@@ -227,12 +231,14 @@ test "lanes: speech kinds default to realtime, a tool may name its lane; voice s
     const c = try parse(arena.allocator(),
         \\{"voice": {"chat_url": "http://127.0.0.1:9/v1", "partial_interval_ms": 0}, "tools": [
         \\  {"id": "tts", "kind": "speech", "cmd": ["x"]}, {"id": "img", "kind": "image", "engine": "testpattern"},
-        \\  {"id": "stt", "kind": "transcription", "cmd": ["x"], "lane": "main"}, {"id": "llm", "kind": "chat", "engine": "openai_server"}]}
+        \\  {"id": "stt", "kind": "transcription", "cmd": ["x"], "lane": "main"}, {"id": "llm", "kind": "chat", "engine": "openai_server"},
+        \\  {"id": "jev", "kind": "decision", "engine": "openai_server"}]}
     );
     try std.testing.expectEqual(Lane.realtime, laneOf(c.tool("tts").?));
     try std.testing.expectEqual(Lane.main, laneOf(c.tool("img").?));
     try std.testing.expectEqual(Lane.main, laneOf(c.tool("stt").?));
     try std.testing.expectEqual(Lane.chat, laneOf(c.tool("llm").?));
+    try std.testing.expectEqual(Lane.decide, laneOf(c.tool("jev").?));
     try std.testing.expectEqualStrings("http://127.0.0.1:9/v1", c.voice.chat_url);
     try std.testing.expectEqual(@as(u32, 0), c.voice.partial_interval_ms);
     try std.testing.expect(!c.voice.remote);

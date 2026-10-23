@@ -1,7 +1,8 @@
 //! The scheduler owns the GPU: one executor thread a lane runs one job at a time, loads and unloads tools inside the
 //! memory budget, and unloads idle tools after their TTL. Other threads only queue work, cancel, and read state.
 //!
-//! Lanes: `main` (image, video), `chat`, `realtime` (speech) and `listen` (transcription; `config.laneOf`), so a
+//! Lanes: `main` (image, video), `chat`, `realtime` (speech), `listen` (transcription) and `decide` (typed decisions;
+//! `config.laneOf`), so a
 //! short TTS or STT job never waits behind a chat reply or a video, nor a chat turn behind a video. A tool is loaded and
 //! run only by its own lane. Residency changes (admission, eviction, the reservation of a load, the GPU lock) are
 //! serialized by `gate`; memory admitted but perhaps not yet allocated (a load in progress, the working bytes of a
@@ -108,7 +109,7 @@ const LaneState = struct {
     idle_since_ns: i96 = 0, // when the executor last finished an item
 };
 
-const lane_count = 4;
+const lane_count = 5;
 
 fn index(l: Lane) usize {
     return switch (l) {
@@ -116,6 +117,7 @@ fn index(l: Lane) usize {
         .realtime => 1,
         .chat => 2,
         .listen => 3,
+        .decide => 4,
     };
 }
 
@@ -895,6 +897,7 @@ fn placeholder(kind: @import("../tool/request.zig").Kind) @import("../tool/reque
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
+        .decision => .{ .decision = .{ .body = "" } },
     };
 }
 

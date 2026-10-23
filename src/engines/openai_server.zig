@@ -14,7 +14,7 @@ const upstream = @import("../tool/upstream.zig");
 const ToolConfig = @import("../config.zig").ToolConfig;
 const Request = @import("../tool/request.zig").Request;
 
-pub const entry: engine.Entry = .{ .name = "openai_server", .capabilities = &.{.chat_completion}, .needs = needs, .create = create };
+pub const entry: engine.Entry = .{ .name = "openai_server", .capabilities = &.{ .chat_completion, .typed_decision }, .needs = needs, .create = create };
 
 fn needs(cfg: *const ToolConfig, _: *const Request) engine.Needs {
     return .{ .resident = cfg.resident_bytes, .working = cfg.working_bytes };

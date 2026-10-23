@@ -61,6 +61,11 @@ if [ "${BUILD_ONLY:-0}" != 1 ]; then
   if wanted qwen-image-2.1-turbo; then
     [ -f "$J/lr/weights/qwen-image-2.1/turbo-fp8s/manifest.json" ] || die "no image pack under $J/lr/weights/qwen-image-2.1"
   fi
+  if wanted knowline-4b; then # tools/decide/knowline/README.md: the pinned weights (checked against SHA256SUMS) and its venv
+    [ "$(cat "$J/models/decide/knowline-4b-gen5.5/.revision" 2> /dev/null)" = "$KNOWLINE_REV" ] ||
+      die "knowline-4b: no weights at $J/models/decide/knowline-4b-gen5.5 of revision $KNOWLINE_REV (tools/decide/knowline/fetch.sh)"
+    [ -x "$J/venvs/decide/bin/python" ] || die "knowline-4b: no venv at $J/venvs/decide (tools/decide/knowline/fetch.sh)"
+  fi
   if wanted minimax-h3; then
     [ -f "$J/lr/weights/minimax-h3/h3-turbo-nvfp4/manifest.json" ] || die "no video pack under $J/lr/weights/minimax-h3"
   fi
