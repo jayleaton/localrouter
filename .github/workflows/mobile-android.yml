@@ -1,9 +1,12 @@
 # An installable Android build of the phone app (apps/mobile): a release APK, JavaScript bundled in, signed with the
-# debug key, so it installs by sideloading and needs no Metro server. Run it from the Actions tab (or `gh workflow run
-# mobile-android.yml --ref <branch>`); it also runs when main changes the app. The APK is the run's artifact.
+# debug key, so it installs by sideloading and needs no Metro server. It runs on pull requests and pushes to main that
+# change the app (a broken native build shows before the merge), and from the Actions tab (`gh workflow run
+# mobile-android.yml`). The APK is the run's artifact.
 name: Mobile Android build
 on:
   workflow_dispatch:
+  pull_request:
+    paths: ['apps/mobile/**', '.github/workflows/mobile-android.yml']
   push:
     branches: [main]
     paths: ['apps/mobile/**', '.github/workflows/mobile-android.yml']
