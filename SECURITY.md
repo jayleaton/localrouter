@@ -1,11 +1,12 @@
 # Security
 
-LocalRouter has no authentication or authorization. Anyone who can reach its listener can submit jobs, fetch
+By default LocalRouter has no authentication or authorization. Anyone who can reach its listener can submit jobs, fetch
 retained outputs and use operator endpoints to load or unload models. Bind it to a trusted private network or a
 private tunnel address and restrict access with a firewall. Do not expose the listener directly to the internet.
-Optional device pairing (`"pairing": {"required": true}`, [docs/MCP.md](docs/MCP.md)) limits `/mcp` and
-`/v1/realtime` to devices holding a token made with `localrouter pair`; every other route stays open to whoever
-reaches the listener, so pairing does not replace the network restriction.
+Optional device pairing (`"pairing": {"required": true}`, [docs/MCP.md](docs/MCP.md#scopes)) limits every route but
+`/health`, pairing itself and the `/voice` page to devices and harnesses holding a token made with `localrouter pair`,
+each within its scopes (`inference`, `media`, `decisions`, `read`, `manage`), and keeps each device's jobs and output
+files to that device. It authenticates who reaches the listener; it does not replace the network restriction.
 The default listener is `127.0.0.1:8190`, reachable from the same machine only. To serve a tailnet, set `host` (or
 `--host`) to `tailscale`, which listens on the machine's tailnet address (100.64.0.0/10) alone, or run the container
 installer with `LOCALROUTER_BIND=tailscale`. `host: all` (`0.0.0.0`) listens on every interface and is for trusted

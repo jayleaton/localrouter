@@ -20,6 +20,8 @@ const gate = @import("../computer/gate.zig");
 const hub_mod = @import("../computer/hub.zig");
 const decide = @import("decide.zig");
 const systemone = @import("../tool/systemone.zig");
+const pair = @import("pair.zig");
+const Need = @import("../pair.zig").Need;
 
 const App = routes.App;
 const Why = backend.Why;
@@ -30,11 +32,33 @@ pub const Local = struct {
     host: []const u8, // the Host the session connected to, for file URLs
     client: chat.Client,
     token: []const u8 = "", // the session's device token (computer/gate.zig): computer tools only for a device allowed them
+    owner: []const u8 = "", // the session's device id (`pair.Caller.owner`): its jobs are that device's
 
     pub fn init(app: *App, host: []const u8, base_url_buf: *[96]u8) Local {
         const v = app.cfg.voice;
         const base = if (v.chat_url.len > 0) v.chat_url else std.fmt.bufPrint(base_url_buf, "http://{f}/v1", .{app.self_addr}) catch "http://127.0.0.1:8190/v1";
         return .{ .app = app, .host = host, .client = .{ .io = app.io, .gpa = app.gpa, .base_url = base, .api_key = v.chat_api_key } };
+    }
+
+    /// The session as device `token` (its id `owner`): its jobs are that device's, and when the chat model is this
+    /// daemon's own /v1, the session's chat requests carry the token, so they need the device's scopes as any other.
+    pub fn as(l: *Local, token: []const u8, owner: []const u8) void {
+        l.token = token;
+        l.owner = owner;
+        if (l.app.cfg.voice.chat_url.len == 0 and token.len > 0) l.client.api_key = token;
+    }
+
+    /// Who the session is now (`pair.callerOf`, re-read for every action: a revoke or a scope change counts at once).
+    fn caller(l: *const Local, a: std.mem.Allocator) ?pair.Caller {
+        return pair.callerOf(l.app, a, l.token);
+    }
+
+    /// Whether the session's device may `n` now.
+    fn may(l: *const Local, n: Need) bool {
+        var arena: std.heap.ArenaAllocator = .init(l.app.gpa);
+        defer arena.deinit();
+        const c = l.caller(arena.allocator()) orelse return false;
+        return c.may(n);
     }
 
     /// The paired device behind the session's token, when it may use the computer tools.
@@ -129,7 +153,8 @@ fn manage(ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []
     const args = std.json.parseFromSliceLeaky(std.json.Value, a, if (arguments.len > 0) arguments else "{}", .{}) catch
         return .{ .ok = false, .text = "the tool call's arguments are not JSON" };
     std.log.info("voice: model tool {s} {s}", .{ name, arguments[0..@min(arguments.len, 200)] }); // the chat model's call, or the session's own check
-    const r = mcp.callText(l.app, a, l.host, name, args) orelse return .{ .ok = false, .text = "no such tool" };
+    const who = l.caller(a) orelse return .{ .ok = false, .text = "this device is no longer paired with this LocalRouter" };
+    const r = mcp.callText(l.app, a, l.host, who, name, args) orelse return .{ .ok = false, .text = "no such tool" }; // as the session's device: its scopes apply
     return .{ .ok = r.ok, .text = r.text };
 }
 
@@ -149,7 +174,7 @@ fn transcribe(ptr: *anyopaque, a: std.mem.Allocator, pcm16k: []const i16, o: bac
     const wav = audio.wav(a, 16_000, 1, try resample.toLe(a, pcm16k)) catch return error.OutOfMemory;
     const lang = try std.ascii.allocLowerString(a, std.mem.trim(u8, o.language, " "));
     const r: request.Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = pcm16k.len / 16, .language = lang, .prompt = o.prompt, .seed = routes.randomSeed(app.io), .decode = if (o.greedy) .greedy else null } };
-    const j = routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = wav }}, &ref) orelse return failed(why, ref.message);
+    const j = routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = wav }}, l.owner, &ref) orelse return failed(why, ref.message);
     try wait(app, j, stop);
     defer forget(app, j);
     if (j.status != .completed) return failed(why, j.error_message);
@@ -210,7 +235,7 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
     const out: backend.PcmSink = .{ .ctx = &counted, .write = Counted.write };
     for (candidates, 0..) |model, n| {
         const voice = if (n > 0) "" else voiceFor(app, model, wanted);
-        speakWith(app, a, model, voice, text, out, stop, why) catch |err| {
+        speakWith(app, a, l.owner, model, voice, text, out, stop, why) catch |err| {
             if (err != error.Failed or n + 1 == candidates.len or counted.samples > 0) return err;
             std.log.warn("voice: speech model {s} failed ({s}); trying {s}", .{ model orelse "default", why.message, candidates[n + 1] orelse "default" });
             continue;
@@ -229,11 +254,12 @@ fn voiceFor(app: *App, model: ?[]const u8, wanted: []const u8) []const u8 {
     return "";
 }
 
-/// The speech job, streamed when the model streams (its `stream` option): its audio then reaches `sink` as it is made.
-fn speakWith(app: *App, a: std.mem.Allocator, model: ?[]const u8, voice: []const u8, text: []const u8, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
+/// The speech job (`owner`'s), streamed when the model streams (its `stream` option): its audio then reaches `sink` as it
+/// is made.
+fn speakWith(app: *App, a: std.mem.Allocator, owner: []const u8, model: ?[]const u8, voice: []const u8, text: []const u8, sink: backend.PcmSink, stop: *Stop, why: *Why) backend.Error!void {
     var ref: routes.Refusal = .{};
     const streams = if (model) |m| (if (app.cfg.tool(m)) |c| engine.optionBool(c, "stream", false) else false) else false;
-    const j = speech.startSpeech(app, a, .{ .model = model, .input = text, .voice = voice, .stream = streams }, &ref) orelse return failed(why, ref.message);
+    const j = speech.startSpeech(app, a, .{ .model = model, .input = text, .voice = voice, .stream = streams }, owner, &ref) orelse return failed(why, ref.message);
     defer forget(app, j);
     try tail(app, j, sink, stop, why);
 }
@@ -335,6 +361,7 @@ fn chatStream(ptr: *anyopaque, a: std.mem.Allocator, r: *const chat.Request, sin
 fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *Why) backend.Error!backend.Job {
     const l = self(ptr);
     const app = l.app;
+    if (!l.may(.media)) return failed(why, "this device's token does not have the media scope: on the box, `localrouter pair scopes NAME ...` adds it");
     var ref: routes.Refusal = .{};
     const seed = routes.randomSeed(app.io);
     var r: request.Request = undefined;
@@ -346,7 +373,7 @@ fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *
         .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = if (spec.seconds > 0) spec.seconds else 5, .seed = seed } },
     }
     const tool = routes.resolve(app, null, r.capability(), &ref) orelse return failed(why, ref.message);
-    const j = routes.enqueue(app, tool, r, &.{}, &ref) orelse return failed(why, ref.message);
+    const j = routes.enqueue(app, tool, r, &.{}, l.owner, &ref) orelse return failed(why, ref.message);
     return .{ .id = try a.dupe(u8, j.id), .kind = spec.kind, .handle = j };
 }
 
@@ -498,10 +525,12 @@ fn askShadow(app: *App, t: *ShadowTurn) void {
 fn offer(ptr: *anyopaque) backend.Offer {
     const app = self(ptr).app;
     var o: backend.Offer = .{};
-    for (app.scheduler.slots) |slot| {
-        const c = slot.tool.config();
-        if (engine.supports(c, .text_to_image)) o.image = true;
-        if (engine.supports(c, .text_to_video)) o.video = true;
+    if (self(ptr).may(.media)) { // the picture and video tools only for a device allowed media
+        for (app.scheduler.slots) |slot| {
+            const c = slot.tool.config();
+            if (engine.supports(c, .text_to_image)) o.image = true;
+            if (engine.supports(c, .text_to_video)) o.video = true;
+        }
     }
     var why: []const u8 = "";
     if (self(ptr).computerDevice(&why) != null) o.computer = app.computer.?.hub.connected() > 0;

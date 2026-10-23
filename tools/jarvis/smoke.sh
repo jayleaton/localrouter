@@ -11,7 +11,8 @@
 # (under 10 min) has them, then waits for the warm set to be whole again. Exit 0 only when every check passed. Writes
 # OUT/results.jsonl, OUT/summary.json, OUT/watch-{image,video}.txt and each check's files.
 # Env: CHAT, DRAMA, STT, IMAGE, VIDEO, DECIDE (model ids; the deploy's defaults), STT_FIXTURE (the pinned LibriSpeech
-# WAV, tools/speech/fixtures/manifest.json; found under ~/jarvis by its sha256 when unset), LOCK (~/jarvis/.dgx01.lock).
+# WAV, tools/speech/fixtures/manifest.json; found under ~/jarvis by its sha256 when unset), LOCK (~/jarvis/.dgx01.lock),
+# LOCALROUTER_TOKEN (with pairing.required).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 quick=0 url=http://127.0.0.1:8190 out=""
@@ -42,6 +43,9 @@ record() {
   jq -nc --arg c "$1" --argjson ok "$2" --argjson s "$3" --arg d "$4" '{check: $c, pass: $ok, seconds: $s, detail: $d}' >> "$out/results.jsonl"
   printf '%-4s %-26s %7s s  %s\n' "$([ "$2" = true ] && echo PASS || echo FAIL)" "$1" "$3" "${4:0:110}"
 }
+# Every request carries $LOCALROUTER_TOKEN when it is set (pairing.required: a token whose device may do all of this,
+# such as `deploy/jarvis/pair.sh token smoke`).
+curl() { if [ -n "${LOCALROUTER_TOKEN:-}" ]; then command curl -H "authorization: Bearer $LOCALROUTER_TOKEN" "$@"; else command curl "$@"; fi; }
 post() { curl -s -m "${3:-300}" -H 'content-type: application/json' "$url$1" -d "$2"; }
 memory() { # NAME: MemAvailable and every model's state, into OUT/memory-NAME.json
   curl -fs -m 10 "$url/v1/tools" | jq '{mem_available_gib: (.mem_available_bytes / 1073741824 * 10 | round / 10),

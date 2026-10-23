@@ -173,13 +173,17 @@ Tell the user:
 
 Pairing is off by default: anyone who can reach the box can use its API, voice and MCP, as before. With
 `"pairing": {"required": true}` in the config (on a Jarvis box: `PAIRING_REQUIRED=1 deploy/jarvis/install.sh`, which
-restarts onto it once no voice session is open; later installs keep it, `PAIRING_REQUIRED=0` turns it off),
-`/v1/realtime` and `/mcp` answer only paired devices; the rest of the API is unchanged. Before turning it on:
+restarts onto it once no voice session is open; later installs keep it, `PAIRING_REQUIRED=0` turns it off), every
+route but `/health` and pairing answers only paired devices, each within its scopes ([docs/MCP.md](docs/MCP.md#scopes)),
+and each device sees only its own jobs and files. Devices paired before scopes keep everything they had. The deploy
+scripts use their own read-only token (`$DEPLOY/operator.token`, made by install.sh). Before turning it on:
 
 - pair every phone (`pair.sh add NAME --url URL`, the app enters the code);
-- mint a token for each MCP client and script (`pair.sh token NAME`, printed once) and give it to them:
+- mint a token for each harness, MCP client and script with what it needs (`pair.sh token NAME --scopes
+  inference,media,read`, printed once; `manage` only for what loads and unloads models) and give it to them:
   `claude mcp add --transport http localrouter <url>/mcp --header "Authorization: Bearer <token>"`,
-  `localrouter mcp-stdio --token <token>`, and `LOCALROUTER_TOKEN=<token>` for the smoke and check scripts;
+  `localrouter mcp-stdio --token <token>`, and `LOCALROUTER_TOKEN=<token>` for the smoke and check scripts (a token
+  with no `--scopes`, which can do everything they check);
 - in the web page (`/voice`), paste a token into **Settings → API key**.
 
 `pair.sh list` shows the devices and `pair.sh revoke <id or name>` removes one (its next connection is refused).

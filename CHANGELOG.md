@@ -10,6 +10,21 @@
   (`localrouter.function_call.cancelled`), so a late result is never spoken in a later turn. Server execution stays
   the default, and the voice pipeline (wait timer, early transcription, priming, speech) is the same in both modes.
   `examples/realtime-client-tools/` is a one-file harness that uses it.
+- Service scopes: with `pairing.required`, every route but `/health`, `/v1/pair` and `/voice` needs a paired token
+  with the scope it serves, over HTTP, the realtime socket and MCP alike (401 without a token, 403 without the scope,
+  before the body or the upgrade). Pairing stays off by default.
+  - `inference` (chat completions, `/v1/realtime`), `media` (images, videos, speech, transcription), `decisions`
+    (`/v1/systemone`), `read` (models, voices, residency) and `manage` (load, unload, reserve, release). Changing
+    models needs `manage`, whichever way it is asked. `localrouter pair token NAME --scopes inference,media,read` issues
+    a harness a token; `GET /v1/pair` shows a token's scopes.
+  - MCP `tools/list` shows only the tools a token may call; a voice session's picture and video tools need `media`,
+    its model tools `manage`, checked at each call so a revoke or a scope change counts at once.
+  - A job and its output files belong to the device that asked for them: `/v1/jobs`, `/v1/videos/{id}`, `/v1/files`,
+    `get_job` and `cancel_job` answer only that device (others get 404).
+  - Legacy tokens are unchanged: `voice` still opens `/v1/realtime`, `mcp` `/mcp`, and either (or none listed, as every
+    device paired before scopes) grants every service scope. Computer control's scopes grant no service scope.
+  - The Jarvis deploy scripts read `/v1/tools` with a `read` token install.sh makes once pairing is on
+    (`$DEPLOY/operator.token`); `smoke.sh` sends `$LOCALROUTER_TOKEN` on every request.
 - Device pairing, off by default (`"pairing": {"required": true}`): `/v1/realtime` and `/mcp` then answer only a
   paired device's token, and refuse anything else with a 401 (`invalid_api_key`, `WWW-Authenticate: Bearer`) before
   the upgrade or the body. There is no loopback exemption (behind `tailscale serve` every peer is loopback); the other

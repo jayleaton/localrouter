@@ -42,9 +42,9 @@ pub const SpeechArgs = struct {
     references: ?std.json.Value = null, // [{text, vq_codes}], for a tool whose options say `references`
 };
 
-/// Validates and queues a text to speech job; null with `why` set on refusal. `references` become the job's
-/// `references.json`, allocated in `a`.
-pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, why: *Refusal) ?*jobs.Job {
+/// Validates and queues a text to speech job for `owner` (`routes.enqueue`); null with `why` set on refusal.
+/// `references` become the job's `references.json`, allocated in `a`.
+pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, owner: []const u8, why: *Refusal) ?*jobs.Job {
     const tool = routes.resolveSpeech(app, b.model, b.voice, why) orelse return null;
     if (b.instructions.len > 0) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' does not take instructions; send the text to speak as input", .{app.scheduler.slots[tool].tool.config().id}) catch "instructions are not supported";
@@ -58,7 +58,7 @@ pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, why: *Refusal
         n = 1;
     };
     const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (n > 0) "references.json" else "" }) };
-    return routes.enqueue(app, tool, r, refs[0..n], why);
+    return routes.enqueue(app, tool, r, refs[0..n], owner, why);
 }
 
 /// A request's voice references as the file the tool reads: a list of `{text, vq_codes}` (a transcript and its codec
@@ -118,7 +118,7 @@ const SpeechBody = struct {
 /// POST /v1/audio/speech: JSON in, audio bytes out (whole, or streamed with `stream`). A tool that says why its audio
 /// ended sets `x-finish-reason` (`stop`, `length`: clipped at its frame limit, `silence`: ended by its silence guard),
 /// and a long-form reply `x-long-form-segments`.
-pub fn speech(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
+pub fn speech(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []const u8) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     const b = std.json.parseFromSliceLeaky(SpeechBody, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
         return h.fail(req, a, 400, "invalid_request_error", "the body is not a valid speech request (JSON with input, voice, model)");
@@ -127,7 +127,7 @@ pub fn speech(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
     if (!std.mem.eql(u8, b.stream_format, "audio")) return h.fail(req, a, 400, "invalid_request_error", "stream_format sse is not supported: send stream true for raw PCM chunks");
     if (b.stream and format != .pcm) return h.fail(req, a, 400, "invalid_request_error", "stream true needs response_format pcm: the other formats are encoded from the whole audio");
     var why: Refusal = .{};
-    const j = startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .stream = b.stream, .references = b.references }, &why) orelse
+    const j = startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .stream = b.stream, .references = b.references }, owner, &why) orelse
         return h.fail(req, a, why.status, why.typ, why.message);
     if (b.stream) return streamSpeech(app, req, a, j);
     j.done.wait(app.io) catch return;
@@ -266,12 +266,12 @@ pub const TranscriptionArgs = struct {
     seed: ?u64 = null,
 };
 
-/// Decodes `upload` and queues a transcription job; null with `why` set on refusal. The model is resolved first, so
-/// an unknown one costs no decode; uploads decode one at a time.
-pub fn startTranscription(app: *App, a: std.mem.Allocator, b: TranscriptionArgs, upload: []const u8, why: *Refusal) ?*jobs.Job {
+/// Decodes `upload` and queues a transcription job for `owner`; null with `why` set on refusal. The model is resolved
+/// first, so an unknown one costs no decode; uploads decode one at a time.
+pub fn startTranscription(app: *App, a: std.mem.Allocator, b: TranscriptionArgs, upload: []const u8, owner: []const u8, why: *Refusal) ?*jobs.Job {
     const tool = routes.resolve(app, b.model, .speech_to_text, why) orelse return null;
     if (!engine.supports(app.scheduler.slots[tool].tool.config(), .speech_to_text)) {
-        _ = routes.enqueue(app, tool, .{ .transcription = .{ .audio = "audio.wav" } }, &.{}, why); // refuses, naming the capability
+        _ = routes.enqueue(app, tool, .{ .transcription = .{ .audio = "audio.wav" } }, &.{}, owner, why); // refuses, naming the capability
         return null;
     }
     const cfg = app.scheduler.slots[tool].tool.config();
@@ -294,7 +294,7 @@ pub fn startTranscription(app: *App, a: std.mem.Allocator, b: TranscriptionArgs,
     };
     const lang = std.ascii.allocLowerString(a, std.mem.trim(u8, b.language, " ")) catch "";
     const r: request.Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = decoded.ms, .language = lang, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed orelse routes.randomSeed(app.io) } };
-    return routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = decoded.wav }}, why);
+    return routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = decoded.wav }}, owner, why);
 }
 
 /// The finished job's transcript (`request.Transcript`, with whatever else the tool wrote kept), as a JSON object.
@@ -324,7 +324,7 @@ const ResponseFormat = enum { json, text, verbose_json, srt, vtt };
 
 /// POST /v1/audio/transcriptions: a multipart `file` (or JSON `file` as base64, a data URL or a URL) in, the
 /// transcript out.
-pub fn transcriptions(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8) !void {
+pub fn transcriptions(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8, owner: []const u8) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     var msg: []const u8 = "the body is not a valid transcription request";
     var raws: std.ArrayList([]const u8) = .empty;
@@ -338,7 +338,7 @@ pub fn transcriptions(app: *App, req: *h.Request, a: std.mem.Allocator, host: []
     if (granularities != .none and format != .verbose_json) return h.fail(req, a, 400, "invalid_request_error", "timestamp_granularities needs response_format verbose_json");
     if (granularities == .none and format != .json and format != .text) granularities = .segment; // verbose_json, srt and vtt carry segments
     var why: Refusal = .{};
-    const j = startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = granularities, .seed = b.seed }, raws.items[0], &why) orelse
+    const j = startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = granularities, .seed = b.seed }, raws.items[0], owner, &why) orelse
         return h.fail(req, a, why.status, why.typ, why.message);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);

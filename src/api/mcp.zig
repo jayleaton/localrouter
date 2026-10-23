@@ -19,6 +19,9 @@
 //!   computer_use     a bounded task on a paired computer's screen; consequential steps wait for the user's tap
 //!   computer_status  a computer task's state, or the paired computers; computer_stop stops a task
 //!   (the computer tools need a paired device token with the `computer` scope: docs/dev/COMPUTER.md)
+//! With `pairing.required`, /mcp takes a paired device whose scopes include a service scope (or the legacy `mcp`);
+//! each tool needs its own (`toolNeed`: read, media, inference, decisions or manage), tools/list shows only those, and
+//! get_job and cancel_job see only the device's own jobs.
 
 const std = @import("std");
 const Io = std.Io;
@@ -38,6 +41,8 @@ const config = @import("../config.zig");
 const sched_memory = @import("../sched/memory.zig");
 const gate = @import("../computer/gate.zig");
 const hub_mod = @import("../computer/hub.zig");
+const pair = @import("pair.zig");
+const Need = @import("../pair.zig").Need;
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -45,12 +50,13 @@ const Value = std.json.Value;
 const versions = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
 const max_wait_s = 3000; // a tool call longer than this returns the job id; get_job picks it up
 
-pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8) !void {
+pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, who: pair.Caller) !void {
     if (req.head.method != .POST) {
         try req.respond("", .{ .status = .method_not_allowed, .extra_headers = &.{.{ .name = "allow", .value = "POST" }} });
         return;
     }
     caller_token = try a.dupe(u8, gate.token(req)); // the headers are gone once the body is read
+    caller = who;
     const text = h.body(req, a) catch return rpcError(req, a, .null, -32600, "body too large");
     const msg = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return rpcError(req, a, .null, -32700, "parse error");
     if (msg != .object) return rpcError(req, a, .null, -32600, "one JSON-RPC message a request (no batches)");
@@ -62,7 +68,7 @@ pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8
     const params: Value = msg.object.get("params") orelse .{ .object = .empty };
     if (eql(method, "initialize")) return initialize(req, a, id, params);
     if (eql(method, "ping")) return reply(req, a, id, .{});
-    if (eql(method, "tools/list")) return reply(req, a, id, .{ .tools = tool_list });
+    if (eql(method, "tools/list")) return reply(req, a, id, .{ .tools = try listed(a) });
     if (eql(method, "tools/call")) return call(app, req, a, host, id, params);
     return rpcError(req, a, id, -32601, "method not found");
 }
@@ -115,10 +121,11 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
 }
 
 /// The text a tool call returns (its text contents, one a line) and whether it failed; for callers outside MCP (the
-/// voice session's model tools). Null for an unknown tool.
-pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
+/// voice session's model tools), as `who` (its scopes apply as over /mcp). Null for an unknown tool.
+pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, who: pair.Caller, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
     var out: std.ArrayList(Content) = .empty;
     caller_token = ""; // an in-process caller has no device: the computer tools refuse it
+    caller = who;
     const result = invoke(app, a, host, name, args, &out) orelse return null;
     const ok = if (result) |x| x else |_| false;
     var w: Io.Writer.Allocating = .init(a);
@@ -132,6 +139,12 @@ pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, name: []const
 /// Runs tool `name` into `out`; null when there is no such tool.
 fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value, out: *std.ArrayList(Content)) ?ToolError!bool {
     calling = name;
+    if (toolNeed(name)) |n| {
+        if (!caller.may(n)) {
+            const refused: ToolError!bool = fail(a, out, "this device's token does not have the {s} scope that {s} needs: on the box, `localrouter pair scopes NAME ...` adds it", .{ n.scopes(), name });
+            return refused;
+        }
+    }
     const r: ToolError!bool = if (eql(name, "list_models"))
         listModels(app, a, out)
     else if (eql(name, "load_model"))
@@ -184,6 +197,30 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
 threadlocal var calling: []const u8 = "";
 /// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
 threadlocal var caller_token: []const u8 = "";
+/// Who is calling (`pair.Caller`): the scopes each tool needs, the owner its jobs get, the jobs it may see.
+threadlocal var caller: pair.Caller = .{};
+
+/// The scope tool `name` needs; null for the tools that check for themselves (get_job and cancel_job: the job must be
+/// the caller's own; the computer tools: computer control's scopes, always) and for an unknown name.
+fn toolNeed(name: []const u8) ?Need {
+    const needs = [_]struct { []const u8, Need }{
+        .{ "list_models", .read },       .{ "list_voices", .read },
+        .{ "generate_image", .media },   .{ "generate_video", .media },
+        .{ "transcribe_audio", .media }, .{ "synthesize_speech", .media },
+        .{ "chat", .inference },         .{ "decide", .decisions },
+        .{ "load_model", .manage },      .{ "unload_model", .manage },
+        .{ "reserve_for", .manage },     .{ "release_models", .manage },
+    };
+    for (needs) |x| if (eql(x[0], name)) return x[1];
+    return null;
+}
+
+/// tools/list for the caller: the tools its scopes let it call (every tool with pairing off).
+fn listed(a: std.mem.Allocator) ![]const Tool {
+    var list: std.ArrayList(Tool) = .empty;
+    for (tool_list) |t| if (if (toolNeed(t.name)) |n| caller.may(n) else true) try list.append(a, t);
+    return list.items;
+}
 
 fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!T {
     return std.json.parseFromValueLeaky(T, a, args, .{ .ignore_unknown_fields = true }) catch |err| {
@@ -472,13 +509,13 @@ fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Valu
     } else inputs.resolve(app.io, app.gpa, a, b.audio orelse return fail(a, out, "audio (base64, a data URL or an http(s) URL) or path (a file on this machine) is required", .{}), app.policy(host), &msg) catch return fail(a, out, "{s}", .{msg});
     if (upload.len > inputs.max_bytes) return fail(a, out, "the audio file is larger than 32 MB", .{});
     var why: routes.Refusal = .{};
-    const j = speech.startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed }, upload, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = speech.startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed }, upload, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
 }
 
 /// The bytes of a file on this machine, by absolute path, only inside a directory the operator listed in the config's
-/// `local_files` (the API has no authentication, so nothing else on the disk is readable through it).
+/// `local_files` (with pairing off the API has no authentication, so nothing else on the disk is readable through it).
 fn localFile(app: *App, a: std.mem.Allocator, path: []const u8, out: *std.ArrayList(Content)) ToolError![]const u8 {
     if (app.cfg.local_files.len == 0) return fail(a, out, "path is off on this server: the operator lists the directories it may read in the config's local_files; send the audio as base64 or an http(s) URL instead", .{});
     if (!std.fs.path.isAbsolute(path)) return fail(a, out, "path must be absolute (it names a file on the machine that runs LocalRouter)", .{});
@@ -499,7 +536,7 @@ fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Val
     const b = try parseArgs(Args, a, args, out);
     const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
     var why: routes.Refusal = .{};
-    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .references = b.references }, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_audio) {
@@ -536,7 +573,7 @@ fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Co
         if (!r.bool) try body.put(a, "reasoning_effort", .{ .string = "none" });
     };
     var why: routes.Refusal = .{};
-    const j = chat.startChat(app, a, .{ .object = body }, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     const text = chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
@@ -552,7 +589,7 @@ fn decideTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
     var body: std.json.ObjectMap = .empty;
     for ([_][]const u8{ "model", "state", "questions" }) |k| if (args.object.get(k)) |v| try body.put(a, k, v);
     var why: decision.Refusal = .{};
-    const r = decision.decide(app, a, .{ .object = body }, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    const r = decision.decide(app, a, .{ .object = body }, caller.owner(), &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
     var bad: []const u8 = "";
     const qs = systemone.parseQuestions(a, .{ .object = body }, &bad) catch return fail(a, out, "{s}", .{bad});
     var w: Io.Writer.Allocating = .init(a);
@@ -591,6 +628,7 @@ fn replyText(a: std.mem.Allocator, completion: []const u8) ![]const u8 {
 fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(struct { id: []const u8, wait_s: u32 = 0 }, a, args, out);
     const j = app.table.get(app.io, b.id) orelse return fail(a, out, "no such job: {s}", .{b.id});
+    if (!caller.sees(j)) return fail(a, out, "no such job: {s}", .{b.id}); // another device's: as if absent
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
 }
@@ -598,6 +636,7 @@ fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *
 fn cancelJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(struct { id: []const u8 }, a, args, out);
     const j = app.table.get(app.io, b.id) orelse return fail(a, out, "no such job: {s}", .{b.id});
+    if (!caller.sees(j)) return fail(a, out, "no such job: {s}", .{b.id}); // another device's: as if absent
     app.scheduler.cancel(j);
     try waitFor(app, j, 10);
     try summary(app, a, host, j, out);
@@ -614,7 +653,7 @@ fn release(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolEr
 
 fn start(app: *App, a: std.mem.Allocator, tool: usize, r: request.Request, files: []const inputs.File, out: *std.ArrayList(Content)) ToolError!*jobs.Job {
     var why: routes.Refusal = .{};
-    return routes.enqueue(app, tool, r, files, &why) orelse fail(a, out, "{s}", .{why.message});
+    return routes.enqueue(app, tool, r, files, caller.owner(), &why) orelse fail(a, out, "{s}", .{why.message});
 }
 
 /// The input images named by `specs` (base64, data URLs or http(s) URLs; at most 5), fetched and checked.

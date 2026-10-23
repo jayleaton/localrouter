@@ -2,7 +2,8 @@
 //! without a paired device's token (401 before the body or the upgrade) and take one as a Bearer header, a WebSocket
 //! subprotocol entry or `?api_key=`; `localrouter pair` makes codes and tokens beside the running daemon; POST /v1/pair
 //! trades a code once; a revoke takes effect on the next request; five wrong codes discard the pending ones. Without
-//! `required`, nothing needs a token.
+//! `required`, nothing needs a token. Service scopes (inference, media, decisions, read, manage) gate every route
+//! class, the legacy profile (voice, mcp, or none) keeps everything, and a job is its device's own.
 
 const std = @import("std");
 const Io = std.Io;
@@ -74,7 +75,7 @@ test "pairing required: /mcp and /v1/realtime need a paired token; codes trade o
     var d = try Daemon.start(testing.allocator, io, "pairing", "{" ++ harness.reserve ++ ", \"pairing\": {\"required\": true}, " ++ quiet_voice ++ "}");
     defer d.stop();
 
-    // Unpaired: 401 with OpenAI's envelope and how to pair; the other routes are as before.
+    // Unpaired: 401 with OpenAI's envelope and how to pair, on /mcp, the socket and the other service routes alike.
     const bare = try d.call(a, .POST, "/mcp", list_tools);
     try testing.expectEqual(std.http.Status.unauthorized, bare.status);
     try testing.expect(has(bare.body, "\"code\":\"invalid_api_key\""));
@@ -82,7 +83,7 @@ test "pairing required: /mcp and /v1/realtime need a paired token; codes trade o
     try testing.expect(has(bare.body, "localrouter pair add NAME"));
     try testing.expectEqual(std.http.Status.unauthorized, (try d.call(a, .GET, "/mcp", null)).status);
     try testing.expectEqual(std.http.Status.unauthorized, (try callBearer(&d, a, .POST, "/mcp", list_tools, "wrong")).status);
-    try testing.expectEqual(std.http.Status.ok, (try d.call(a, .GET, "/v1/models", null)).status);
+    try testing.expectEqual(std.http.Status.unauthorized, (try d.call(a, .GET, "/v1/models", null)).status);
     try testing.expect(has((try d.call(a, .GET, "/v1/pair", null)).body, "{\"required\":true,\"paired\":false,\"device\":null}"));
     {
         var w: voice.Ws = undefined;
@@ -117,7 +118,7 @@ test "pairing required: /mcp and /v1/realtime need a paired token; codes trade o
     try testing.expect(p.required);
     try testing.expectEqual(std.http.Status.ok, (try callBearer(&d, a, .POST, "/mcp", list_tools, p.token)).status);
     const me = try callBearer(&d, a, .GET, "/v1/pair", null, p.token);
-    try testing.expect(has(me.body, try std.fmt.allocPrint(a, "\"paired\":true,\"device\":{{\"id\":\"{s}\",\"name\":\"kitchen tablet\"}}", .{p.device.id})));
+    try testing.expect(has(me.body, try std.fmt.allocPrint(a, "\"paired\":true,\"device\":{{\"id\":\"{s}\",\"name\":\"kitchen tablet\",\"scopes\":[\"voice\",\"mcp\"]}}", .{p.device.id})));
     const again = try redeem(&d, a, code, "");
     try testing.expectEqual(std.http.Status.unauthorized, again.status);
     try testing.expect(has(again.body, "wrong, expired"));
@@ -268,7 +269,7 @@ test "pairing required and scopes: a desktop helper's token reaches neither /mcp
     const old = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone" }), "\n");
     const no_mcp = try callBearer(&d, a, .POST, "/mcp", list_tools, helper);
     try testing.expectEqual(std.http.Status.forbidden, no_mcp.status);
-    try testing.expect(has(no_mcp.body, "does not have the mcp scope"));
+    try testing.expect(has(no_mcp.body, "does not have the inference, media, decisions, read or manage scope"));
     var w: voice.Ws = undefined;
     try w.openAt(io, a, d.port, "/v1/realtime", try std.fmt.allocPrint(a, "realtime, openai-insecure-api-key.{s}", .{helper}));
     try testing.expect(has(w.head, " 403 "));
@@ -276,4 +277,126 @@ test "pairing required and scopes: a desktop helper's token reaches neither /mcp
     try testing.expectEqual(std.http.Status.ok, (try callBearer(&d, a, .POST, "/mcp", list_tools, old)).status);
     _ = try pairCli(&d, a, &.{ "scopes", "phone", "voice" }); // now without mcp: refused on the next request
     try testing.expectEqual(std.http.Status.forbidden, (try callBearer(&d, a, .POST, "/mcp", list_tools, old)).status);
+}
+
+/// The status of `method path` with `token` (none: no Authorization header).
+fn statusAs(d: *Daemon, a: std.mem.Allocator, method: std.http.Method, path: []const u8, body: ?[]const u8, token: ?[]const u8) !std.http.Status {
+    return (if (token) |t| try callBearer(d, a, method, path, body, t) else try d.call(a, method, path, body)).status;
+}
+
+/// tools/list's names for `token`.
+fn toolNames(d: *Daemon, a: std.mem.Allocator, token: []const u8) ![]const u8 {
+    const r = try callBearer(d, a, .POST, "/mcp", list_tools, token);
+    try testing.expectEqual(std.http.Status.ok, r.status);
+    var w: Io.Writer.Allocating = .init(a);
+    for ((try std.json.parseFromSliceLeaky(Value, a, r.body, .{})).object.get("result").?.object.get("tools").?.array.items) |t| try w.writer.print("{s},", .{t.object.get("name").?.string});
+    return w.written();
+}
+
+test "service scopes: a wrong or missing scope is refused on every route class; the legacy profile keeps everything; manage changes models; a job is its device's own" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try Daemon.start(testing.allocator, io, "service-scopes", "{" ++ harness.reserve ++ ", \"pairing\": {\"required\": true}, " ++ quiet_voice ++
+        ", \"tools\": [{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 1}}]}");
+    defer d.stop();
+    const tok = struct {
+        fn of(dd: *Daemon, aa: std.mem.Allocator, name: []const u8, scopes: ?[]const u8) ![]const u8 {
+            const out = if (scopes) |s| try pairCli(dd, aa, &.{ "token", name, "--scopes", s }) else try pairCli(dd, aa, &.{ "token", name });
+            return std.mem.trim(u8, out, " \r\n");
+        }
+    }.of;
+    const legacy = try tok(&d, a, "phone", null); // paired before scopes: voice and mcp
+    const coder = try tok(&d, a, "opencode", "inference,media,read");
+    const other = try tok(&d, a, "deepseek", "media");
+    const reader = try tok(&d, a, "dashboard", "read");
+    const judge = try tok(&d, a, "router", "decisions");
+    const helper = try tok(&d, a, "mac", "desktop_helper");
+    const operator = try tok(&d, a, "ops", "read,manage");
+    try testing.expect(has(try pairCli(&d, a, &.{"list"}), "voice,mcp (legacy)"));
+
+    // Every route class: no token is 401, a token without the scope 403, the scope (or the legacy profile) gets through.
+    const image = "{\"model\":\"tp\",\"prompt\":\"bars\",\"size\":\"256x256\",\"response_format\":\"url\"}";
+    const Case = struct { method: std.http.Method, path: []const u8, body: ?[]const u8, wrong: []const u8, right: []const u8 };
+    const cases = [_]Case{
+        .{ .method = .GET, .path = "/v1/models", .body = null, .wrong = judge, .right = reader },
+        .{ .method = .GET, .path = "/v1/tools", .body = null, .wrong = other, .right = reader },
+        .{ .method = .GET, .path = "/v1/skills/model-manager", .body = null, .wrong = helper, .right = reader },
+        .{ .method = .POST, .path = "/v1/images/generations", .body = image, .wrong = reader, .right = other },
+        .{ .method = .POST, .path = "/v1/audio/speech", .body = "{\"input\":\"hi\"}", .wrong = judge, .right = other },
+        .{ .method = .POST, .path = "/v1/videos", .body = "{\"prompt\":\"x\"}", .wrong = judge, .right = other },
+        .{ .method = .POST, .path = "/v1/chat/completions", .body = "{\"messages\":[]}", .wrong = other, .right = coder },
+        .{ .method = .POST, .path = "/v1/systemone", .body = "{}", .wrong = coder, .right = judge },
+        .{ .method = .POST, .path = "/v1/tools/release", .body = "{}", .wrong = coder, .right = operator },
+        .{ .method = .POST, .path = "/mcp", .body = list_tools, .wrong = helper, .right = judge },
+    };
+    for (cases) |c| {
+        try testing.expectEqual(std.http.Status.unauthorized, try statusAs(&d, a, c.method, c.path, c.body, null));
+        try testing.expectEqual(std.http.Status.unauthorized, try statusAs(&d, a, c.method, c.path, c.body, "not-a-token"));
+        const refused = try callBearer(&d, a, c.method, c.path, c.body, c.wrong);
+        if (refused.status != .forbidden) std.debug.print("{s} {s}: {d} {s}\n", .{ @tagName(c.method), c.path, @backingInt(refused.status), refused.body });
+        try testing.expectEqual(std.http.Status.forbidden, refused.status);
+        try testing.expect(has(refused.body, "scope"));
+        for ([_][]const u8{ c.right, legacy }) |t| {
+            const s = try statusAs(&d, a, c.method, c.path, c.body, t);
+            if (s == .unauthorized or s == .forbidden) std.debug.print("{s} {s}: refused {d}\n", .{ @tagName(c.method), c.path, @backingInt(s) });
+            try testing.expect(s != .unauthorized and s != .forbidden);
+        }
+    }
+    // /v1/realtime: inference (or the legacy voice) opens it; media alone does not.
+    {
+        var w: voice.Ws = undefined;
+        try w.openAt(io, a, d.port, "/v1/realtime", try std.fmt.allocPrint(a, "realtime, openai-insecure-api-key.{s}", .{other}));
+        try testing.expect(has(w.head, " 403 "));
+        w.close();
+    }
+    try expectSession(&d, a, "/v1/realtime", try std.fmt.allocPrint(a, "realtime, openai-insecure-api-key.{s}", .{coder}));
+    try expectSession(&d, a, try std.fmt.allocPrint(a, "/v1/realtime?api_key={s}", .{legacy}), "realtime");
+    // The open routes stay open.
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/health", null, null));
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/pair", null, null));
+    try testing.expect(has((try callBearer(&d, a, .GET, "/v1/pair", null, coder)).body, "\"scopes\":[\"inference\",\"media\",\"read\"]"));
+    try testing.expect(has((try callBearer(&d, a, .GET, "/v1/pair", null, legacy)).body, "\"scopes\":[\"voice\",\"mcp\"]"));
+
+    // MCP: tools/list shows what the token may call, and each tool checks its own scope.
+    const judged = try toolNames(&d, a, judge);
+    try testing.expect(has(judged, "decide,") and std.mem.indexOf(u8, judged, "generate_image,") == null and std.mem.indexOf(u8, judged, "release_models,") == null);
+    const everything = try toolNames(&d, a, legacy);
+    for ([_][]const u8{ "list_models,", "generate_image,", "chat,", "decide,", "release_models,", "load_model,", "get_job," }) |n| try testing.expect(has(everything, n));
+    const no_media = try mcpAs(&d, a, judge, "generate_image", "{\"prompt\":\"x\",\"model\":\"tp\",\"size\":\"256x256\"}");
+    try testing.expect(no_media.is_error and has(no_media.text, "does not have the media scope"));
+    // Changing models needs manage, over MCP and HTTP alike; read lists them.
+    for ([_][]const u8{ "load_model", "unload_model", "reserve_for", "release_models" }) |n| {
+        const r = try mcpAs(&d, a, coder, n, "{\"model\":\"tp\"}");
+        try testing.expect(r.is_error and has(r.text, "does not have the manage scope"));
+    }
+    try testing.expectEqual(std.http.Status.forbidden, try statusAs(&d, a, .POST, "/v1/tools/tp/load", "{}", coder));
+    try testing.expectEqual(std.http.Status.forbidden, try statusAs(&d, a, .POST, "/v1/tools/tp/unload", "{}", reader));
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .POST, "/v1/tools/tp/load", "{}", operator));
+    try testing.expect(!(try mcpAs(&d, a, operator, "release_models", "{}")).is_error);
+    try testing.expect(!(try mcpAs(&d, a, legacy, "release_models", "{}")).is_error);
+    try testing.expect(!(try mcpAs(&d, a, reader, "list_models", "{}")).is_error);
+
+    // Ownership: a job, its state and its files are its device's alone (another device: as if absent).
+    const made = try callBearer(&d, a, .POST, "/v1/images/generations", image, coder);
+    try testing.expectEqual(std.http.Status.ok, made.status);
+    const url = (try std.json.parseFromSliceLeaky(struct { data: []const struct { url: []const u8 } }, a, made.body, .{ .ignore_unknown_fields = true })).data[0].url;
+    const path = url[std.mem.indexOf(u8, url, "/v1/files/").?..];
+    const id = path["/v1/files/".len..][0..std.mem.indexOfScalar(u8, path["/v1/files/".len..], '/').?];
+    const job = try std.fmt.allocPrint(a, "/v1/jobs/{s}", .{id});
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, path, null, coder));
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, job, null, coder));
+    for ([_][]const u8{ other, legacy, operator }) |t| {
+        try testing.expectEqual(std.http.Status.not_found, try statusAs(&d, a, .GET, path, null, t));
+        try testing.expectEqual(std.http.Status.not_found, try statusAs(&d, a, .GET, job, null, t));
+    }
+    try testing.expectEqual(std.http.Status.unauthorized, try statusAs(&d, a, .GET, path, null, null));
+    const theirs = try mcpAs(&d, a, other, "get_job", try std.fmt.allocPrint(a, "{{\"id\":\"{s}\"}}", .{id}));
+    try testing.expect(theirs.is_error and has(theirs.text, "no such job"));
+    try testing.expect((try mcpAs(&d, a, other, "cancel_job", try std.fmt.allocPrint(a, "{{\"id\":\"{s}\"}}", .{id}))).is_error);
+    try testing.expect(!(try mcpAs(&d, a, coder, "get_job", try std.fmt.allocPrint(a, "{{\"id\":\"{s}\"}}", .{id}))).is_error);
+    // A revoke counts at once, for its jobs too.
+    _ = try pairCli(&d, a, &.{ "revoke", "opencode" });
+    try testing.expectEqual(std.http.Status.unauthorized, try statusAs(&d, a, .GET, job, null, coder));
 }

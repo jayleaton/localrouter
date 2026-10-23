@@ -27,9 +27,10 @@ fn refuse(why: *Refusal, msg: []const u8) ?*jobs.Job {
     return null;
 }
 
-/// Checks a chat request (a parsed JSON object), points it at the model that serves it and queues it; null with `why`
-/// set on refusal. Only what LocalRouter needs is checked here; the model's server judges the rest.
-pub fn startChat(app: *App, a: std.mem.Allocator, body: Value, why: *Refusal) ?*jobs.Job {
+/// Checks a chat request (a parsed JSON object), points it at the model that serves it and queues it for `owner`
+/// (`routes.enqueue`); null with `why` set on refusal. Only what LocalRouter needs is checked here; the model's server
+/// judges the rest.
+pub fn startChat(app: *App, a: std.mem.Allocator, body: Value, owner: []const u8, why: *Refusal) ?*jobs.Job {
     if (body != .object) return refuse(why, not_a_request);
     var obj = body.object;
     const messages = obj.get("messages") orelse return refuse(why, "messages is required: a non-empty array of messages");
@@ -48,7 +49,7 @@ pub fn startChat(app: *App, a: std.mem.Allocator, body: Value, why: *Refusal) ?*
     obj.put(a, "model", .{ .string = app.scheduler.slots[tool].tool.config().id }) catch return refuse(why, "out of memory");
     const text = std.json.Stringify.valueAlloc(a, Value{ .object = obj }, .{}) catch return refuse(why, "out of memory");
     const seed: u64 = if (obj.get("seed")) |s| (if (s == .integer and s.integer >= 0) @intCast(s.integer) else 0) else 0;
-    return routes.enqueue(app, tool, .{ .chat = .{ .body = text, .stream = stream, .seed = seed } }, &.{}, why);
+    return routes.enqueue(app, tool, .{ .chat = .{ .body = text, .stream = stream, .seed = seed } }, &.{}, owner, why);
 }
 
 /// The finished job's whole reply (`completion.json`), as the model's server sent it.
@@ -63,11 +64,11 @@ pub fn readCompletion(app: *App, a: std.mem.Allocator, j: *jobs.Job, why: *Refus
 }
 
 /// POST /v1/chat/completions.
-pub fn completions(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
+pub fn completions(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []const u8) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     const body = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return h.fail(req, a, 400, "invalid_request_error", not_a_request);
     var why: Refusal = .{};
-    const j = startChat(app, a, body, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
+    const j = startChat(app, a, body, owner, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     if (j.request.chat.stream) return streamChat(app, req, a, j);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);

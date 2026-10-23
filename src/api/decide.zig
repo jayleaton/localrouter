@@ -42,14 +42,14 @@ fn pick(app: *App, model: ?[]const u8, why: *Refusal) ?usize {
     return routes.resolve(app, null, .typed_decision, why);
 }
 
-/// Queues `body` (a parsed System One request whose `questions` are `qs`) for the decision model it names.
-fn start(app: *App, a: std.mem.Allocator, body: Value, why: *Refusal) ?*jobs.Job {
+/// Queues `body` (a parsed System One request) for the decision model it names, on behalf of `owner`.
+fn start(app: *App, a: std.mem.Allocator, body: Value, owner: []const u8, why: *Refusal) ?*jobs.Job {
     var obj = body.object;
     const model: ?[]const u8 = if (obj.get("model")) |m| (if (m == .string) m.string else null) else null;
     const tool = pick(app, model, why) orelse return null;
     obj.put(a, "model", .{ .string = app.scheduler.slots[tool].tool.config().id }) catch return refuse(why, 500, "server_error", "out of memory");
     const text = std.json.Stringify.valueAlloc(a, Value{ .object = obj }, .{}) catch return refuse(why, 500, "server_error", "out of memory");
-    return routes.enqueue(app, tool, .{ .decision = .{ .body = text } }, &.{}, why);
+    return routes.enqueue(app, tool, .{ .decision = .{ .body = text } }, &.{}, owner, why);
 }
 
 /// Waits for `j` and checks its reply against `qs`; null with `why` set on failure.
@@ -76,7 +76,8 @@ fn finish(app: *App, a: std.mem.Allocator, j: *jobs.Job, qs: []const systemone.Q
 }
 
 /// Asks the default decision model `questions` about `state_json` (JSON text) and waits for checked answers. For the
-/// daemon's own features; null (with `why`) when no decision model is configured, it is not qualified, or it failed.
+/// daemon's own features (the job is the daemon's: no device sees it); null (with `why`) when no decision model is
+/// configured, it is not qualified, or it failed.
 pub fn ask(app: *App, a: std.mem.Allocator, state_json: []const u8, questions: []const systemone.Question, why: *Refusal) ?Result {
     const text = systemone.encodeRequest(a, "", state_json, questions) catch {
         _ = refuse(why, 500, "server_error", "out of memory");
@@ -91,7 +92,7 @@ pub fn ask(app: *App, a: std.mem.Allocator, state_json: []const u8, questions: [
         _ = refuse(why, 400, "invalid_request_error", bad);
         return null;
     };
-    const j = start(app, a, body, why) orelse return null;
+    const j = start(app, a, body, "", why) orelse return null;
     return finish(app, a, j, questions, why);
 }
 
@@ -107,22 +108,22 @@ pub fn available(app: *App) bool {
     };
 }
 
-/// A parsed request body, checked and run: the checked result, or null with `why` set.
-pub fn decide(app: *App, a: std.mem.Allocator, body: Value, why: *Refusal) ?Result {
+/// A parsed request body, checked and run for `owner`: the checked result, or null with `why` set.
+pub fn decide(app: *App, a: std.mem.Allocator, body: Value, owner: []const u8, why: *Refusal) ?Result {
     var bad: []const u8 = "";
     const qs = systemone.parseQuestions(a, body, &bad) catch |err| {
         _ = refuse(why, if (err == error.OutOfMemory) 500 else 400, "invalid_request_error", if (err == error.OutOfMemory) "out of memory" else bad);
         return null;
     };
-    const j = start(app, a, body, why) orelse return null;
+    const j = start(app, a, body, owner, why) orelse return null;
     return finish(app, a, j, qs, why);
 }
 
 /// POST /v1/systemone.
-pub fn systemOne(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
+pub fn systemOne(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []const u8) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     const body = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return h.fail(req, a, 400, "invalid_request_error", "the body is not JSON: send {model, state, questions}");
     var why: Refusal = .{};
-    const r = decide(app, a, body, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
+    const r = decide(app, a, body, owner, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     return h.json(req, .ok, r.raw);
 }
