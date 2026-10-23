@@ -325,10 +325,10 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     reply starts with 200 ms in hand, on a session's first turn as on later ones. Before this, a reply still being written when its first audio came was held
     on its rate so far once `text_done` came (0.88 to 0.92x on DGX-01): 0.75 to 6 s.
   - **The first session after a start warms speech** (`voice.warm_speech`, on by default): on its own thread, it speaks
-    one sentence when it connects, the audio discarded. The speech model's first job after a load took 0.84 s to its
-    first audio on DGX-01 (0.1 s warm). That job's rate means nothing (1.03x beside the chat prime; 1.45x warm), so
-    while no rate is measured the sentence is spoken once more, warm, and its rate is `speech_rate` until a reply
-    measures one: the first reply after a start starts on time too.
+    one word ("Hello.") when it connects, the audio discarded. The speech model's first job after a load took 0.84 s to
+    its first audio on DGX-01 (0.1 s warm), and a 2 s sentence 4.7 s in all; the engine speaks one request at a time, so
+    a reply waits behind it, hence one word. Its rate is not kept (a first job's: 1.03x beside the chat prime, 1.45x
+    warm; a second, warm sentence collided with the first turn). The first reply after a start measures the rate.
   - Replayed over 10 recorded default-length replies (15 to 35 s of audio, chat decoding for 3 to 10 s), first audio
     measured from the request:
 
