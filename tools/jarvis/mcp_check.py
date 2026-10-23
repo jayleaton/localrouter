@@ -5,6 +5,7 @@
 Writes OUT/models.json, voices.json, chat.txt, image.png, video.mp4, speech-<voice>.wav (two voices),
 transcript.json (of the first WAV, fetched by its URL) and calls.jsonl (every request and reply, base64 trimmed).
 Exits 1 if any call fails. Stdlib only.
+With pairing on (pairing.required), $LOCALROUTER_TOKEN is sent as a Bearer token (deploy/jarvis/pair.sh token NAME).
 """
 import base64, http.client, json, os, sys, time, urllib.parse
 
@@ -13,6 +14,7 @@ URL = urllib.parse.urlsplit(sys.argv[2] if len(sys.argv) > 2 else "http://127.0.
 os.makedirs(OUT, exist_ok=True)
 log = open(os.path.join(OUT, "calls.jsonl"), "w")
 failed = []
+AUTH = {"Authorization": "Bearer " + os.environ["LOCALROUTER_TOKEN"]} if os.environ.get("LOCALROUTER_TOKEN") else {}
 seq = 0
 
 
@@ -22,7 +24,7 @@ def rpc(method, params=None, timeout=1200):
     body = {"jsonrpc": "2.0", "id": seq, "method": method, "params": params or {}}
     c = http.client.HTTPConnection(URL.hostname, URL.port, timeout=timeout)
     t0 = time.time()
-    c.request("POST", "/mcp", json.dumps(body), {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    c.request("POST", "/mcp", json.dumps(body), {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", **AUTH})
     r = c.getresponse()
     reply = json.loads(r.read())
     trimmed = json.loads(json.dumps(reply))

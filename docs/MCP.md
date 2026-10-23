@@ -8,12 +8,30 @@ speech, transcription, the model and voice lists, and job control. Two transport
 | Streamable HTTP (stateless) | `http://<host>:8190/mcp`; on the Jarvis box `https://dgx-01.<tailnet>.ts.net:10443/mcp` | clients that speak MCP over HTTP |
 | stdio | `localrouter mcp-stdio --url http://<host>:8190` | clients that only start a command; a stateless bridge to the HTTP endpoint |
 
-## Security: there is no authentication
+## Security: pairing, and who can reach it
 
-LocalRouter has no API keys. Anyone who can reach `/mcp` can run every tool: use the GPU, read the outputs, and read
-audio files under the directories listed in `local_files`. Keep it on loopback (the default, `127.0.0.1`) or your
-tailnet (`--host tailscale`, or `tailscale serve` as `deploy/jarvis/install.sh` sets up), where the tailnet's ACLs
+By default LocalRouter has no API keys: anyone who can reach `/mcp` can run every tool, use the GPU, read the outputs,
+and read audio files under the directories listed in `local_files`. Keep it on loopback (the default, `127.0.0.1`) or
+your tailnet (`--host tailscale`, or `tailscale serve` as `deploy/jarvis/install.sh` sets up), where the tailnet's ACLs
 decide who connects. Never bind it to `0.0.0.0` or a LAN address, and never put it behind a public reverse proxy.
+
+To narrow that to your own devices, set `"pairing": {"required": true}` in the config. `/mcp` and `/v1/realtime` then
+answer only a paired device's token and refuse everything else with HTTP 401 (`invalid_api_key`,
+`WWW-Authenticate: Bearer`) before reading the request. There is no loopback exemption: behind `tailscale serve` every
+peer arrives as loopback. Nothing else changes: `/voice`, the other `/v1` HTTP routes and `/v1/files` stay open to
+whoever reaches the daemon. Tokens are made on the box:
+
+```sh
+localrouter pair token claude-code --config FILE   # prints a token once, for an MCP client or a script
+localrouter pair add "JJ's phone" --config FILE    # a code (XXXX-XXXX, 10 minutes, once) for the app: POST /v1/pair
+localrouter pair list --config FILE                # id, name, created (never tokens)
+localrouter pair revoke ID|NAME --config FILE      # refused from the next request, no restart
+```
+
+On the Jarvis box use `deploy/jarvis/pair.sh token claude-code` (the deployed config and data). Only hashes of the
+tokens are kept, in `<data_dir>/devices.json` (0600). A token goes in `Authorization: Bearer <token>`; for
+`/v1/realtime` it may also be a `Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>` (the OpenAI browser
+SDK's) or `?api_key=<token>`.
 
 ## Connect
 
@@ -23,6 +41,13 @@ decide who connects. Never bind it to `0.0.0.0` or a LAN address, and never put 
 claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp            # on the box itself
 claude mcp add --transport http localrouter https://dgx-01.<tailnet>.ts.net:10443/mcp   # from another tailnet machine
 claude mcp add localrouter -- localrouter mcp-stdio --url http://127.0.0.1:8190   # stdio, through the bridge
+```
+
+With `pairing.required`, pass the token:
+
+```sh
+claude mcp add --transport http localrouter https://<host>/mcp --header "Authorization: Bearer <token>"
+claude mcp add localrouter -- localrouter mcp-stdio --url https://<host> --token <token>
 ```
 
 **Codex** (`~/.codex/config.toml`)
@@ -49,8 +74,9 @@ tool_timeout_sec = 900   # image and video loads; or pass a small wait_s and pol
 }}
 ```
 
-The bridge reads `$LOCALROUTER_URL` when `--url` is not given. It keeps no state; a daemon it cannot reach answers
-each request with a JSON-RPC error rather than hanging.
+The bridge reads `$LOCALROUTER_URL` when `--url` is not given, and `$LOCALROUTER_TOKEN` when `--token` is not (sent as
+`Authorization: Bearer`; an unpaired bridge's requests come back as JSON-RPC errors that say so). It keeps no state;
+a daemon it cannot reach answers each request with a JSON-RPC error rather than hanging.
 
 ## Tools
 
@@ -115,7 +141,8 @@ Each line is a `tools/call` request body for `POST /mcp` (or a line on the bridg
 {"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"release_models","arguments":{}}}
 ```
 
-With curl: `curl -s http://127.0.0.1:8190/mcp -H 'content-type: application/json' -d '<one of the lines>'`.
+With curl: `curl -s http://127.0.0.1:8190/mcp -H 'content-type: application/json' -d '<one of the lines>'` (with
+pairing: add `-H "authorization: Bearer $TOKEN"`).
 
 ## Files on the box
 

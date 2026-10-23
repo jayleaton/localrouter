@@ -41,6 +41,7 @@ Once the models are installed and qualified:
 deploy/jarvis/install.sh   # preflight, build into ~/jarvis/deploy/src/<commit>, config, unit, tailscale serve
 deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and the image model are warm
 deploy/jarvis/status.sh    # unit, build, each model's state and memory, URLs
+deploy/jarvis/pair.sh      # paired devices: add NAME (a code for the app), token NAME, list, revoke ID|NAME
 deploy/jarvis/stop.sh      # stop every model (and a Drama 3 server a killed worker left); --disable: off at boot too
 journalctl --user -u localrouter-jarvis -f          # the daemon; models log to ~/jarvis/deploy/data/logs/
 tools/jarvis/smoke.sh [--quick]                       # every capability against the live service
@@ -66,5 +67,34 @@ goes through HTTPS:
 - **Without tailscale:** `ssh -N -L 8190:127.0.0.1:8190 dgx01@192.168.1.116`, then `http://127.0.0.1:8190/voice` on
   your machine. Loopback counts as a secure context.
 
-LocalRouter has no API keys. Who may connect is decided by the tailnet (its ACLs) or by who can ssh in. Do not bind
-the daemon to `0.0.0.0` or a LAN address: nothing would authenticate the requests.
+Who may connect is decided by the tailnet (its ACLs) or by who can ssh in. Do not bind the daemon to `0.0.0.0` or a
+LAN address: nothing would authenticate the requests.
+
+## Pairing
+
+`tailscale serve` hands every tailnet peer to the daemon as loopback, so by default any tailnet device can open a voice
+session (`/v1/realtime`) or call the MCP tools (`/mcp`). With device pairing on, those two answer only paired devices;
+`/voice`, the other `/v1` routes and `/v1/files` stay as they are. It is off by default.
+
+```sh
+deploy/jarvis/pair.sh add "JJ's phone"     # a code for the app (XXXX-XXXX, 10 minutes, once) and its localrouter:// link
+deploy/jarvis/pair.sh token claude-code    # a token now, for MCP clients and scripts (printed once)
+deploy/jarvis/pair.sh list                 # id, name, created
+deploy/jarvis/pair.sh revoke ID|NAME       # refused from the next request
+```
+
+`pair.sh` runs the deployed binary on `$DEPLOY/config.json` and `$DEPLOY/data` (devices in `data/devices.json`, hashes
+only); none of it restarts the service. Five wrong codes within 10 minutes discard the pending codes (logged).
+
+To turn it on: pair what you use first, then `PAIRING_REQUIRED=1 deploy/jarvis/install.sh` (it restarts onto
+`"pairing": {"required": true}` once no voice call is open). Later installs keep the deployed setting;
+`PAIRING_REQUIRED=0` turns it off. Once it is on:
+
+- **The web page** (`/voice`): paste a token (`pair.sh token browser`) into Settings → API key; the page sends it on
+  the socket (`?api_key=`) and its API calls.
+- **MCP clients**: `claude mcp add --transport http localrouter https://dgx-01.prawn-penny.ts.net:10443/mcp --header
+  "Authorization: Bearer <token>"`, or `localrouter mcp-stdio --token <token>` (or `LOCALROUTER_TOKEN`).
+- **Smoke and check scripts**: `tools/jarvis/smoke.sh`, `tools/jarvis/mcp_check.py`, `tools/spark/jarvis/voice_e2e.py`
+  and `tools/spark/jarvis/model_manager_check.py` send `$LOCALROUTER_TOKEN` when it is set:
+  `LOCALROUTER_TOKEN=$(deploy/jarvis/pair.sh token smoke) tools/jarvis/smoke.sh`. `tools/spark/jarvis/client_check.py`
+  drives the web page in Chrome and does not set the page's API key: run it with pairing off.

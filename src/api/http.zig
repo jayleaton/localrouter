@@ -49,10 +49,12 @@ pub fn Server(comptime Ctx: type, comptime handle: fn (*Ctx, *const Conn, *Reque
                 // server reads to end of stream for the body and asserts before keeping the connection alive.
                 if (req.head.method.requestHasBody() and req.head.transfer_encoding == .none and req.head.content_length == null)
                     req.head.content_length = 0;
-                // Reading the body invalidates the head's strings, so keep a copy of the target to report a failure.
+                // Reading the body invalidates the head's strings, so keep a copy of the path to report a failure; not the
+                // query, which may hold a device token (`?api_key=`).
                 var target_buf: [256]u8 = undefined;
-                const target = target_buf[0..@min(req.head.target.len, target_buf.len)];
-                @memcpy(target, req.head.target[0..target.len]);
+                const p = path(&req);
+                const target = target_buf[0..@min(p.len, target_buf.len)];
+                @memcpy(target, p[0..target.len]);
                 handle(ctx, conn, &req) catch |err| {
                     std.log.warn("{s} {s}: {s}", .{ @tagName(req.head.method), target, @errorName(err) });
                     return;
@@ -86,10 +88,19 @@ pub fn jsonValue(req: *Request, gpa: std.mem.Allocator, status: http.Status, val
 
 /// OpenAI's error envelope: {"error":{"message","type","param","code"}}.
 pub fn fail(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, message: []const u8) !void {
+    return failWith(req, gpa, status, typ, null, message, &.{});
+}
+
+/// `fail` with a `code` and more headers (at most 7), e.g. a 401's WWW-Authenticate.
+pub fn failWith(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, code: ?[]const u8, message: []const u8, extra: []const http.Header) !void {
     const Env = struct { @"error": struct { message: []const u8, type: []const u8, param: ?[]const u8 = null, code: ?[]const u8 = null } };
-    const text = try std.json.Stringify.valueAlloc(gpa, Env{ .@"error" = .{ .message = message, .type = typ } }, .{});
+    const text = try std.json.Stringify.valueAlloc(gpa, Env{ .@"error" = .{ .message = message, .type = typ, .code = code } }, .{});
     defer gpa.free(text);
-    try json(req, @fromBackingInt(@intCast(status)), text);
+    var all: [8]http.Header = undefined;
+    all[0] = .{ .name = "content-type", .value = "application/json" };
+    const n = @min(extra.len, all.len - 1);
+    @memcpy(all[1..][0..n], extra[0..n]);
+    try req.respond(text, .{ .status = @fromBackingInt(@intCast(status)), .extra_headers = all[0 .. n + 1] });
 }
 
 pub fn bytes(req: *Request, content_type: []const u8, data: []const u8) !void {

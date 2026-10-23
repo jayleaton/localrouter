@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Device pairing, off by default (`"pairing": {"required": true}`): `/v1/realtime` and `/mcp` then answer only a
+  paired device's token, and refuse anything else with a 401 (`invalid_api_key`, `WWW-Authenticate: Bearer`) before
+  the upgrade or the body. There is no loopback exemption (behind `tailscale serve` every peer is loopback); the other
+  routes are unchanged.
+  - A token is `Authorization: Bearer`, a `Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>`, or
+    `?api_key=` (what the page sends from Settings → API key).
+  - `localrouter pair add NAME [--url URL]` makes a one-time code (XXXX-XXXX, 10 minutes) and the app's
+    `localrouter://pair` link; `POST /v1/pair` trades it for a token, `GET /v1/pair` says whether a token is paired.
+    `pair token NAME` mints one directly, `pair list` and `pair revoke ID|NAME` manage them; the daemon reads
+    `<data_dir>/devices.json` (hashes only, 0600) on every check, so a revoke needs no restart. Five wrong codes
+    within 10 minutes discard the pending codes.
+  - `localrouter mcp-stdio --token T` (or `LOCALROUTER_TOKEN`); `deploy/jarvis/pair.sh`; `install.sh` keeps the
+    deployed pairing setting (`PAIRING_REQUIRED=1|0` sets it); the voice and MCP check scripts send
+    `$LOCALROUTER_TOKEN`.
+  - A failed request's log line names its path without the query string, so a key never reaches the journal.
+
 - Voice: a picture or video turn answered in several tool calls is confirmed aloud, and the chat model no longer manages
   models around a picture.
   - The session checks memory itself: before a video, the `reserve_for` dry run, and when a voice model would go the

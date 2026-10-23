@@ -34,3 +34,21 @@ jobs:
           if [ -z "$files" ]; then exit 0; fi
           zig fmt $files
           git diff --exit-code -- $files
+  mobile:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: lint (expo lint)
+        run: pnpm lint
+      - name: type-check (the app, and the headless check under Node)
+        run: pnpm type-check
+      - name: unit tests (protocol, conversation, voice decisions)
+        run: pnpm test

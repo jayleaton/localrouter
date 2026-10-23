@@ -1,0 +1,10 @@
+{
+  "name": "voice-commands",
+  "version": "0.1.0",
+  "description": "On-device recognition of spoken app commands (\"mute audio\", \"hey Jarvis\") on the call's microphone stream",
+  "private": true,
+  "main": "src/index.ts",
+  "license": "UNLICENSED",
+  "author": "Sidebud",
+  "homepage": "https://github.com/jayleaton/remote-voice-agent"
+}

@@ -1,7 +1,7 @@
 //! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
 //! /v1/chat/completions (`chat.zig`)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
-//! /v1/tools for residency, and /mcp
+//! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
 
@@ -18,6 +18,7 @@ const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
 const realtime = @import("realtime.zig");
+const pair = @import("pair.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -29,6 +30,7 @@ pub const App = struct {
     self_addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) }, // where this daemon listens, for fetching its own output URLs
     decode_mutex: Io.Mutex = .init, // audio uploads decode one at a time (`speech.startTranscription`)
     voice: realtime.Registry = .{}, // open voice sessions, closed at shutdown
+    pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -45,9 +47,14 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     const host = try a.dupe(u8, h.host(req)); // headers are gone once the body is read
     const ctype = try a.dupe(u8, req.head.content_type orelse "");
     if (m == .GET and std.mem.eql(u8, p, "/health")) return h.json(req, .ok, "{\"ok\":true}");
-    if (eql(p, "/mcp")) return mcp.handle(app, req, a, host);
+    if (eql(p, "/mcp")) {
+        if (!try pair.admitted(app, req, a)) return; // refused before the body is read
+        return mcp.handle(app, req, a, host);
+    }
     if (m == .GET and eql(p, "/v1/realtime")) return realtime.serve(app, conn, req, a);
     if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
+    if (m == .POST and eql(p, "/v1/pair")) return pair.redeem(app, req, a);
+    if (m == .GET and eql(p, "/v1/pair")) return pair.status(app, req, a);
     if (m == .GET and eql(p, "/")) return req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = "/voice" }} });
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models"))) return models(app, req, a);
     if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, ctype, false);

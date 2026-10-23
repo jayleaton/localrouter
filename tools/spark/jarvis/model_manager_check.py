@@ -20,6 +20,7 @@ OUT, SCENARIO = sys.argv[1], sys.argv[2]
 args = sys.argv[3:]
 BALLAST_MODE = args[args.index("--ballast") + 1] if "--ballast" in args else "none"
 URL = urllib.parse.urlsplit(args[args.index("--url") + 1] if "--url" in args else "http://127.0.0.1:8190")
+AUTH = {"Authorization": "Bearer " + os.environ["LOCALROUTER_TOKEN"]} if os.environ.get("LOCALROUTER_TOKEN") else {}  # pairing.required
 VIDEO, CHAT = "minimax-h3", "qwen3.8-27b"
 ASK = "Make a 3 second video of a cat."
 os.makedirs(OUT, exist_ok=True)
@@ -35,7 +36,7 @@ def log(kind, **kw):
 
 def request(method, path, body=None, timeout=900):
     c = http.client.HTTPConnection(URL.hostname, URL.port, timeout=timeout)
-    c.request(method, path, json.dumps(body) if body is not None else None, {"Content-Type": "application/json"})
+    c.request(method, path, json.dumps(body) if body is not None else None, {"Content-Type": "application/json", **AUTH})
     r = c.getresponse()
     data = r.read()
     try:
@@ -182,7 +183,8 @@ class Ws:
         self.s = socket.create_connection((URL.hostname, URL.port), timeout=900)
         key = base64.b64encode(os.urandom(16)).decode()
         self.s.sendall((f"GET /v1/realtime HTTP/1.1\r\nHost: {URL.netloc}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: realtime\r\n\r\n").encode())
+                        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: realtime\r\n"
+                        + "".join(f"{k}: {v}\r\n" for k, v in AUTH.items()) + "\r\n").encode())
         head = b""
         while b"\r\n\r\n" not in head:
             head += self.s.recv(1)

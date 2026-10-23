@@ -4,7 +4,10 @@ LocalRouter is an HTTP server (default port 8190), OpenAI-compatible where OpenA
 on demand, so the first request to a tool waits for it to load. Later requests are fast until the tool has been idle
 for its TTL.
 
-Base URL: `http://<host>:8190/v1` (any API key, or none).
+Base URL: `http://<host>:8190/v1` (any API key, or none). When the operator turns on device pairing
+(`pairing.required`), `/mcp` and `/v1/realtime` need a paired device's token as `Authorization: Bearer <token>` and
+answer 401 `invalid_api_key` without it; ask the operator for one (`localrouter pair token NAME` on the box). The other
+`/v1` routes take any key, or none, either way.
 
 By default the daemon listens on `127.0.0.1` only, so `<host>` is `127.0.0.1` on the machine itself. To reach it from
 other machines the operator starts it with `--host tailscale` (the tailnet address; `<host>` is then the machine's
@@ -20,6 +23,7 @@ the client configs, every tool with an example, and the security note:
 
 ```bash
 claude mcp add --transport http localrouter http://<host>:8190/mcp
+claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Authorization: Bearer <token>"   # with pairing
 ```
 
 | Tool | Does |
@@ -234,7 +238,9 @@ The chat model can also call LocalRouter's own `generate_image` and `generate_vi
 `localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. Only
 `pcm16` and `server_vad` are offered; anything else is an `error` event naming the field, and the session stays open.
 By default both endpoints answer this machine only (the operator sets `voice.remote` to open them; browsers need HTTPS
-for the microphone off loopback). Details: `docs/dev/VOICE.md`.
+for the microphone off loopback). With pairing on, `/v1/realtime` also needs a token: `Authorization: Bearer`, a
+`Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>` beside `realtime` (the OpenAI browser SDK's), or
+`?api_key=<token>`; without one the upgrade is refused with a 401. Details: `docs/dev/VOICE.md`.
 
 ## Input URLs
 
