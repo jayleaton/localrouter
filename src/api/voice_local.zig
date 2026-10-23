@@ -100,7 +100,14 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools };
+
+/// Client tool execution makes the session a harness's inference service: its device needs the inference scope.
+fn clientTools(ptr: *anyopaque, why: *Why) bool {
+    if (self(ptr).may(.inference)) return true;
+    why.set("client tool execution needs the inference scope: on the box, `localrouter pair scopes NAME ...` adds it", .{});
+    return false;
+}
 
 fn self(ptr: *anyopaque) *Local {
     return @ptrCast(@alignCast(ptr));

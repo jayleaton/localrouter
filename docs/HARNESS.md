@@ -210,7 +210,8 @@ for a mode the box lacks finds out at once.
   sends `conversation.item.create {type: "function_call_output", call_id, output}` for each, then `response.create`.
   An output for an unknown call, a second output, or one after the call expired is refused (`unknown_call_id`,
   `duplicate_call_output`, `call_expired`). A call expires when the user speaks again or another response begins, and
-  `localrouter.function_call.cancelled` says so, so a late result is never spoken in a later turn.
+  `localrouter.function_call.cancelled` says so, so a late result is never spoken in a later turn. With pairing
+  required, the session's device needs the `inference` scope for this mode (the legacy `voice` profile includes it).
 - **`server` (default, what our web page and app use).** The client's `tools` plus, unless the operator turned them
   off, the box's built-ins (`realtime.server_tools`): `generate_image`, `generate_video`, the model management tools
   with `voice.manage_models`, and `computer_control` / `computer_use` while a desktop helper is paired. Client calls

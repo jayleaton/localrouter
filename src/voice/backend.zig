@@ -77,7 +77,13 @@ pub const Backend = struct {
         manage: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8) Managed = null,
         computer: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed = null,
         shadow: ?*const fn (ptr: *anyopaque, turn: Shadow) void = null, // must not block: called under the session's lock
+        client_tools: ?*const fn (ptr: *anyopaque, why: *Why) bool = null, // may the session own its tools (null: yes)
     };
+
+    /// Whether the session's caller may take client tool execution (the `inference` scope); false with `why` set.
+    pub fn clientTools(b: Backend, why: *Why) bool {
+        return if (b.vtable.client_tools) |f| f(b.ptr, why) else true;
+    }
 
     /// Runs a computer tool (computer_control, computer_use) for the user's words `utterance`, until the task ends
     /// (or `stop`: the task is stopped first); its JSON outcome. Progress worth hearing goes to `speaker`.

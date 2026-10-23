@@ -251,6 +251,10 @@ pub const Session = struct {
             next.deinit();
             return s.emit.fail(a, "invalid_request_error", "invalid_session", "session.localrouter.tool_execution is fixed once the session's first response has begun", eid);
         }
+        if (st.tool_execution == .client and s.settings.tool_execution != .client and !s.backend.clientTools(&why)) {
+            next.deinit();
+            return s.emit.fail(a, "invalid_request_error", "invalid_session", why.message, eid);
+        }
         const vad_changed = !std.meta.eql(st.vad, s.settings.vad);
         var old = s.settings_arena;
         s.settings = st;
