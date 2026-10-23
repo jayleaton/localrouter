@@ -5,6 +5,7 @@ zig-out/
 *.png
 *.mp4
 !docs/assets/*.png
+!apps/mobile/assets/images/*.png
 zig-pkg/
 results/
 __pycache__/
