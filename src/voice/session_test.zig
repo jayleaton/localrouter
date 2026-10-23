@@ -360,7 +360,10 @@ test "pauses under the wait never add up: one turn, nothing transcribed or asked
     try testing.expectEqual(@as(usize, 0), rig.rec.count("input_audio_buffer.committed", 0));
     try testing.expectEqual(@as(usize, 0), rig.rec.count("response.created", 0));
     try testing.expectEqual(@as(usize, 0), rig.fake.requests.items.len); // no chat request at all
-    try testing.expectEqual(@as(u32, 1), rig.fake.hears); // only the idle STT's warm-up: no transcript of a part
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("conversation.item.input_audio_transcription.completed", 0));
+    rig.fake.mutex.lockUncancelable(rig.fake.io);
+    const heard_before = rig.fake.hears; // the early transcripts made in the pauses (nothing considered them)
+    rig.fake.mutex.unlock(rig.fake.io);
     try rig.audio(1100, false);
     _ = try rig.rec.wait("response.done", 0);
     Io.sleep(rig.fake.io, .fromMilliseconds(100), .awake) catch {};
@@ -373,6 +376,7 @@ test "pauses under the wait never add up: one turn, nothing transcribed or asked
     try testing.expect(try rig.rec.wait("response.created", 0) > stopped_at);
     const heard = try rig.rec.get(a, try rig.rec.wait("conversation.item.input_audio_transcription.completed", 0));
     try testing.expectEqualStrings("I want a cup of tea. With milk.", heard.object.get("transcript").?.string);
+    try testing.expectEqual(heard_before + 1, rig.fake.hears); // the last pause's early transcript was the turn's: no second decode
 }
 
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {

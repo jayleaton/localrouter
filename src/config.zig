@@ -58,6 +58,8 @@ pub const Voice = struct {
     instructions: []const u8 = "You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
     partial_interval_ms: u32 = 0, // a partial transcript per this much new speech; 0 (default): none, since a partial
     // on a non-streaming STT model (Whisper) can hold the turn's final transcript back by a whole decode
+    early_stt_ms: u32 = 150, // quiet after speech that starts transcribing the turn so far (reused when the wait ends with
+    // nothing more said: only the transcript is early, nothing considers it before the wait ends); 0: none
     prime_chat: bool = true, // at the start and after each response the chat server reads the conversation so far
     // (max_tokens 1, discarded), so the next turn's request finds it in its prefix cache
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
