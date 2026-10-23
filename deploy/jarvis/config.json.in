@@ -6,7 +6,8 @@
               "speech_to_text": "whisper-large-v3-turbo", "text_to_image": "qwen-image-2.1-turbo",
               "text_to_video": "minimax-h3", "typed_decision": "knowline-4b"},
  "voice": {
-  "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"},
+  "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none", "top_p": 0.8},
+  "temperature": 0.7,
   "speech_models": ["fishaudio/drama-3"],
   "prime_chat": true, "greedy_transcripts": true,
   "partial_interval_ms": 0, "tool_wait_s": 900, "manage_models": true, "shadow_decisions": true

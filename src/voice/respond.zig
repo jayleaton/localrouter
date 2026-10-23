@@ -29,6 +29,7 @@ pub const Response = struct {
     audio: bool = true,
     client_tools: bool = false, // the session's tool_execution was client when it began: its calls go to the client
     line: []const u8 = "", // a fixed sentence to say instead of a chat reply (Task.Ask.line)
+    ack_at: ?usize = null, // where in `text` the session's own "making it" for a tool call begins (Feed.onTool)
     text: std.ArrayList(u8) = .empty,
     queue: std.ArrayList(Chunk) = .empty, // sentences for the speaker
     closed: bool = false, // no more sentences will come
@@ -396,6 +397,7 @@ const Feed = struct {
         f.add(f.lead.pass(f.s.gpa, a, held, true) catch held, false); // what the filters held back is said first
         if (f.r.client_tools) return f.endText(true); // the client's tool, whatever its name: the client says what it likes
         const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
+        f.r.ack_at = f.r.text.items.len; // what is added from here is the session's, about this call
         const video = std.mem.eql(u8, name, "generate_video");
         if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
         if (!said and f.r.audio and std.mem.eql(u8, name, "computer_use")) f.add(ack_computer, false);
@@ -587,6 +589,12 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
         for (r.spoken.items) |sp| end = sp.text_end;
         kept = std.mem.trimEnd(u8, kept[0..@min(end, kept.len)], " \n");
     }
+    // A cancelled response makes no calls, so the session's own "Making that now." for one describes nothing that
+    // happened: kept, the model read a picture promised without the tool and copied it (1 in 5 spoken picture turns
+    // after such a barge-in went without the call on DGX-01).
+    if (r.stop.cancelled()) if (r.ack_at) |at| {
+        kept = std.mem.trimEnd(u8, kept[0..@min(at, kept.len)], " \n");
+    };
     var outputs: std.ArrayList(Value) = .empty;
     if (s.find(r.item_id)) |it| {
         it.text = it.arena.allocator().dupe(u8, kept) catch "";

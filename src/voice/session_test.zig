@@ -98,6 +98,11 @@ const Fake = struct {
             return f.call(a, sink, "call_s", "get_time", "{}");
         }
         if (std.mem.indexOf(u8, said, "time") != null) return f.call(a, sink, "call_0", "get_time", "{\"zone\": \"UTC\"}");
+        if (std.mem.indexOf(u8, said, "slowly draw") != null) { // a picture call whose arguments take long: barge-in lands in them
+            if (sink.tool) |t| t(sink.ctx, "generate_image");
+            if (!f.nap(3000, stop)) return error.Cancelled;
+            return f.call(a, sink, "call_d", "generate_image", "{\"prompt\": \"a cat\"}");
+        }
         if (std.mem.indexOf(u8, said, "check") != null) return f.call(a, sink, "call_lm", "list_models", "{}");
         if (std.mem.indexOf(u8, said, "fail") != null) {
             why.set("the fake model failed", .{});
@@ -785,4 +790,30 @@ test "client tool execution needs the inference scope: without it the session st
     rig.s.handle(client_mode);
     const updated = try rig.rec.get(a, try rig.rec.wait("session.updated", 0));
     try testing.expectEqualStrings("client", updated.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
+}
+
+test "a barge-in while a picture call is written: no call, and the session's \"Making that now.\" leaves the history with it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    rig.heard("slowly draw me a cat");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("localrouter.response.speech_done", 0); // "Making that now." was said while the arguments are written
+    try testing.expectEqualStrings("Making that now.", rig.fake.spoke.items[0]);
+    rig.heard("never mind, hello there");
+    try rig.audio(600, true);
+    const cut = try rig.rec.get(a, try rig.rec.wait("response.done", 0));
+    try testing.expectEqualStrings("cancelled", cut.object.get("response").?.object.get("status").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.function_call_arguments.done", 0));
+    const said = cut.object.get("response").?.object.get("output").?.array.items[0].object.get("content").?.array.items[0].object.get("transcript").?.string;
+    try testing.expectEqualStrings("", said);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 1);
+    const next = rig.fake.requests.items[rig.fake.requests.items.len - 1];
+    try testing.expect(contains(next, "never mind, hello there"));
+    try testing.expect(!contains(next, "Making that now."));
 }

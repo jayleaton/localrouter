@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Voice picture turns: a reply cancelled by barge-in while it wrote a tool call no longer leaves the session's own
+  "Making that now." in the history (the call is dropped, so the line promised a picture that never came, and the model
+  copied it). `voice.temperature` sets a session's starting chat temperature; the Jarvis config runs Qwen with thinking off
+  at 0.7 and `top_p` 0.8, its non-thinking sampling, instead of the server's 1.0 and 0.95, which left 1 in 4 spoken picture
+  requests without the tool call.
+
 - Realtime client tool execution: `session.update {"localrouter": {"tool_execution": "client"}}` makes a voice session's
   tools the client's alone. The built-in image, video, model and computer tools are neither offered nor run, and their
   names are free. Each call reaches the client once, complete; its `function_call_output` must answer a call still
