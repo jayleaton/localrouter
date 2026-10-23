@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `client_check`: clicks are judged where a fault can be told from speech.
+  - Playback: the output must equal each received piece once aligned on the audio clock; a sample off by over 0.05 is
+    playback's.
+  - Stream: only where received pieces join, a step at least 0.05 and 8x the steps around it.
+  - Speech inside a piece is not judged: its plosives and sibilants have steps as large. The earlier measure, a fixed
+    threshold on any step, counted them; it is still reported as `clicks_old`.
+  - `window.jarvis.clickTest` checks this on each run's own audio. Recorded speech at a pretended seam
+    (`click_fixtures.json`) and the clean output and seams must not count. Splices into the output, and a step or a
+    dropped 10 ms at a received seam, must.
 - Voice picture turns:
   - The spoken text ends where the model's tool call begins (`localrouter.response.text_done` with `tool_calls: true`); the
     arguments are never spoken. The page then waits for that short speech to be all sent

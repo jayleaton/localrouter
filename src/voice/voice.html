@@ -2112,7 +2112,7 @@ function schedule(item, { buf, loudAt, rms }) {
   const start = V.nextTime;
   src.start(start);
   V.nextTime = frame(start + buf.duration); // back to back on whole frames: no overlap or 1-frame hole between pieces
-  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); (V.rec.pcm.get(key) || V.rec.pcm.set(key, []).get(key)).push(buf.getChannelData(0).slice()); }
+  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); V.rec.pieces.push({ key, start, data: buf.getChannelData(0).slice() }); }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
@@ -2134,9 +2134,10 @@ function schedule(item, { buf, loudAt, rms }) {
   }
 }
 
-// For tests: the page's own output, recorded after the mixer (window.jarvis.recordOutput before voice starts), and
+// For tests: the page's own output, recorded after the mixer (window.jarvis.recordOutput before voice starts; silence too,
+// so the recording keeps the audio clock's timeline: with nothing playing the input has no channels), and
 // where it fell silent mid-speech: an exact-zero run in played audio is a gap in the schedule, not a pause in speech.
-const TAP = 'class Tap extends AudioWorkletProcessor { process(i) { const c = i[0] && i[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; } } registerProcessor("tap", Tap);';
+const TAP = 'class Tap extends AudioWorkletProcessor { process(i) { const c = i[0] && i[0][0]; this.port.postMessage(c ? c.slice(0) : new Float32Array(128)); return true; } } registerProcessor("tap", Tap);';
 async function startTap() {
   const url = URL.createObjectURL(new Blob([TAP], { type: 'application/javascript' }));
   try { await V.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
@@ -2145,31 +2146,172 @@ async function startTap() {
   sink.gain.value = 0;
   V.out.connect(node);
   node.connect(sink).connect(V.ctx.destination);
-  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), srcs: [], pcm: new Map(), t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
+  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), srcs: [], pieces: [], t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
   node.port.onmessage = e => V.rec.chunks.push(e.data);
 }
 // Each speech onset (sound after 300 ms of quiet): within `windowMs` of it, the longest exact-zero run that
-// sound follows (a gap), how many ran over `gapMs`, and the clicks: steps over 4 times the window's 99th percentile.
-// The same click measure on each reply's audio as it was received (before playback): a click there is in the stream
-// (the speech model or the server), one only in the output is playback's.
-function streamClicks(windowMs = 2000) {
-  if (!V.rec) return null;
+// sound follows (a gap), how many ran over `gapMs`, and clicks_old (the earlier click measure, for comparison).
+// Clicks the check counts, in two places, each where a fault can be told from speech:
+// (a) playback: once the recording is aligned with the audio clock, the output must equal each piece as it was received
+//     (the output is the pieces at gain 1, at the wire rate); a sample off by over CLICK_DIFF is playback changing the
+//     audio (a render glitch, an overlap, a hole between pieces).
+// (b) stream: in the audio as received, only where two pieces join (where a dropped or misordered chunk would show): a
+//     step at least SEAM_MIN and SEAM_RATIO times the mean step within SEAM_SPAN samples around it (the step and its two
+//     neighbours left out). Speech inside a piece is not examined: its plosives and sibilants have steps as large.
+// clicks_old (outputStats) is the earlier measure, a fixed threshold on any step, which counted speech.
+const CLICK_DIFF = 0.05, SEAM_MIN = 0.05, SEAM_RATIO = 8, SEAM_SPAN = 48;
+function seamClick(x, k) {
+  const n = x.length, d = j => Math.abs(x[j] - x[j - 1]);
+  if (k < 1 || k >= n || d(k) < SEAM_MIN) return false;
+  let sum = 0, c = 0;
+  for (let j = Math.max(1, k - SEAM_SPAN); j <= Math.min(n - 1, k + SEAM_SPAN); j++) if (Math.abs(j - k) > 1) { sum += d(j); c++; }
+  return c > 0 && d(k) >= SEAM_RATIO * (sum / c);
+}
+// Each reply's received audio, whole, and where its pieces start: { key: { samples, starts } }.
+function received() {
   const out = {};
-  for (const [key, parts] of V.rec.pcm) {
-    const n = parts.reduce((s, p) => s + p.length, 0), x = new Float32Array(n);
-    let o = 0;
-    for (const p of parts) { x.set(p, o); o += p.length; }
-    const win = Math.round(windowMs / 1000 * RATE);
-    let clicks = 0;
-    for (let s = 0; s + 1 < n; s += win) {
-      const e = Math.min(n, s + win), steps = new Float32Array(e - s - 1);
-      for (let k = s + 1; k < e; k++) steps[k - s - 1] = Math.abs(x[k] - x[k - 1]);
-      const lim = Math.max(4 * (Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0), 0.2);
-      clicks += steps.filter(v => v > lim).length;
-    }
-    out[key] = { ms: Math.round(n / RATE * 1000), clicks };
+  for (const p of V.rec ? V.rec.pieces : []) {
+    const r = out[p.key] || (out[p.key] = { samples: [], starts: [] });
+    r.starts.push(r.samples.length);
+    for (const v of p.data) r.samples.push(v);
   }
   return out;
+}
+// (b): the seams of each reply's received audio (`audio`: received(), or a test's copy).
+function streamSeams(audio = received()) {
+  const out = {};
+  for (const [key, a] of Object.entries(audio)) {
+    const x = Float32Array.from(a.samples), at = a.starts.filter(k => k > 0 && seamClick(x, k));
+    out[key] = { ms: Math.round(x.length / RATE * 1000), seams: Math.max(0, a.starts.length - 1), clicks: at.length, at_ms: at.slice(0, 5).map(k => +(k / RATE * 1000).toFixed(1)) };
+  }
+  return out;
+}
+const recordedOutput = () => {
+  const n = V.rec.chunks.reduce((s, c) => s + c.length, 0), x = new Float32Array(n);
+  let o = 0;
+  for (const c of V.rec.chunks) { x.set(c, o); o += c.length; }
+  return x;
+};
+// Where piece `p` starts in the recording: its scheduled time on the audio clock, plus an offset. The recording does not
+// keep one offset for a whole call (it lost time against the clock on DGX-01), so each piece is matched where it
+// lies: from the previous piece's offset, within ALIGN_NEAR samples, else within ALIGN_FAR.
+const ALIGN_NEAR = 96, ALIGN_FAR = 4800;
+const pieceAt = (p, shift) => Math.round((p.start - V.rec.t0) * RATE) + shift;
+function pieceError(x, p, s, stride) {
+  const o = pieceAt(p, s);
+  if (o < 0 || o + p.data.length > x.length) return Infinity;
+  let err = 0;
+  for (let i = 0; i < p.data.length; i += stride) err += Math.abs(x[o + i] - p.data[i]);
+  return err;
+}
+function bestShift(x, p, center, span, step, stride) {
+  let best = center, bestErr = Infinity;
+  for (let s = center - span; s <= center + span; s += step) {
+    const e = pieceError(x, p, s, stride);
+    if (e < bestErr) { bestErr = e; best = s; }
+  }
+  return best;
+}
+function alignPieces(x) {
+  const shifts = [];
+  let center = 0;
+  for (const p of V.rec.pieces) {
+    const sig = p.data.reduce((s, v) => s + Math.abs(v), 0);
+    let s = bestShift(x, p, center, ALIGN_NEAR, 1, 2);
+    if (sig > 1 && pieceError(x, p, s, 1) > 0.2 * sig) s = bestShift(x, p, bestShift(x, p, center, ALIGN_FAR, 2, 6), 2, 1, 1);
+    shifts.push(s);
+    if (sig > 1) center = s; // a silent piece matches anywhere: it does not move the track
+  }
+  return shifts;
+}
+// (a): per reply, the samples where the output differs from the received audio (one click per 1 ms), the largest
+// difference, pieces outside the recording, and places where a piece's offset moved from the one before in the same
+// reply (playback inserted or dropped audio between them). `match`: 1 - error / signal over all pieces compared.
+function playbackDiffs(x = V.rec && recordedOutput(), shifts = null) {
+  if (!V.rec || V.rec.rate !== RATE) return { skipped: 'the output is not at the wire rate' };
+  if (!shifts) shifts = alignPieces(x);
+  const per = {};
+  let sig = 0, err = 0, prev = null;
+  V.rec.pieces.forEach((p, n) => {
+    const r = per[p.key] || (per[p.key] = { clicks: 0, max_diff: 0, unchecked: 0, moved: 0, at_s: [] }), o = pieceAt(p, shifts[n]);
+    if (o < 0 || o + p.data.length > x.length) { r.unchecked++; prev = null; return; }
+    const loud = p.data.reduce((s, v) => s + Math.abs(v), 0) > 1;
+    if (prev && prev.key === p.key && loud && prev.loud && shifts[n] !== prev.shift) { r.moved++; r.clicks++; if (r.at_s.length < 5) r.at_s.push(+(o / RATE).toFixed(3)); }
+    let last = -1e9;
+    for (let i = 0; i < p.data.length; i++) {
+      const e = Math.abs(x[o + i] - p.data[i]);
+      sig += Math.abs(p.data[i]);
+      err += e;
+      if (e > r.max_diff) r.max_diff = +e.toFixed(4);
+      if (e > CLICK_DIFF) {
+        if (o + i - last > RATE / 1000) { r.clicks++; if (r.at_s.length < 5) r.at_s.push(+((o + i) / RATE).toFixed(3)); }
+        last = o + i;
+      }
+    }
+    prev = { key: p.key, shift: shifts[n], loud };
+  });
+  const moves = shifts.filter((s, i) => i && s !== shifts[i - 1]).length;
+  return { match: sig ? +(1 - err / sig).toFixed(4) : null, shifts: shifts.length ? { first: shifts[0], last: shifts[shifts.length - 1], min: Math.min(...shifts), max: Math.max(...shifts), moves } : null, per, _shifts: shifts };
+}
+// The click checks on known cases, on this call's own audio: fixtures (speech at a pretended seam: must not count), the
+// clean output and seams (must not count), and splices: 1 ms steps into a copy of the output inside a quiet and a
+// voiced piece (playback), a step at a seam of the received audio, and the audio after one inverted (stream). All must count.
+function clickTest(fixtures) {
+  const out = { fixtures: fixtures.map(f => seamClick(Float32Array.from(f.samples), f.at)) };
+  const x = recordedOutput(), base = playbackDiffs(x);
+  out.shifts = base.shifts;
+  out.match = base.match;
+  out.clean_playback = Object.values(base.per || {}).reduce((s, r) => s + r.clicks, 0);
+  const audio = received();
+  out.clean_stream = Object.values(streamSeams(audio)).reduce((s, r) => s + r.clicks, 0);
+  const rms = d => Math.sqrt(d.reduce((s, v) => s + v * v, 0) / Math.max(d.length, 1));
+  const peak = d => d.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+  out.cases = [];
+  for (const [name, pick, amp] of [['playback, quiet piece', p => p.data.length >= 240 && peak(p.data) < 0.02, 0.15],
+                                   ['playback, voiced piece', p => p.data.length >= 240 && rms(p.data) > 0.05, 0.3]]) {
+    const p = V.rec.pieces.find(pick);
+    if (!p) { out.cases.push({ name, found: false }); continue; }
+    const y = x.slice(), o = pieceAt(p, base._shifts[V.rec.pieces.indexOf(p)]) + Math.floor(p.data.length / 2);
+    for (let j = o; j < o + 24; j++) y[j] += amp;
+    const got = playbackDiffs(y, base._shifts).per[p.key].clicks - base.per[p.key].clicks;
+    out.cases.push({ name, amp, caught: got >= 1 });
+  }
+  {
+    // A hole between two pieces of a reply: 2 ms of the output dropped where the second begins.
+    const name = 'playback, 2 ms dropped between pieces', ps = V.rec.pieces;
+    const n = ps.findIndex((p, i) => i && ps[i - 1].key === p.key && rms(p.data) > 0.05 && rms(ps[i - 1].data) > 0.05);
+    if (n < 0) out.cases.push({ name, found: false });
+    else {
+      const o = pieceAt(ps[n], base._shifts[n]), y = new Float32Array(x.length - 48);
+      y.set(x.subarray(0, o));
+      y.set(x.subarray(o + 48), o);
+      out.cases.push({ name, caught: playbackDiffs(y).per[ps[n].key].clicks > base.per[ps[n].key].clicks });
+    }
+  }
+  const key = Object.keys(audio).sort((a, b) => audio[b].samples.length - audio[a].samples.length)[0];
+  // A step is judged against the steps around it: a seam in voiced speech (loud, small steps), not in a fricative,
+  // whose own steps mask one.
+  const meanStep = d => d.reduce((s, v, i) => s + (i ? Math.abs(v - d[i - 1]) : 0), 0) / Math.max(d.length - 1, 1);
+  const a = key && audio[key], s = a && a.starts.find(k => k > 240 && k < a.samples.length - 240 && rms(a.samples.slice(k - 240, k + 240)) > 0.05 && meanStep(a.samples.slice(k - 240, k + 240)) < 0.03);
+  // Inverting the audio after a seam only breaks it where the wave is away from zero (at a zero crossing it joins).
+  const s2 = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && Math.abs(a.samples[k]) >= 0.15);
+  for (const [name, at, change] of [['stream, a step at a seam', s, (y, k) => { for (let j = k; j < k + 24; j++) y[j] += 0.3; return y; }],
+                                    ['stream, the audio after a seam inverted', s2, (y, k) => y.slice(0, k).concat(y.slice(k).map(v => -v))]]) {
+    if (at == null) { out.cases.push({ name, found: false }); continue; }
+    out.cases.push({ name, caught: seamClick(Float32Array.from(change(a.samples.slice(), at)), at) });
+  }
+  return out;
+}
+// The earlier measure, for comparison: steps over max(4 x the 99th percentile of the window's steps, 0.2).
+function clickStepsOld(x, win) {
+  let clicks = 0;
+  for (let s = 0; s + 1 < x.length; s += win) {
+    const e = Math.min(x.length, s + win), steps = new Float32Array(e - s - 1);
+    for (let k = s + 1; k < e; k++) steps[k - s - 1] = Math.abs(x[k] - x[k - 1]);
+    const lim = Math.max(4 * (Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0), 0.2);
+    clicks += steps.filter(v => v > lim).length;
+  }
+  return clicks;
 }
 function outputStats(windowMs = 2000, gapMs = 30) {
   if (!V.rec) return null;
@@ -2186,9 +2328,7 @@ function outputStats(windowMs = 2000, gapMs = 30) {
       const t = V.rec.t0 + i / r, sp = [...V.rec.spans.values()].find(s => t >= s.a - 0.1 && t < s.b);
       const end = Math.min(n, i + win, sp ? Math.max(i + 1, Math.round((sp.b - V.rec.t0) * r)) : n);
       let run = 0, longest = 0, longestAt = 0, gaps = 0, glitch = 0, glitches = 0;
-      const steps = new Float32Array(end - i - 1);
       for (let k = i + 1; k < end; k++) {
-        steps[k - i - 1] = Math.abs(x[k] - x[k - 1]);
         if (x[k] === 0) { run++; continue; }
         if (run) {
           // Silence with no audio scheduled is a delivery gap (the stream ran dry); silence while a source was scheduled to play
@@ -2200,9 +2340,8 @@ function outputStats(windowMs = 2000, gapMs = 30) {
           run = 0;
         }
       }
-      const p99 = Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0;
-      const clicks = steps.filter(s => s > Math.max(4 * p99, 0.2)).length;
-      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, gap_at_ms: Math.round(longestAt / r * 1000), reply: sp ? [...V.rec.spans].find(([, s]) => s === sp)[0] : null, reply_ms: sp ? Math.round((sp.b - sp.a) * 1000) : null, render_gap_ms: Math.round(glitch / r * 1000), render_gaps: glitches, clicks, p99_step: +p99.toFixed(4), window_ms: Math.round((end - i) / r * 1000) });
+      const clicksOld = clickStepsOld(x.subarray(i, end), win);
+      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, gap_at_ms: Math.round(longestAt / r * 1000), reply: sp ? [...V.rec.spans].find(([, s]) => s === sp)[0] : null, reply_ms: sp ? Math.round((sp.b - sp.a) * 1000) : null, render_gap_ms: Math.round(glitch / r * 1000), render_gaps: glitches, clicks_old: clicksOld, window_ms: Math.round((end - i) / r * 1000) });
       i = end - 1;
     }
     zeros = 0;
@@ -2599,7 +2738,7 @@ if (window.visualViewport) {
 
 // A test or another script can see the state without scraping the page.
 window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, socket: V.ws ? V.ws.readyState : null, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
-                  output: outputStats, streamClicks, recordOutput: false,
+                  output: outputStats, streamSeams: () => streamSeams(), playbackDiffs: () => playbackDiffs(), clickTest, recordOutput: false,
                   get engine() { return engine(); },
                   say: text => { $('text').value = text; sendText(); }, // a turn in the call, as typed
                   dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },

@@ -439,10 +439,26 @@ def main():
             # loses its alignment with the AudioContext clock across a reconnect, and Drama 3's own audio has no exact-zero runs.
             gaps = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.gap').map(e => ({ item: e.item, ms: e.ms, at_ms: e.at_ms, t: e.t }))")
             lat = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && x.lat && x.lat.firstAudio != null).map(x => x.lat.firstAudio)")
-            bad = list(gaps) + [o for o in onsets if o["clicks"]]
-            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "stream_clicks": cdp.js("window.jarvis.streamClicks()"), "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
+            # Clicks: (a) playback, where the output differs from the audio received (aligned on the audio clock); (b) stream,
+            # a discontinuity where two received pieces join. Speech inside a piece is not judged (its plosives and sibilants
+            # have steps as large as a click's); clicks_old in the onsets is the earlier measure, which judged it.
+            pb = cdp.js("window.jarvis.playbackDiffs()") or {}
+            seams = cdp.js("window.jarvis.streamSeams()") or {}
+            playback_clicks = {k: v for k, v in (pb.get("per") or {}).items() if v["clicks"] or v["unchecked"]}
+            stream_clicks = {k: v for k, v in seams.items() if v["clicks"]}
+            bad = list(gaps) + ([{"playback": playback_clicks}] if playback_clicks else []) + ([{"stream": stream_clicks}] if stream_clicks else [])
+            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "playback_diffs": {k: v for k, v in pb.items() if k != "_shifts"}, "stream_seams": seams, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
-            check("voice: no reply runs dry anywhere (no underrun), and no click in a reply\x27s first 2 s", not bad, bad or onsets)
+            check("voice: the recording lines up with the audio received (the playback comparison is sound)", pb.get("skipped") or (pb.get("match") or 0) > 0.99, {k: pb.get(k) for k in ("shifts", "match", "skipped")})
+            check("voice: no reply runs dry (no underrun), playback adds no click, and no click where received pieces join", not bad, bad)
+            # The click checks on known cases, on this run's own audio (window.jarvis.clickTest): speech fixtures at a
+            # pretended seam, and the clean output and seams, must not count; 1 ms steps spliced into a copy of the output
+            # (a quiet and a voiced piece) and a step or a dropped 10 ms at a received seam must.
+            fixtures = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_fixtures.json")))["speech"]
+            probe = cdp.js(f"window.jarvis.clickTest({json.dumps(fixtures)})") or {}
+            results["click_test"] = probe
+            check("clicks: no speech fixture counts as a click at a seam", not any(probe.get("fixtures") or [True]), probe.get("fixtures"))
+            check("clicks: every splice counts (in the output: playback; at a received seam: stream)", probe.get("cases") and all(c.get("caught") for c in probe["cases"]), probe.get("cases"))
             click(cdp, "vbarEnd")
         # The reel, in a call: the fake microphone asks for a picture. The reel (and the chat) show a placeholder, then the
         # picture; nothing before it says it is ready, and a confirmation is spoken after it. A request the image model
