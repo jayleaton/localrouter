@@ -48,7 +48,7 @@ pub const Response = struct {
 /// a reply already written at that rate, instead of measuring the rate of a stream that so far shared the GPU with the
 /// chat model (a fresh session's long reply was held 2.9 to 5.2 s for that on DGX-01).
 var free_speech_rate: std.atomic.Value(u32) = .init(0);
-const free_min_ms = 1000;
+const free_min_ms = 500; // shorter spans read low (a sentence's start counts): the safe side
 
 /// free_speech_rate as a rate (null: not measured yet).
 fn speechRate() ?f64 {
@@ -148,8 +148,9 @@ pub fn speechCold() bool {
 }
 
 /// On its own thread at connect (Session.warmer): the warm-up sentence through the session's speech model and voice,
-/// the audio discarded, so the model's first job is paid before a reply needs it. Its rate is not kept: a first job,
-/// beside the chat prime, came at 1.03x on DGX-01 (1.45x warm).
+/// the audio discarded, so the model's first job is paid before a reply needs it. That job's rate means nothing (a
+/// first job, beside the chat prime, came at 1.03x on DGX-01; 1.45x warm), so while none is measured the sentence is
+/// spoken once more, warm, and that one's rate is free_speech_rate until a reply measures one.
 pub fn warmSpeech(s: *Session) void {
     if (!speechCold() or speech_warming.swap(true, .acq_rel)) return;
     defer speech_warming.store(false, .release);
@@ -164,9 +165,31 @@ pub fn warmSpeech(s: *Session) void {
     s.backend.speak(a, warm_sentence, say, .{ .ctx = s, .write = discardPcm }, &s.close_stop, &why) catch return;
     speech_warm.store(true, .monotonic);
     std.log.info("voice {s}: speech warmed in {d} ms", .{ s.id, @divTrunc(s.clock() - began, std.time.ns_per_ms) });
+    if (speechRate() != null) return;
+    var count: Count = .{};
+    const again = s.clock();
+    s.backend.speak(a, warm_sentence, say, .{ .ctx = &count, .write = Count.write }, &s.close_stop, &why) catch return;
+    if (count.rate == 0) return;
+    const span_ns = s.clock() - again;
+    const span_ms: u64 = if (span_ns >= std.time.ns_per_ms) @intCast(@divTrunc(span_ns, std.time.ns_per_ms)) else 1;
+    const rate: u64 = count.samples * 1_000_000 / count.rate / span_ms;
+    if (speechRate() == null) free_speech_rate.store(if (rate > 100_000) 100_000 else @intCast(rate), .monotonic);
+    std.log.info("voice {s}: speech rate {d}/1000 (warm-up)", .{ s.id, rate });
 }
 
 fn discardPcm(_: *anyopaque, _: []const i16, _: u32) void {}
+
+/// Counts a warm-up sentence's audio.
+const Count = struct {
+    samples: u64 = 0,
+    rate: u64 = 0,
+
+    fn write(ctx: *anyopaque, samples: []const i16, rate: u32) void {
+        const c: *Count = @ptrCast(@alignCast(ctx));
+        c.samples += samples.len;
+        c.rate = rate;
+    }
+};
 
 fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
