@@ -304,8 +304,14 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   Until the chat stream ends, speech arrives slower than it plays. The session sends
   `localrouter.response.text_done` `{response_id, item_id}` as soon as the chat stream ends; from then on speech has the
   GPU to itself.
-  - **Smooth start** (a setting, off by default). When a reply's start window ends without 200 ms of audio in hand,
-    the stream is slow. Its start then waits for `text_done`, or for 1 s of audio in hand.
+  - **The start waits for the writing when speech falls behind** (default; the "smooth start" setting is gone). A reply
+    starts with 200 ms in hand once `text_done` has come (500 ms while a picture or video is being made), or, while the
+    chat model still writes, once speech has come at 1.05x real time or better over its first 250 ms; otherwise it waits
+    for `text_done` (at most 10 s). A short reply is written before its first audio, so it starts as before. The priority
+    is a reply that plays to its end without running dry over time to first audio: a 1 s buffer (smooth start) still ran
+    dry in a long reply, because a reply's length is not known until it is written. On DGX-01, `client_check` (five
+    replies a run, each checked to its end): 3 of 3 runs with no underrun in any reply; the long reply waited 2.9 to 5.9 s
+    for its writing, at 0.51 to 0.64x real time.
   - Replayed over 10 recorded default-length replies (15 to 35 s of audio, chat decoding for 3 to 10 s), first audio
     measured from the request:
 

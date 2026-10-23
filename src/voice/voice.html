@@ -488,7 +488,6 @@
       <label class="field"><span>Wait before replying<small>Jarvis starts on your words only after you have been quiet this long in one go. Speak again and it starts over, so you can stop to think.</small></span>
         <select id="wait"><option value="300">0.3 s</option><option value="500">0.5 s</option><option value="800">0.8 s</option><option value="1000">1 s</option><option value="1500">1.5 s</option><option value="2000">2 s</option><option value="3000">3 s</option><option value="4000">4 s</option><option value="5000">5 s</option></select></label>
       <label class="switch"><span>Echo guard<small>Ignore my own voice from the speaker</small></span><input type="checkbox" id="gate"></label>
-      <label class="switch"><span>Smooth start for long replies<small>Waits up to about a second more so a long answer does not stutter while it is still being written</small></span><input type="checkbox" id="smooth"></label>
     </section>
     <section class="sect" aria-labelledby="hAdv">
       <h3 id="hAdv">Advanced</h3>
@@ -583,10 +582,11 @@ const store = {
   },
 };
 const S = Object.assign({ chatModel: '', think: false, speechModel: '', voices: {}, mode: 'vad', wait: 800, threshold: 0.5,
-  tools: true, gate: true, smoothStart: false, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
+  tools: true, gate: true, logN: 300, key: '', instructions: '', maxTokens: 0 }, store.get('settings', {}));
 if (S.voice && S.speechModel && !S.voices[S.speechModel]) S.voices[S.speechModel] = S.voice; // the earlier single voice
 delete S.voice;
 delete S.silence; // the old "pause before I reply" (200 to 1500 ms): the wait starts again at its default
+delete S.smoothStart; delete S.slowCapMs; // the "smooth start" setting is gone: a reply waits for its writing whenever speech falls behind
 S.wait = [300, 500, 800, 1000, 1500, 2000, 3000, 4000, 5000].includes(Number(S.wait)) ? Number(S.wait) : 800;
 const saveSettings = () => store.set('settings', S);
 
@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), slow: null, contend: null, firstAt: new Map(), textDone: new Set(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1809,7 +1809,7 @@ function connect(my) {
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
     for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone']) V[k].clear();
-    V.slow = null;
+    V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
     checkPage(); // a tab left open across a deploy hears of it as a call starts, or reconnects to the new daemon
@@ -1972,7 +1972,7 @@ function silence() {
   V.held = [];
   clearTimeout(V.holdTimer);
   V.holdTimer = 0;
-  V.slow = null;
+  V.holding = null;
 }
 function playedMs(item, now) {
   let ms = V.doneMs.get(item) || 0;
@@ -1995,25 +1995,17 @@ function bargeIn(cancel) {
   if (cancel && V.resp) vsend({ type: 'response.cancel' });
   renderVoice();
 }
-// A reply's audio is held at its start until START_MS of it is in hand, or START_WAIT_MS after its first piece came,
-// then scheduled back to back on the AudioContext clock. Drama 3 streams a 46 ms first piece and then a 186 ms burst
-// every ~125 ms: started at once, playback ran dry after the first syllable for 30 to 90 ms (measured on DGX-01).
-const START_MS = 200, START_WAIT_MS = 150, SLOW_CAP_MS = 1000;
-// While a picture or video is being made, a reply starts with more in hand: speech pauses the generation between its
-// steps (speech first), but the step already on the GPU, about 0.7 s, still slows the reply's first words.
-const GEN_START_MS = 500, GEN_WAIT_MS = 900;
-// While the chat model is still writing the reply, speech shares the GPU with it and runs below real time, so a start
-// with only Drama 3's 46 ms first piece in hand ran dry at once (a 172 ms stall measured on DGX-01). Then the start
-// waits for enough in hand to play the first CONTEND_SPAN_MS without running dry at the rate the audio is coming in
-// (at rate p, CONTEND_SPAN_MS x (1 - p), at least START_MS, at most CONTEND_MAX_MS), or the chat model done (speech then
-// has the GPU and catches up), or CONTEND_CAP_MS after the first piece. A stream that keeps up never waits here.
-const CONTEND_SPAN_MS = 3000, CONTEND_MAX_MS = 1000, CONTEND_CAP_MS = 1500;
-function contendNeed(item) {
-  const since = performance.now() - (V.firstAt.get(item) || performance.now());
-  const first = (V.held.find(p => p.item === item) || { buf: { duration: 0 } }).buf.duration * 1000;
-  const rate = since > 100 ? (have(item) - first) / since : 0; // audio ms a wall ms, after the first piece (0: unknown yet)
-  return Math.min(CONTEND_MAX_MS, CONTEND_SPAN_MS * (1 - Math.min(rate, 1)));
-}
+// A reply's audio is held at its start, then scheduled back to back on the AudioContext clock, so that it plays to its
+// end without running dry. Speech comes faster than it plays (1.35x real time on DGX-01, 1.2x beside a picture, with
+// speech first), except while the chat model is still writing the reply: the two share the GPU, and speech came at
+// 0.55 to 0.67x for as long as the writing went on. No buffer of a fixed size covers that, since a reply's length is not
+// known until it is written (a 1 s "smooth start" still ran dry in a long reply). So the start waits for:
+// - the chat model done (localrouter.response.text_done), then START_MS in hand: Drama 3's 46 ms first piece alone ran
+//   dry at once. GEN_START_MS while a picture or video is being made: the step already on the GPU slows the first words;
+// - or, while it still writes, speech keeping up anyway (KEEP_UP over RATE_MS from the first piece), then START_MS;
+// - and never more than HOLD_CAP_MS after the first piece (a stream whose text_done never comes).
+// A short reply is written before its first audio comes, so it starts as soon as it would have.
+const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000;
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
 const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
 function decode(b64) {
@@ -2038,49 +2030,44 @@ function play(item, b64) {
   if (!piece) return;
   if (V.rec) V.rec.arrivals.push([Math.round(performance.now()), item, piece.buf.length]);
   if (V.started.has(item)) return schedule(item, piece);
-  const wait = S.startWaitMs ?? (generating() ? GEN_WAIT_MS : START_WAIT_MS);
   if (!V.held.some(p => p.item === item)) V.firstAt.set(item, performance.now());
   V.held.push({ item, ...piece });
-  if (wait <= 0) return release(item, 0.05);
-  if (have(item) >= (V.slow === item ? slowCap() : slowCap() > 0 ? startMs() : holdNeed(item))) return release(item, 0.01);
-  if (!V.holdTimer && V.slow !== item && V.contend !== item) V.holdTimer = setTimeout(() => startOrWait(item), wait);
+  if (S.startWaitMs === 0) return release(item, 0.05); // tests: start on the first piece, as before #28
+  startOrWait(item);
 }
-// The slow-start hold is the "smooth start" setting (off by default): it removes a long reply's stutter for about a
-// second more before its first word (measured on DGX-01: replies with a gap in their first 2 s 8/10 -> 0/10, first
-// audio median +1.6 s). window.jarvis.settings.slowCapMs overrides it for tests.
-const slowCap = () => S.slowCapMs ?? (S.smoothStart ? SLOW_CAP_MS : 0);
 const have = item => V.held.filter(p => p.item === item).reduce((s, p) => s + p.buf.duration, 0) * 1000;
-// The start window is over. A stream that keeps up has START_MS in hand by now; one that does not is speech sharing the
-// GPU with the chat model still writing the reply, slower than playback (0.67x real time against 1.49x alone on
-// DGX-01). Then the start waits for the chat model to finish (localrouter.response.text_done: speech has the GPU again
-// and catches up) or SLOW_CAP_MS in hand, whichever is first: one short wait instead of a stutter every few words.
-function startOrWait(item) {
-  V.holdTimer = 0;
-  if (have(item) >= (slowCap() > 0 ? startMs() : holdNeed(item))) return release(item, 0.01);
-  if (slowCap() > 0) { // the "smooth start" setting
-    if (V.textDone.has(item)) return release(item, 0.01);
-    V.slow = item;
-    return dbg('voice.slow_start', { item, have_ms: Math.round(have(item)) });
-  }
-  // Not START_MS in hand yet: hold on, never past CONTEND_CAP_MS from the first piece. Once the chat model is done, speech
-  // has the GPU and the rest of START_MS comes within about 100 ms; while it still writes, hold for contendNeed.
-  const left = CONTEND_CAP_MS - (performance.now() - (V.firstAt.get(item) || 0));
-  if (left <= 0 || have(item) >= holdNeed(item)) return release(item, 0.01);
-  if (V.contend !== item && !V.textDone.has(item)) dbg('voice.contend_start', { item, have_ms: Math.round(have(item)) });
-  V.contend = item; // released by more audio (play) or the cap
-  V.holdTimer = setTimeout(() => startOrWait(item), Math.min(left, 25));
+// Audio ms a wall ms after the first piece (the first piece itself is not counted), once RATE_MS has passed; else null.
+function arrivalRate(item) {
+  const since = performance.now() - (V.firstAt.get(item) || performance.now());
+  if (since < RATE_MS) return null;
+  const first = V.held.find(p => p.item === item);
+  return (have(item) - (first ? first.buf.duration * 1000 : 0)) / since;
 }
-const holdNeed = item => (V.textDone.has(item) ? startMs() : Math.max(startMs(), contendNeed(item)));
+function startOrWait(item) {
+  if (!V.held.some(p => p.item === item)) return;
+  const since = performance.now() - (V.firstAt.get(item) || performance.now());
+  const rate = arrivalRate(item);
+  const ready = have(item) >= startMs() && (V.textDone.has(item) || (rate != null && rate >= KEEP_UP));
+  if (ready || since >= HOLD_CAP_MS) {
+    if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
+    return release(item, 0.01);
+  }
+  if (rate != null && V.holding !== item) { // speech is not keeping up with the chat model still writing: wait for it
+    V.holding = item;
+    dbg('voice.hold', { item, have_ms: Math.round(have(item)), rate: +rate.toFixed(2) });
+  }
+  clearTimeout(V.holdTimer);
+  V.holdTimer = setTimeout(() => startOrWait(item), 25);
+}
 function textDone(item) {
   V.textDone.add(item);
-  if (V.slow === item && V.held.some(p => p.item === item)) release(item, 0.01);
+  startOrWait(item);
 }
 // The held start of `item` goes out, `lead` s from now.
 function release(item, lead) {
   clearTimeout(V.holdTimer);
   V.holdTimer = 0;
-  if (V.slow === item) V.slow = null;
-  if (V.contend === item) V.contend = null;
+  if (V.holding === item) V.holding = null;
   V.firstAt.delete(item);
   if (!V.ctx || V.cut.has(item)) { V.held = []; return; }
   V.started.add(item);
@@ -2465,7 +2452,6 @@ function openDrawer(section) {
   $('sens').value = Math.max(0, Math.min(100, sensFromThreshold()));
   $('wait').value = String(S.wait);
   $('gate').checked = S.gate;
-  $('smooth').checked = S.smoothStart;
   $('key').value = S.key;
   $('logn').value = S.logN;
   renderVoices();
@@ -2477,7 +2463,6 @@ $('chatmodel').addEventListener('change', () => { S.chatModel = $('chatmodel').v
 $('thinkSw').addEventListener('change', () => { S.think = $('thinkSw').checked; saveSettings(); renderControls(); });
 $('tools').addEventListener('change', () => { S.tools = $('tools').checked; saveSettings(); });
 $('gate').addEventListener('change', () => { S.gate = $('gate').checked; saveSettings(); });
-$('smooth').addEventListener('change', () => { S.smoothStart = $('smooth').checked; saveSettings(); });
 live('maxtok', e => { S.maxTokens = Number(e.value) || 0; });
 live('instructions', e => { S.instructions = e.value; });
 live('sens', e => { S.threshold = Math.round((0.8 - Number(e.value) / 100 * 0.6) * 100) / 100; });
