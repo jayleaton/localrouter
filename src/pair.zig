@@ -18,8 +18,39 @@ pub const max_name_len = 64;
 pub const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const token_len = 43;
 
-pub const Device = struct { id: []const u8, name: []const u8, token_sha256: []const u8, created: i64 };
-pub const Pending = struct { code_sha256: []const u8, name: []const u8, expires: i64 };
+/// `scopes`: what the device may do. None listed (every device paired before scopes existed) is `voice` and `mcp`;
+/// a list names each scope it grants: `voice` (/v1/realtime), `mcp` (/mcp), and computer control's `desktop_helper`,
+/// `computer` and `approve` (docs/dev/COMPUTER.md).
+pub const Device = struct {
+    id: []const u8,
+    name: []const u8,
+    token_sha256: []const u8,
+    created: i64,
+    scopes: []const []const u8 = &.{},
+
+    pub fn allows(d: Device, scope: []const u8) bool {
+        if (d.scopes.len == 0) return std.mem.eql(u8, scope, "voice") or std.mem.eql(u8, scope, "mcp");
+        for (d.scopes) |x| if (std.mem.eql(u8, x, scope)) return true;
+        return false;
+    }
+};
+pub const Pending = struct { code_sha256: []const u8, name: []const u8, expires: i64, scopes: []const []const u8 = &.{} };
+
+/// Every scope a device may be given.
+pub const scope_names = [_][]const u8{ "voice", "mcp", "desktop_helper", "computer", "approve" };
+
+/// `voice,mcp,computer` as a list in `a`; null when a name is not one of `scope_names` or the list is empty.
+pub fn parseScopes(a: std.mem.Allocator, text: []const u8) !?[]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, text, ", ");
+    while (it.next()) |s| {
+        var known = false;
+        for (scope_names) |n| known = known or std.mem.eql(u8, n, s);
+        if (!known) return null;
+        try out.append(a, try a.dupe(u8, s));
+    }
+    return if (out.items.len == 0) null else out.items;
+}
 pub const Doc = struct { devices: []const Device = &.{}, pending: []const Pending = &.{} };
 
 /// A code as shown, `XXXX-XXXX`, and when it stops working.
@@ -73,6 +104,11 @@ pub const Store = struct {
 
     /// A new pending code for a device to be called `name`.
     pub fn addCode(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, at: i64) !Code {
+        return s.addCodeScoped(io, a, name, &.{}, at);
+    }
+
+    /// `addCode` for a device that gets `scopes` (none: the defaults) when it redeems the code.
+    pub fn addCodeScoped(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, scopes: []const []const u8, at: i64) !Code {
         const l = try s.lock(io, a);
         defer l.close(io);
         const doc = try s.load(io, a);
@@ -81,20 +117,40 @@ pub const Store = struct {
         const pending = try a.alloc(Pending, doc.pending.len + 1);
         @memcpy(pending[0..doc.pending.len], doc.pending);
         const c: Code = .{ .text = shown(raw), .expires = at + code_ttl_s };
-        pending[doc.pending.len] = .{ .code_sha256 = try hexHash(a, &raw), .name = name, .expires = c.expires };
+        pending[doc.pending.len] = .{ .code_sha256 = try hexHash(a, &raw), .name = name, .expires = c.expires, .scopes = scopes };
         try s.save(io, a, .{ .devices = doc.devices, .pending = pending }, at);
         return c;
     }
 
     /// A new device called `name`, with its token.
     pub fn mint(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, at: i64) !Minted {
+        return s.mintScoped(io, a, name, &.{}, at);
+    }
+
+    /// `mint` for a device with `scopes` (none: the defaults).
+    pub fn mintScoped(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, scopes: []const []const u8, at: i64) !Minted {
         const l = try s.lock(io, a);
         defer l.close(io);
         const doc = try s.load(io, a);
-        return s.addDevice(io, a, doc, doc.pending, name, at);
+        return s.addDevice(io, a, doc, doc.pending, name, scopes, at);
     }
 
-    fn addDevice(s: Store, io: Io, a: std.mem.Allocator, doc: Doc, pending: []const Pending, name: []const u8, at: i64) !Minted {
+    /// Replaces the scopes of the devices whose id or name is `key`; the ones changed.
+    pub fn setScopes(s: Store, io: Io, a: std.mem.Allocator, key: []const u8, scopes: []const []const u8, at: i64) ![]const Device {
+        const l = try s.lock(io, a);
+        defer l.close(io);
+        const doc = try s.load(io, a);
+        const devices = try a.dupe(Device, doc.devices);
+        var changed: std.ArrayList(Device) = .empty;
+        for (devices) |*d| if (std.mem.eql(u8, d.id, key) or std.mem.eql(u8, d.name, key)) {
+            d.scopes = scopes;
+            try changed.append(a, d.*);
+        };
+        if (changed.items.len > 0) try s.save(io, a, .{ .devices = devices, .pending = doc.pending }, at);
+        return changed.items;
+    }
+
+    fn addDevice(s: Store, io: Io, a: std.mem.Allocator, doc: Doc, pending: []const Pending, name: []const u8, scopes: []const []const u8, at: i64) !Minted {
         var m: Minted = .{ .token = undefined, .id = undefined, .name = name };
         var bytes: [32]u8 = undefined;
         io.random(&bytes);
@@ -109,7 +165,7 @@ pub const Store = struct {
         }
         const devices = try a.alloc(Device, doc.devices.len + 1);
         @memcpy(devices[0..doc.devices.len], doc.devices);
-        devices[doc.devices.len] = .{ .id = try a.dupe(u8, &m.id), .name = name, .token_sha256 = try hexHash(a, &m.token), .created = at };
+        devices[doc.devices.len] = .{ .id = try a.dupe(u8, &m.id), .name = name, .token_sha256 = try hexHash(a, &m.token), .created = at, .scopes = scopes };
         try s.save(io, a, .{ .devices = devices, .pending = pending }, at);
         return m;
     }
@@ -131,7 +187,7 @@ pub const Store = struct {
         const rest = try a.alloc(Pending, doc.pending.len - 1);
         @memcpy(rest[0..i], doc.pending[0..i]);
         @memcpy(rest[i..], doc.pending[i + 1 ..]);
-        return try s.addDevice(io, a, doc, rest, if (name.len > 0) name else doc.pending[i].name, at);
+        return try s.addDevice(io, a, doc, rest, if (name.len > 0) name else doc.pending[i].name, doc.pending[i].scopes, at);
     }
 
     /// The device whose token this is, or null.
@@ -360,4 +416,29 @@ test "utc dates" {
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("1970-01-01 00:00 UTC", utc(&buf, 0));
     try testing.expectEqualStrings("2026-10-23 14:05 UTC", utc(&buf, 1792764300));
+}
+
+test "scopes: none is voice and mcp; a list grants only what it names; codes and tokens carry them; they can change" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const t = try TestStore.init(a);
+    defer t.deinit();
+    const s = t.store;
+    const old = try s.mint(io, a, "phone", 10);
+    const helper = try s.mintScoped(io, a, "mac", (try parseScopes(a, "desktop_helper")).?, 11);
+    const code = try s.addCodeScoped(io, a, "tablet", (try parseScopes(a, "voice, mcp,approve")).?, 12);
+    _ = (try s.redeem(io, a, &code.text, "", 13)).?;
+    const p = (try s.verify(io, a, &old.token)).?;
+    try testing.expect(p.allows("voice") and p.allows("mcp") and !p.allows("computer") and !p.allows("approve"));
+    const h = (try s.verify(io, a, &helper.token)).?;
+    try testing.expect(h.allows("desktop_helper") and !h.allows("mcp") and !h.allows("voice"));
+    const doc = try s.load(io, a);
+    try testing.expect(doc.devices[2].allows("approve") and doc.devices[2].allows("voice") and !doc.devices[2].allows("computer"));
+    const changed = try s.setScopes(io, a, "phone", (try parseScopes(a, "voice,mcp,computer,approve")).?, 14);
+    try testing.expectEqual(@as(usize, 1), changed.len);
+    try testing.expect((try s.verify(io, a, &old.token)).?.allows("computer"));
+    try testing.expect(try parseScopes(a, "voice,root") == null);
+    try testing.expect(try parseScopes(a, " , ") == null);
 }

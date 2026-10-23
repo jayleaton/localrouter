@@ -9,6 +9,7 @@ const process = @import("tool/process.zig");
 const jobs = @import("sched/jobs.zig");
 const sched = @import("sched/scheduler.zig");
 const routes = @import("api/routes.zig");
+const desktop = @import("api/desktop.zig");
 const http = @import("api/http.zig");
 const bind = @import("bind.zig");
 const engine = @import("engine/engine.zig");
@@ -78,6 +79,12 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     defer app.voice.deinit(gpa);
+    var computer: desktop.Service = undefined;
+    if (cfg.computer.enabled) {
+        try computer.init(&app, cfg.data_dir, arena);
+        app.computer = &computer;
+    }
+    defer if (app.computer) |c| c.deinit();
 
     // `host` may be an IP, localhost, all or tailscale (see bind.zig); listen on the resolved address
     const ifaces: []const bind.Iface = if (bind.needsInterfaces(cfg.host)) bind.listInterfaces(arena) catch &.{} else &.{};
@@ -127,6 +134,7 @@ fn installSignals() void {
 fn watchStop(io: Io, server: *Io.net.Server, app: *routes.App) void {
     while (!stop_flag.load(.acquire)) Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
     app.voice.closeAll(io);
+    if (app.computer) |c| c.closeAll();
     _ = posix.system.shutdown(server.socket.handle, posix.SHUT.RDWR);
 }
 

@@ -139,7 +139,7 @@ fn tools(a: std.mem.Allocator, x: Value, why: *backend.Why) Invalid![]const u8 {
 }
 
 pub fn isBuiltin(name: []const u8) bool {
-    for ([_][]const u8{ "generate_image", "generate_video", "list_models", "reserve_for", "unload_model", "load_model" }) |n| if (std.mem.eql(u8, name, n)) return true;
+    for ([_][]const u8{ "generate_image", "generate_video", "list_models", "reserve_for", "unload_model", "load_model", "computer_control", "computer_use" }) |n| if (std.mem.eql(u8, name, n)) return true;
     return false;
 }
 

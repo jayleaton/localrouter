@@ -14,6 +14,10 @@
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
+//!   computer_control a fixed control on a paired computer (open/quit an app, volume, media, dark mode, lock)
+//!   computer_use     a bounded task on a paired computer's screen; consequential steps wait for the user's tap
+//!   computer_status  a computer task's state, or the paired computers; computer_stop stops a task
+//!   (the computer tools need a paired device token with the `computer` scope: docs/dev/COMPUTER.md)
 
 const std = @import("std");
 const Io = std.Io;
@@ -29,6 +33,8 @@ const chat = @import("chat.zig");
 const audio = @import("../media/audio.zig");
 const config = @import("../config.zig");
 const sched_memory = @import("../sched/memory.zig");
+const gate = @import("../computer/gate.zig");
+const hub_mod = @import("../computer/hub.zig");
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -41,6 +47,7 @@ pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8
         try req.respond("", .{ .status = .method_not_allowed, .extra_headers = &.{.{ .name = "allow", .value = "POST" }} });
         return;
     }
+    caller_token = try a.dupe(u8, gate.token(req)); // the headers are gone once the body is read
     const text = h.body(req, a) catch return rpcError(req, a, .null, -32600, "body too large");
     const msg = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return rpcError(req, a, .null, -32700, "parse error");
     if (msg != .object) return rpcError(req, a, .null, -32600, "one JSON-RPC message a request (no batches)");
@@ -108,6 +115,7 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
 /// voice session's model tools). Null for an unknown tool.
 pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
     var out: std.ArrayList(Content) = .empty;
+    caller_token = ""; // an in-process caller has no device: the computer tools refuse it
     const result = invoke(app, a, host, name, args, &out) orelse return null;
     const ok = if (result) |x| x else |_| false;
     var w: Io.Writer.Allocating = .init(a);
@@ -147,6 +155,14 @@ fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, a
         cancelJob(app, a, host, args, out)
     else if (eql(name, "release_models"))
         release(app, a, out)
+    else if (eql(name, "computer_control"))
+        computerControl(app, a, args, out)
+    else if (eql(name, "computer_use"))
+        computerUse(app, a, args, out)
+    else if (eql(name, "computer_status"))
+        computerStatus(app, a, args, out)
+    else if (eql(name, "computer_stop"))
+        computerStop(app, a, args, out)
     else
         return null;
     return r;
@@ -161,6 +177,8 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
 
 /// The tool being called on this connection's thread, for argument errors that name it.
 threadlocal var calling: []const u8 = "";
+/// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
+threadlocal var caller_token: []const u8 = "";
 
 fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!T {
     return std.json.parseFromValueLeaky(T, a, args, .{ .ignore_unknown_fields = true }) catch |err| {
@@ -169,6 +187,64 @@ fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.Arra
         try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "invalid arguments for {s}: {s}; its inputSchema in tools/list names the arguments, their types and which are required", .{ calling, why }) });
         return error.BadArguments;
     };
+}
+
+// ---------------------------------------------------------------- computer tools (docs/dev/COMPUTER.md)
+
+/// The computer service and the calling device, when its token has the `computer` scope; else a tool error.
+fn computerCaller(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!struct { hub: *hub_mod.Hub, who: hub_mod.Requester } {
+    const s = app.computer orelse return fail(a, out, "computer control is switched off in this daemon's config (computer.enabled)", .{});
+    return switch (s.gate.check(caller_token, .computer)) {
+        .ok => |d| .{ .hub = &s.hub, .who = .{ .source = "mcp", .device = try a.dupe(u8, d.name) } },
+        .off => |m| fail(a, out, "{s}", .{m}),
+        .denied => |m| fail(a, out, "{s}", .{m}),
+    };
+}
+
+fn computerControl(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { control: Value, computer: []const u8 = "" }, a, args, out);
+    const r = c.hub.control(a, c.who, b.computer, b.control);
+    if (!r.ok) return fail(a, out, "{s}", .{r.text});
+    try out.append(a, .{ .type = "text", .text = r.text });
+    return true;
+}
+
+fn computerUse(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { goal: []const u8, text: ?[]const u8 = null, computer: []const u8 = "", wait_s: u32 = 120 }, a, args, out);
+    const r = c.hub.startUse(a, c.who, b.computer, b.goal, b.text, null);
+    if (!r.ok) return fail(a, out, "{s}", .{r.text});
+    return taskOutcome(c.hub, a, r.task_id, @min(b.wait_s, 600), out);
+}
+
+fn computerStatus(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { task_id: []const u8 = "", wait_s: u32 = 0 }, a, args, out);
+    if (b.task_id.len > 0) return taskOutcome(c.hub, a, b.task_id, @min(b.wait_s, 600), out);
+    const st = c.hub.status(a) catch return error.OutOfMemory;
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .computers = st.computers, .tasks = st.tasks }, .{ .emit_null_optional_fields = false }) });
+    return true;
+}
+
+fn computerStop(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { task_id: []const u8 = "" }, a, args, out);
+    const n = c.hub.stop(a, b.task_id, try std.fmt.allocPrint(a, "mcp: {s}", .{c.who.device}));
+    try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "{{\"stopped\": {d}}}", .{n}) });
+    return true;
+}
+
+/// A task's state as JSON after waiting up to `wait_s` for it to end; a failed or refused outcome is a tool error.
+fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wait_s: u32, out: *std.ArrayList(Content)) ToolError!bool {
+    const v = hub.wait(a, task_id, @as(i64, wait_s) * 1000) orelse return fail(a, out, "no such computer task: {s}", .{task_id});
+    const text = try std.json.Stringify.valueAlloc(a, v, .{ .emit_null_optional_fields = false });
+    if (eql(v.status, "running") or eql(v.status, "done")) {
+        try out.append(a, .{ .type = "text", .text = text });
+        return true;
+    }
+    try out.append(a, .{ .type = "text", .text = text });
+    return error.ToolFailed;
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
@@ -714,6 +790,22 @@ const tool_list = [_]Tool{
     } },
     .{ .name = "release_models", .title = "Release models", .description = "Unloads every model now, returning its memory to the machine (they also unload by themselves when idle).", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
+    } },
+    .{ .name = "computer_control", .title = "Computer control", .description = "A fixed control on the user's paired computer (the LocalRouter desktop helper): open or quit an app, volume, media playback, dark mode, lock the screen. Locking asks the user to tap Approve in the LocalRouter web UI first. Needs a device token with the computer scope.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["control"],"properties":{"control":{"type":"object","description":"{\"kind\":\"open_app\",\"app\":\"Safari\"}, {\"kind\":\"quit_app\",\"app\":...}, {\"kind\":\"volume\",\"action\":\"up|down|mute|unmute|set\",\"level\":0-100,\"target\":\"system|Spotify|Music\"}, {\"kind\":\"media\",\"action\":\"play|pause|next|previous\",\"player\":\"Spotify|Music\"}, {\"kind\":\"dark_mode\",\"action\":\"on|off|toggle\"} or {\"kind\":\"lock_screen\"}."},
+    \\"computer":{"type":"string","description":"Which paired computer, by name; omit when only one is connected."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_use", .title = "Computer use", .description = "Do a small task on the user's paired computer's screen (a browser tab or an app window), one decided step at a time: at most 15 steps and 90 s of work. Sending, buying, deleting, posting and typing into a field that is not a search box each wait for the user to tap Approve in the LocalRouter web UI. Returns the outcome (done, stuck, blocked, unavailable, stopped, failed) with the steps taken, or the task id while it still runs (computer_status). Needs a device token with the computer scope.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["goal"],"properties":{"goal":{"type":"string","description":"What to do on screen, in plain words: \"in Chrome, switch to the YouTube tab and pause the video\". Quote exact names."},
+    \\"text":{"type":"string","description":"Exact text to type, if the task types anything (a search, a message). Only this text is ever typed."},
+    \\"computer":{"type":"string","description":"Which paired computer, by name; omit when only one is connected."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":600,"default":120,"description":"How long to wait for the outcome; after it, the task id."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_status", .title = "Computer status", .description = "A computer task's state (status, steps, whether it waits for an approval) by task_id, or without one: the paired computers and recent tasks.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{"task_id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":600,"default":0,"description":"With task_id: wait this long for it to end."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_stop", .title = "Computer stop", .description = "Stops a computer task before its next step (every running one without task_id). A pending approval for it can no longer be granted.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{"task_id":{"type":"string"}},"additionalProperties":false}
     } },
 };
 

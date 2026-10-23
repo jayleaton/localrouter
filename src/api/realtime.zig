@@ -153,7 +153,7 @@ pub fn offers(offered: []const u8, want: []const u8) bool {
 /// GET /v1/realtime: the WebSocket upgrade, then one session until either side closes.
 pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator) !void {
     if (!allowed(app, conn)) return h.fail(req, a, 403, "invalid_request_error", refused);
-    if (!try pair.admitted(app, req, a)) return; // refused before the upgrade
+    if (!try pair.admitted(app, req, a, "voice")) return; // refused before the upgrade
     const key = switch (req.upgradeRequested()) {
         .websocket => |k| k orelse return h.fail(req, a, 400, "invalid_request_error", "the WebSocket upgrade has no Sec-WebSocket-Key"),
         else => return h.fail(req, a, 426, "invalid_request_error", "this is a WebSocket endpoint (the OpenAI Realtime API): connect with ws://"),
@@ -161,6 +161,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     // Everything from the head is copied: the head's buffer is reused once the socket is read.
     const model = try a.dupe(u8, query(req.head.target, "model") orelse "");
     const host = try a.dupe(u8, h.host(req));
+    const token = try a.dupe(u8, @import("../computer/gate.zig").token(req)); // a paired device's, for the computer tools
     var protocol: []const u8 = "";
     var hit = req.iterateHeaders();
     while (hit.next()) |hd| if (std.ascii.eqlIgnoreCase(hd.name, "sec-websocket-protocol")) {
@@ -177,6 +178,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     defer app.voice.remove(app.io, fd);
     var url_buf: [96]u8 = undefined;
     var local = Local.init(app, host, &url_buf);
+    local.token = token;
     var sink: Sink = .{ .c = &c };
     const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, if (model.len > 0) model else Local.defaultChatModel(app)) catch
         return c.close(1011, "could not start the session");

@@ -341,7 +341,7 @@ test "mcp-stdio: lines in, lines out, notifications silent, an unreachable daemo
     try testing.expectEqualStrings("2025-03-26", first.object.get("result").?.object.get("protocolVersion").?.string);
     const second = try std.json.parseFromSliceLeaky(std.json.Value, a, lines.next().?, .{});
     try testing.expectEqual(@as(i64, 2), second.object.get("id").?.integer);
-    try testing.expectEqual(@as(usize, 13), second.object.get("result").?.object.get("tools").?.array.items.len);
+    try testing.expectEqual(@as(usize, 17), second.object.get("result").?.object.get("tools").?.array.items.len);
     try testing.expect(lines.next() == null); // the notification produced nothing
 
     const down = try pipe(io, a, "http://127.0.0.1:1", input);

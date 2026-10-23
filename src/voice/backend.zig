@@ -41,7 +41,13 @@ pub const Managed = struct { ok: bool, text: []const u8 };
 pub const Role = enum { chat, speech, transcription };
 
 /// What the built-in tools can do here: a tool is offered only when a model can serve it.
-pub const Offer = struct { image: bool = false, video: bool = false };
+pub const Offer = struct { image: bool = false, video: bool = false, computer: bool = false };
+
+/// Lines the session speaks while a computer task runs ("I need your OK on screen to send that"), from any thread.
+pub const Speaker = struct {
+    ctx: *anyopaque,
+    say: *const fn (ctx: *anyopaque, text: []const u8) void,
+};
 
 pub const Backend = struct {
     ptr: *anyopaque,
@@ -57,7 +63,15 @@ pub const Backend = struct {
         check: *const fn (ptr: *anyopaque, role: Role, name: []const u8, why: *Why) bool,
         paused: ?*const fn (ptr: *anyopaque) bool = null, // a voice model is unloaded to make room (it comes back)
         manage: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8) Managed = null,
+        computer: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed = null,
     };
+
+    /// Runs a computer tool (computer_control, computer_use) for the user's words `utterance`, until the task ends
+    /// (or `stop`: the task is stopped first); its JSON outcome. Progress worth hearing goes to `speaker`.
+    pub fn computer(b: Backend, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed {
+        const f = b.vtable.computer orelse return .{ .ok = false, .text = "computer control is not available here" };
+        return f(b.ptr, a, name, arguments, utterance, speaker, stop);
+    }
 
     /// True while a voice model is unloaded to make room for another job; it comes back by itself.
     pub fn paused(b: Backend) bool {

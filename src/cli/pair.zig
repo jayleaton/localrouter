@@ -12,7 +12,7 @@ const Io = std.Io;
 const config = @import("../config.zig");
 const store = @import("../pair.zig");
 
-const Opts = struct { arg: ?[]const u8 = null, config: ?[]const u8 = null, data: ?[]const u8 = null, url: ?[]const u8 = null };
+const Opts = struct { arg: ?[]const u8 = null, arg2: ?[]const u8 = null, config: ?[]const u8 = null, data: ?[]const u8 = null, url: ?[]const u8 = null, scopes: ?[]const u8 = null };
 
 pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len < 1) return usageError();
@@ -24,8 +24,8 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
         if (std.mem.startsWith(u8, k, "--")) {
             if (i + 1 == args.len) return usageError();
             i += 1;
-            if (eql(k, "--config")) o.config = args[i] else if (eql(k, "--data")) o.data = args[i] else if (eql(k, "--url")) o.url = args[i] else return usageError();
-        } else if (o.arg == null) o.arg = k else return usageError();
+            if (eql(k, "--config")) o.config = args[i] else if (eql(k, "--data")) o.data = args[i] else if (eql(k, "--url")) o.url = args[i] else if (eql(k, "--scopes")) o.scopes = args[i] else return usageError();
+        } else if (o.arg == null) o.arg = k else if (o.arg2 == null) o.arg2 = k else return usageError();
     }
     var cfg: config.Config = .{};
     if (o.config) |p| {
@@ -40,16 +40,18 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
     var when: [32]u8 = undefined;
 
     if (eql(verb, "add") or eql(verb, "token")) {
+        if (o.arg2 != null) return usageError();
         const name = std.mem.trim(u8, o.arg orelse return usageError(), " \t");
         if (name.len == 0 or name.len > store.max_name_len) return fail("NAME must be 1 to {d} bytes", .{store.max_name_len});
+        const scopes: []const []const u8 = if (o.scopes) |text| (try store.parseScopes(a, text)) orelse return fail(scopes_help, .{}) else &.{};
         if (eql(verb, "token")) {
             if (o.url != null) return usageError();
-            const m = s.mint(io, a, name, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
+            const m = s.mintScoped(io, a, name, scopes, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
             try out.print("{s}\n", .{&m.token});
             try out.flush();
             std.debug.print("paired {s} \"{s}\"; the token is shown only now (revoke: localrouter pair revoke {s})\n", .{ &m.id, name, &m.id });
         } else {
-            const c = s.addCode(io, a, name, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
+            const c = s.addCodeScoped(io, a, name, scopes, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
             try out.print("code     {s}\nexpires  {s} (10 minutes, single use)\n", .{ &c.text, store.utc(&when, c.expires) });
             if (o.url) |u| try out.print("link     localrouter://pair?url={f}&code={s}\n", .{ Percent{ .s = u }, &c.text });
             try out.flush();
@@ -58,13 +60,26 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
     if (eql(verb, "list")) {
-        if (o.arg != null or o.url != null) return usageError();
+        if (o.arg != null or o.url != null or o.scopes != null) return usageError();
         const doc = s.load(io, a) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
-        try out.print("{s:<8}  {s:<32}  {s}\n", .{ "ID", "NAME", "CREATED" });
-        for (doc.devices) |d| try out.print("{s:<8}  {s:<32}  {s}\n", .{ d.id, d.name, store.utc(&when, d.created) });
+        try out.print("{s:<8}  {s:<32}  {s:<20}  {s}\n", .{ "ID", "NAME", "CREATED", "SCOPES" });
+        for (doc.devices) |d| {
+            const scopes = if (d.scopes.len == 0) "voice,mcp" else try std.mem.join(a, ",", d.scopes);
+            try out.print("{s:<8}  {s:<32}  {s:<20}  {s}\n", .{ d.id, d.name, store.utc(&when, d.created), scopes });
+        }
         var live: usize = 0;
         for (doc.pending) |p| live += @intFromBool(p.expires > at);
         if (live > 0) try out.print("{d} pending code(s)\n", .{live});
+        try out.flush();
+        return 0;
+    }
+    if (eql(verb, "scopes")) {
+        const key = o.arg orelse return usageError();
+        if (o.url != null or o.scopes != null) return usageError();
+        const scopes = (try store.parseScopes(a, o.arg2 orelse return usageError())) orelse return fail(scopes_help, .{});
+        const changed = s.setScopes(io, a, key, scopes, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
+        if (changed.len == 0) return fail("no device has the id or name '{s}' (localrouter pair list)", .{key});
+        for (changed) |d| try out.print("{s} {s}: {s}\n", .{ d.id, d.name, try std.mem.join(a, ",", scopes) });
         try out.flush();
         return 0;
     }
@@ -101,12 +116,17 @@ fn fail(comptime f: []const u8, args: anytype) u8 {
 }
 
 pub const usage_text =
-    \\usage: localrouter pair add NAME [--config FILE] [--data DIR] [--url URL]   a code for the app (10 minutes, once)
-    \\       localrouter pair token NAME [--config FILE] [--data DIR]             a token now, for MCP clients and scripts
+    \\usage: localrouter pair add NAME [--scopes LIST] [--config FILE] [--data DIR] [--url URL]   a code for the app (10 minutes, once)
+    \\       localrouter pair token NAME [--scopes LIST] [--config FILE] [--data DIR]             a token now, for MCP clients, scripts and the desktop helper
+    \\       localrouter pair scopes ID|NAME LIST [--config FILE] [--data DIR]                    what a paired device may do
     \\       localrouter pair list [--config FILE] [--data DIR]
     \\       localrouter pair revoke ID|NAME [--config FILE] [--data DIR]
+    \\LIST: comma-separated, of voice, mcp, desktop_helper, computer, approve (none given: voice,mcp).
+    \\  A desktop helper: --scopes desktop_helper. A phone that drives and approves computer tasks: voice,mcp,computer,approve.
     \\
 ;
+
+const scopes_help = "scopes are a comma-separated list of voice, mcp, desktop_helper, computer, approve";
 
 fn usageError() u8 {
     std.debug.print(usage_text, .{});

@@ -158,3 +158,122 @@ test "pairing off (the default): /mcp and /v1/realtime need no token; /v1/pair s
     try testing.expectEqual(std.http.Status.ok, paired.status);
     try testing.expect(has(paired.body, "\"name\":\"phone\"},\"required\":false"));
 }
+
+const McpOut = struct { status: std.http.Status = .ok, text: []const u8 = "", is_error: bool = true };
+
+/// One MCP tools/call with a device token; the result's first text and isError.
+fn mcpAs(d: *Daemon, a: std.mem.Allocator, token: []const u8, tool: []const u8, args: []const u8) !McpOut {
+    const body = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"{s}\",\"arguments\":{s}}}}}", .{ tool, args });
+    const r = try callBearer(d, a, .POST, "/mcp", body, token);
+    if (r.status != .ok) return .{ .status = r.status, .text = r.body };
+    const v = try std.json.parseFromSliceLeaky(Value, a, r.body, .{});
+    const res = v.object.get("result").?.object;
+    return .{ .text = res.get("content").?.array.items[0].object.get("text").?.string, .is_error = res.get("isError").?.bool };
+}
+
+const McpCall = struct {
+    d: *Daemon,
+    a: std.mem.Allocator,
+    token: []const u8,
+    tool: []const u8,
+    args: []const u8,
+    out: McpOut = .{},
+    fn run(c: *McpCall) void {
+        c.out = mcpAs(c.d, c.a, c.token, c.tool, c.args) catch .{ .text = "the call failed" };
+    }
+};
+
+test "computer control needs paired devices even with pairing off: scopes gate every route; a paired helper runs a control; a lock waits for the tap" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try Daemon.start(testing.allocator, io, "computer", "{" ++ harness.reserve ++ ", " ++ quiet_voice ++ "}");
+    defer d.stop();
+    const helper = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "mac", "--scopes", "desktop_helper" }), "\n");
+    const phone = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone", "--scopes", "voice,mcp,computer,approve" }), "\n");
+    const agent = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "agent" }), "\n"); // voice and mcp only
+    const listed = try pairCli(&d, a, &.{"list"});
+    try testing.expect(has(listed, "desktop_helper") and has(listed, "voice,mcp,computer,approve"));
+
+    // Global pairing is off, so /mcp answers anyone; the computer tools, the socket and approvals still need paired devices.
+    const anon = try mcpAs(&d, a, "", "computer_control", "{\"control\":{\"kind\":\"lock_screen\"}}");
+    try testing.expect(anon.is_error and has(anon.text, "needs device pairing"));
+    const refused = try mcpAs(&d, a, agent, "computer_control", "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}");
+    try testing.expect(refused.is_error and has(refused.text, "computer scope"));
+    try testing.expectEqual(std.http.Status.unauthorized, (try callBearer(&d, a, .GET, "/v1/computer/status", null, agent)).status);
+    try testing.expectEqual(std.http.Status.unauthorized, (try callBearer(&d, a, .GET, "/v1/computer/status", null, helper)).status);
+    // No helper yet: the tool says so.
+    const none = try mcpAs(&d, a, phone, "computer_control", "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}");
+    try testing.expect(none.is_error and has(none.text, "no computer is connected"));
+
+    // The phone's token cannot open the helper's socket; the helper's can.
+    var bad: voice.Ws = undefined;
+    try bad.openAt(io, a, d.port, "/v1/desktop", try std.fmt.allocPrint(a, "openai-insecure-api-key.{s}", .{phone}));
+    try testing.expect(has(bad.head, " 401 "));
+    bad.close();
+    var w: voice.Ws = undefined;
+    try w.openAt(io, a, d.port, "/v1/desktop", try std.fmt.allocPrint(a, "openai-insecure-api-key.{s}", .{helper}));
+    defer w.close();
+    try testing.expect(has(w.head, " 101 "));
+    try w.send("{\"type\":\"hello\",\"protocol\":1,\"helper\":{\"name\":\"Test Mac\",\"platform\":\"darwin\",\"version\":\"0.1.0\"},\"capabilities\":{\"controls\":[\"open_app\",\"lock_screen\"],\"computer_use\":true},\"access\":{\"accessibility\":true}}");
+    try testing.expect(has(try w.next(a), "\"type\":\"welcome\""));
+
+    // A simple control runs at once: the box sends it to the helper and returns the helper's sentence.
+    var open: McpCall = .{ .d = &d, .a = a, .token = phone, .tool = "computer_control", .args = "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}" };
+    const t1 = try std.Thread.spawn(.{}, McpCall.run, .{&open});
+    const frame = try std.json.parseFromSliceLeaky(Value, a, try w.next(a), .{});
+    try testing.expectEqualStrings("control", frame.object.get("type").?.string);
+    try testing.expectEqualStrings("Safari", frame.object.get("control").?.object.get("app").?.string);
+    try w.send(try std.fmt.allocPrint(a, "{{\"type\":\"result\",\"id\":\"{s}\",\"ok\":true,\"done\":\"Opened Safari\"}}", .{frame.object.get("id").?.string}));
+    t1.join();
+    try testing.expect(!open.out.is_error and has(open.out.text, "Opened Safari"));
+
+    const st = try callBearer(&d, a, .GET, "/v1/computer/status", null, phone);
+    try testing.expectEqual(std.http.Status.ok, st.status);
+    try testing.expect(has(st.body, "\"name\":\"Test Mac\""));
+
+    // Locking the screen waits for a tap: the helper hears nothing until the phone denies it, and then nothing at all.
+    var lock: McpCall = .{ .d = &d, .a = a, .token = phone, .tool = "computer_control", .args = "{\"control\":{\"kind\":\"lock_screen\"}}" };
+    const t2 = try std.Thread.spawn(.{}, McpCall.run, .{&lock});
+    var id: []const u8 = "";
+    var tries: u32 = 0;
+    while (id.len == 0 and tries < 200) : (tries += 1) {
+        const cards = try std.json.parseFromSliceLeaky(struct { data: []const struct { id: []const u8, state: []const u8, action: []const u8 } }, a, (try callBearer(&d, a, .GET, "/v1/computer/approvals", null, phone)).body, .{ .ignore_unknown_fields = true });
+        for (cards.data) |c| if (std.mem.eql(u8, c.state, "pending")) {
+            try testing.expect(has(c.action, "lock the screen"));
+            id = c.id;
+        };
+        if (id.len == 0) harness.sleepMs(io, 50);
+    }
+    try testing.expect(id.len > 0);
+    // An agent cannot answer it; the phone can.
+    try testing.expectEqual(std.http.Status.unauthorized, (try callBearer(&d, a, .POST, try std.fmt.allocPrint(a, "/v1/computer/approvals/{s}", .{id}), "{\"decision\":\"approve\"}", agent)).status);
+    try testing.expectEqual(std.http.Status.ok, (try callBearer(&d, a, .POST, try std.fmt.allocPrint(a, "/v1/computer/approvals/{s}", .{id}), "{\"decision\":\"deny\"}", phone)).status);
+    t2.join();
+    try testing.expect(lock.out.is_error and has(lock.out.text, "said no"));
+
+    const log = try callBearer(&d, a, .GET, "/v1/computer/audit?limit=50", null, phone);
+    try testing.expect(has(log.body, "\"event\":\"helper.connected\"") and has(log.body, "\"event\":\"approval.answer\"") and has(log.body, "\"status\":\"blocked\""));
+}
+
+test "pairing required and scopes: a desktop helper's token reaches neither /mcp nor /v1/realtime; an unscoped device keeps both" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try Daemon.start(testing.allocator, io, "scopes", "{" ++ harness.reserve ++ ", \"pairing\": {\"required\": true}, " ++ quiet_voice ++ "}");
+    defer d.stop();
+    const helper = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "mac", "--scopes", "desktop_helper" }), "\n");
+    const old = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone" }), "\n");
+    const no_mcp = try callBearer(&d, a, .POST, "/mcp", list_tools, helper);
+    try testing.expectEqual(std.http.Status.forbidden, no_mcp.status);
+    try testing.expect(has(no_mcp.body, "does not have the mcp scope"));
+    var w: voice.Ws = undefined;
+    try w.openAt(io, a, d.port, "/v1/realtime", try std.fmt.allocPrint(a, "realtime, openai-insecure-api-key.{s}", .{helper}));
+    try testing.expect(has(w.head, " 403 "));
+    w.close();
+    try testing.expectEqual(std.http.Status.ok, (try callBearer(&d, a, .POST, "/mcp", list_tools, old)).status);
+    _ = try pairCli(&d, a, &.{ "scopes", "phone", "voice" }); // now without mcp: refused on the next request
+    try testing.expectEqual(std.http.Status.forbidden, (try callBearer(&d, a, .POST, "/mcp", list_tools, old)).status);
+}
