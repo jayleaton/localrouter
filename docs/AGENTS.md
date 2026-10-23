@@ -273,7 +273,7 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | `modalities` | `["audio","text"]` (default) or `["text"]` |
 | `instructions`, `tools`, `tool_choice`, `temperature`, `max_response_output_tokens` | as OpenAI's; `tools` are your functions (you return `function_call_output`) |
 | `partial_interval_ms` | extension: a `localrouter.transcription.partial` per this much speech (0: none) |
-| `localrouter` | extension: `{"tool_execution": "server"}` (default) or `"client"`; set it before the first response |
+| `localrouter` | extension: `{"tool_execution": "server"}` (default) or `"client"`; set it before the first response; with pairing it needs the `inference` scope |
 
 The chat model can also call LocalRouter's own `generate_image` and `generate_video`: the job runs, its URLs arrive as
 `localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. With

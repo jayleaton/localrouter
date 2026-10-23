@@ -23,10 +23,11 @@ const Fake = struct {
     spoke: std.ArrayList([]const u8) = .empty,
     specs: std.ArrayList(backend.JobSpec) = .empty,
     chat_cancelled: std.atomic.Value(bool) = .init(false),
+    no_inference: bool = false, // the session's device lacks the inference scope
     speech_cancelled: std.atomic.Value(bool) = .init(false),
 
     fn b(f: *Fake) backend.Backend {
-        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check } };
+        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools } };
     }
 
     fn self(p: *anyopaque) *Fake {
@@ -151,6 +152,12 @@ const Fake = struct {
 
     fn offer(_: *anyopaque) backend.Offer {
         return .{ .image = true };
+    }
+
+    fn clientTools(p: *anyopaque, why: *backend.Why) bool {
+        if (!self(p).no_inference) return true;
+        why.set("client tool execution needs the inference scope", .{});
+        return false;
     }
 
     fn check(_: *anyopaque, _: backend.Role, name: []const u8, why: *backend.Why) bool {
@@ -759,4 +766,23 @@ test "server tool execution stays the default: a client's tool may not take a bu
     try testing.expectEqualStrings("server", created.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
     rig.s.handle("{\"type\":\"session.update\",\"session\":{\"tools\":[{\"type\":\"function\",\"name\":\"generate_image\"}]}}");
     try testing.expectEqualStrings("invalid_session", try errorCode(&rig, a, 0));
+}
+
+test "client tool execution needs the inference scope: without it the session stays on server tools" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false });
+    defer rig.stop();
+    rig.fake.no_inference = true;
+    rig.s.handle(client_mode);
+    const e = try rig.rec.get(a, try rig.rec.wait("error", 0));
+    try testing.expectEqualStrings("invalid_session", e.object.get("error").?.object.get("code").?.string);
+    try testing.expectEqualStrings("client tool execution needs the inference scope", e.object.get("error").?.object.get("message").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("session.updated", 0));
+    rig.fake.no_inference = false;
+    rig.s.handle(client_mode);
+    const updated = try rig.rec.get(a, try rig.rec.wait("session.updated", 0));
+    try testing.expectEqualStrings("client", updated.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
 }

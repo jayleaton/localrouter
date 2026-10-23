@@ -9,7 +9,8 @@
   `call_expired`). A call stops waiting when the user speaks again or another response begins
   (`localrouter.function_call.cancelled`), so a late result is never spoken in a later turn. Server execution stays
   the default, and the voice pipeline (wait timer, early transcription, priming, speech) is the same in both modes.
-  `examples/realtime-client-tools/` is a one-file harness that uses it.
+  `examples/realtime-client-tools/` is a one-file harness that uses it. With pairing required, the mode needs the
+  session device's `inference` scope.
 - Service scopes: with `pairing.required`, every route but `/health`, `/v1/pair` and `/voice` needs a paired token
   with the scope it serves, over HTTP, the realtime socket and MCP alike (401 without a token, 403 without the scope,
   before the body or the upgrade). Pairing stays off by default.

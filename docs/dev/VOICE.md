@@ -119,7 +119,9 @@ What changes is who owns the tools:
   must be one of them.
 - `session.created` / `session.updated` echo `"localrouter": {"tool_execution": ...}`. Any other `localrouter` key or
   value is refused (`invalid_session`), so a client asking for a mode this server lacks finds out at once. The mode can
-  change only before the session's first response.
+  change only before the session's first response. With pairing required, the session's device needs the `inference`
+  scope for it (the legacy `voice` profile includes it); without it the request is refused and the session keeps server
+  tools.
 - Each call arrives once, complete, after the model has finished it: `response.output_item.added` (the `function_call`
   item), `response.function_call_arguments.delta` (all the arguments at once) and `.done` `{call_id, name, arguments}`,
   then `response.done`. A reply may make several calls (`output_index` 1, 2, ...). A `call_id` is unique in the session:
