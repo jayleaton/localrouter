@@ -27,7 +27,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const tri = try qi.triton_k.specsFromCapture(a, io, cap.dir);
     const source: qi.pipeline.TritonSource = if (tri[0] != null) .{ .specs = tri } else .pack;
     const t0 = std.Io.Clock.awake.now(io);
-    const p = try qi.pipeline.Pipeline.create(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, @max(height, width));
+    const p = try qi.pipeline.Pipeline.create(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, @max(height, width), @as(u64, @max(height, width)) * @max(height, width));
     defer p.destroy();
     const load_ms = t0.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
 

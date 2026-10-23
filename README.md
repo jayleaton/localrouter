@@ -165,7 +165,7 @@ The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an age
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |
 | `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
-| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
+| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; `max_pixels`, the largest width x height, which sizes the image engines' scratch (about 4.6 KiB a pixel on GB10 FP8); default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
 (the Jarvis install puts `tailscale serve` HTTPS in front of it; `--host tailscale` binds the tailnet address) and never

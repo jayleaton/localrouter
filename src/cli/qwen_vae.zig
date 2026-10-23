@@ -39,7 +39,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer vk.unload();
     var up = try qi.upload.Uploader.init(&d, io, s);
     defer up.deinit();
-    var vae = try qi.vae.Vae.init(gpa, io, &d, &vk, &tk, &ops, s, &pack, &up, args[0], h, w);
+    var vae = try qi.vae.Vae.init(gpa, io, &d, &vk, &tk, &ops, s, &pack, &up, args[0], h, w, @as(u64, h) * w);
     try s.synchronize();
     defer vae.deinit();
     var lat = try cuda.DeviceBuffer.alloc(&d, lat_ref.bytes());

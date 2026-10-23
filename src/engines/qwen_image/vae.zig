@@ -91,10 +91,11 @@ pub const Vae = struct {
     pm: Ptr = 0,
     max_h: u32,
     max_w: u32,
+    max_area: u64, // h * w at most: what the activations are sized for
 
-    /// Weights from the pack `p` and scratch for latents up to max_h x max_w (the image is 16x that).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32) !Vae {
-        var v: Vae = .{ .gpa = gpa, .arena = .init(gpa), .d = d, .k = k, .tk = tk, .ops = ops, .s = s, .max_h = max_h, .max_w = max_w, .mem = .init(d, gpa) };
+    /// Weights from the pack `p` and scratch for latents up to max_h x max_w and max_area in all (the image is 16x that).
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32, max_area: u64) !Vae {
+        var v: Vae = .{ .gpa = gpa, .arena = .init(gpa), .d = d, .k = k, .tk = tk, .ops = ops, .s = s, .max_h = max_h, .max_w = max_w, .max_area = @min(max_area, @as(u64, max_h) * max_w), .mem = .init(d, gpa) };
         errdefer v.deinit();
         const a = v.arena.allocator();
         const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(64 << 20));
@@ -133,7 +134,7 @@ pub const Vae = struct {
 
         // the largest activation: C x (16h x 16w) over the decoder's stages is 288 x 16h x 16w (block 3's upsample
         // and block 4's input); the attention's [L, L] scores at L = h * w; the decoder's widest stage 1152 x h x w x 4
-        const hw: u64 = @as(u64, max_h) * max_w;
+        const hw: u64 = v.max_area;
         v.act_bytes = 2 * @max(@max(288 * 256 * hw, hw * hw + 8 * hw), 1152 * 16 * hw);
         for (&v.pool) |*b| b.* = try v.alloc(v.act_bytes);
         // a band of columns (or one output row of the widest conv), and its GEMM output: cout / k <= 2 (conv_in)
@@ -400,7 +401,7 @@ pub const Vae = struct {
 
     /// Normalised latents `lat` [64, h, w] (the sampler's) -> uint8 pixels `out` [16h, 16w, out_channels] (HWC).
     pub fn decode(v: *Vae, lat: Ptr, h: u32, w: u32, out: Ptr) !void {
-        if (h > v.max_h or w > v.max_w) return error.ImageTooLarge;
+        if (h > v.max_h or w > v.max_w or @as(u64, h) * w > v.max_area) return error.ImageTooLarge;
         @memset(&v.busy, false);
         const zs: Shape = .{ .c = z_dim, .h = h, .w = w };
         const zi = try v.take();
