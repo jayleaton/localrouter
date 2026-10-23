@@ -298,3 +298,48 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     try w.send("{\"type\":\"session.update\",\"session\":{\"voice\":\"bright\"}}");
     _ = try w.until(a, "session.updated", &seen);
 }
+
+test "voice: client tool execution over the WebSocket: a client's generate_image is called once, runs nowhere here, and its output is answered" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var chat = try ChatServer.start(io);
+    defer chat.stop(io);
+    var d = try Daemon.start(testing.allocator, io, "voice-client-tools", try config(a, chat.port));
+    defer d.stop();
+    var w: Ws = undefined;
+    try w.open(io, a, d.port, "realtime");
+    defer w.close();
+    var seen: std.ArrayList(std.json.Value) = .empty;
+    _ = try w.until(a, "session.created", &seen);
+    try w.send("{\"type\":\"session.update\",\"session\":{\"localrouter\":{\"tool_execution\":\"client\"},\"tools\":[{\"type\":\"function\",\"name\":\"generate_image\",\"description\":\"draws on the device\",\"parameters\":{\"type\":\"object\"}}]}}");
+    const updated = try w.until(a, "session.updated", &seen);
+    try testing.expectEqualStrings("client", updated.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
+
+    // "make me a picture of a fox": the fake model streams a generate_image call in pieces; the client gets it whole.
+    try turn(&w, a, 880, 900);
+    const call = try w.until(a, "response.function_call_arguments.done", &seen);
+    try testing.expectEqualStrings("generate_image", call.object.get("name").?.string);
+    try testing.expectEqualStrings("{\"prompt\": \"a red fox\"}", call.object.get("arguments").?.string);
+    const call_id = call.object.get("call_id").?.string;
+    _ = try w.until(a, "response.done", &seen);
+    const first = (try chat.stats(&d, a))[0];
+    try testing.expectEqual(@as(usize, 1), first.tools.len); // the client's tool alone: no built-in video or image tool
+    sleepMs(io, 300);
+    try w.send(try std.fmt.allocPrint(a, "{{\"type\":\"conversation.item.create\",\"item\":{{\"type\":\"function_call_output\",\"call_id\":\"{s}\",\"output\":\"{{\\\"drawn\\\":true}}\"}}}}", .{call_id}));
+    _ = try w.until(a, "conversation.item.created", &seen);
+    try w.send("{\"type\":\"response.create\"}");
+    _ = try w.until(a, "response.audio.delta", &seen);
+    const done = try w.until(a, "response.done", &seen);
+    try testing.expectEqualStrings("completed", done.object.get("response").?.object.get("status").?.string);
+    try testing.expectEqual(@as(usize, 0), countType(seen.items, "localrouter.job.created")); // nothing ran on the box
+    try testing.expectEqual(@as(usize, 0), countType(seen.items, "localrouter.job.done"));
+    const st = try chat.stats(&d, a);
+    const follow = st[st.len - 1].messages;
+    try testing.expectEqualStrings("tool", follow[follow.len - 1].object.get("role").?.string);
+    try testing.expectEqualStrings("{\"drawn\":true}", follow[follow.len - 1].object.get("content").?.string);
+    try w.send(try std.fmt.allocPrint(a, "{{\"type\":\"conversation.item.create\",\"item\":{{\"type\":\"function_call_output\",\"call_id\":\"{s}\",\"output\":\"again\"}}}}", .{call_id}));
+    const refused = try w.until(a, "error", &seen);
+    try testing.expectEqualStrings("duplicate_call_output", refused.object.get("error").?.object.get("code").?.string);
+}

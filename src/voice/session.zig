@@ -35,8 +35,12 @@ pub const Item = struct {
     arguments: []const u8 = "",
     response_id: []const u8 = "",
     spoken: std.ArrayList(Spoken) = .empty, // assistant: sentences sent as audio
+    call: Call = .history, // function_call: where its output stands (client tool execution)
 
     pub const Spoken = struct { end_ms: u64, text_end: usize };
+    /// history: seeded by the client, or made with server tool execution. pending: a client call waiting for its
+    /// output. answered: its output came. expired: the conversation went on without it, and an output is refused.
+    pub const Call = enum { history, pending, answered, expired };
 };
 
 pub const Task = union(enum) {
@@ -107,6 +111,7 @@ pub const Session = struct {
     resp: ?*respond.Response = null,
     partial_busy: bool = false,
     fresh: bool = false, // something to answer arrived since the last response
+    responded: bool = false, // a response has begun: the tool execution mode is fixed from then on
     waiters: std.ArrayList(std.Thread) = .empty,
     close_stop: Stop = .{}, // set when the session closes: ends transcriptions and tool waits
     // The last spoken turn's marks (awake-clock ns; 0: none), for the timing of the response that answers it.
@@ -242,6 +247,10 @@ pub const Session = struct {
         };
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
+        if (st.tool_execution != s.settings.tool_execution and s.responded) {
+            next.deinit();
+            return s.emit.fail(a, "invalid_request_error", "invalid_session", "session.localrouter.tool_execution is fixed once the session's first response has begun", eid);
+        }
         const vad_changed = !std.meta.eql(st.vad, s.settings.vad);
         var old = s.settings_arena;
         s.settings = st;
@@ -331,6 +340,7 @@ pub const Session = struct {
         }
         if (!s.settings.interrupt_response) return;
         if (s.resp != null) s.cancelResponse("turn_detected");
+        s.expireCalls(a, "turn_detected"); // the user went on: a result still to come must not answer this new turn
         var i: usize = 0;
         while (i < s.tasks.items.len) {
             if (s.tasks.items[i] == .respond) {
@@ -485,6 +495,26 @@ pub const Session = struct {
         return null;
     }
 
+    /// The function_call item with `call_id` (the latest, if a seeded history repeats one).
+    pub fn findCall(s: *Session, call_id: []const u8) ?*Item {
+        var i = s.items.items.len;
+        while (i > 0) {
+            i -= 1;
+            const it = s.items.items[i];
+            if (it.kind == .function_call and eql(it.call_id, call_id)) return it;
+        }
+        return null;
+    }
+
+    /// Under `mutex`: every client call still waiting for its output is cancelled, and the client hears so (it can stop
+    /// the work); an output for one is refused from now on. `reason`: turn_detected or response_started.
+    pub fn expireCalls(s: *Session, a: std.mem.Allocator, reason: []const u8) void {
+        for (s.items.items) |it| if (it.kind == .function_call and it.call == .pending) {
+            it.call = .expired;
+            s.emit.send(a, "localrouter.function_call.cancelled", .{ .item_id = it.id, .call_id = it.call_id, .name = it.name, .response_id = it.response_id, .reason = reason });
+        };
+    }
+
     fn createItem(s: *Session, a: std.mem.Allocator, o: std.json.ObjectMap, eid: ?[]const u8) !void {
         const v = o.get("item") orelse return s.emit.fail(a, "invalid_request_error", "missing_item", "conversation.item.create needs an item", eid);
         if (v != .object) return s.emit.fail(a, "invalid_request_error", "invalid_item", "item must be an object", eid);
@@ -498,6 +528,7 @@ pub const Session = struct {
             const call = events.str(io_.get("call_id") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call needs call_id", eid);
             const name = events.str(io_.get("name") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call needs name", eid);
             const args = events.str(io_.get("arguments") orelse .null) orelse "{}";
+            if (s.settings.tool_execution == .client and s.findCall(call) != null) return s.emit.fail(a, "invalid_request_error", "duplicate_call_id", try std.fmt.allocPrint(a, "a function call with call_id {s} exists", .{call}), eid);
             const it = try s.addItem(.function_call, id);
             const ia = it.arena.allocator();
             it.call_id = try ia.dupe(u8, call);
@@ -508,6 +539,15 @@ pub const Session = struct {
         if (eql(typ, "function_call_output")) {
             const call = events.str(io_.get("call_id") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call_output needs call_id", eid);
             const out = events.str(io_.get("output") orelse .null) orelse return s.emit.fail(a, "invalid_request_error", "invalid_item", "a function_call_output needs output (a string)", eid);
+            if (s.settings.tool_execution == .client) {
+                // The output must answer a call that still waits for one: once, and before the conversation went on.
+                const c = s.findCall(call) orelse return s.emit.fail(a, "invalid_request_error", "unknown_call_id", try std.fmt.allocPrint(a, "no function call has call_id {s}", .{call}), eid);
+                switch (c.call) {
+                    .answered => return s.emit.fail(a, "invalid_request_error", "duplicate_call_output", try std.fmt.allocPrint(a, "call {s} already has its output", .{call}), eid),
+                    .expired => return s.emit.fail(a, "invalid_request_error", "call_expired", try std.fmt.allocPrint(a, "call {s} was cancelled (localrouter.function_call.cancelled): its output is not used", .{call}), eid),
+                    .history, .pending => c.call = .answered,
+                }
+            }
             const it = try s.addItem(.function_call_output, id);
             it.call_id = try it.arena.allocator().dupe(u8, call);
             it.text = try it.arena.allocator().dupe(u8, out);
