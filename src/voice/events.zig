@@ -36,7 +36,7 @@ pub const Settings = struct {
     partial_interval_ms: u32 = 0,
 
     pub fn defaults(v: config.Voice) Settings {
-        return .{ .instructions = v.instructions, .voice = v.voice, .model = v.chat_model, .speech_model = v.speech_model, .transcription_model = v.transcription_model, .partial_interval_ms = v.partial_interval_ms };
+        return .{ .instructions = v.instructions, .voice = v.voice, .model = v.chat_model, .speech_model = v.speech_model, .transcription_model = v.transcription_model, .partial_interval_ms = v.partial_interval_ms, .temperature = v.temperature };
     }
 
     /// A deep copy in `a`.

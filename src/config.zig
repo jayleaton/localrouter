@@ -52,6 +52,8 @@ pub const Voice = struct {
     chat_api_key: []const u8 = "", // sent as a bearer token to chat_url (with chat_url unset: the session's own token)
     chat_model: []const u8 = "", // "": this daemon's chat_completion default (with chat_url unset), else the server's
     chat_extra: ?std.json.Value = null, // members added to every chat request, e.g. {"chat_template_kwargs": {"enable_thinking": false}}
+    temperature: ?f32 = null, // a session's chat temperature until it sets its own (session.update); null: the chat server's
+    // (Qwen with thinking off wants 0.7: at its server's 1.0 a spoken picture request went without the tool call 1 in 4)
     speech_model: []const u8 = "", // "": the first of speech_models that is configured and qualified
     speech_models: []const []const u8 = &.{ "fishaudio/drama-3", "kitten-tts-2" }, // in order; one that fails to serve falls through to the next; none: the text_to_speech default
     transcription_model: []const u8 = "", // "": the speech_to_text default
