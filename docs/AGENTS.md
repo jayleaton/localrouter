@@ -54,7 +54,11 @@ agents is `skill/localrouter/SKILL.md`. The HTTP API below is the same jobs with
 
 ```bash
 curl -s $BASE/models | jq '.data[] | {id, kind, running}'
+curl -s $BASE/capabilities | jq '{contract, unsupported}'   # what this box offers a harness, and what it does not
 ```
+
+`GET /v1/capabilities` is the harness contract's discovery document ([HARNESS.md](HARNESS.md)): the contract
+version, each surface's profile and authorization, the MCP tools and the features not offered.
 
 `kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now.
 `capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
@@ -299,6 +303,8 @@ Redirects are not followed: a 3xx answer is an error, so a public URL cannot bou
 
 Two exceptions. The daemon's own output URLs (`/v1/files/...`, as returned by `response_format: url` and the MCP tools)
 work, because the URL's host and port are the address the request itself came to; the daemon fetches them from itself.
+Behind a TLS proxy (`tailscale serve`) output URLs are `https://` (from `X-Forwarded-Proto`), and those are not
+recognized as the daemon's own: send such an output back as base64.
 And the operator can set `"allow_private_urls": true` in the config to lift the check (a lab where inputs live on a
 private image server); redirects stay off.
 

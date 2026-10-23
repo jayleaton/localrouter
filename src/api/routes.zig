@@ -1,7 +1,8 @@
 //! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
 //! /v1/chat/completions (`chat.zig`), /v1/systemone (`decide.zig`, typed decisions)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
-//! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), and /mcp
+//! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
+//! `capabilities.zig`), and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
 
@@ -50,6 +51,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     const m = req.head.method;
     const host = try a.dupe(u8, h.host(req)); // headers are gone once the body is read
     const ctype = try a.dupe(u8, req.head.content_type orelse "");
+    const scheme = h.scheme(req); // a static string: it outlives the headers
     // With pairing required, every route but the open ones needs its scope: refused before the body or the upgrade.
     const caller: pair.Caller = if (need(m, p)) |n| (try pair.admit(app, req, a, n)) orelse return else .{};
     if (m == .GET and std.mem.eql(u8, p, "/health")) return h.json(req, .ok, "{\"ok\":true}");
@@ -62,8 +64,9 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .GET and eql(p, "/v1/pair")) return pair.status(app, req, a);
     if (m == .GET and eql(p, "/")) return req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = "/voice" }} });
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models"))) return models(app, req, a);
-    if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, ctype, false, caller);
-    if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, ctype, true, caller);
+    if (m == .GET and eql(p, "/v1/capabilities")) return @import("capabilities.zig").serve(app, req, a);
+    if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, scheme, ctype, false, caller);
+    if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, scheme, ctype, true, caller);
     if (m == .POST and eql(p, "/v1/videos")) return videoCreate(app, req, a, host, ctype, caller);
     if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..], caller);
     if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a, caller.owner());
@@ -87,6 +90,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
 pub fn need(m: std.http.Method, p: []const u8) ?Need {
     const starts = std.mem.startsWith;
     if (eql(p, "/health") or eql(p, "/v1/pair") or eql(p, "/voice") or eql(p, "/voice/") or eql(p, "/")) return null;
+    if (m == .GET and eql(p, "/v1/capabilities")) return null; // how to get in has to be readable before getting in
     if (eql(p, "/v1/desktop") or starts(u8, p, "/v1/computer/")) return null;
     if (eql(p, "/mcp")) return .mcp;
     if (eql(p, "/v1/realtime")) return .realtime;
@@ -100,7 +104,7 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
 
 test "every route class needs its scope; only the open routes need none; an unnamed route needs manage" {
     const t = std.testing;
-    const open = [_][]const u8{ "/health", "/v1/pair", "/voice", "/voice/", "/", "/v1/desktop", "/v1/computer/approvals/x" };
+    const open = [_][]const u8{ "/health", "/v1/pair", "/voice", "/voice/", "/", "/v1/desktop", "/v1/computer/approvals/x", "/v1/capabilities" };
     for (open) |p| try t.expect(need(.GET, p) == null);
     const Case = struct { std.http.Method, []const u8, Need };
     const cases = [_]Case{
@@ -289,7 +293,7 @@ pub fn parseBody(comptime T: type, app: *App, a: std.mem.Allocator, host: []cons
     return b;
 }
 
-fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8, edit: bool, caller: pair.Caller) !void {
+fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, scheme: []const u8, ctype: []const u8, edit: bool, caller: pair.Caller) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     var why: []const u8 = "the body is not a valid image request";
     var raws: std.ArrayList([]const u8) = .empty;
@@ -311,7 +315,7 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     const as_url = eql(b.response_format, "url");
     for (items, j.files) |*it, f| {
         if (as_url) {
-            it.* = .{ .url = try std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ host, j.id, f }) };
+            it.* = .{ .url = try std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ scheme, host, j.id, f }) };
         } else {
             const path = try std.fs.path.join(a, &.{ j.dir, f });
             const png = try Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(h.max_body));

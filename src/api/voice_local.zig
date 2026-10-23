@@ -30,6 +30,7 @@ const poll_ms = 20; // how often a wait looks at its stop flag
 pub const Local = struct {
     app: *App,
     host: []const u8, // the Host the session connected to, for file URLs
+    scheme: []const u8 = "http", // and the scheme it used (`h.scheme`: https behind tailscale serve)
     client: chat.Client,
     token: []const u8 = "", // the session's device token (computer/gate.zig): computer tools only for a device allowed them
     owner: []const u8 = "", // the session's device id (`pair.Caller.owner`): its jobs are that device's
@@ -154,7 +155,7 @@ fn manage(ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []
         return .{ .ok = false, .text = "the tool call's arguments are not JSON" };
     std.log.info("voice: model tool {s} {s}", .{ name, arguments[0..@min(arguments.len, 200)] }); // the chat model's call, or the session's own check
     const who = l.caller(a) orelse return .{ .ok = false, .text = "this device is no longer paired with this LocalRouter" };
-    const r = mcp.callText(l.app, a, l.host, who, name, args) orelse return .{ .ok = false, .text = "no such tool" }; // as the session's device: its scopes apply
+    const r = mcp.callText(l.app, a, l.host, l.scheme, who, name, args) orelse return .{ .ok = false, .text = "no such tool" }; // as the session's device: its scopes apply
     return .{ .ok = r.ok, .text = r.text };
 }
 
@@ -392,7 +393,7 @@ fn waitJob(ptr: *anyopaque, a: std.mem.Allocator, job: backend.Job, timeout_s: u
     defer app.table.mutex.unlock(app.io);
     if (j.status != .completed) return .{ .status = @tagName(j.status), .@"error" = a.dupe(u8, j.error_message) catch "" };
     const urls = a.alloc([]const u8, j.files.len) catch return .{ .status = "completed" };
-    for (urls, j.files) |*u, f| u.* = std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ l.host, j.id, f }) catch "";
+    for (urls, j.files) |*u, f| u.* = std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ l.scheme, l.host, j.id, f }) catch "";
     return .{ .status = "completed", .urls = urls };
 }
 

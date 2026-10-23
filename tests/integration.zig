@@ -2,7 +2,8 @@
 //! testpattern engine stands in for a GPU engine (same protocol, memory accounting and output paths).
 //! `harness.zig` starts the daemon; `router.zig` has the tests of priorities, image inputs and the stdio bridge;
 //! `speech.zig` those of text to speech and speech to text; `chat.zig` those of the chat kind (tests/fixtures/chat_server.py); `jarvis.zig` chat and voice warm together;
-//! `drama3.zig` those of the Drama 3 adapter; `voice.zig` the voice loop over a WebSocket; `pairing.zig` device pairing.
+//! `drama3.zig` those of the Drama 3 adapter; `voice.zig` the voice loop over a WebSocket; `pairing.zig` device pairing; `contract.zig` the harness contract
+//! (`/v1/capabilities`, and our clients' recorded requests replayed).
 
 const std = @import("std");
 const Io = std.Io;
@@ -30,6 +31,7 @@ test {
     _ = @import("mcp.zig");
     _ = @import("models.zig");
     _ = @import("pairing.zig");
+    _ = @import("contract.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;

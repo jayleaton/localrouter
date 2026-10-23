@@ -125,7 +125,8 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 
 Config snippets for every client, an example call for every tool and the security note are in [docs/MCP.md](docs/MCP.md).
 The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an agent skill is in
-[skill/localrouter](skill/localrouter/SKILL.md).
+[skill/localrouter](skill/localrouter/SKILL.md). What a harness on another device may rely on (versioned, with
+`GET /v1/capabilities` to discover it and what is not offered) is [docs/HARNESS.md](docs/HARNESS.md).
 
 ## Configuration
 
