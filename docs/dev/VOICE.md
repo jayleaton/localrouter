@@ -330,10 +330,11 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     `ct_probe` (one 10.6 s seeded speech request while a greedy chat request decodes, 3 trials each): speech came at
     0.62 to 0.63x real time without MPS and at 0.62x with it (1.45x alone), with the same chat and speech output bytes.
     Both decoders are bound by the shared memory bandwidth, which client priority does not divide. Not shipped.
-  - **The start cushion is measured.** 200 ms in hand covers pieces coming late. Once a reply has 1 s of audio in, the
-    page keeps how far its first second came behind a playhead started on its first piece (network and GPU jitter as
-    the page sees them). The next reply on a free GPU starts with that x 1.25 + 25 ms in hand, kept between 100 and
-    200 ms. A slow reply, chat still decoding for example, measures a large lag, and the next reply keeps 200 ms.
+  - The 130 to 195 ms a short reply is held at its start on DGX-01 is Drama 3's decode cadence, not the cushion: its
+    first piece is one 46 ms codec frame, and the next 185 ms (four frames) comes in one piece about 140 ms later.
+    Started on the first piece, playback would run dry for about 95 ms. A cushion measured from the last reply's
+    lateness (tried, between 100 and 200 ms) stayed at 200 ms for that reason. A shorter start is a speech engine
+    change: a second decode of fewer frames.
 
 **Voice picker.**
 - The voices are exactly what `/v1/models` lists for the speech model in use (names, or `{id, name, description,

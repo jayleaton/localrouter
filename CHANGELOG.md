@@ -8,8 +8,6 @@
     Nothing considers the words before the wait ends.
   - A reply already written, with no picture or video being made, starts at the arrival rate the previous reply
     measured (if it kept up), instead of measuring for 250 ms first.
-  - The start cushion (200 ms in hand) is measured: the next reply keeps how late the last one's first second came,
-    x 1.25 + 25 ms, between 100 and 200 ms.
 - `client_check`: clicks are judged where a fault can be told from speech.
   - Playback: the output must equal each received piece once aligned on the audio clock; a sample off by over 0.05 is
     playback's.
