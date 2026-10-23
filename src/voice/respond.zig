@@ -343,7 +343,7 @@ const Feed = struct {
         if (f.r.stop.cancelled()) return;
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
-        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = args_follow });
+        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = args_follow, .chars = f.r.text.items.len });
     }
 };
 

@@ -302,7 +302,7 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   - the chat stream slows from 20.2 to 33.1 s.
 
   Until the chat stream ends, speech arrives slower than it plays. The session sends
-  `localrouter.response.text_done` `{response_id, item_id, tool_calls}` as soon as the spoken text is complete: the chat
+  `localrouter.response.text_done` `{response_id, item_id, tool_calls, chars}` as soon as the spoken text is complete: the chat
   stream ended (`tool_calls` false: from then on speech has the GPU to itself), or a tool call began (`tool_calls` true:
   the model still writes arguments, which are not spoken). `localrouter.response.speech_done` `{response_id, item_id}`
   follows once every sentence of the reply has been spoken and sent. A picture or video call with nothing said before it

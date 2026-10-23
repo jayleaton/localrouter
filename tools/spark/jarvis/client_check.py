@@ -440,7 +440,7 @@ def main():
             gaps = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.gap').map(e => ({ item: e.item, ms: e.ms, at_ms: e.at_ms, t: e.t }))")
             lat = cdp.js("window.jarvis.conversation.msgs.filter(x => x.role === 'assistant' && x.via === 'voice' && x.lat && x.lat.firstAudio != null).map(x => x.lat.firstAudio)")
             bad = list(gaps) + [o for o in onsets if o["clicks"]]
-            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
+            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "stream_clicks": cdp.js("window.jarvis.streamClicks()"), "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
             check("voice: no reply runs dry anywhere (no underrun), and no click in a reply\x27s first 2 s", not bad, bad or onsets)
             click(cdp, "vbarEnd")
