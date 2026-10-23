@@ -107,4 +107,11 @@ test {
     _ = @import("voice/tools.zig");
     _ = @import("voice/timing.zig");
     _ = @import("voice/session_test.zig");
+    _ = @import("computer/policy.zig");
+    _ = @import("computer/approvals.zig");
+    _ = @import("computer/decide.zig");
+    _ = @import("computer/audit.zig");
+    _ = @import("computer/gate.zig");
+    _ = @import("computer/hub.zig");
+    _ = @import("api/desktop.zig");
 }

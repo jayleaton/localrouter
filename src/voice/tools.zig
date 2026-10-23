@@ -31,6 +31,15 @@ fn wait(s: *Session, c: Call) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
     const a = tmp.allocator();
+    if (std.mem.eql(u8, c.name, "computer_control") or std.mem.eql(u8, c.name, "computer_use")) {
+        // A computer task (docs/dev/COMPUTER.md): the user's own words in this turn go with it, so the model alone
+        // cannot start one; lines worth hearing while it runs are spoken (an approval waiting for a tap).
+        var sp: SessionSpeaker = .{ .s = s };
+        const m = s.backend.computer(a, c.name, c.arguments, lastUserWords(s, a), .{ .ctx = &sp, .say = SessionSpeaker.say }, &s.close_stop);
+        if (s.close_stop.cancelled()) return;
+        const text = if (m.ok) m.text else std.fmt.allocPrint(a, "{{\"error\": {s}}}", .{std.json.Stringify.valueAlloc(a, m.text, .{}) catch return}) catch return;
+        return answer(s, a, c, text);
+    }
     if (!std.mem.eql(u8, c.name, "generate_image") and !std.mem.eql(u8, c.name, "generate_video")) {
         // A model management tool (list_models, reserve_for, unload_model, load_model): its JSON is the output.
         const m = s.backend.manage(a, c.name, c.arguments);
@@ -80,6 +89,34 @@ fn waitForVoice(s: *Session) void {
         std.Io.sleep(s.io, .fromMilliseconds(250), .awake) catch return;
     }
 }
+
+/// The user's words in the latest user turn that has a transcript, copied into `a` ("" when there is none).
+fn lastUserWords(s: *Session, a: std.mem.Allocator) []const u8 {
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    var i = s.items.items.len;
+    while (i > 0) {
+        i -= 1;
+        const it = s.items.items[i];
+        if (it.kind == .user and !it.pending and it.text.len > 0) return a.dupe(u8, it.text) catch "";
+    }
+    return "";
+}
+
+/// Speaks a fixed line as the assistant (queued after whatever the session is saying).
+const SessionSpeaker = struct {
+    s: *Session,
+
+    fn say(ctx: *anyopaque, text: []const u8) void {
+        const sp: *SessionSpeaker = @ptrCast(@alignCast(ctx));
+        const s = sp.s;
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        if (s.closing) return;
+        const line = s.gpa.dupe(u8, text) catch return;
+        s.push(.{ .respond = .{ .auto = false, .line = line } }) catch s.gpa.free(line);
+    }
+};
 
 /// Adds the call's output to the conversation and asks for the reply that reads it.
 fn answer(s: *Session, a: std.mem.Allocator, c: Call, output: []const u8) void {

@@ -48,7 +48,8 @@ pub const Task = union(enum) {
 
     /// key: session ms where the quiet the early transcript was made in began (a final with the same key may reuse it).
     pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
-    pub const Ask = struct { auto: bool, instructions: ?[]u8 = null, audio: ?bool = null };
+    /// line: a fixed sentence to say as the assistant (a computer task's progress), without asking the chat model.
+    pub const Ask = struct { auto: bool, instructions: ?[]u8 = null, audio: ?bool = null, line: ?[]u8 = null };
 
     pub fn free(t: Task, gpa: std.mem.Allocator) void {
         switch (t) {
@@ -56,7 +57,10 @@ pub const Task = union(enum) {
                 gpa.free(h.item_id);
                 gpa.free(h.pcm);
             },
-            .respond => |r| if (r.instructions) |i| gpa.free(i),
+            .respond => |r| {
+                if (r.instructions) |i| gpa.free(i);
+                if (r.line) |l| gpa.free(l);
+            },
             .warm => {},
         }
     }

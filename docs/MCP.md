@@ -24,9 +24,14 @@ whoever reaches the daemon. Tokens are made on the box:
 ```sh
 localrouter pair token claude-code --config FILE   # prints a token once, for an MCP client or a script
 localrouter pair add "JJ's phone" --config FILE    # a code (XXXX-XXXX, 10 minutes, once) for the app: POST /v1/pair
-localrouter pair list --config FILE                # id, name, created (never tokens)
+localrouter pair list --config FILE                # id, name, created, scopes (never tokens)
+localrouter pair scopes ID|NAME voice,mcp,computer --config FILE   # what a device may do
 localrouter pair revoke ID|NAME --config FILE      # refused from the next request, no restart
 ```
+
+A device's scopes say what it may do: `voice` (/v1/realtime), `mcp` (/mcp), and computer control's `desktop_helper`,
+`computer` and `approve` ([dev/COMPUTER.md](dev/COMPUTER.md)); `--scopes LIST` on `add` or `token` sets them. A device
+with none listed has `voice` and `mcp`, so devices paired before scopes keep working.
 
 On the Jarvis box use `deploy/jarvis/pair.sh token claude-code` (the deployed config and data). Only hashes of the
 tokens are kept, in `<data_dir>/devices.json` (0600). A token goes in `Authorization: Bearer <token>`; for
@@ -105,6 +110,15 @@ full machine says `insufficient_memory`.
 | `get_job` | **`id`**, `wait_s` | status, progress, output URLs; a transcript's text |
 | `cancel_job` | **`id`** | the job, cancelled |
 | `release_models` | | unloads every model now |
+| `computer_control` | **`control`** (`{"kind":"open_app","app":"Safari"}`, `quit_app`, `volume`, `media`, `dark_mode`, `lock_screen`), `computer` | the paired computer's sentence ("Opened Safari"); locking waits for a tap in the web UI |
+| `computer_use` | **`goal`**, `text` (exact text to type), `computer`, `wait_s` (120, at most 600) | the outcome (`done`, `stuck`, `blocked`, `unavailable`, `stopped`, `failed`) with its steps, or the task id while it runs |
+| `computer_status` | `task_id`, `wait_s` | a task's state (and the approval it waits for), or the paired computers and recent tasks |
+| `computer_stop` | `task_id` (none: every running task) | how many it stopped |
+
+The computer tools act on the user's own computer through the LocalRouter desktop helper, and need a paired device token
+with the `computer` scope (`Authorization: Bearer`), even when `pairing.required` is off; without one they refuse. Sending, buying, deleting, posting and
+typing into a field that is not a search box each wait for the user's tap in the web UI: an agent's token cannot approve
+(that needs the `approve` scope). Details: [dev/COMPUTER.md](dev/COMPUTER.md).
 
 Every schema is strict (`additionalProperties: false`), so a misspelled argument shows up in the client rather than
 being dropped.

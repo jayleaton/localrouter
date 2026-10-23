@@ -16,6 +16,8 @@ const backend = @import("../voice/backend.zig");
 const chat = @import("../voice/chat.zig");
 const resample = @import("../voice/resample.zig");
 const Stop = @import("../voice/stop.zig").Stop;
+const gate = @import("../computer/gate.zig");
+const hub_mod = @import("../computer/hub.zig");
 
 const App = routes.App;
 const Why = backend.Why;
@@ -25,11 +27,35 @@ pub const Local = struct {
     app: *App,
     host: []const u8, // the Host the session connected to, for file URLs
     client: chat.Client,
+    token: []const u8 = "", // the session's device token (computer/gate.zig): computer tools only for a device allowed them
 
     pub fn init(app: *App, host: []const u8, base_url_buf: *[96]u8) Local {
         const v = app.cfg.voice;
         const base = if (v.chat_url.len > 0) v.chat_url else std.fmt.bufPrint(base_url_buf, "http://{f}/v1", .{app.self_addr}) catch "http://127.0.0.1:8190/v1";
         return .{ .app = app, .host = host, .client = .{ .io = app.io, .gpa = app.gpa, .base_url = base, .api_key = v.chat_api_key } };
+    }
+
+    /// The paired device behind the session's token, when it may use the computer tools.
+    fn computerDevice(l: *const Local, why: *[]const u8) ?gate.Device {
+        const svc = l.app.computer orelse {
+            why.* = "computer control is switched off in this daemon's config (computer.enabled)";
+            return null;
+        };
+        if (!l.app.cfg.computer.voice) {
+            why.* = "computer control is not offered to voice sessions here (computer.voice)";
+            return null;
+        }
+        return switch (svc.gate.check(l.token, .computer)) {
+            .ok => |d| d,
+            .off => |m| blk: {
+                why.* = m;
+                break :blk null;
+            },
+            .denied => |m| blk: {
+                why.* = m;
+                break :blk null;
+            },
+        };
     }
 
     /// The chat model a session starts with: `voice.chat_model`, else (chat served here) this daemon's chat default.
@@ -47,7 +73,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer };
 
 fn self(ptr: *anyopaque) *Local {
     return @ptrCast(@alignCast(ptr));
@@ -349,8 +375,64 @@ fn offer(ptr: *anyopaque) backend.Offer {
         if (engine.supports(c, .text_to_image)) o.image = true;
         if (engine.supports(c, .text_to_video)) o.video = true;
     }
+    var why: []const u8 = "";
+    if (self(ptr).computerDevice(&why) != null) o.computer = app.computer.?.hub.connected() > 0;
     return o;
 }
+
+/// A computer tool call from the voice session's chat model: as the requesting device, with the user's own words for
+/// the turn; computer_use waits for the task to end (its working time is bounded; taps are not), and a session that
+/// closes stops it.
+fn computer(ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: backend.Speaker, stop: *Stop) backend.Managed {
+    const l = self(ptr);
+    var why: []const u8 = "";
+    const d = l.computerDevice(&why) orelse return .{ .ok = false, .text = why };
+    const hub = &l.app.computer.?.hub;
+    const who: hub_mod.Requester = .{ .source = "voice", .device = d.name, .utterance = utterance };
+    const Args = struct { control: ?std.json.Value = null, goal: []const u8 = "", text: ?[]const u8 = null, computer: []const u8 = "" };
+    const args = std.json.parseFromSliceLeaky(Args, a, if (arguments.len > 0) arguments else "{}", .{ .ignore_unknown_fields = true }) catch
+        return .{ .ok = false, .text = "the tool call's arguments are not valid JSON" };
+    std.log.info("voice: computer tool {s}", .{name});
+    if (std.mem.eql(u8, name, "computer_control")) {
+        const ctl = args.control orelse return .{ .ok = false, .text = "computer_control needs control" };
+        const r = hub.control(a, who, args.computer, ctl);
+        return .{ .ok = r.ok, .text = std.json.Stringify.valueAlloc(a, .{ .done = r.ok, .result = r.text }, .{}) catch r.text };
+    }
+    var listener: VoiceListener = .{ .speaker = speaker };
+    const r = hub.startUse(a, who, args.computer, args.goal, args.text, .{ .ctx = &listener, .event = VoiceListener.event });
+    if (!r.ok) {
+        if (r.task_id.len > 0) hub.detach(r.task_id);
+        return .{ .ok = false, .text = r.text };
+    }
+    defer hub.detach(r.task_id); // the listener lives on this stack
+    var stopped = false;
+    while (true) {
+        var tmp: std.heap.ArenaAllocator = .init(l.app.gpa);
+        defer tmp.deinit();
+        const v = hub.wait(tmp.allocator(), r.task_id, 500) orelse break;
+        if (!std.mem.eql(u8, v.status, "running")) break;
+        if (stop.cancelled() and !stopped) {
+            stopped = true;
+            _ = hub.stop(tmp.allocator(), r.task_id, "the voice session closed");
+            break; // the helper ends the task; nobody is left to hear it
+        }
+    }
+    const v = hub.view(a, r.task_id) orelse return .{ .ok = false, .text = "the task is gone" };
+    return .{ .ok = std.mem.eql(u8, v.status, "done"), .text = std.json.Stringify.valueAlloc(a, v, .{ .emit_null_optional_fields = false }) catch "{}" };
+}
+
+/// Speaks what the user must hear while a computer task runs: an approval waiting for their tap.
+const VoiceListener = struct {
+    speaker: backend.Speaker,
+
+    fn event(ctx: *anyopaque, kind: hub_mod.EventKind, text: []const u8) void {
+        const vl: *VoiceListener = @ptrCast(@alignCast(ctx));
+        if (kind != .approval) return;
+        var buf: [600]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "I need your OK in the LocalRouter app to {s}.", .{text[0..@min(text.len, 500)]}) catch return;
+        vl.speaker.say(vl.speaker.ctx, line);
+    }
+};
 
 fn check(ptr: *anyopaque, role: backend.Role, name: []const u8, why: *Why) bool {
     const app = self(ptr).app;

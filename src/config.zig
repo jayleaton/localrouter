@@ -79,6 +79,17 @@ pub const Pairing = struct {
     // behind `tailscale serve` every peer arrives as loopback
 };
 
+/// Computer control (docs/dev/COMPUTER.md): Jarvis using a paired desktop helper's computer. Its routes need device
+/// pairing; without it they refuse.
+pub const Computer = struct {
+    enabled: bool = true, // the /v1/desktop and /v1/computer routes and the computer tools exist
+    voice: bool = true, // offer computer_control and computer_use to a voice session's chat model while a helper is connected
+    decision_model: []const u8 = "", // the chat model that makes the step decisions; "": the chat_completion default
+    max_steps: u32 = 15, // a computer-use task's actions (at most 15)
+    timeout_s: u32 = 90, // a task's working time, not counting time waiting for a tap (at most 90)
+    approval_timeout_s: u32 = 60, // how long a tap may take before the step is refused
+};
+
 pub const Config = struct {
     host: []const u8 = bind.default_host, // an IP, localhost, all (0.0.0.0) or tailscale (this machine's tailnet IPv4)
     port: u16 = 8190,
@@ -94,6 +105,7 @@ pub const Config = struct {
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     voice: Voice = .{},
     pairing: Pairing = .{},
+    computer: Computer = .{},
     tools: []const ToolConfig = &default_tools,
 
     pub fn tool(c: *const Config, id: []const u8) ?*const ToolConfig {

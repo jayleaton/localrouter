@@ -19,6 +19,7 @@ const speech = @import("speech.zig");
 const chat = @import("chat.zig");
 const realtime = @import("realtime.zig");
 const pair = @import("pair.zig");
+const desktop = @import("desktop.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -31,6 +32,7 @@ pub const App = struct {
     decode_mutex: Io.Mutex = .init, // audio uploads decode one at a time (`speech.startTranscription`)
     voice: realtime.Registry = .{}, // open voice sessions, closed at shutdown
     pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
+    computer: ?*desktop.Service = null, // computer control (desktop.zig); null when the config switches it off
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -48,10 +50,12 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     const ctype = try a.dupe(u8, req.head.content_type orelse "");
     if (m == .GET and std.mem.eql(u8, p, "/health")) return h.json(req, .ok, "{\"ok\":true}");
     if (eql(p, "/mcp")) {
-        if (!try pair.admitted(app, req, a)) return; // refused before the body is read
+        if (!try pair.admitted(app, req, a, "mcp")) return; // refused before the body is read
         return mcp.handle(app, req, a, host);
     }
     if (m == .GET and eql(p, "/v1/realtime")) return realtime.serve(app, conn, req, a);
+    if (m == .GET and eql(p, "/v1/desktop")) return desktop.serve(app, conn, req, a);
+    if (std.mem.startsWith(u8, p, "/v1/computer/")) return desktop.route(app, req, a, p["/v1/computer/".len..]);
     if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
     if (m == .POST and eql(p, "/v1/pair")) return pair.redeem(app, req, a);
     if (m == .GET and eql(p, "/v1/pair")) return pair.status(app, req, a);

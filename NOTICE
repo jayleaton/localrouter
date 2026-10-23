@@ -37,6 +37,11 @@ Sidebud (https://github.com/jayleaton/sidebud), Copyright 2026 Jay Leaton.
   echo gate, wake gate, spoken commands), the UI components and theme, the icon and splash images, and
   patches/react-native-audio-api@0.13.5.patch. Its session layer (Sidebud's companion protocol) is replaced by
   LocalRouter's realtime voice protocol (src/lib/localrouter/).
+  The desktop helper in apps/desktop-helper/ is ported from Sidebud's companion (apps/companion/) at the same commit,
+  contributed by its owner under LocalRouter's license: its macOS backend (src/computer/use/desktop.ts, chromeTabs.ts,
+  dock.ts, types.ts and src/computer/macControls.ts) and its computer-use controller (src/computer/use/controller.ts),
+  each ported file naming its origin. Sidebud's own companion is distributed under a proprietary licence
+  (apps/companion/LICENSE there); that licence does not apply to the files contributed here.
 
 Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
 by the installer from their publishers and remain under their own licenses.

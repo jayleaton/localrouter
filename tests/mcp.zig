@@ -64,7 +64,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     // Every tool: a name, a description, an object schema that refuses unknown arguments.
     const listed = try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).body, .{});
     const list = listed.object.get("result").?.object.get("tools").?.array.items;
-    try testing.expectEqual(@as(usize, 13), list.len);
+    try testing.expectEqual(@as(usize, 17), list.len);
     var names: std.ArrayList(u8) = .empty;
     for (list) |t| {
         const schema = t.object.get("inputSchema").?.object;
@@ -74,7 +74,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
         try names.appendSlice(a, t.object.get("name").?.string);
         try names.append(a, ' ');
     }
-    for ([_][]const u8{ "list_models", "list_voices", "reserve_for", "unload_model", "load_model", "generate_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models" }) |n|
+    for ([_][]const u8{ "list_models", "list_voices", "reserve_for", "unload_model", "load_model", "generate_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models", "computer_control", "computer_use", "computer_status", "computer_stop" }) |n|
         try testing.expect(std.mem.indexOf(u8, names.items, n) != null);
 
     // list_models: each model's state, resident bytes and lane, and the machine's memory.
@@ -139,4 +139,23 @@ test "mcp transcribe_audio by path: only files inside local_files are read" {
     try expectError(try mcpCall(&d, a, "transcribe_audio", "{\"path\":\"clip.wav\"}"), "path must be absolute");
     try expectError(try mcpCall(&d, a, "transcribe_audio", try std.fmt.allocPrint(a, "{{\"path\":\"{s}/missing.wav\"}}", .{root})), "no such file");
     try expectError(try mcpCall(&d, a, "transcribe_audio", try std.fmt.allocPrint(a, "{{\"path\":\"{s}\",\"audio\":\"aGk=\"}}", .{clip})), "send audio or path, not both");
+}
+
+test "computer control without a paired device: the tools, the helper's socket and the approval routes all refuse" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try Daemon.start(testing.allocator, io, "computer-off", "{\"tools\": [" ++ tools ++ "]}");
+    defer d.stop();
+    try expectError(try mcpCall(&d, a, "computer_control", "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}"), "needs device pairing");
+    try expectError(try mcpCall(&d, a, "computer_use", "{\"goal\":\"search for groceries\"}"), "needs device pairing");
+    try expectError(try mcpCall(&d, a, "computer_stop", "{}"), "needs device pairing");
+    for ([_][]const u8{ "/v1/computer/status", "/v1/computer/approvals", "/v1/computer/audit", "/v1/desktop" }) |p| {
+        const r = try d.call(a, .GET, p, null);
+        try testing.expectEqual(std.http.Status.unauthorized, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.body, "needs device pairing") != null);
+    }
+    const approve = try d.call(a, .POST, "/v1/computer/approvals/appr_x", "{\"decision\":\"approve\"}");
+    try testing.expectEqual(std.http.Status.unauthorized, approve.status);
 }

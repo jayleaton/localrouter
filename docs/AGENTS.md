@@ -38,6 +38,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
 | `release_models` | unloads every model now |
+| `computer_control`, `computer_use` | the user's paired computer (the desktop helper): a fixed control, or a bounded task on its screen whose consequential steps wait for the user's tap; `computer_status`, `computer_stop`. Needs a paired device token ([dev/COMPUTER.md](dev/COMPUTER.md)) |
 
 Clients that only speak MCP over stdio use the bridge: `localrouter mcp-stdio --url http://<host>:8190` (below).
 

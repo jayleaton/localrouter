@@ -95,7 +95,7 @@ pub const Ws = struct {
         w.stream.close(w.io);
     }
 
-    fn send(w: *Ws, text: []const u8) !void {
+    pub fn send(w: *Ws, text: []const u8) !void {
         const out = &w.writer.interface;
         const mask = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
         try out.writeByte(0x81);
@@ -112,7 +112,7 @@ pub const Ws = struct {
     }
 
     /// The next text message (control frames skipped); error.Closed on a close frame.
-    fn next(w: *Ws, a: std.mem.Allocator) ![]const u8 {
+    pub fn next(w: *Ws, a: std.mem.Allocator) ![]const u8 {
         w.deadline_ns.store(now(w.io) + 20 * std.time.ns_per_s, .release);
         defer w.deadline_ns.store(std.math.maxInt(i64), .release);
         const in = &w.reader.interface;

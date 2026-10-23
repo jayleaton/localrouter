@@ -17,7 +17,21 @@
     deployed pairing setting (`PAIRING_REQUIRED=1|0` sets it); the voice and MCP check scripts send
     `$LOCALROUTER_TOKEN`.
   - A failed request's log line names its path without the query string, so a key never reaches the journal.
-
+- Computer control: Jarvis can use the user's Mac through a paired desktop helper (`apps/desktop-helper`, ported from
+  SideBud's companion; docs/dev/COMPUTER.md).
+  - MCP tools `computer_control` (open or quit an app, volume, media, dark mode, lock the screen) and `computer_use` (a
+    bounded on-screen task: 15 steps, 90 s of work), plus `computer_status` and `computer_stop`. The voice session's
+    chat model gets the first two while a helper is connected, and says when a step waits for a tap.
+  - The box grants every step (`src/computer/`): simple controls and benign steps run; sending, buying, deleting,
+    posting, typing into a field that is not a search box, Enter after one, and locking the screen each wait for a tap
+    in the web UI, bound to that one exact action for 60 s. Step decisions come from the chat model through a
+    System One shaped decision interface, so the open Jev service can replace it.
+  - Every task, grant, approval and outcome is in `<data>/computer/audit.jsonl` (`GET /v1/computer/audit`); typed text
+    is kept as its length and a hash.
+  - The helper's socket (`/v1/desktop`), the tools and the approvals need a paired device token with the right scope;
+    computer control refuses without them even when `pairing.required` is off. Pairing gains per-device scopes
+    (`localrouter pair token|add NAME --scopes LIST`, `localrouter pair scopes ID|NAME LIST`): a device with none keeps
+    `voice` and `mcp`, and a desktop helper's token (`desktop_helper` only) reaches neither `/mcp` nor `/v1/realtime`.
 - Voice: a picture or video turn answered in several tool calls is confirmed aloud, and the chat model no longer manages
   models around a picture.
   - The session checks memory itself: before a video, the `reserve_for` dry run, and when a voice model would go the

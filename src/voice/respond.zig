@@ -27,6 +27,7 @@ pub const Response = struct {
     stop: Stop = .{},
     reason: []const u8 = "", // why it was cancelled: turn_detected or client_cancelled
     audio: bool = true,
+    line: []const u8 = "", // a fixed sentence to say instead of a chat reply (Task.Ask.line)
     text: std.ArrayList(u8) = .empty,
     queue: std.ArrayList(Chunk) = .empty, // sentences for the speaker
     closed: bool = false, // no more sentences will come
@@ -261,7 +262,10 @@ fn stream(s: *Session, r: *Response, req: *chat.Request, say: backend.Say, why: 
     defer feed.think.deinit(s.gpa);
     defer feed.lead.deinit(s.gpa);
     r.marks.chat_start = s.clock();
-    const result = s.backend.stream(r.arena.allocator(), req, .{ .ctx = &feed, .text = Feed.onText, .tool = Feed.onTool }, &r.stop, why);
+    const result = if (r.line.len > 0) line: {
+        Feed.onText(&feed, r.line); // a fixed sentence: spoken as if the model had written it
+        break :line @as(backend.Error!chat.Result, .{ .finish_reason = "stop", .text = r.line });
+    } else s.backend.stream(r.arena.allocator(), req, .{ .ctx = &feed, .text = Feed.onText, .tool = Feed.onTool }, &r.stop, why);
     feed.end();
     if (speaker) |t| t.join();
     return result;
@@ -277,6 +281,7 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
     defer s.mutex.unlock(s.io);
     if (s.closing or (ask.auto and !s.fresh)) return false; // nothing new to answer (an empty transcript)
     r.audio = ask.audio orelse s.settings.audio;
+    if (ask.line) |l| r.line = a.dupe(u8, l) catch return false;
     r.marks.from_turn = ask.auto and s.stop_ns > 0; // answering a spoken turn: timed from its end
     r.marks.t0 = if (r.marks.from_turn) s.stop_ns else s.clock();
     if (r.marks.from_turn) {
@@ -388,6 +393,7 @@ const Feed = struct {
         const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
         const video = std.mem.eql(u8, name, "generate_video");
         if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
+        if (!said and f.r.audio and std.mem.eql(u8, name, "computer_use")) f.add(ack_computer, false);
         if (video and f.r.audio and pausesVoice(f.s, a)) f.add(ack_pause, false);
         f.endText(true);
     }
@@ -636,6 +642,8 @@ fn statusDetails(a: std.mem.Allocator, typ: []const u8, reason: []const u8, mess
 /// description asks it to.
 const ack_image = "Making that now.";
 const ack_video = "Making that now. A video takes a few minutes.";
+/// Said for a computer_use call the model made without saying anything first.
+const ack_computer = "Working on it on your computer.";
 /// Said when making room for a video unloads a voice model (Feed.pausesVoice).
 const ack_pause = "My voice pauses while it is made, and comes back about half a minute after.";
 
@@ -658,6 +666,16 @@ const manage_tools =
     \\ {"type": "function", "function": {"name": "load_model", "description": "Load a model now, for example one you unloaded.", "parameters": {"type": "object", "properties": {"model": {"type": "string"}}, "required": ["model"]}}}]
 ;
 
+/// Computer control on the user's paired computer (docs/dev/COMPUTER.md), offered while a desktop helper is connected
+/// and the session's device may use it.
+const computer_tools =
+    \\[{"type": "function", "function": {"name": "computer_control", "description": "Do a simple thing on the user's computer at once: open or quit an app, change the volume, play, pause or skip music, dark mode on or off, lock the screen. Use it only when the user asks for that in this turn. Say briefly what you did after the result comes.",
+    \\  "parameters": {"type": "object", "properties": {"control": {"type": "object", "description": "{\"kind\":\"open_app\",\"app\":\"Safari\"}, {\"kind\":\"quit_app\",\"app\":\"Music\"}, {\"kind\":\"volume\",\"action\":\"up|down|mute|unmute|set\",\"level\":0-100,\"target\":\"system\"}, {\"kind\":\"media\",\"action\":\"play|pause|next|previous\",\"player\":\"Spotify|Music\"}, {\"kind\":\"dark_mode\",\"action\":\"on|off|toggle\"}, {\"kind\":\"lock_screen\"}"}}, "required": ["control"]}}},
+    \\ {"type": "function", "function": {"name": "computer_use", "description": "Do a small task on the user's computer screen, in a browser tab or an app, when the user asks for it in this turn: find a tab, click through a page, search, start typing a message. It works step by step for up to a minute and a half. Sending, buying, deleting, posting and typing into a message field each need the user to tap Approve in the LocalRouter app; you will be told, and then tell the user. When you call this, only say briefly that you are on it. You get the outcome later as the tool output: then say what happened, or why it stopped.",
+    \\  "parameters": {"type": "object", "properties": {"goal": {"type": "string", "description": "what to do on screen, in plain words, with exact names in quotes"},
+    \\  "text": {"type": "string", "description": "the exact text to type, if any (a search, a message the user dictated)"}}, "required": ["goal"]}}}]
+;
+
 /// Under the lock: the chat request from the settings and the conversation, copied into `a`.
 fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     const st = &s.settings;
@@ -675,6 +693,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
         if (offer.image) try tools.append(a, all[0]);
         if (offer.video) try tools.append(a, all[1]);
         if (manage) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
+        if (offer.computer) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, computer_tools, .{}));
     }
     try tools.appendSlice(a, try events.chatTools(a, st.tools_json));
     return .{

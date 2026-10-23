@@ -47,16 +47,28 @@ fn devices(app: *const App) store.Store {
 /// The paired device whose token the request presents, or null.
 fn device(app: *App, req: *const h.Request, a: std.mem.Allocator) ?store.Device {
     const t = credential(req) orelse return null;
+    return deviceOf(app, a, t);
+}
+
+/// The paired device whose token `t` is, or null (re-read from the devices file: a revoke counts at once).
+pub fn deviceOf(app: *App, a: std.mem.Allocator, t: []const u8) ?store.Device {
+    if (t.len == 0) return null;
     return devices(app).verify(app.io, a, t) catch |err| {
         std.log.warn("pairing: cannot read {s}/devices.json: {s}", .{ app.cfg.data_dir, @errorName(err) });
         return null;
     };
 }
 
-/// True when the request may go on: pairing is off, or it presents a paired device's token. Otherwise the 401 is
-/// already sent. Call it before reading the body or upgrading.
-pub fn admitted(app: *App, req: *h.Request, a: std.mem.Allocator) !bool {
-    if (!app.cfg.pairing.required or device(app, req, a) != null) return true;
+/// True when the request may go on: pairing is off, or it presents a paired device's token whose scopes include
+/// `scope` (`voice` for /v1/realtime, `mcp` for /mcp). Otherwise the 401 is already sent. Call it before reading the
+/// body or upgrading.
+pub fn admitted(app: *App, req: *h.Request, a: std.mem.Allocator, scope: []const u8) !bool {
+    if (!app.cfg.pairing.required) return true;
+    if (device(app, req, a)) |d| {
+        if (d.allows(scope)) return true;
+        try h.fail(req, a, 403, "invalid_request_error", try std.fmt.allocPrint(a, "this device's token does not have the {s} scope: on the box, `localrouter pair scopes NAME ...` adds it", .{scope}));
+        return false;
+    }
     try h.failWith(req, a, 401, "invalid_request_error", "invalid_api_key", "this device is not paired with this LocalRouter: on the box run `localrouter pair add NAME` and enter the code in the app (or `localrouter pair token NAME` for a client that takes a token), then send the token as Authorization: Bearer", &.{.{ .name = "www-authenticate", .value = "Bearer" }});
     return false;
 }
