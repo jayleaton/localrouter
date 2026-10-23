@@ -265,9 +265,15 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | `modalities` | `["audio","text"]` (default) or `["text"]` |
 | `instructions`, `tools`, `tool_choice`, `temperature`, `max_response_output_tokens` | as OpenAI's; `tools` are your functions (you return `function_call_output`) |
 | `partial_interval_ms` | extension: a `localrouter.transcription.partial` per this much speech (0: none) |
+| `localrouter` | extension: `{"tool_execution": "server"}` (default) or `"client"`; set it before the first response |
 
 The chat model can also call LocalRouter's own `generate_image` and `generate_video`: the job runs, its URLs arrive as
-`localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. Only
+`localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. With
+`"tool_execution": "client"` only your `tools` exist (any names, built-in ones included) and none runs on the box: each
+call arrives once, complete, as `response.function_call_arguments.done`; return its `function_call_output` and send
+`response.create`. An output for an unknown call, a second output, or one that comes after the user spoke again or
+another response began is refused, and `localrouter.function_call.cancelled` tells you when a call stops waiting
+([VOICE.md](dev/VOICE.md#client-tool-execution), example in `examples/realtime-client-tools/`). Only
 `pcm16` and `server_vad` are offered; anything else is an `error` event naming the field, and the session stays open.
 By default both endpoints answer this machine only (the operator sets `voice.remote` to open them; browsers need HTTPS
 for the microphone off loopback). With pairing on, `/v1/realtime` also needs a token: `Authorization: Bearer`, a

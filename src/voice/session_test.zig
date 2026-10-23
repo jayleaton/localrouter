@@ -87,6 +87,16 @@ const Fake = struct {
             if (std.mem.eql(u8, last.tool_call_id orelse "", "call_lm")) return f.call(a, sink, "call_7", "generate_image", "{\"prompt\": \"a red fox\"}");
             return f.say(a, &.{"Your picture is ready."}, sink, stop);
         }
+        // A client's tools: one call (its id repeats each reply, as a chat server's "call_0" does), two in one reply, and
+        // a call after a long spoken lead-in (time to cancel it).
+        if (std.mem.indexOf(u8, said, "time and weather") != null) return f.calls(a, sink, &.{ .{ .id = "call_a", .function = .{ .name = "get_time", .arguments = "{}" } }, .{ .id = "call_b", .function = .{ .name = "get_weather", .arguments = "{\"city\": \"Oslo\"}" } } });
+        if (std.mem.indexOf(u8, said, "slowly check the time") != null) {
+            var parts: [40][]const u8 = undefined;
+            for (&parts, 0..) |*x, i| x.* = if (i % 2 == 0) "Let me look that up for you" else ". ";
+            _ = try f.say(a, &parts, sink, stop);
+            return f.call(a, sink, "call_s", "get_time", "{}");
+        }
+        if (std.mem.indexOf(u8, said, "time") != null) return f.call(a, sink, "call_0", "get_time", "{\"zone\": \"UTC\"}");
         if (std.mem.indexOf(u8, said, "check") != null) return f.call(a, sink, "call_lm", "list_models", "{}");
         if (std.mem.indexOf(u8, said, "fail") != null) {
             why.set("the fake model failed", .{});
@@ -102,11 +112,13 @@ const Fake = struct {
     }
 
     /// One tool call, reported as a streaming server reports it (its name, before the arguments).
-    fn call(_: *Fake, a: std.mem.Allocator, sink: chat.Sink, id: []const u8, name: []const u8, arguments: []const u8) backend.Error!chat.Result {
-        if (sink.tool) |t| t(sink.ctx, name);
-        const calls = try a.alloc(chat.ToolCall, 1);
-        calls[0] = .{ .id = id, .function = .{ .name = name, .arguments = arguments } };
-        return .{ .finish_reason = "tool_calls", .tool_calls = calls };
+    fn call(f: *Fake, a: std.mem.Allocator, sink: chat.Sink, id: []const u8, name: []const u8, arguments: []const u8) backend.Error!chat.Result {
+        return f.calls(a, sink, &.{.{ .id = id, .function = .{ .name = name, .arguments = arguments } }});
+    }
+
+    fn calls(_: *Fake, a: std.mem.Allocator, sink: chat.Sink, list: []const chat.ToolCall) backend.Error!chat.Result {
+        if (sink.tool) |t| t(sink.ctx, list[0].function.name);
+        return .{ .finish_reason = "tool_calls", .tool_calls = try a.dupe(chat.ToolCall, list) };
     }
 
     fn say(f: *Fake, a: std.mem.Allocator, parts: []const []const u8, sink: chat.Sink, stop: *Stop) backend.Error!chat.Result {
@@ -580,4 +592,171 @@ test "error paths, push to talk and a text-only response" {
     _ = try rig.rec.wait("response.done", 2);
     _ = try rig.rec.wait("response.text.delta", 0);
     try testing.expectEqual(before, rig.rec.count("response.audio.delta", 0));
+}
+
+const client_mode =
+    \\{"type":"session.update","session":{"localrouter":{"tool_execution":"client"},"tools":[
+    \\ {"type":"function","name":"generate_image","description":"the client's own","parameters":{"type":"object"}},
+    \\ {"type":"function","name":"get_time","parameters":{"type":"object"}},
+    \\ {"type":"function","name":"get_weather","parameters":{"type":"object"}}]}}
+;
+
+fn typed(s: *Session, text: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    s.handle(try std.fmt.bufPrint(&buf, "{{\"type\":\"conversation.item.create\",\"item\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{s}\"}}]}}}}", .{text}));
+}
+
+fn sendOutput(s: *Session, call_id: []const u8, out: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    s.handle(try std.fmt.bufPrint(&buf, "{{\"type\":\"conversation.item.create\",\"item\":{{\"type\":\"function_call_output\",\"call_id\":\"{s}\",\"output\":\"{s}\"}}}}", .{ call_id, out }));
+}
+
+fn errorCode(rig: *Rig, a: std.mem.Allocator, nth: usize) ![]const u8 {
+    const e = try rig.rec.get(a, try rig.rec.wait("error", nth));
+    return e.object.get("error").?.object.get("code").?.string;
+}
+
+test "client tool execution: only the client's tools exist, a call waits for its one output, and the continuation speaks" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .manage_models = true });
+    defer rig.stop();
+    const s = rig.s;
+    s.handle(client_mode);
+    const updated = try rig.rec.get(a, try rig.rec.wait("session.updated", 0));
+    try testing.expectEqualStrings("client", updated.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
+
+    try typed(s, "what time is it");
+    s.handle("{\"type\":\"response.create\"}");
+    const args = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 0));
+    try testing.expectEqualStrings("get_time", args.object.get("name").?.string);
+    try testing.expectEqualStrings("call_0", args.object.get("call_id").?.string);
+    try testing.expectEqualStrings("{\"zone\": \"UTC\"}", args.object.get("arguments").?.string); // complete, once
+    _ = try rig.rec.wait("response.done", 0);
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("response.function_call_arguments.done", 0));
+    // Offered: the client's three tools, none of the server's, and not the model management procedure.
+    const first = rig.fake.requests.items[0];
+    try testing.expect(contains(first, "\"name\":\"get_time\"") and contains(first, "\"name\":\"generate_image\""));
+    try testing.expect(!contains(first, "generate_video") and !contains(first, "list_models") and !contains(first, "reserve_for") and !contains(first, "computer_"));
+    try testing.expect(contains(first, "the client's own"));
+    // Nothing ran here and nothing was said for it.
+    Io.sleep(testing.io, .fromMilliseconds(50), .awake) catch {};
+    try testing.expectEqual(@as(usize, 0), rig.fake.specs.items.len);
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("localrouter.job.created", 0));
+    try testing.expectEqual(@as(usize, 0), rig.fake.spoke.items.len);
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("response.created", 0)); // no follow-up of its own
+
+    try sendOutput(s, "call_x", "noon");
+    try testing.expectEqualStrings("unknown_call_id", try errorCode(&rig, a, 0));
+    try sendOutput(s, "call_0", "noon");
+    _ = try rig.rec.wait("conversation.item.created", 3); // user, call, (assistant item), output
+    try sendOutput(s, "call_0", "noon again");
+    try testing.expectEqualStrings("duplicate_call_output", try errorCode(&rig, a, 1));
+    s.handle("{\"type\":\"response.create\"}");
+    const cont = try rig.rec.get(a, try rig.rec.wait("response.done", 1));
+    try testing.expectEqualStrings("completed", cont.object.get("response").?.object.get("status").?.string);
+    try testing.expectEqualStrings("Your picture is ready.", rig.fake.spoke.items[rig.fake.spoke.items.len - 1]); // heard
+    const second = rig.fake.requests.items[1];
+    try testing.expect(contains(second, "{\"role\":\"tool\",\"content\":\"noon\",\"tool_call_id\":\"call_0\"}") or contains(second, "\"tool_call_id\":\"call_0\",\"content\":\"noon\""));
+    try testing.expect(!contains(second, "noon again"));
+
+    // The mode is the session's from its first response on.
+    s.handle("{\"type\":\"session.update\",\"session\":{\"localrouter\":{\"tool_execution\":\"server\"}}}");
+    try testing.expectEqualStrings("invalid_session", try errorCode(&rig, a, 2));
+
+    // The model's next call reuses its id: the session gives it its own, and a response begun without its output
+    // cancels it, so the output that comes after is refused.
+    try typed(s, "and the time again");
+    s.handle("{\"type\":\"response.create\"}");
+    const again = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 1));
+    const minted = again.object.get("call_id").?.string;
+    try testing.expect(!std.mem.eql(u8, minted, "call_0"));
+    _ = try rig.rec.wait("response.done", 2);
+    s.handle("{\"type\":\"response.create\"}");
+    const cancelled = try rig.rec.get(a, try rig.rec.wait("localrouter.function_call.cancelled", 0));
+    try testing.expectEqualStrings(minted, cancelled.object.get("call_id").?.string);
+    try testing.expectEqualStrings("response_started", cancelled.object.get("reason").?.string);
+    _ = try rig.rec.wait("response.done", 3);
+    try sendOutput(s, minted, "too late");
+    try testing.expectEqualStrings("call_expired", try errorCode(&rig, a, 3));
+    try testing.expect(contains(rig.fake.requests.items[3], "\"status\\\":\\\"cancelled\\\""));
+}
+
+test "client tool execution: several calls in one reply; barge-in cancels the waiting one, and its late output never answers the new turn" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    const s = rig.s;
+    s.handle(client_mode);
+    _ = try rig.rec.wait("session.updated", 0);
+    rig.heard("what is the time and weather");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    const first = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 0));
+    const second = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 1));
+    try testing.expectEqualStrings("call_a", first.object.get("call_id").?.string);
+    try testing.expectEqualStrings("call_b", second.object.get("call_id").?.string);
+    try testing.expectEqual(@as(i64, 2), second.object.get("output_index").?.integer);
+    const done = try rig.rec.get(a, try rig.rec.wait("response.done", 0));
+    try testing.expectEqual(@as(usize, 3), done.object.get("response").?.object.get("output").?.array.items.len); // the message and both calls
+    try sendOutput(s, "call_a", "noon");
+    _ = try rig.rec.wait("conversation.item.created", 4);
+
+    rig.heard("never mind, and once more");
+    try rig.audio(600, true); // the user talks before the weather came back
+    const cancelled = try rig.rec.get(a, try rig.rec.wait("localrouter.function_call.cancelled", 0));
+    try testing.expectEqualStrings("call_b", cancelled.object.get("call_id").?.string);
+    try testing.expectEqualStrings("turn_detected", cancelled.object.get("reason").?.string);
+    try testing.expectEqual(@as(usize, 1), rig.rec.count("localrouter.function_call.cancelled", 0)); // call_a was answered
+    try sendOutput(s, "call_b", "sunny"); // late: while the user still speaks
+    try testing.expectEqualStrings("call_expired", try errorCode(&rig, a, 0));
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 1);
+    try sendOutput(s, "call_b", "sunny"); // late: after the new turn's answer
+    try testing.expectEqualStrings("call_expired", try errorCode(&rig, a, 1));
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+    try testing.expectEqual(@as(usize, 2), rig.rec.count("response.created", 0)); // the late output started nothing
+    const body = rig.fake.requests.items[1];
+    try testing.expect(contains(body, "noon") and !contains(body, "sunny"));
+    try testing.expect(contains(body, "\"tool_call_id\":\"call_b\""));
+    try testing.expect(contains(body, "never mind, and once more"));
+}
+
+test "client tool execution: a cancelled response makes no call, and nothing waits for an output" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false });
+    defer rig.stop();
+    const s = rig.s;
+    s.handle(client_mode);
+    _ = try rig.rec.wait("session.updated", 0);
+    try typed(s, "slowly check the time");
+    s.handle("{\"type\":\"response.create\"}");
+    _ = try rig.rec.wait("response.audio_transcript.delta", 0);
+    s.handle("{\"type\":\"response.cancel\"}");
+    const done = try rig.rec.get(a, try rig.rec.wait("response.done", 0));
+    try testing.expectEqualStrings("cancelled", done.object.get("response").?.object.get("status").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.rec.count("response.function_call_arguments.done", 0));
+    try sendOutput(s, "call_s", "noon");
+    try testing.expectEqualStrings("unknown_call_id", try errorCode(&rig, a, 0));
+}
+
+test "server tool execution stays the default: a client's tool may not take a built-in name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false });
+    defer rig.stop();
+    const created = try rig.rec.get(a, try rig.rec.wait("session.created", 0));
+    try testing.expectEqualStrings("server", created.object.get("session").?.object.get("localrouter").?.object.get("tool_execution").?.string);
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"tools\":[{\"type\":\"function\",\"name\":\"generate_image\"}]}}");
+    try testing.expectEqualStrings("invalid_session", try errorCode(&rig, a, 0));
 }

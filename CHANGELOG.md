@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Realtime client tool execution: `session.update {"localrouter": {"tool_execution": "client"}}` makes a voice session's
+  tools the client's alone. The built-in image, video, model and computer tools are neither offered nor run, and their
+  names are free. Each call reaches the client once, complete; its `function_call_output` must answer a call still
+  waiting for one: an unknown, second or late output is refused (`unknown_call_id`, `duplicate_call_output`,
+  `call_expired`). A call stops waiting when the user speaks again or another response begins
+  (`localrouter.function_call.cancelled`), so a late result is never spoken in a later turn. Server execution stays
+  the default, and the voice pipeline (wait timer, early transcription, priming, speech) is the same in both modes.
+  `examples/realtime-client-tools/` is a one-file harness that uses it.
 - Device pairing, off by default (`"pairing": {"required": true}`): `/v1/realtime` and `/mcp` then answer only a
   paired device's token, and refuse anything else with a 401 (`invalid_api_key`, `WWW-Authenticate: Bearer`) before
   the upgrade or the body. There is no loopback exemption (behind `tailscale serve` every peer is loopback); the other

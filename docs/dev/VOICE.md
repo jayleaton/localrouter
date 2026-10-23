@@ -50,7 +50,7 @@ When the user starts talking over the assistant, playback stops and the chat gen
 transcription model), `turn_detection` (`{type: "server_vad", threshold, prefix_padding_ms, silence_duration_ms,
 create_response, interrupt_response}` or null), `tools`, `tool_choice`, `temperature`,
 `max_response_output_tokens`. Extensions: `model` (the chat model; also `?model=` on the URL), `speech_model` (the
-TTS model), `partial_interval_ms`. A name that is not a model of the right kind is an `error` event naming the models
+TTS model), `partial_interval_ms`, `localrouter.tool_execution` ([Client tool execution](#client-tool-execution)). A name that is not a model of the right kind is an `error` event naming the models
 that can do it, as the HTTP API's refusals do. Defaults come from the daemon config:
 
 ```json
@@ -105,6 +105,39 @@ A tool call adds `response.output_item.added` (a `function_call` item), `respons
 `.done`, `response.output_item.done`; then, when the job ends, `conversation.item.created` (the
 `function_call_output`), `localrouter.job.done` `{call_id, job_id, kind, status, urls, error}` and a new response.
 Errors are `error` `{error: {type, code, message, param, event_id}}`.
+
+## Client tool execution
+
+A harness that runs its own tools on the user's device sets `session.update {"session": {"localrouter":
+{"tool_execution": "client"}, "tools": [...]}}` (default `"server"`, the built-in tools above). The audio pipeline is
+the same in both modes: the wait timer, early transcription, chat priming, sentence speech and barge-in are unchanged.
+What changes is who owns the tools:
+
+- Only the client's `tools` are offered. The built-in image, video, model-management and computer tools, and the
+  model-management procedure in the instructions, are not, and no call runs on the server. The built-in names are free
+  for the client's own functions. Each name must be unique, 1 to 64 letters, digits, `_` or `-`; a named `tool_choice`
+  must be one of them.
+- `session.created` / `session.updated` echo `"localrouter": {"tool_execution": ...}`. Any other `localrouter` key or
+  value is refused (`invalid_session`), so a client asking for a mode this server lacks finds out at once. The mode can
+  change only before the session's first response.
+- Each call arrives once, complete, after the model has finished it: `response.output_item.added` (the `function_call`
+  item), `response.function_call_arguments.delta` (all the arguments at once) and `.done` `{call_id, name, arguments}`,
+  then `response.done`. A reply may make several calls (`output_index` 1, 2, ...). A `call_id` is unique in the session:
+  when the model repeats one (a chat server's `call_0` each reply), the session gives the call its own. A cancelled or
+  failed response makes no calls.
+- Run each call, then send `conversation.item.create {"item": {"type": "function_call_output", "call_id", "output"}}`
+  for it and `response.create` to hear the answer. Nothing starts a response by itself for an output.
+- An output must answer a call that still waits for one. Refused as an `error`, never added to the conversation:
+  `unknown_call_id` (no such call), `duplicate_call_output` (it already has its output) and `call_expired`.
+- A waiting call expires when the conversation goes on without it: the user starts speaking (with `interrupt_response`,
+  as barge-in does) or a response begins. The session sends `localrouter.function_call.cancelled` `{item_id, call_id,
+  name, response_id, reason: turn_detected | response_started}` so the harness can stop the work, and the model reads
+  the call as cancelled with no result. A late output is refused, so it can never be spoken in a later turn.
+- A `function_call` item a client creates is history, as in server mode (a reconnecting harness rebuilds its
+  conversation); it may take one output, and its `call_id` must be new.
+
+`examples/realtime-client-tools/` is a small client that registers one local function, is called, returns the output
+and hears the continuation.
 
 ## The chat contract
 

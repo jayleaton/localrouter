@@ -27,6 +27,7 @@ pub const Response = struct {
     stop: Stop = .{},
     reason: []const u8 = "", // why it was cancelled: turn_detected or client_cancelled
     audio: bool = true,
+    client_tools: bool = false, // the session's tool_execution was client when it began: its calls go to the client
     line: []const u8 = "", // a fixed sentence to say instead of a chat reply (Task.Ask.line)
     text: std.ArrayList(u8) = .empty,
     queue: std.ArrayList(Chunk) = .empty, // sentences for the speaker
@@ -280,6 +281,9 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (s.closing or (ask.auto and !s.fresh)) return false; // nothing new to answer (an empty transcript)
+    s.responded = true;
+    r.client_tools = s.settings.tool_execution == .client;
+    if (r.client_tools) s.expireCalls(ea, "response_started"); // an output that has not come by now never will count
     r.audio = ask.audio orelse s.settings.audio;
     if (ask.line) |l| r.line = a.dupe(u8, l) catch return false;
     r.marks.from_turn = ask.auto and s.stop_ns > 0; // answering a spoken turn: timed from its end
@@ -390,6 +394,7 @@ const Feed = struct {
         const a = f.r.arena.allocator();
         const held = f.think.flush(f.s.gpa, a) catch "";
         f.add(f.lead.pass(f.s.gpa, a, held, true) catch held, false); // what the filters held back is said first
+        if (f.r.client_tools) return f.endText(true); // the client's tool, whatever its name: the client says what it likes
         const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
         const video = std.mem.eql(u8, name, "generate_video");
         if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
@@ -601,10 +606,13 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
     }
     for (calls, 1..) |call, index| {
         const id = s.newId(a, "item") catch break;
+        // A client matches outputs by call_id, so each is unique in the session (a server's "call_0" repeats each reply).
+        const call_id = if (r.client_tools and (call.id.len == 0 or s.findCall(call.id) != null)) (s.newId(a, "call") catch break) else call.id;
         const prev = s.lastId();
         const it = s.addItem(.function_call, id) catch break;
         const ia = it.arena.allocator();
-        it.call_id = ia.dupe(u8, call.id) catch "";
+        it.call_id = ia.dupe(u8, call_id) catch "";
+        if (r.client_tools) it.call = .pending;
         it.name = ia.dupe(u8, call.function.name) catch "";
         it.arguments = ia.dupe(u8, call.function.arguments) catch "";
         it.response_id = ia.dupe(u8, r.id) catch "";
@@ -615,7 +623,7 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
         s.emit.send(a, "response.function_call_arguments.done", .{ .response_id = r.id, .item_id = it.id, .output_index = index, .call_id = it.call_id, .name = it.name, .arguments = it.arguments });
         s.emit.send(a, "response.output_item.done", .{ .response_id = r.id, .output_index = index, .item = item });
         outputs.append(a, item) catch {};
-        if (events.isBuiltin(it.name) and s.voice.tools) tool_calls.start(s, it);
+        if (!r.client_tools and events.isBuiltin(it.name) and s.voice.tools) tool_calls.start(s, it);
     }
     s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
@@ -682,7 +690,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     const st = &s.settings;
     var msgs: std.ArrayList(chat.Message) = .empty;
     const base = ask.instructions orelse st.instructions;
-    const manage = s.voice.tools and s.voice.manage_models;
+    const manage = s.voice.tools and s.voice.manage_models and st.tool_execution == .server;
     const instructions = if (manage) try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ base, model_skill }) else base;
     if (instructions.len > 0) try msgs.append(a, .{ .role = "system", .content = try a.dupe(u8, instructions) });
     try history(s, a, &msgs);
@@ -700,11 +708,12 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
 }
 
 /// Under the lock: the tools a reply is offered: the built-in image and video tools a model can serve, the model
-/// management tools when enabled, the computer tools when a helper is paired, then the client's own.
+/// management tools when enabled, the computer tools when a helper is paired, then the client's own (only those with
+/// client tool execution).
 fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
     var tools: std.ArrayList(chat.Tool) = .empty;
     const offer = s.backend.offer();
-    if (s.voice.tools) {
+    if (s.voice.tools and s.settings.tool_execution == .server) {
         const all = try std.json.parseFromSliceLeaky([]const chat.Tool, a, builtin_tools, .{});
         if (offer.image) try tools.append(a, all[0]);
         if (offer.video) try tools.append(a, all[1]);
@@ -747,6 +756,9 @@ fn shadow(s: *Session, a: std.mem.Allocator, r: *const Response, calls: []const 
     });
 }
 
+/// What the model reads for a client call cancelled before its output came (Session.expireCalls).
+const call_cancelled = "{\"status\":\"cancelled\",\"note\":\"interrupted before it finished: there is no result\"}";
+
 /// The items as chat messages. A run of tool calls becomes one assistant message followed by a tool message for
 /// each call: its output when it came right after, else a placeholder (the chat API needs one); an output that
 /// arrives later is a system note where it arrived.
@@ -776,8 +788,8 @@ fn history(s: *Session, a: std.mem.Allocator, msgs: *std.ArrayList(chat.Message)
                     try msgs.append(a, .{ .role = "tool", .tool_call_id = try a.dupe(u8, items[k].call_id), .content = try a.dupe(u8, items[k].text) });
                     try answered.append(a, items[k].call_id);
                 }
-                for (calls.items) |c| if (!contains(answered.items, c.id))
-                    try msgs.append(a, .{ .role = "tool", .tool_call_id = c.id, .content = "{\"status\":\"in_progress\"}" });
+                for (items[i..j], calls.items) |c, cc| if (!contains(answered.items, cc.id))
+                    try msgs.append(a, .{ .role = "tool", .tool_call_id = cc.id, .content = if (c.call == .expired) call_cancelled else "{\"status\":\"in_progress\"}" });
                 i = k;
                 continue;
             },
