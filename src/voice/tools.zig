@@ -50,12 +50,25 @@ fn wait(s: *Session, c: Call) void {
         break :blk s.backend.waitJob(a, job, s.voice.tool_wait_s, &s.close_stop);
     };
     if (s.close_stop.cancelled()) return;
-    const output = std.json.Stringify.valueAlloc(a, .{ .status = outcome.status, .job_id = job_id, .urls = outcome.urls, .@"error" = outcome.@"error" }, .{}) catch return;
     s.mutex.lockUncancelable(s.io);
     if (!s.closing) s.emit.send(a, "localrouter.job.done", .{ .call_id = c.call_id, .job_id = job_id, .kind = @tagName(kind), .status = outcome.status, .urls = outcome.urls, .@"error" = outcome.@"error" });
     s.mutex.unlock(s.io);
     waitForVoice(s); // the models a video unloaded come back right after it: then say it is ready
+    const back = comingBack(s, a);
+    const output = std.json.Stringify.valueAlloc(a, .{ .status = outcome.status, .job_id = job_id, .urls = outcome.urls, .@"error" = outcome.@"error", .coming_back = back, .note = if (back.len > 0) "these models were unloaded to make room and come back by themselves" else null }, .{ .emit_null_optional_fields = false }) catch return;
     answer(s, a, c, output);
+}
+
+/// The server's own memory check after a job, so the chat model need not call list_models around a picture or a video:
+/// the kept-loaded models not running now (unloaded to make room). The scheduler brings them back by itself.
+fn comingBack(s: *Session, a: std.mem.Allocator) []const []const u8 {
+    const m = s.backend.manage(a, "list_models", "{}");
+    if (!m.ok) return &.{};
+    const Model = struct { id: []const u8, keep_loaded: bool = false, running: bool = true };
+    const list = std.json.parseFromSliceLeaky(struct { models: []const Model = &.{} }, a, m.text, .{ .ignore_unknown_fields = true }) catch return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (list.models) |x| if (x.keep_loaded and !x.running) out.append(a, x.id) catch {};
+    return out.items;
 }
 
 /// Waits (without the session's lock) while a voice model is away making room, at most `tool_wait_s`, so the reply

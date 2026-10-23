@@ -82,23 +82,31 @@ const Fake = struct {
         f.keep(&f.requests, chat.body(a, r) catch "");
         const last = r.messages[r.messages.len - 1];
         const said = last.content orelse "";
-        if (std.mem.eql(u8, last.role, "tool")) return f.say(a, &.{"Your picture is ready."}, sink, stop);
+        if (std.mem.eql(u8, last.role, "tool")) {
+            // after the models were listed, the picture; after the picture, the confirmation
+            if (std.mem.eql(u8, last.tool_call_id orelse "", "call_lm")) return f.call(a, sink, "call_7", "generate_image", "{\"prompt\": \"a red fox\"}");
+            return f.say(a, &.{"Your picture is ready."}, sink, stop);
+        }
+        if (std.mem.indexOf(u8, said, "check") != null) return f.call(a, sink, "call_lm", "list_models", "{}");
         if (std.mem.indexOf(u8, said, "fail") != null) {
             why.set("the fake model failed", .{});
             return error.Failed;
         }
-        if (std.mem.indexOf(u8, said, "picture") != null) {
-            if (sink.tool) |t| t(sink.ctx, "generate_image"); // as a streaming server reports it, before the arguments
-            const calls = try a.alloc(chat.ToolCall, 1);
-            calls[0] = .{ .id = "call_7", .function = .{ .name = "generate_image", .arguments = "{\"prompt\": \"a red fox\"}" } };
-            return .{ .finish_reason = "tool_calls", .tool_calls = calls };
-        }
+        if (std.mem.indexOf(u8, said, "picture") != null) return f.call(a, sink, "call_7", "generate_image", "{\"prompt\": \"a red fox\"}");
         if (std.mem.indexOf(u8, said, "slow") != null) {
             var parts: [40][]const u8 = undefined;
             for (&parts, 0..) |*x, i| x.* = try std.fmt.allocPrint(a, "{s}", .{if (i % 2 == 0) "This is one more sentence" else ". "});
             return f.say(a, &parts, sink, stop);
         }
         return f.say(a, &.{ "Hello", " there! How can I", " help you today? I can make", " pictures too." }, sink, stop);
+    }
+
+    /// One tool call, reported as a streaming server reports it (its name, before the arguments).
+    fn call(_: *Fake, a: std.mem.Allocator, sink: chat.Sink, id: []const u8, name: []const u8, arguments: []const u8) backend.Error!chat.Result {
+        if (sink.tool) |t| t(sink.ctx, name);
+        const calls = try a.alloc(chat.ToolCall, 1);
+        calls[0] = .{ .id = id, .function = .{ .name = name, .arguments = arguments } };
+        return .{ .finish_reason = "tool_calls", .tool_calls = calls };
     }
 
     fn say(f: *Fake, a: std.mem.Allocator, parts: []const []const u8, sink: chat.Sink, stop: *Stop) backend.Error!chat.Result {
@@ -437,6 +445,31 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     try testing.expect(done.object.get("tool_calls").?.bool);
     _ = try rig.rec.wait("localrouter.response.speech_done", 0);
     try testing.expect(contains(follow, "\"content\":\"Making that now.\""));
+}
+
+test "a turn whose answer makes several tool calls still says aloud that the picture is ready" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    rig.heard("check the models and make me a picture of a fox");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    // list_models, its output, then generate_image, the job, its output (with the session's own memory check), then the
+    // spoken confirmation
+    const first = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 0));
+    try testing.expectEqualStrings("list_models", first.object.get("name").?.string);
+    const second = try rig.rec.get(a, try rig.rec.wait("response.function_call_arguments.done", 1));
+    try testing.expectEqualStrings("generate_image", second.object.get("name").?.string);
+    const job = try rig.rec.wait("localrouter.job.done", 0);
+    const confirm = try rig.rec.wait("response.audio_transcript.done", 2);
+    try testing.expect(confirm > job);
+    try testing.expectEqualStrings("Your picture is ready.", (try rig.rec.get(a, confirm)).object.get("transcript").?.string);
+    try testing.expectEqualStrings("Your picture is ready.", rig.fake.spoke.items[rig.fake.spoke.items.len - 1]);
+    const output = rig.fake.requests.items[rig.fake.requests.items.len - 1];
+    try testing.expect(contains(output, "coming_back")); // the job's output, as the chat model reads it
 }
 
 test "text_done carries how fast speech came with the GPU to itself, measured on an earlier reply" {
