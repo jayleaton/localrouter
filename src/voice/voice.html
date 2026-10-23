@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), argsAfter: new Set(), speechDone: new Set(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1808,7 +1808,7 @@ function connect(my) {
     opened = true;
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'argsAfter', 'speechDone']) V[k].clear();
     V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
@@ -1838,7 +1838,10 @@ async function voiceStart() {
   if (V.ws) return;
   const my = ++V.run;
   try {
-    V.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // At the wire rate, each piece of a reply is a buffer at the context's own rate: the browser resamples the mixed
+    // output once, not each piece on its own, which left a step where two pieces met (a click on DGX-01).
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { V.ctx = new AC({ sampleRate: RATE }); } catch { V.ctx = new AC(); }
     V.ctx.resume();
     V.out = V.ctx.createGain();
     V.an = V.ctx.createAnalyser();
@@ -2047,7 +2050,10 @@ function startOrWait(item) {
   if (!V.held.some(p => p.item === item)) return;
   const since = performance.now() - (V.firstAt.get(item) || performance.now());
   const rate = arrivalRate(item);
-  const ready = have(item) >= startMs() && (V.textDone.has(item) || (rate != null && rate >= KEEP_UP));
+  // After its text, a reply whose model goes on to write tool arguments still shares the GPU: it waits for all of its
+  // (short) speech, localrouter.response.speech_done, unless speech keeps up anyway.
+  const written = V.textDone.has(item) && !V.argsAfter.has(item);
+  const ready = V.speechDone.has(item) || (have(item) >= startMs() && (written || (rate != null && rate >= KEEP_UP)));
   if (ready || since >= HOLD_CAP_MS) {
     if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
     return release(item, 0.01);
@@ -2059,10 +2065,13 @@ function startOrWait(item) {
   clearTimeout(V.holdTimer);
   V.holdTimer = setTimeout(() => startOrWait(item), 25);
 }
-function textDone(item) {
+function textDone(item, tools) {
   V.textDone.add(item);
+  if (tools) V.argsAfter.add(item);
   startOrWait(item);
 }
+// A time on the context's frame grid (rounded up), so pieces start exactly where the one before ends.
+const frame = t => Math.ceil(t * V.ctx.sampleRate - 1e-6) / V.ctx.sampleRate;
 // The held start of `item` goes out, `lead` s from now.
 function release(item, lead) {
   clearTimeout(V.holdTimer);
@@ -2073,7 +2082,7 @@ function release(item, lead) {
   V.started.add(item);
   const held = V.held.filter(p => p.item === item);
   V.held = V.held.filter(p => p.item !== item);
-  V.nextTime = Math.max(V.nextTime, V.ctx.currentTime + lead);
+  V.nextTime = Math.max(V.nextTime, frame(V.ctx.currentTime + lead));
   for (const p of held) schedule(item, p);
 }
 function schedule(item, { buf, loudAt, rms }) {
@@ -2085,14 +2094,14 @@ function schedule(item, { buf, loudAt, rms }) {
     (V.gaps.get(item) || V.gaps.set(item, []).get(item)).push({ ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
     dbg('voice.gap', { item, ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
     V.lead = Math.min(0.5, V.lead + (now - V.nextTime));
-    V.nextTime = now + V.lead;
+    V.nextTime = frame(now + V.lead);
   }
   const src = V.ctx.createBufferSource();
   src.buffer = buf;
   src.connect(V.out || V.ctx.destination);
   const start = V.nextTime;
   src.start(start);
-  V.nextTime = start + buf.duration;
+  V.nextTime = frame(start + buf.duration); // back to back on whole frames: no overlap or 1-frame hole between pieces
   if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
@@ -2233,7 +2242,11 @@ function handle(ev) {
       break;
     }
     case 'localrouter.response.text_done':
-      textDone(ev.item_id);
+      textDone(ev.item_id, !!ev.tool_calls);
+      break;
+    case 'localrouter.response.speech_done':
+      V.speechDone.add(ev.item_id);
+      startOrWait(ev.item_id);
       break;
     case 'response.created':
       V.resp = ev.response && ev.response.id;

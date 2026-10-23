@@ -88,6 +88,7 @@ const Fake = struct {
             return error.Failed;
         }
         if (std.mem.indexOf(u8, said, "picture") != null) {
+            if (sink.tool) |t| t(sink.ctx, "generate_image"); // as a streaming server reports it, before the arguments
             const calls = try a.alloc(chat.ToolCall, 1);
             calls[0] = .{ .id = "call_7", .function = .{ .name = "generate_image", .arguments = "{\"prompt\": \"a red fox\"}" } };
             return .{ .finish_reason = "tool_calls", .tool_calls = calls };
@@ -423,6 +424,13 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     try testing.expect(contains(follow, "/v1/files/img_1/0.png"));
     try testing.expect(contains(follow, "\"tool_call_id\":\"call_7\""));
     try testing.expectEqualStrings("Your picture is ready.", rig.fake.spoke.items[rig.fake.spoke.items.len - 1]);
+    // Nothing was said before the call: the session says the short "making it" the tool asks for, ends the spoken text
+    // there (the arguments are not spoken) and says when that speech is all sent.
+    try testing.expectEqualStrings("Making that now.", rig.fake.spoke.items[0]);
+    const done = try rig.rec.get(a, try rig.rec.wait("localrouter.response.text_done", 0));
+    try testing.expect(done.object.get("tool_calls").?.bool);
+    _ = try rig.rec.wait("localrouter.response.speech_done", 0);
+    try testing.expect(contains(follow, "\"content\":\"Making that now.\""));
 }
 
 test "a client seeds its history with a tool call and its output: the chat sees them as a call, nothing runs again" {

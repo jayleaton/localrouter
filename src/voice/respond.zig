@@ -205,7 +205,7 @@ fn stream(s: *Session, r: *Response, req: *chat.Request, say: backend.Say, why: 
     defer feed.think.deinit(s.gpa);
     defer feed.lead.deinit(s.gpa);
     r.marks.chat_start = s.clock();
-    const result = s.backend.stream(r.arena.allocator(), req, .{ .ctx = &feed, .text = Feed.onText }, &r.stop, why);
+    const result = s.backend.stream(r.arena.allocator(), req, .{ .ctx = &feed, .text = Feed.onText, .tool = Feed.onTool }, &r.stop, why);
     feed.end();
     if (speaker) |t| t.join();
     return result;
@@ -268,9 +268,11 @@ const Feed = struct {
     think: chunker.ThinkFilter = .{},
     lead: chunker.Lead = .{}, // holds the reply's start until no leaked reasoning can precede it
     search: usize = 0, // where the next sentence is looked for in the text
+    ended: bool = false, // the spoken text is complete (endText)
 
     fn onText(ctx: *anyopaque, delta: []const u8) void {
         const f: *Feed = @ptrCast(@alignCast(ctx));
+        if (f.ended) return; // text after a tool call began is not spoken
         if (f.r.marks.first_token == 0) f.r.marks.first_token = f.s.clock();
         const visible = f.think.filter(f.s.gpa, f.r.arena.allocator(), delta) catch return;
         f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), visible, false) catch visible, false);
@@ -306,18 +308,42 @@ const Feed = struct {
 
     /// The stream ended: what the filter held back, the last sentence, and no more.
     fn end(f: *Feed) void {
+        f.endText(false);
+    }
+
+    /// The model has begun a tool call: the rest of the stream is its arguments, which nobody hears. A picture or video
+    /// call with nothing said before it gets the short "making it" its tool description asks for, so the user hears
+    /// that the turn was taken while the arguments are written and the job runs (DGX-01: 12 to 15 s of silence before).
+    fn onTool(ctx: *anyopaque, name: []const u8) void {
+        const f: *Feed = @ptrCast(@alignCast(ctx));
+        if (f.ended) return;
+        const a = f.r.arena.allocator();
+        const held = f.think.flush(f.s.gpa, a) catch "";
+        f.add(f.lead.pass(f.s.gpa, a, held, true) catch held, false); // what the filters held back is said first
+        const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
+        const video = std.mem.eql(u8, name, "generate_video");
+        if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
+        f.endText(true);
+    }
+
+    /// The spoken text is complete (the stream ended, or its tool calls began): the last sentence goes to the speaker,
+    /// which may finish once it is spoken, and the client hears of it (`tool_calls`: the model still writes arguments).
+    fn endText(f: *Feed, tool_calls: bool) void {
+        if (f.ended) return;
+        f.ended = true;
         const rest = f.think.flush(f.s.gpa, f.r.arena.allocator()) catch "";
         f.add(f.lead.pass(f.s.gpa, f.r.arena.allocator(), rest, true) catch rest, true);
         f.s.mutex.lockUncancelable(f.s.io);
         defer f.s.mutex.unlock(f.s.io);
         f.r.closed = true;
         f.r.cond.signal(f.s.io);
-        // The chat model has stopped writing: from here speech has the GPU to itself (it shares it while chat decodes, and
-        // runs slower than playback then), so a client can stop holding the reply's start (docs/dev/VOICE.md).
+        // From the stream's end speech has the GPU to itself (it shares it while chat decodes, and runs slower than
+        // playback then), so a client can stop holding the reply's start; while tool arguments are still written it
+        // waits for localrouter.response.speech_done instead (docs/dev/VOICE.md).
         if (f.r.stop.cancelled()) return;
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
-        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id });
+        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = tool_calls });
     }
 };
 
@@ -328,7 +354,12 @@ fn speak(s: *Session, r: *Response, say: backend.Say) void {
         s.mutex.lockUncancelable(s.io);
         while (next >= r.queue.items.len and !r.closed and !r.stop.cancelled()) r.cond.waitUncancelable(s.io, &s.mutex);
         if (r.stop.cancelled() or next >= r.queue.items.len) {
-            s.mutex.unlock(s.io);
+            defer s.mutex.unlock(s.io);
+            if (r.stop.cancelled()) return;
+            // Every sentence of the reply is spoken and sent: a client holding the start for it can begin.
+            var tmp: std.heap.ArenaAllocator = .init(s.gpa);
+            defer tmp.deinit();
+            s.emit.send(tmp.allocator(), "localrouter.response.speech_done", .{ .response_id = r.id, .item_id = r.item_id });
             return;
         }
         const c = r.queue.items[next];
@@ -519,6 +550,11 @@ fn statusDetails(a: std.mem.Allocator, typ: []const u8, reason: []const u8, mess
 }
 
 // ---------------------------------------------------------------- the chat request
+
+/// Said for a picture or video call the model made without saying anything first (Feed.onTool), as its tool
+/// description asks it to.
+const ack_image = "Making that now.";
+const ack_video = "Making that now. A video takes a few minutes.";
 
 const builtin_tools =
     \\[{"type": "function", "function": {"name": "generate_image", "description": "Start making a picture on this machine from a detailed description. It takes several seconds and the user sees it when it is done. When you call this, only say briefly that you are making it (for example: Making that now). Never say or imply it is ready, and do not describe it: you get the result later as the tool output, and then you say it is ready, or that it failed.",

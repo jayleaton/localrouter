@@ -32,10 +32,12 @@ pub const Request = struct {
     extra: ?std.json.Value = null, // more members for the body (`voice.chat_extra`)
 };
 
-/// Receives text as the model writes it (reasoning excluded).
+/// Receives text as the model writes it (reasoning excluded), and the first tool call's name as soon as it is known:
+/// from there on the model writes arguments, which nobody hears.
 pub const Sink = struct {
     ctx: *anyopaque,
     text: *const fn (ctx: *anyopaque, delta: []const u8) void,
+    tool: ?*const fn (ctx: *anyopaque, name: []const u8) void = null,
 };
 
 pub const Result = struct {
@@ -85,6 +87,7 @@ pub const Parser = struct {
     calls: std.ArrayList(Partial) = .empty,
     finish_reason: []const u8 = "",
     done: bool = false,
+    tool_seen: bool = false, // the sink was told of the first tool call
 
     const Partial = struct { id: std.ArrayList(u8) = .empty, name: std.ArrayList(u8) = .empty, args: std.ArrayList(u8) = .empty };
 
@@ -131,7 +134,13 @@ pub const Parser = struct {
             const call = &p.calls.items[tc.index];
             if (tc.id) |id| try call.id.appendSlice(p.a, id);
             if (tc.function) |f| {
-                if (f.name) |n| try call.name.appendSlice(p.a, n);
+                if (f.name) |n| {
+                    try call.name.appendSlice(p.a, n);
+                    if (!p.tool_seen and n.len > 0) {
+                        p.tool_seen = true;
+                        if (sink.tool) |t| t(sink.ctx, n);
+                    }
+                }
                 if (f.arguments) |x| try call.args.appendSlice(p.a, x);
             }
         }
@@ -234,11 +243,19 @@ const Shut = struct {
 
 const Collect = struct {
     out: std.ArrayList(u8) = .empty,
+    tools: std.ArrayList([]const u8) = .empty,
+    at_text: usize = 0, // how much text had come when the tool call began
     a: std.mem.Allocator,
 
     fn text(ctx: *anyopaque, d: []const u8) void {
         const c: *Collect = @ptrCast(@alignCast(ctx));
         c.out.appendSlice(c.a, d) catch {};
+    }
+
+    fn tool(ctx: *anyopaque, name: []const u8) void {
+        const c: *Collect = @ptrCast(@alignCast(ctx));
+        c.tools.append(c.a, c.a.dupe(u8, name) catch return) catch {};
+        c.at_text = c.out.items.len;
     }
 };
 
@@ -247,7 +264,7 @@ test "the SSE stream: text deltas, tool call fragments, usage and [DONE]" {
     defer arena.deinit();
     const a = arena.allocator();
     var col: Collect = .{ .a = a };
-    const sink: Sink = .{ .ctx = &col, .text = Collect.text };
+    const sink: Sink = .{ .ctx = &col, .text = Collect.text, .tool = Collect.tool };
     var why: Why = .{};
     var p: Parser = .{ .a = a };
     const lines = [_][]const u8{
@@ -267,6 +284,9 @@ test "the SSE stream: text deltas, tool call fragments, usage and [DONE]" {
     try std.testing.expect(p.done);
     const r = try p.result();
     try std.testing.expectEqualStrings("Sure, ", col.out.items);
+    try std.testing.expectEqual(@as(usize, 1), col.tools.items.len); // once, at the name, not at each fragment
+    try std.testing.expectEqualStrings("generate_image", col.tools.items[0]);
+    try std.testing.expectEqual(@as(usize, 6), col.at_text); // after the text
     try std.testing.expectEqualStrings("Sure, ", r.text);
     try std.testing.expectEqualStrings("tool_calls", r.finish_reason);
     try std.testing.expectEqual(@as(usize, 1), r.tool_calls.len);

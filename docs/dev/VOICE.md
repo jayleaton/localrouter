@@ -302,8 +302,12 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   - the chat stream slows from 20.2 to 33.1 s.
 
   Until the chat stream ends, speech arrives slower than it plays. The session sends
-  `localrouter.response.text_done` `{response_id, item_id}` as soon as the chat stream ends; from then on speech has the
-  GPU to itself.
+  `localrouter.response.text_done` `{response_id, item_id, tool_calls}` as soon as the spoken text is complete: the chat
+  stream ended (`tool_calls` false: from then on speech has the GPU to itself), or a tool call began (`tool_calls` true:
+  the model still writes arguments, which are not spoken). `localrouter.response.speech_done` `{response_id, item_id}`
+  follows once every sentence of the reply has been spoken and sent. A picture or video call with nothing said before it
+  gets "Making that now." (the tool description asks the model to say so; it often did not, and the turn was silent
+  until the picture was done, 12 to 15 s).
   - **The start waits for the writing when speech falls behind** (default; the "smooth start" setting is gone). A reply
     starts with 200 ms in hand once `text_done` has come (500 ms while a picture or video is being made), or, while the
     chat model still writes, once speech has come at 1.05x real time or better over its first 250 ms; otherwise it waits
