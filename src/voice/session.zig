@@ -45,7 +45,6 @@ pub const Task = union(enum) {
     final: Hearing,
     respond: Ask,
     warm: void, // a throwaway transcription of silence: speech started after the STT model sat idle
-    warm_speech: void, // a throwaway sentence through the speech model (voice.warm_speech)
 
     /// key: session ms where the quiet the early transcript was made in began (a final with the same key may reuse it).
     pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
@@ -58,7 +57,7 @@ pub const Task = union(enum) {
                 gpa.free(h.pcm);
             },
             .respond => |r| if (r.instructions) |i| gpa.free(i),
-            .warm, .warm_speech => {},
+            .warm => {},
         }
     }
 };
@@ -113,6 +112,7 @@ pub const Session = struct {
     stt_worker_ms: u64 = 0, // the transcription as the worker timed it
     last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
     primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
+    warmer: ?std.Thread = null, // the speech warm-up (respond.warmSpeech), joined at the end
     priming: bool = false,
     speech_end_ns: i96 = 0, // the last spoken turn's quiet began (awake clock), for its response's timing
     // The turn so far, transcribed once the speaker has been quiet for voice.early_stt_ms: while they stay quiet it is the
@@ -142,8 +142,8 @@ pub const Session = struct {
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
         s.mutex.lockUncancelable(io);
         respond.prime(s); // the system prompt and tools, before the first turn needs them
-        if (s.voice.warm_speech and s.settings.audio and respond.speechUnmeasured()) s.push(.warm_speech) catch {};
         s.mutex.unlock(io);
+        if (s.voice.warm_speech and s.settings.audio and respond.speechCold()) s.warmer = std.Thread.spawn(.{}, respond.warmSpeech, .{s}) catch null;
         return s;
     }
 
@@ -157,6 +157,7 @@ pub const Session = struct {
         s.close_stop.set(s.io);
         if (s.worker) |t| t.join();
         if (s.primer) |t| t.join(); // the worker has finished: no response can start another
+        if (s.warmer) |t| t.join(); // close_stop ends its sentence
         for (s.waiters.items) |t| t.join();
         s.waiters.deinit(s.gpa);
         for (s.tasks.items) |t| t.free(s.gpa);

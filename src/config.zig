@@ -62,9 +62,8 @@ pub const Voice = struct {
     // nothing more said: only the transcript is early, nothing considers it before the wait ends); 0: none
     prime_chat: bool = true, // at the start and after each response the chat server reads the conversation so far
     // (max_tokens 1, discarded), so the next turn's request finds it in its prefix cache
-    warm_speech: bool = true, // the first session after a start speaks one sentence (discarded) when it connects: the speech
-    // model's first job after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm), and it measures how fast speech
-    // comes with the GPU free, which a client needs to start a session's first long reply on time
+    warm_speech: bool = true, // the first session after a start speaks one sentence (discarded) as it connects, on its own
+    // thread: the speech model's first job after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm)
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
     // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
     max_history_chars: u32 = 24000, // older turns are dropped past this

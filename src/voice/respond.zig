@@ -34,21 +34,19 @@ pub const Response = struct {
     spoken: std.ArrayList(session.Item.Spoken) = .empty, // gpa: moves to the item
     audio_ms: u64 = 0, // sent so far
     marks: timing.Marks = .{},
-    // Speech with the GPU to itself: from when the text was complete with no tool arguments to write (0: not yet), the
-    // sentences that began after it, their audio and their span (for free_speech_rate).
+    // Speech with the GPU to itself: when the text was complete with no tool arguments to write (0: not yet), and the
+    // audio sent by then (for free_speech_rate).
     free_ns: i96 = 0,
-    free_audio_ms: u64 = 0,
-    free_from_ns: i96 = 0,
-    free_to_ns: i96 = 0,
+    free_audio_at: u64 = 0,
 
     const Chunk = struct { text: []const u8, text_end: usize };
 };
 
 /// How fast speech came the last time it had the GPU to itself (audio ms a wall s, x1000; 0: not measured yet in this
-/// process): the sentences of a reply that began after its text was complete, from the first one's start to the last
-/// one's end, once they hold free_min_ms of audio. A client given it with text_done can start a reply already written
-/// at that rate, instead of measuring the rate of a stream that so far shared the GPU with the chat model (a session's
-/// first long reply was held 3.6 to 5.2 s for that on DGX-01).
+/// process): the audio a reply sent from its text_done to its speech_done, over that time, once it holds free_min_ms
+/// (the part of a sentence under way, and each later one's start, count). A client given it with text_done can start
+/// a reply already written at that rate, instead of measuring the rate of a stream that so far shared the GPU with the
+/// chat model (a fresh session's long reply was held 2.9 to 5.2 s for that on DGX-01).
 var free_speech_rate: std.atomic.Value(u32) = .init(0);
 const free_min_ms = 1000;
 
@@ -76,7 +74,6 @@ pub fn work(s: *Session) void {
             .final => |h| hear(s, h, .final),
             .respond => |ask| run(s, ask),
             .warm => warm(s),
-            .warm_speech => warmSpeech(s),
         }
     }
 }
@@ -141,19 +138,20 @@ fn warm(s: *Session) void {
     s.last_heard_ns = s.clock();
 }
 
-/// No speech has been measured with the GPU free in this process (voice.warm_speech).
-pub fn speechUnmeasured() bool {
-    return free_speech_rate.load(.monotonic) == 0;
+var speech_warm: std.atomic.Value(bool) = .init(false); // a sentence has been spoken in this process
+var speech_warming: std.atomic.Value(bool) = .init(false); // one session at a time speaks the warm-up
+const warm_sentence = "Hello, I am here and ready to help you.";
+
+/// Nothing has been spoken in this process yet (voice.warm_speech).
+pub fn speechCold() bool {
+    return !speech_warm.load(.monotonic);
 }
 
-var speech_warming: std.atomic.Value(bool) = .init(false); // one session at a time speaks the warm-up
-const warm_sentence = "Hello, I am here and ready to help you whenever you need me.";
-
-/// The warm-up sentence through the session's speech model and voice, the audio discarded: the model's first job is
-/// paid now, and its rate is free_speech_rate until a reply measures one. Nothing else of the session waits on the
-/// GPU at connect, so the sentence has it to itself.
-fn warmSpeech(s: *Session) void {
-    if (!speechUnmeasured() or speech_warming.swap(true, .acq_rel)) return;
+/// On its own thread at connect (Session.warmer): the warm-up sentence through the session's speech model and voice,
+/// the audio discarded, so the model's first job is paid before a reply needs it. Its rate is not kept: a first job,
+/// beside the chat prime, came at 1.03x on DGX-01 (1.45x warm).
+pub fn warmSpeech(s: *Session) void {
+    if (!speechCold() or speech_warming.swap(true, .acq_rel)) return;
     defer speech_warming.store(false, .release);
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
@@ -161,32 +159,14 @@ fn warmSpeech(s: *Session) void {
     s.mutex.lockUncancelable(s.io);
     const say: backend.Say = .{ .model = a.dupe(u8, s.settings.speech_model) catch "", .voice = a.dupe(u8, s.settings.voice) catch "" };
     s.mutex.unlock(s.io);
-    var heard: Heard = .{ .s = s };
     var why: backend.Why = .{};
-    s.backend.speak(a, warm_sentence, say, .{ .ctx = &heard, .write = Heard.write }, &s.close_stop, &why) catch return;
-    if (heard.rate == 0) return;
-    const audio_ms = heard.samples * 1000 / heard.rate;
-    const span_ns = s.clock() - heard.first_ns; // from its first audio: the model's first job after a load starts late
-    if (audio_ms < free_min_ms or span_ns < std.time.ns_per_ms) return;
-    const rate: u64 = audio_ms * 1000 / @as(u64, @intCast(@divTrunc(span_ns, std.time.ns_per_ms)));
-    if (speechUnmeasured()) free_speech_rate.store(if (rate > 100_000) 100_000 else @intCast(rate), .monotonic);
-    std.log.info("voice {s}: speech warmed: {d} ms of audio in {d} ms", .{ s.id, audio_ms, @divTrunc(span_ns, std.time.ns_per_ms) });
+    const began = s.clock();
+    s.backend.speak(a, warm_sentence, say, .{ .ctx = s, .write = discardPcm }, &s.close_stop, &why) catch return;
+    speech_warm.store(true, .monotonic);
+    std.log.info("voice {s}: speech warmed in {d} ms", .{ s.id, @divTrunc(s.clock() - began, std.time.ns_per_ms) });
 }
 
-/// Counts the warm-up's audio.
-const Heard = struct {
-    s: *Session,
-    samples: u64 = 0,
-    rate: u64 = 0,
-    first_ns: i96 = 0,
-
-    fn write(ctx: *anyopaque, samples: []const i16, rate: u32) void {
-        const h: *Heard = @ptrCast(@alignCast(ctx));
-        if (h.first_ns == 0) h.first_ns = h.s.clock();
-        h.samples += samples.len;
-        h.rate = rate;
-    }
-};
+fn discardPcm(_: *anyopaque, _: []const i16, _: u32) void {}
 
 fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
@@ -416,7 +396,10 @@ const Feed = struct {
         // playback then), so a client can stop holding the reply's start; while tool arguments are still written it
         // waits for localrouter.response.speech_done instead (docs/dev/VOICE.md).
         if (f.r.stop.cancelled()) return;
-        if (!args_follow) f.r.free_ns = f.s.clock();
+        if (!args_follow) {
+            f.r.free_ns = f.s.clock();
+            f.r.free_audio_at = f.r.audio_ms;
+        }
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
         f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = args_follow, .chars = f.r.text.items.len, .speech_rate = if (args_follow) null else speechRate() });
@@ -433,7 +416,7 @@ fn speak(s: *Session, r: *Response, say: backend.Say) void {
             defer s.mutex.unlock(s.io);
             if (r.stop.cancelled()) return;
             // Every sentence of the reply is spoken and sent: a client holding the start for it can begin.
-            measureFree(r);
+            measureFree(s, r);
             var tmp: std.heap.ArenaAllocator = .init(s.gpa);
             defer tmp.deinit();
             s.emit.send(tmp.allocator(), "localrouter.response.speech_done", .{ .response_id = r.id, .item_id = r.item_id });
@@ -457,9 +440,7 @@ fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool
     var out: Voice = .{ .s = s, .r = r, .a = a };
     defer out.rs.deinit(s.gpa);
     var why: backend.Why = .{};
-    const began = s.clock();
-    const audio_before = r.audio_ms; // only this thread adds to it
-    if (r.marks.tts_start == 0) r.marks.tts_start = began;
+    if (r.marks.tts_start == 0) r.marks.tts_start = s.clock();
     s.backend.speak(a, text, say, .{ .ctx = &out, .write = Voice.write }, &r.stop, &why) catch |err| {
         if (err == error.Cancelled) return false;
         s.mutex.lockUncancelable(s.io);
@@ -471,20 +452,16 @@ fn sentence(s: *Session, r: *Response, say: backend.Say, c: Response.Chunk) bool
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     r.spoken.append(s.gpa, .{ .end_ms = r.audio_ms, .text_end = c.text_end }) catch {};
-    if (r.free_ns != 0 and r.free_ns <= began) {
-        if (r.free_from_ns == 0) r.free_from_ns = began;
-        r.free_to_ns = s.clock();
-        r.free_audio_ms += r.audio_ms - audio_before;
-    }
+    speech_warm.store(true, .monotonic);
     return true;
 }
 
 /// Under the lock, once every sentence is spoken: the reply's speech with the GPU to itself, as free_speech_rate.
-fn measureFree(r: *const Response) void {
-    if (r.free_audio_ms < free_min_ms) return;
-    const span_ns = r.free_to_ns - r.free_from_ns;
+fn measureFree(s: *Session, r: *const Response) void {
+    if (r.free_ns == 0 or r.audio_ms - r.free_audio_at < free_min_ms) return;
+    const span_ns = s.clock() - r.free_ns;
     const span_ms: u64 = if (span_ns >= std.time.ns_per_ms) @intCast(@divTrunc(span_ns, std.time.ns_per_ms)) else 1;
-    const rate: u64 = r.free_audio_ms * 1000 / span_ms;
+    const rate: u64 = (r.audio_ms - r.free_audio_at) * 1000 / span_ms;
     free_speech_rate.store(if (rate > 100_000) 100_000 else @intCast(rate), .monotonic);
 }
 
