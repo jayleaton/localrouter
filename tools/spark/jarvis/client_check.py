@@ -37,6 +37,30 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+SAVE_REPLIES, SAVE_SECONDS = 3, 120  # at most 3 flagged replies, 120 s each (5.8 MB a reply at 24 kHz)
+
+
+def save_received(cdp, out, flagged):
+    """A flagged reply's received audio, so the flag can be classified: received-<conn>-<item>.wav (as the wire sent it)
+    and .json (where each piece starts, and what was flagged where). Only flagged replies, bounded."""
+    keys = sorted(flagged)[:SAVE_REPLIES]
+    if not keys:
+        return []
+    audio = cdp.js(f"window.jarvis.receivedPcm({json.dumps(keys)}, {SAVE_SECONDS})") or {}
+    saved = []
+    for key, r in audio.items():
+        name = "received-" + re.sub(r"[^A-Za-z0-9_]+", "-", key)
+        with wave.open(os.path.join(out, name + ".wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(r["rate"])
+            w.writeframes(base64.b64decode(r["pcm"]))
+        with open(os.path.join(out, name + ".json"), "w") as f:
+            json.dump({"key": key, "rate": r["rate"], "piece_starts": r["starts"], "flagged": flagged[key]}, f)
+        saved.append(name + ".wav")
+    return saved
+
+
 class Cdp:
     """One DevTools WebSocket (to a page target): commands with ids, events kept in order."""
 
@@ -210,6 +234,7 @@ def main():
     ap.add_argument("--base", required=True, help="the daemon's origin, e.g. https://dgx-01.example.ts.net:10443")
     ap.add_argument("--out", required=True)
     ap.add_argument("--page", help="write this file over the daemon's /voice before it parses (a branch's client)")
+    ap.add_argument("--save-received", action="store_true", help="keep every reply's received audio, not only flagged ones (same bounds)")
     ap.add_argument("--wav", help="a spoken prompt for the fake microphone (16-bit WAV); without it the voice step is skipped")
     ap.add_argument("--chrome", default=shutil.which("google-chrome") or shutil.which("chromium") or "google-chrome")
     ap.add_argument("--chat", default="In two short sentences: what is a GPU, and why does it suit neural networks? "
@@ -447,7 +472,9 @@ def main():
             playback_clicks = {k: v for k, v in (pb.get("per") or {}).items() if v["clicks"] or v["unchecked"]}
             stream_clicks = {k: v for k, v in seams.items() if v["clicks"]}
             bad = list(gaps) + ([{"playback": playback_clicks}] if playback_clicks else []) + ([{"stream": stream_clicks}] if stream_clicks else [])
-            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "playback_diffs": {k: v for k, v in pb.items() if k != "_shifts"}, "stream_seams": seams, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
+            flagged = {**playback_clicks, **stream_clicks} or ({k: {} for k in seams} if a.save_received else {})
+            saved = save_received(cdp, a.out, flagged)
+            results["playback"] = {"saved_audio": saved,"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "playback_diffs": {k: v for k, v in pb.items() if k != "_shifts"}, "stream_seams": seams, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
             check("voice: the recording lines up with the audio received (the playback comparison is sound)", pb.get("skipped") or (pb.get("match") or 0) > 0.99, {k: pb.get(k) for k in ("shifts", "match", "skipped")})
             check("voice: no reply runs dry (no underrun), playback adds no click, and no click where received pieces join", not bad, bad)

@@ -56,7 +56,7 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 ```json
 {"voice": {"remote": false, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
            "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
-           "partial_interval_ms": 0, "prime_chat": true, "greedy_transcripts": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
+           "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800}}
 ```
 
 A Jarvis box keeps the three voice models warm above the image and video models, so a picture or a clip evicts
@@ -302,7 +302,7 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   - the chat stream slows from 20.2 to 33.1 s.
 
   Until the chat stream ends, speech arrives slower than it plays. The session sends
-  `localrouter.response.text_done` `{response_id, item_id, tool_calls, chars}` as soon as the spoken text is complete: the chat
+  `localrouter.response.text_done` `{response_id, item_id, tool_calls, chars, speech_rate}` as soon as the spoken text is complete: the chat
   stream ended (`tool_calls` false: from then on speech has the GPU to itself), or a tool call began (`tool_calls` true:
   the model still writes arguments, which are not spoken). `localrouter.response.speech_done` `{response_id, item_id}`
   follows once every sentence of the reply has been spoken and sent. A picture or video call with nothing said before it
@@ -316,6 +316,19 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     dry in a long reply, because a reply's length is not known until it is written. On DGX-01, `client_check` (five
     replies a run, each checked to its end): 3 of 3 runs with no underrun in any reply; the long reply waited 2.9 to 5.9 s
     for its writing, at 0.51 to 0.64x real time.
+  - **Once written, the rest comes at the free rate.** From `text_done` with `tool_calls` false, speech has the GPU to
+    itself, so what is still to come arrives faster than it plays, whatever the rate so far (which shared the GPU with
+    the chat model). `speech_rate` on `text_done` is how fast speech came the last time it had the GPU to itself, in
+    this process (null until measured): the audio a reply sent from its `text_done` to its `speech_done`, over that
+    time, once it holds 0.5 s (a sentence's start counts in it, so a short span reads low: the safe side). The page
+    uses it (else the last reply's rate) in place of the rate measured so far, when it is 1.05x or better; so a written
+    reply starts with 200 ms in hand, on a session's first turn as on later ones. Before this, a reply still being written when its first audio came was held
+    on its rate so far once `text_done` came (0.88 to 0.92x on DGX-01): 0.75 to 6 s.
+  - **The first session after a start warms speech** (`voice.warm_speech`, on by default): on its own thread, it speaks
+    one word ("Hello.") when it connects, the audio discarded. The speech model's first job after a load took 0.84 s to
+    its first audio on DGX-01 (0.1 s warm), and a 2 s sentence 4.7 s in all; the engine speaks one request at a time, so
+    a reply waits behind it, hence one word. Its rate is not kept (a first job's: 1.03x beside the chat prime, 1.45x
+    warm; a second, warm sentence collided with the first turn). The first reply after a start measures the rate.
   - Replayed over 10 recorded default-length replies (15 to 35 s of audio, chat decoding for 3 to 10 s), first audio
     measured from the request:
 
