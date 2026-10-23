@@ -18,7 +18,7 @@ const Value = std.json.Value;
 /// chat 40 MiB (priority 100), mouth 8 (60), ears 8 (50), img 40 (10): 96 MiB warm. A testpattern video at its default
 /// 1344x768 needs 32 MiB loaded and about 69.9 MiB working: 101.9 MiB.
 fn config(a: std.mem.Allocator, budget_mib: u64) ![]const u8 {
-    return std.fmt.allocPrint(a, "{{{s}, \"budget_bytes\": {d}, \"voice\": {{\"prime_chat\": false}}, \"tools\": [" ++
+    return std.fmt.allocPrint(a, "{{{s}, \"budget_bytes\": {d}, \"voice\": {{\"prime_chat\": false, \"warm_speech\": false}}, \"tools\": [" ++
         "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 41943040, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
         "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 60, \"options\": {{\"voices\": [\"plain\"]}}}}," ++
         "{{\"id\": \"ears\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50}}," ++

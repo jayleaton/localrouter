@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Voice: a session's first turn, and any reply still being written when its audio starts, start like later short ones.
+  - `localrouter.response.text_done` carries `speech_rate`: how fast speech came the last time it had the GPU to
+    itself. Once a reply is written, the page holds its start for that rate (200 ms in hand), not for the slower rate
+    it came at while the chat model was still writing it.
+  - The first session after a start speaks one discarded sentence when it connects (`voice.warm_speech`): the speech
+    model's slow first job is paid then, and the rate gets its first measure.
+- `client_check`: a run that flags a click keeps the flagged replies' received audio (`received-*.wav` and `.json` in
+  its output directory; at most 3 replies of 120 s), so the flag can be classified. `--save-received` keeps them
+  unflagged too.
 - Voice: the answer starts as the wait ends.
   - The turn's words are transcribed while the speaker is quiet (150 ms into a pause, `voice.early_stt_ms`). If the
     wait ends with nothing more said, that transcript is the turn's, so speech to text no longer runs after the wait.

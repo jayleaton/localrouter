@@ -45,6 +45,7 @@ pub const Task = union(enum) {
     final: Hearing,
     respond: Ask,
     warm: void, // a throwaway transcription of silence: speech started after the STT model sat idle
+    warm_speech: void, // a throwaway sentence through the speech model (voice.warm_speech)
 
     /// key: session ms where the quiet the early transcript was made in began (a final with the same key may reuse it).
     pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
@@ -57,7 +58,7 @@ pub const Task = union(enum) {
                 gpa.free(h.pcm);
             },
             .respond => |r| if (r.instructions) |i| gpa.free(i),
-            .warm => {},
+            .warm, .warm_speech => {},
         }
     }
 };
@@ -141,6 +142,7 @@ pub const Session = struct {
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
         s.mutex.lockUncancelable(io);
         respond.prime(s); // the system prompt and tools, before the first turn needs them
+        if (s.voice.warm_speech and s.settings.audio and respond.speechUnmeasured()) s.push(.warm_speech) catch {};
         s.mutex.unlock(io);
         return s;
     }

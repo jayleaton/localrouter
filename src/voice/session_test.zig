@@ -207,8 +207,10 @@ const Rig = struct {
 
     fn start(rig: *Rig, voice: config.Voice) !void {
         const io = testing.io;
+        var v = voice;
+        v.warm_speech = false; // the tests count what is spoken
         rig.* = .{ .fake = .{ .io = io, .arena = .init(testing.allocator) }, .rec = .{ .io = io, .arena = .init(testing.allocator) } };
-        rig.s = try Session.create(testing.allocator, io, rig.fake.b(), .{ .ctx = &rig.rec, .send = Rec.send }, voice, "");
+        rig.s = try Session.create(testing.allocator, io, rig.fake.b(), .{ .ctx = &rig.rec, .send = Rec.send }, v, "");
     }
 
     fn stop(rig: *Rig) void {
@@ -435,6 +437,31 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     try testing.expect(done.object.get("tool_calls").?.bool);
     _ = try rig.rec.wait("localrouter.response.speech_done", 0);
     try testing.expect(contains(follow, "\"content\":\"Making that now.\""));
+}
+
+test "text_done carries how fast speech came with the GPU to itself, measured on an earlier reply" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    rig.fake.delta_ms = 0; // the text is complete at once: its later sentences are spoken with the GPU free
+    rig.heard("slow please");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("localrouter.response.speech_done", 0);
+    rig.heard("and once more");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    const done = try rig.rec.get(a, try rig.rec.wait("localrouter.response.text_done", 1));
+    try testing.expect(!done.object.get("tool_calls").?.bool);
+    const rate: f64 = switch (done.object.get("speech_rate").?) {
+        .float => |x| x,
+        .integer => |x| @floatFromInt(x),
+        else => return error.NoSpeechRate,
+    };
+    try testing.expect(rate > 1); // the fake speaks far faster than real time
 }
 
 test "a client seeds its history with a tool call and its output: the chat sees them as a call, nothing runs again" {

@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, freeRate: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1808,7 +1808,7 @@ function connect(my) {
     opened = true;
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'got']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'got', 'freeRate']) V[k].clear();
     V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
@@ -2053,9 +2053,13 @@ function arrivalRate(item) {
 function startOrWait(item) {
   if (!V.held.some(p => p.item === item)) return;
   const since = performance.now() - (V.firstAt.get(item) || performance.now());
-  // A reply already written, with the GPU free, comes at the rate the last reply did: its start need not wait
-  // RATE_MS to measure it (about 250 ms off a short reply's first audio).
-  const rate = arrivalRate(item) ?? (V.textDone.has(item) && !generating() && V.lastRate >= KEEP_UP ? V.lastRate : null);
+  // A reply already written, with the GPU free, comes from here on as fast as speech comes with the GPU to itself: the
+  // server's measure (text_done's speech_rate), else the last reply's rate. Its own rate so far can be lower (it shared
+  // the GPU with the chat model), and need not be measured first (RATE_MS: about 250 ms off a short reply's first audio;
+  // a session's first long reply was held 3.6 to 5.2 s on its rate so far).
+  const measured = arrivalRate(item);
+  const prior = V.textDone.has(item) && !generating() ? (V.freeRate.get(item) || V.lastRate) : 0;
+  const rate = prior >= KEEP_UP ? Math.max(measured ?? 0, prior) : measured;
   const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
   if (ready || since >= HOLD_CAP_MS) {
     if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
@@ -2178,6 +2182,19 @@ function received() {
     const r = out[p.key] || (out[p.key] = { samples: [], starts: [] });
     r.starts.push(r.samples.length);
     for (const v of p.data) r.samples.push(v);
+  }
+  return out;
+}
+// Those replies' received audio as the wire sent it (16-bit little-endian PCM, base64) with where each piece starts, so a
+// check that flags one can keep it: { key: { rate, starts, pcm } }. At most `maxS` seconds of each.
+function receivedPcm(keys, maxS = 120) {
+  const all = received(), out = {};
+  for (const key of keys) {
+    const r = all[key];
+    if (!r) continue;
+    const n = Math.min(r.samples.length, Math.round(maxS * RATE)), bytes = new Uint8Array(n * 2), view = new DataView(bytes.buffer);
+    for (let i = 0; i < n; i++) view.setInt16(i * 2, Math.max(-32768, Math.min(32767, Math.round(r.samples[i] * 32768))), true);
+    out[key] = { rate: RATE, starts: r.starts.filter(k => k < n), pcm: toB64(bytes) };
   }
   return out;
 }
@@ -2416,6 +2433,7 @@ function handle(ev) {
       break;
     }
     case 'localrouter.response.text_done':
+      if (!ev.tool_calls && ev.speech_rate) V.freeRate.set(ev.item_id, ev.speech_rate);
       textDone(ev.item_id, ev.chars);
       break;
     case 'localrouter.response.speech_done': {
@@ -2747,7 +2765,7 @@ if (window.visualViewport) {
 
 // A test or another script can see the state without scraping the page.
 window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, socket: V.ws ? V.ws.readyState : null, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
-                  output: outputStats, streamSeams: () => streamSeams(), playbackDiffs: () => playbackDiffs(), clickTest, recordOutput: false,
+                  output: outputStats, streamSeams: () => streamSeams(), receivedPcm, playbackDiffs: () => playbackDiffs(), clickTest, recordOutput: false,
                   get engine() { return engine(); },
                   say: text => { $('text').value = text; sendText(); }, // a turn in the call, as typed
                   dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },
