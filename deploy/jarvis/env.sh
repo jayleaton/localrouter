@@ -14,6 +14,15 @@ KNOWLINE_REV=779944d2cc8ffa19cef386aee83c83bcb967ade2   # PelaAI/KnowLine-4B-Gen
 URL=http://127.0.0.1:$PORT
 export PATH=$J/bin:$PATH XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+# The deployment's own token (scope read: models and residency), for these scripts once pairing.required is on;
+# install.sh makes it (delete the file to make a new one). $LOCALROUTER_TOKEN wins when set.
+TOKEN_FILE=${TOKEN_FILE:-$DEPLOY/operator.token}
+lr_token() { if [ -n "${LOCALROUTER_TOKEN:-}" ]; then echo "$LOCALROUTER_TOKEN"; elif [ -r "$TOKEN_FILE" ]; then cat "$TOKEN_FILE"; fi; }
+# curl, with the token when there is one (every route but /health and pairing needs it once pairing.required is on)
+lr_curl() {
+  local t; t=$(lr_token)
+  if [ -n "$t" ]; then curl -H "authorization: Bearer $t" "$@"; else curl "$@"; fi
+}
 die() { echo "$(basename "$0"): $*" >&2; exit 1; }
 mem_gib() { awk '/^MemAvailable:/{printf "%.1f", $2 / 1048576}' /proc/meminfo; }
 # The tailnet URL (https://<name>:<port>), or nothing without tailscale serve.
@@ -29,7 +38,7 @@ wait_warm() {
   t0=$(date +%s)
   ids=$(jq -r '[.tools[] | select(.keep_loaded == true) | .id] | join(" ")' "$DEPLOY/config.json")
   while true; do
-    state=$(curl -fs -m 5 "$URL/v1/tools" | jq -r --arg ids "$ids" \
+    state=$(lr_curl -fs -m 5 "$URL/v1/tools" | jq -r --arg ids "$ids" \
       '[.data[] | select(.id as $i | $ids | split(" ") | index($i)) | "\(.id)=\(.state)"] | join(" ")' 2> /dev/null || true)
     [ -n "$state" ] && [ "$(grep -o '=ready' <<< "$state" | wc -l)" -eq "$(wc -w <<< "$ids")" ] && {
       echo "warm in $(($(date +%s) - t0)) s: $state"; return 0; }

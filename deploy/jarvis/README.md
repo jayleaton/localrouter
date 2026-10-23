@@ -74,14 +74,17 @@ LAN address: nothing would authenticate the requests.
 
 ## Pairing
 
-`tailscale serve` hands every tailnet peer to the daemon as loopback, so by default any tailnet device can open a voice
-session (`/v1/realtime`) or call the MCP tools (`/mcp`). With device pairing on, those two answer only paired devices;
-`/voice`, the other `/v1` routes and `/v1/files` stay as they are. It is off by default.
+`tailscale serve` hands every tailnet peer to the daemon as loopback, so by default any tailnet device can use every
+route: voice (`/v1/realtime`), the MCP tools (`/mcp`), the `/v1` API and its output files. With device pairing on, every
+route but `/health`, pairing and the `/voice` page answers only paired devices, each within its scopes (`inference`,
+`media`, `decisions`, `read`, `manage`; [docs/MCP.md](../../docs/MCP.md#scopes)), and each device sees only its own
+jobs and files. It is off by default.
 
 ```sh
 deploy/jarvis/pair.sh add "JJ's phone"     # a code for the app (XXXX-XXXX, 10 minutes, once) and its localrouter:// link
-deploy/jarvis/pair.sh token claude-code    # a token now, for MCP clients and scripts (printed once)
-deploy/jarvis/pair.sh list                 # id, name, created
+deploy/jarvis/pair.sh token opencode --scopes inference,media,read   # a harness's token (printed once)
+deploy/jarvis/pair.sh token smoke          # no --scopes: every service scope (scripts that check everything)
+deploy/jarvis/pair.sh list                 # id, name, created, scopes
 deploy/jarvis/pair.sh revoke ID|NAME       # refused from the next request
 ```
 
@@ -100,3 +103,6 @@ To turn it on: pair what you use first, then `PAIRING_REQUIRED=1 deploy/jarvis/i
   and `tools/spark/jarvis/model_manager_check.py` send `$LOCALROUTER_TOKEN` when it is set:
   `LOCALROUTER_TOKEN=$(deploy/jarvis/pair.sh token smoke) tools/jarvis/smoke.sh`. `tools/spark/jarvis/client_check.py`
   drives the web page in Chrome and does not set the page's API key: run it with pairing off.
+- **These scripts** (`status.sh`, `start.sh`'s warm wait, `install.sh`'s idle check) read `/v1/tools` with
+  `$DEPLOY/operator.token`, a `read`-only token install.sh makes when pairing is on (delete it to make a new one), or
+  `$LOCALROUTER_TOKEN` when set.

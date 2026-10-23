@@ -5,9 +5,13 @@ on demand, so the first request to a tool waits for it to load. Later requests a
 for its TTL.
 
 Base URL: `http://<host>:8190/v1` (any API key, or none). When the operator turns on device pairing
-(`pairing.required`), `/mcp` and `/v1/realtime` need a paired device's token as `Authorization: Bearer <token>` and
-answer 401 `invalid_api_key` without it; ask the operator for one (`localrouter pair token NAME` on the box). The other
-`/v1` routes take any key, or none, either way.
+(`pairing.required`), every route but `/health` and `/v1/pair` needs a paired device's token as
+`Authorization: Bearer <token>`, with the scope the route needs: `inference` (chat, `/v1/realtime`), `media` (images,
+videos, speech, transcription), `decisions` (`/v1/systemone`), `read` (models, voices, residency) or `manage` (load,
+unload, release). No token is a 401 `invalid_api_key`, a missing scope a 403 naming it; ask the operator for a token with
+what you need (`localrouter pair token NAME --scopes inference,media,read` on the box; `GET /v1/pair` shows yours).
+Your jobs and output files are then yours alone: fetch `/v1/jobs/...` and `/v1/files/...` with the same token. The
+table of scopes and the legacy profile are in [MCP.md](MCP.md#scopes).
 
 By default the daemon listens on `127.0.0.1` only, so `<host>` is `127.0.0.1` on the machine itself. To reach it from
 other machines the operator starts it with `--host tailscale` (the tailnet address; `<host>` is then the machine's
@@ -278,7 +282,8 @@ another response began is refused, and `localrouter.function_call.cancelled` tel
 By default both endpoints answer this machine only (the operator sets `voice.remote` to open them; browsers need HTTPS
 for the microphone off loopback). With pairing on, `/v1/realtime` also needs a token: `Authorization: Bearer`, a
 `Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>` beside `realtime` (the OpenAI browser SDK's), or
-`?api_key=<token>`; without one the upgrade is refused with a 401. Details: `docs/dev/VOICE.md`.
+`?api_key=<token>`, of a device with `inference`; without one the upgrade is refused with a 401 (403 without the
+scope). The session's picture and video tools need `media`, its model tools `manage`. Details: `docs/dev/VOICE.md`.
 
 ## Input URLs
 
@@ -335,7 +340,9 @@ Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
 | Status | Meaning | Do |
 | --- | --- | --- |
 | 400 | Invalid request (size, n, prompt, input images or audio, a capability the model lacks, a model of another kind, a size, step count, voice, speed, preset or audio length the model does not take; a chat request the model's server refuses) | Fix the request |
-| 404 | Unknown model (the message lists the models that can do it) or route | Re-check `GET /models` |
+| 401 `invalid_api_key` | Pairing is required and no paired token came (or it was revoked) | Ask the operator for a token |
+| 403 | Pairing is required and the token lacks the scope this route or tool needs (the message names it) | Ask for that scope |
+| 404 | Unknown model (the message lists the models that can do it) or route; with pairing, a job or file of another device | Re-check `GET /models` |
 | 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority) | Retry later; don't loop |
 | 503 `server_error` | The tool failed to load, its worker or server died, its server is busy, or it is not yet qualified on this machine; the message says which | Retry once; report it if it repeats |
 | 500 `server_error` | The model failed on this request | Report it |

@@ -1,10 +1,13 @@
-//! `localrouter pair`: the devices allowed to open /v1/realtime and /mcp when `pairing.required` is set (`src/pair.zig`),
-//! managed on the box. The data directory is found as `serve` finds it: the config's data_dir, else --data.
-//!   localrouter pair add NAME [--config FILE] [--data DIR] [--url URL]   a code for the app (10 minutes, once); with
-//!                                                                        --url (the address the phone reaches) its link
-//!   localrouter pair token NAME [--config FILE] [--data DIR]             a device made at once: its token, printed once
-//!   localrouter pair list [--config FILE] [--data DIR]                   the devices (never their tokens)
-//!   localrouter pair revoke ID|NAME [--config FILE] [--data DIR]         removes them; the next request is refused
+//! `localrouter pair`: the devices and harnesses allowed to use this LocalRouter when `pairing.required` is set, and
+//! the scopes each holds (`src/pair.zig`), managed on the box. The data directory is found as `serve` finds it: the
+//! config's data_dir, else --data.
+//!   localrouter pair add NAME [--scopes LIST] [--config FILE] [--data DIR] [--url URL]   a code for the app (10
+//!                                                     minutes, once); with --url (the address the phone reaches) its link
+//!   localrouter pair token NAME [--scopes LIST] [--config FILE] [--data DIR]    a device made at once: its token, printed
+//!                                                     once (a harness: --scopes inference,media,read)
+//!   localrouter pair scopes ID|NAME LIST [--config FILE] [--data DIR]           replaces what a device may do
+//!   localrouter pair list [--config FILE] [--data DIR]                          the devices (never their tokens)
+//!   localrouter pair revoke ID|NAME [--config FILE] [--data DIR]                removes them; the next request is refused
 //! The daemon reads the devices file on every check, so none of these needs a restart.
 
 const std = @import("std");
@@ -56,7 +59,7 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
             if (o.url) |u| try out.print("link     localrouter://pair?url={f}&code={s}\n", .{ Percent{ .s = u }, &c.text });
             try out.flush();
         }
-        if (!cfg.pairing.required) std.debug.print("note: pairing.required is off in {s}: /v1/realtime and /mcp still answer every client\n", .{o.config orelse "the default config"});
+        if (!cfg.pairing.required) std.debug.print("note: pairing.required is off in {s}: every route but computer control still answers every client, whatever its scopes\n", .{o.config orelse "the default config"});
         return 0;
     }
     if (eql(verb, "list")) {
@@ -64,7 +67,7 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
         const doc = s.load(io, a) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
         try out.print("{s:<8}  {s:<32}  {s:<20}  {s}\n", .{ "ID", "NAME", "CREATED", "SCOPES" });
         for (doc.devices) |d| {
-            const scopes = if (d.scopes.len == 0) "voice,mcp" else try std.mem.join(a, ",", d.scopes);
+            const scopes = if (d.scopes.len == 0) "voice,mcp (legacy)" else try std.mem.join(a, ",", d.scopes);
             try out.print("{s:<8}  {s:<32}  {s:<20}  {s}\n", .{ d.id, d.name, store.utc(&when, d.created), scopes });
         }
         var live: usize = 0;
@@ -117,16 +120,22 @@ fn fail(comptime f: []const u8, args: anytype) u8 {
 
 pub const usage_text =
     \\usage: localrouter pair add NAME [--scopes LIST] [--config FILE] [--data DIR] [--url URL]   a code for the app (10 minutes, once)
-    \\       localrouter pair token NAME [--scopes LIST] [--config FILE] [--data DIR]             a token now, for MCP clients, scripts and the desktop helper
+    \\       localrouter pair token NAME [--scopes LIST] [--config FILE] [--data DIR]             a token now, for a harness, an MCP client, a script or the desktop helper
     \\       localrouter pair scopes ID|NAME LIST [--config FILE] [--data DIR]                    what a paired device may do
     \\       localrouter pair list [--config FILE] [--data DIR]
     \\       localrouter pair revoke ID|NAME [--config FILE] [--data DIR]
-    \\LIST: comma-separated, of voice, mcp, desktop_helper, computer, approve (none given: voice,mcp).
-    \\  A desktop helper: --scopes desktop_helper. A phone that drives and approves computer tasks: voice,mcp,computer,approve.
+    \\LIST: comma-separated. Service scopes, least privilege for a harness:
+    \\  inference   chat completions and /v1/realtime        media    image, video, speech and transcription
+    \\  decisions   typed decisions (/v1/systemone)          read     models, voices and residency
+    \\  manage      load, unload, reserve and release models
+    \\Computer control: desktop_helper, computer, approve. Legacy: voice (/v1/realtime) and mcp (/mcp), each with every
+    \\service scope; none given is voice,mcp, as every device paired before scopes. A device sees only its own jobs.
+    \\  A coding harness: --scopes inference,media,read. A desktop helper: --scopes desktop_helper.
+    \\  A phone that talks, drives and approves computer tasks: voice,mcp,computer,approve.
     \\
 ;
 
-const scopes_help = "scopes are a comma-separated list of voice, mcp, desktop_helper, computer, approve";
+const scopes_help = "scopes are a comma-separated list of inference, media, decisions, read, manage, desktop_helper, computer, approve (or the legacy voice, mcp)";
 
 fn usageError() u8 {
     std.debug.print(usage_text, .{});

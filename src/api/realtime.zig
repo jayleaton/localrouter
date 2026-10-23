@@ -1,6 +1,7 @@
 //! The voice endpoints (docs/dev/VOICE.md): `GET /v1/realtime`, upgraded to a WebSocket that speaks the OpenAI Realtime
 //! API's events (`voice/session.zig`), and `GET /voice`, the built-in browser client. Both answer loopback peers
-//! only unless `voice.remote` is set; with `pairing.required` the socket also needs a paired device's token (`pair.zig`).
+//! only unless `voice.remote` is set; with `pairing.required` the socket also needs a paired device's token with the
+//! inference scope (or the legacy voice: `pair.zig`), and the session's tools need that device's scopes (`voice_local.zig`).
 
 const std = @import("std");
 const Io = std.Io;
@@ -151,9 +152,8 @@ pub fn offers(offered: []const u8, want: []const u8) bool {
 }
 
 /// GET /v1/realtime: the WebSocket upgrade, then one session until either side closes.
-pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator) !void {
+pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator, caller: pair.Caller) !void {
     if (!allowed(app, conn)) return h.fail(req, a, 403, "invalid_request_error", refused);
-    if (!try pair.admitted(app, req, a, "voice")) return; // refused before the upgrade
     const key = switch (req.upgradeRequested()) {
         .websocket => |k| k orelse return h.fail(req, a, 400, "invalid_request_error", "the WebSocket upgrade has no Sec-WebSocket-Key"),
         else => return h.fail(req, a, 426, "invalid_request_error", "this is a WebSocket endpoint (the OpenAI Realtime API): connect with ws://"),
@@ -178,7 +178,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     defer app.voice.remove(app.io, fd);
     var url_buf: [96]u8 = undefined;
     var local = Local.init(app, host, &url_buf);
-    local.token = token;
+    local.as(token, caller.owner()); // `routes.handle` admitted it (pairing.required: a device with inference or voice)
     var sink: Sink = .{ .c = &c };
     const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, if (model.len > 0) model else Local.defaultChatModel(app)) catch
         return c.close(1011, "could not start the session");

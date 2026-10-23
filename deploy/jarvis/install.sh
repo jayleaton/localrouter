@@ -11,12 +11,13 @@
 #    session is open; until then (and when a check fails) current, the config and the unit stay as they were.
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (sudo; other serve entries are
 #    left as they are). The daemon itself listens on 127.0.0.1 only and nothing binds 0.0.0.0: the tailnet (its ACLs)
-#    is who may connect, and with pairing.required only paired devices open /v1/realtime and /mcp (pair.sh).
+#    is who may connect, and with pairing.required only paired devices, each within its scopes, use it (pair.sh).
 # Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, UNIT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER,
 # DRAMA_PORT).
 # Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), BUILD_ONLY=1 (preflight of the tools and step 2 only: the
 # binary that the models' qualify.sh runs), TOOLS (the tool ids to serve, space separated; default: every tool in
-# config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: /v1/realtime and /mcp need a paired device; 0: not; unset:
+# config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: every route but /health and pairing needs a paired device with
+# the scope it needs, and the scripts get $DEPLOY/operator.token (scope read); 0: not; unset:
 # as the deployed config has it).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -114,6 +115,11 @@ render "$here/config.json.in" | jq --arg t " $TOOLS " --argjson pairing "$pairin
   | if $pairing == {} then . else .pairing = $pairing end' > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
+# with pairing required, these scripts' own token (read only: models and residency, env.sh), made once
+if jq -e '.pairing.required == true' "$DEPLOY/config.json.new" > /dev/null && [ ! -s "$TOKEN_FILE" ]; then
+  (umask 077 && "$src/zig-out/bin/localrouter" pair token jarvis-operator --scopes read --data "$DEPLOY/data" > "$TOKEN_FILE.tmp") &&
+    mv "$TOKEN_FILE.tmp" "$TOKEN_FILE" || die "could not make the operator token ($TOKEN_FILE)"
+fi
 mkdir -p "$HOME/.config/systemd/user"
 render "$here/localrouter-jarvis.service.in" > "$DEPLOY/$UNIT.service.new"
 ! grep -q '@[A-Z_]*@' "$DEPLOY/$UNIT.service.new" || die "unrendered placeholders in the unit"
@@ -130,7 +136,7 @@ if [ $running = 1 ]; then
   # to the daemon's port), IDLE_WAIT_S at most (default 1800; FORCE_RESTART=1 skips the wait)
   t0=$(date +%s)
   while [ "${FORCE_RESTART:-0}" != 1 ]; do
-    n=$(curl -fs -m 5 "$URL/v1/tools" | jq -r '.voice_sessions // empty' 2> /dev/null || true)
+    n=$(lr_curl -fs -m 5 "$URL/v1/tools" | jq -r '.voice_sessions // empty' 2> /dev/null || true)
     [ -n "$n" ] || n=$(ss -Htn state established "( sport = :$PORT )" 2> /dev/null | wc -l)
     [ "$n" = 0 ] && break
     [ $(($(date +%s) - t0)) -lt "${IDLE_WAIT_S:-1800}" ] ||

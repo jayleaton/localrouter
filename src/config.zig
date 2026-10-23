@@ -49,7 +49,7 @@ pub fn laneOf(t: *const ToolConfig) Lane {
 pub const Voice = struct {
     remote: bool = false, // serve /voice and /v1/realtime to non-loopback peers too
     chat_url: []const u8 = "", // an OpenAI-compatible base URL ending in /v1; "": this daemon
-    chat_api_key: []const u8 = "", // sent as a bearer token to chat_url
+    chat_api_key: []const u8 = "", // sent as a bearer token to chat_url (with chat_url unset: the session's own token)
     chat_model: []const u8 = "", // "": this daemon's chat_completion default (with chat_url unset), else the server's
     chat_extra: ?std.json.Value = null, // members added to every chat request, e.g. {"chat_template_kwargs": {"enable_thinking": false}}
     speech_model: []const u8 = "", // "": the first of speech_models that is configured and qualified
@@ -78,8 +78,9 @@ pub const Voice = struct {
 
 /// Device pairing (src/pair.zig): off by default, so every client that reaches the daemon may use it, as before.
 pub const Pairing = struct {
-    required: bool = false, // /v1/realtime and /mcp answer only paired devices (`localrouter pair`); no loopback exemption:
-    // behind `tailscale serve` every peer arrives as loopback
+    required: bool = false, // every route but /health, /v1/pair and /voice answers only paired devices, each within its
+    // scopes (`localrouter pair`, src/pair.zig); no loopback exemption: behind `tailscale serve` every peer arrives as
+    // loopback
 };
 
 /// Computer control (docs/dev/COMPUTER.md): Jarvis using a paired desktop helper's computer. Its routes need device

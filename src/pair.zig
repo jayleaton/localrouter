@@ -1,6 +1,6 @@
-//! Device pairing (`pairing.required`): the devices that may open /v1/realtime and /mcp, and the one-time codes that
-//! pair a new one. They live in `<data_dir>/devices.json` (0600), read again on every check so a revoke from the CLI
-//! takes effect on the next request:
+//! Device pairing (`pairing.required`): the devices and harnesses that may use LocalRouter, what each may do (its
+//! scopes, `Device`), and the one-time codes that pair a new one. They live in `<data_dir>/devices.json` (0600), read
+//! again on every check so a revoke or a scope change from the CLI takes effect on the next request:
 //!   {"devices":[{"id":"8 hex","name":"JJ's phone","token_sha256":"hex","created":unix_s}],
 //!    "pending":[{"code_sha256":"hex","name":"JJ's phone","expires":unix_s}]}
 //! Only SHA-256 hashes are kept: a token (32 random bytes, base64url without padding: 43 characters, valid as a
@@ -18,9 +18,14 @@ pub const max_name_len = 64;
 pub const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const token_len = 43;
 
-/// `scopes`: what the device may do. None listed (every device paired before scopes existed) is `voice` and `mcp`;
-/// a list names each scope it grants: `voice` (/v1/realtime), `mcp` (/mcp), and computer control's `desktop_helper`,
-/// `computer` and `approve` (docs/dev/COMPUTER.md).
+/// `scopes`: what the device may do. None listed (every device paired before scopes existed) is `voice` and `mcp`.
+/// The service scopes a harness is issued, least privilege: `inference` (chat completions and /v1/realtime), `media`
+/// (image, video, speech and transcription), `decisions` (typed decisions), `read` (models, voices, residency) and
+/// `manage` (load, unload, reserve and release models). Computer control's `desktop_helper`, `computer` and `approve`
+/// (docs/dev/COMPUTER.md) grant only themselves. The legacy scopes keep what they always reached: `voice` opens
+/// /v1/realtime, `mcp` opens /mcp, and either grants every service scope (before service scopes the /v1 routes answered
+/// anyone, and /mcp offered every tool); narrowing such a device means re-issuing its scopes. `Need` and `grants` say
+/// which scopes satisfy what.
 pub const Device = struct {
     id: []const u8,
     name: []const u8,
@@ -28,16 +33,67 @@ pub const Device = struct {
     created: i64,
     scopes: []const []const u8 = &.{},
 
+    /// Whether the device holds `scope` itself (none listed: `voice` and `mcp`); `grants` is what a request needs.
     pub fn allows(d: Device, scope: []const u8) bool {
         if (d.scopes.len == 0) return std.mem.eql(u8, scope, "voice") or std.mem.eql(u8, scope, "mcp");
         for (d.scopes) |x| if (std.mem.eql(u8, x, scope)) return true;
         return false;
     }
+
+    /// Whether the device's scopes satisfy `n`.
+    pub fn grants(d: Device, n: Need) bool {
+        const legacy = d.allows("voice") or d.allows("mcp");
+        return switch (n) {
+            .realtime => d.allows("voice") or d.allows("inference"),
+            .owned => true,
+            .mcp => d.allows("mcp") or d.anyService(),
+            .inference, .media, .decisions, .read, .manage => legacy or d.allows(@tagName(n)),
+        };
+    }
+
+    fn anyService(d: Device) bool {
+        for (service_scopes) |s| if (d.allows(s)) return true;
+        return false;
+    }
 };
+
+/// What a request needs from the device behind its token (when pairing is required).
+pub const Need = enum {
+    inference, // POST /v1/chat/completions, MCP chat
+    media, // images, videos, speech and transcription, over HTTP, MCP and a voice session's tools
+    decisions, // POST /v1/systemone, MCP decide
+    read, // /v1/models, /v1/tools, list_models, list_voices; also any of its own jobs
+    manage, // POST /v1/tools/..., load_model, unload_model, reserve_for, release_models, a voice session's model tools
+    realtime, // /v1/realtime: `inference` (or the legacy `voice`)
+    mcp, // /mcp itself: the legacy `mcp` or any service scope; each tool then needs its own
+    owned, // a job's state, outputs and files: any paired device, and the job must be its own (api/pair.zig `Caller.sees`)
+
+    /// The scopes that satisfy it, for a refusal.
+    pub fn scopes(n: Need) []const u8 {
+        return switch (n) {
+            .realtime => "inference",
+            .owned => "any",
+            .mcp => "inference, media, decisions, read or manage",
+            else => @tagName(n),
+        };
+    }
+};
+
+/// The scope a job's kind falls under: its owner may read it with that scope or `read`.
+pub fn jobNeed(kind: @import("tool/request.zig").Kind) Need {
+    return switch (kind) {
+        .chat => .inference,
+        .decision => .decisions,
+        .image, .video, .speech, .transcription => .media,
+    };
+}
+
 pub const Pending = struct { code_sha256: []const u8, name: []const u8, expires: i64, scopes: []const []const u8 = &.{} };
 
-/// Every scope a device may be given.
-pub const scope_names = [_][]const u8{ "voice", "mcp", "desktop_helper", "computer", "approve" };
+/// The least-privilege scopes for a harness.
+pub const service_scopes = [_][]const u8{ "inference", "media", "decisions", "read", "manage" };
+/// Every scope a device may be given: the service scopes, computer control's, and the legacy `voice` and `mcp`.
+pub const scope_names = service_scopes ++ [_][]const u8{ "voice", "mcp", "desktop_helper", "computer", "approve" };
 
 /// `voice,mcp,computer` as a list in `a`; null when a name is not one of `scope_names` or the list is empty.
 pub fn parseScopes(a: std.mem.Allocator, text: []const u8) !?[]const []const u8 {
@@ -441,4 +497,46 @@ test "scopes: none is voice and mcp; a list grants only what it names; codes and
     try testing.expect((try s.verify(io, a, &old.token)).?.allows("computer"));
     try testing.expect(try parseScopes(a, "voice,root") == null);
     try testing.expect(try parseScopes(a, " , ") == null);
+}
+
+test "service scopes: each grants only its own; the legacy profile keeps everything it reached; manage is its own" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dev = struct {
+        fn of(scopes: []const []const u8) Device {
+            return .{ .id = "1", .name = "x", .token_sha256 = "", .created = 0, .scopes = scopes };
+        }
+    }.of;
+    const service = [_]Need{ .inference, .media, .decisions, .read, .manage };
+    // Before scopes, `voice` alone and `mcp` alone: every service scope; /v1/realtime only with voice, /mcp only with mcp.
+    const legacy = [_]struct { d: Device, realtime: bool, mcp: bool }{
+        .{ .d = dev(&.{}), .realtime = true, .mcp = true },
+        .{ .d = dev(&.{"voice"}), .realtime = true, .mcp = false },
+        .{ .d = dev(&.{"mcp"}), .realtime = false, .mcp = true },
+        .{ .d = dev(&.{ "voice", "mcp", "computer", "approve" }), .realtime = true, .mcp = true },
+    };
+    for (legacy) |l| {
+        for (service) |n| try testing.expect(l.d.grants(n));
+        try testing.expectEqual(l.realtime, l.d.grants(.realtime));
+        try testing.expectEqual(l.mcp, l.d.grants(.mcp));
+    }
+    // Computer control's scopes grant no service.
+    for ([_][]const u8{ "desktop_helper", "computer", "approve" }) |s| {
+        const one = [_][]const u8{s};
+        const d = dev(&one);
+        for (std.enums.values(Need)) |n| try testing.expectEqual(n == .owned, d.grants(n));
+    }
+    // A service scope grants itself and /mcp; only inference opens /v1/realtime; nothing else implies manage.
+    for (service_scopes, service) |s, own| {
+        const one = [_][]const u8{s};
+        const d = dev(&one);
+        for (service) |n| try testing.expectEqual(n == own, d.grants(n));
+        try testing.expect(d.grants(.mcp));
+        try testing.expectEqual(own == .inference, d.grants(.realtime));
+    }
+    try testing.expect(!dev((try parseScopes(a, "inference,media,decisions,read")).?).grants(.manage));
+    try testing.expectEqual(Need.media, jobNeed(.speech));
+    try testing.expectEqual(Need.inference, jobNeed(.chat));
+    try testing.expectEqual(Need.decisions, jobNeed(.decision));
 }

@@ -15,6 +15,7 @@ pub const Job = struct {
     request: Request,
     dir: []const u8,
     created_at: i64,
+    owner: []const u8 = "", // the paired device that asked for it (its id), or "" (pairing off, or the daemon itself)
     // Below: written by the scheduler under `Table.mutex`, read by the API under it.
     status: Status = .queued,
     percent: u8 = 0,
@@ -59,8 +60,9 @@ pub const Table = struct {
         t.map.deinit(t.gpa);
     }
 
-    /// A new job whose request is copied into its own arena; `dir` is `<jobs_dir>/<id>`, created here.
-    pub fn create(t: *Table, io: Io, jobs_dir: []const u8, tool_index: usize, req: Request, now: i64) !*Job {
+    /// A new job for `owner` (a device id, or "") whose request is copied into its own arena; `dir` is
+    /// `<jobs_dir>/<id>`, created here.
+    pub fn create(t: *Table, io: Io, jobs_dir: []const u8, tool_index: usize, req: Request, owner: []const u8, now: i64) !*Job {
         const j = try t.gpa.create(Job);
         errdefer t.gpa.destroy(j);
         j.* = .{ .arena = .init(t.gpa), .id = "", .tool = tool_index, .request = undefined, .dir = "", .created_at = now };
@@ -78,6 +80,7 @@ pub const Table = struct {
         };
         j.id = try std.fmt.allocPrint(a, "{s}_{x}", .{ prefix, std.mem.readInt(u64, &rnd, .little) });
         j.request = try dupeRequest(a, req);
+        j.owner = try a.dupe(u8, owner);
         j.dir = try std.fs.path.join(a, &.{ jobs_dir, j.id });
         try Io.Dir.cwd().createDirPath(io, j.dir);
         try t.mutex.lock(io);

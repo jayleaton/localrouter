@@ -15,28 +15,56 @@ and read audio files under the directories listed in `local_files`. Keep it on l
 your tailnet (`--host tailscale`, or `tailscale serve` as `deploy/jarvis/install.sh` sets up), where the tailnet's ACLs
 decide who connects. Never bind it to `0.0.0.0` or a LAN address, and never put it behind a public reverse proxy.
 
-To narrow that to your own devices, set `"pairing": {"required": true}` in the config. `/mcp` and `/v1/realtime` then
-answer only a paired device's token and refuse everything else with HTTP 401 (`invalid_api_key`,
-`WWW-Authenticate: Bearer`) before reading the request. There is no loopback exemption: behind `tailscale serve` every
-peer arrives as loopback. Nothing else changes: `/voice`, the other `/v1` HTTP routes and `/v1/files` stay open to
-whoever reaches the daemon. Tokens are made on the box:
+To narrow that to your own devices and harnesses, set `"pairing": {"required": true}` in the config. Every route but
+`/health`, pairing itself (`/v1/pair`) and the `/voice` page then answers only a paired device's token, and only for
+what its scopes allow: no token (or a revoked one) is HTTP 401 (`invalid_api_key`, `WWW-Authenticate: Bearer`), a
+token without the scope 403, both before the request is read. That holds for HTTP, the `/v1/realtime` socket and `/mcp`
+alike. There is no loopback exemption: behind `tailscale serve` every peer arrives as loopback. Tokens are made on the
+box:
 
 ```sh
-localrouter pair token claude-code --config FILE   # prints a token once, for an MCP client or a script
+localrouter pair token opencode --scopes inference,media,read --config FILE   # a harness: prints a token once
 localrouter pair add "JJ's phone" --config FILE    # a code (XXXX-XXXX, 10 minutes, once) for the app: POST /v1/pair
 localrouter pair list --config FILE                # id, name, created, scopes (never tokens)
-localrouter pair scopes ID|NAME voice,mcp,computer --config FILE   # what a device may do
+localrouter pair scopes ID|NAME inference,read --config FILE   # replaces what a device may do
 localrouter pair revoke ID|NAME --config FILE      # refused from the next request, no restart
 ```
 
-A device's scopes say what it may do: `voice` (/v1/realtime), `mcp` (/mcp), and computer control's `desktop_helper`,
-`computer` and `approve` ([dev/COMPUTER.md](dev/COMPUTER.md)); `--scopes LIST` on `add` or `token` sets them. A device
-with none listed has `voice` and `mcp`, so devices paired before scopes keep working.
+### Scopes
 
-On the Jarvis box use `deploy/jarvis/pair.sh token claude-code` (the deployed config and data). Only hashes of the
-tokens are kept, in `<data_dir>/devices.json` (0600). A token goes in `Authorization: Bearer <token>`; for
-`/v1/realtime` it may also be a `Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>` (the OpenAI browser
-SDK's) or `?api_key=<token>`.
+Issue a harness the least it needs (`--scopes LIST` on `token` or `add`; `GET /v1/pair` shows a token's own):
+
+| Scope | HTTP | MCP tools | Voice session (`/v1/realtime`) |
+| --- | --- | --- | --- |
+| `inference` | `POST /v1/chat/completions` | `chat` | opens the socket (its speech in and out is part of it) |
+| `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture and video tools |
+| `decisions` | `POST /v1/systemone` | `decide` | |
+| `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager` | `list_models`, `list_voices` | `list_models` |
+| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release` | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
+
+Any of these opens `/mcp`, whose `tools/list` then shows only the tools the token may call; a tool outside its scopes
+is a tool error naming the scope. Changing which models are loaded always needs `manage`: no other scope implies it.
+
+**Jobs and files are their device's own.** A job (an image, a video, speech, a transcript, a completion, a decision)
+belongs to the device whose token asked for it, over HTTP, MCP or a voice session. `GET /v1/jobs/{id}`,
+`/v1/videos/{id}` (and its `DELETE`), `/v1/files/{id}/...`, `get_job` and `cancel_job` answer only that device (with
+`read` or the job's own scope); any other token gets 404, as for a job that does not exist. Fetch an output URL with
+the same `Authorization` header. Jobs the daemon makes for itself are nobody's.
+
+**Computer control** keeps its own scopes, checked whether or not pairing is required: `desktop_helper`, `computer` and
+`approve` ([dev/COMPUTER.md](dev/COMPUTER.md)). They grant no service scope.
+
+**Legacy tokens keep working unchanged.** A device paired before service scopes holds `voice` and `mcp` (or one of
+them, or either beside computer control's). `voice` opens `/v1/realtime`, `mcp` opens `/mcp`, and either grants every
+service scope above, because before service scopes the other routes answered anyone and `/mcp` offered every tool.
+Such a device is not narrowed silently: to give it less, re-issue its scopes (`localrouter pair scopes NAME LIST`) or
+pair a new token. With pairing off (the default) scopes are not checked at all, except computer control's.
+
+On the Jarvis box use `deploy/jarvis/pair.sh token claude-code --scopes inference,media,read` (the deployed config and
+data). Only hashes of the tokens are kept, in `<data_dir>/devices.json` (0600). A token goes in
+`Authorization: Bearer <token>`; for `/v1/realtime` it may also be a `Sec-WebSocket-Protocol` entry
+`openai-insecure-api-key.<token>` (the OpenAI browser SDK's) or `?api_key=<token>`. Keep it in the harness's secret
+store, never in a URL you share: an MCP client that cannot send headers uses the stdio bridge (`--token`).
 
 ## Connect
 

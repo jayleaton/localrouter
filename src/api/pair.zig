@@ -1,14 +1,16 @@
 //! Device pairing over HTTP (the devices themselves: `src/pair.zig`). `POST /v1/pair` trades a one-time code for a
 //! token and `GET /v1/pair` says whether the token presented is paired; both are served whether or not pairing is
-//! required, so a client can pair ahead of it. With `pairing.required`, `admitted` gates /v1/realtime and /mcp (and
-//! nothing else). A token comes as `Authorization: Bearer <token>`, as a `Sec-WebSocket-Protocol` entry
-//! `openai-insecure-api-key.<token>` (the OpenAI browser SDK's), or as `?api_key=<token>` (the built-in page's).
+//! required, so a client can pair ahead of it. With `pairing.required`, `admit` gates every other route on the scope
+//! it needs (`routes.need`), MCP tools and a voice session's tools check theirs per call, and `Caller.sees` keeps each
+//! device to its own jobs and files. A token comes as `Authorization: Bearer <token>`, as a `Sec-WebSocket-Protocol`
+//! entry `openai-insecure-api-key.<token>` (the OpenAI browser SDK's), or as `?api_key=<token>` (the built-in page's).
 
 const std = @import("std");
 const h = @import("http.zig");
 const routes = @import("routes.zig");
 const store = @import("../pair.zig");
 const realtime = @import("realtime.zig");
+const jobs = @import("../sched/jobs.zig");
 
 const App = routes.App;
 const key_protocol = "openai-insecure-api-key.";
@@ -59,28 +61,63 @@ pub fn deviceOf(app: *App, a: std.mem.Allocator, t: []const u8) ?store.Device {
     };
 }
 
-/// True when the request may go on: pairing is off, or it presents a paired device's token whose scopes include
-/// `scope` (`voice` for /v1/realtime, `mcp` for /mcp). Otherwise the 401 is already sent. Call it before reading the
-/// body or upgrading.
-pub fn admitted(app: *App, req: *h.Request, a: std.mem.Allocator, scope: []const u8) !bool {
-    if (!app.cfg.pairing.required) return true;
-    if (device(app, req, a)) |d| {
-        if (d.allows(scope)) return true;
-        try h.fail(req, a, 403, "invalid_request_error", try std.fmt.allocPrint(a, "this device's token does not have the {s} scope: on the box, `localrouter pair scopes NAME ...` adds it", .{scope}));
-        return false;
+/// Who is asking, as far as the scopes go: with pairing off, anyone (every scope, every job); with it required, the
+/// paired device behind the request's token.
+pub const Caller = struct {
+    required: bool = false,
+    device: ?store.Device = null, // set only when pairing is required
+
+    /// The owner its jobs get: the device's id, or "" with pairing off.
+    pub fn owner(c: Caller) []const u8 {
+        return if (c.device) |d| d.id else "";
     }
-    try h.failWith(req, a, 401, "invalid_request_error", "invalid_api_key", "this device is not paired with this LocalRouter: on the box run `localrouter pair add NAME` and enter the code in the app (or `localrouter pair token NAME` for a client that takes a token), then send the token as Authorization: Bearer", &.{.{ .name = "www-authenticate", .value = "Bearer" }});
-    return false;
+
+    pub fn may(c: Caller, n: store.Need) bool {
+        if (!c.required) return true;
+        const d = c.device orelse return false;
+        return d.grants(n);
+    }
+
+    /// Whether it may see job `j` (its state, outputs and files) or cancel it: with pairing required, only the device
+    /// that asked for it, with `read` or the job's own scope. A job of the daemon's own (no owner) is nobody's.
+    pub fn sees(c: Caller, j: *const jobs.Job) bool {
+        if (!c.required) return true;
+        const d = c.device orelse return false;
+        return j.owner.len > 0 and std.mem.eql(u8, j.owner, d.id) and (d.grants(.read) or d.grants(store.jobNeed(j.kind())));
+    }
+};
+
+/// The caller when the request may go on: pairing is off, or it presents a paired device's token whose scopes satisfy
+/// `need`. Otherwise null, with the 401 (no or an unknown token) or 403 (a scope missing) already sent. Call it before
+/// reading the body or upgrading.
+pub fn admit(app: *App, req: *h.Request, a: std.mem.Allocator, need: store.Need) !?Caller {
+    if (!app.cfg.pairing.required) return .{};
+    if (device(app, req, a)) |d| {
+        if (d.grants(need)) return .{ .required = true, .device = d };
+        try h.fail(req, a, 403, "invalid_request_error", try std.fmt.allocPrint(a, "this device's token does not have the {s} scope: on the box, `localrouter pair scopes NAME ...` adds it", .{need.scopes()}));
+        return null;
+    }
+    try h.failWith(req, a, 401, "invalid_request_error", "invalid_api_key", "this device is not paired with this LocalRouter: on the box run `localrouter pair add NAME` and enter the code in the app (or `localrouter pair token NAME --scopes ...` for a harness or client that takes a token), then send the token as Authorization: Bearer", &.{.{ .name = "www-authenticate", .value = "Bearer" }});
+    return null;
 }
 
-/// GET /v1/pair: {"required", "paired", "device": {"id", "name"} or null}, for whatever token is presented.
+/// The caller behind token `t` now, for a long-lived connection (a voice session) checking each action: a revoke or a
+/// scope change counts at once. Null when pairing is required and `t` is no longer a paired device's.
+pub fn callerOf(app: *App, a: std.mem.Allocator, t: []const u8) ?Caller {
+    if (!app.cfg.pairing.required) return .{};
+    return .{ .required = true, .device = deviceOf(app, a, t) orelse return null };
+}
+
+/// GET /v1/pair: {"required", "paired", "device": {"id", "name", "scopes"} or null}, for whatever token is presented
+/// (`scopes` as the device holds them; a device paired before scopes holds `voice` and `mcp`).
 pub fn status(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Dev = struct { id: []const u8, name: []const u8 };
+    const Dev = struct { id: []const u8, name: []const u8, scopes: []const []const u8 };
     const d = device(app, req, a);
+    const legacy = [_][]const u8{ "voice", "mcp" };
     const text = try std.json.Stringify.valueAlloc(a, .{
         .required = app.cfg.pairing.required,
         .paired = d != null,
-        .device = if (d) |x| @as(?Dev, .{ .id = x.id, .name = x.name }) else null,
+        .device = if (d) |x| @as(?Dev, .{ .id = x.id, .name = x.name, .scopes = if (x.scopes.len > 0) x.scopes else &legacy }) else null,
     }, .{});
     try h.json(req, .ok, text);
 }
