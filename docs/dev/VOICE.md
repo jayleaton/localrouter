@@ -326,8 +326,14 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     | the whole text first | 0/10 | 4.69 s |
   - So no lossless client or session choice removes the stutter within about 1.2 s. Cancelling the chat stream and
     resuming it later is not lossless either: 0 of 6 greedy replies came back the same.
-  - The structural fix is GPU priority for speech over chat decoding, such as CUDA MPS client priority or capping the
-    chat process's share. That is a host-wide change, left to the deployment.
+  - CUDA MPS with the chat server at client priority 1 (below speech) does not help on DGX-01 (GB10). Measured with
+    `ct_probe` (one 10.6 s seeded speech request while a greedy chat request decodes, 3 trials each): speech came at
+    0.62 to 0.63x real time without MPS and at 0.62x with it (1.45x alone), with the same chat and speech output bytes.
+    Both decoders are bound by the shared memory bandwidth, which client priority does not divide. Not shipped.
+  - **The start cushion is measured.** 200 ms in hand covers pieces coming late. Once a reply has 1 s of audio in, the
+    page keeps how far its first second came behind a playhead started on its first piece (network and GPU jitter as
+    the page sees them). The next reply on a free GPU starts with that x 1.25 + 25 ms in hand, kept between 100 and
+    200 ms. A slow reply, chat still decoding for example, measures a large lag, and the next reply keeps 200 ms.
 
 **Voice picker.**
 - The voices are exactly what `/v1/models` lists for the speech model in use (names, or `{id, name, description,

@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, lastLag: null,textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1810,6 +1810,7 @@ function connect(my) {
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
     for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'got']) V[k].clear();
     V.holding = null;
+    V.lastLag = null; // the network may have changed with the connection
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
     checkPage(); // a tab left open across a deploy hears of it as a call starts, or reconnects to the new daemon
@@ -2010,9 +2011,14 @@ function bargeIn(cancel) {
 // - or all of the reply's speech is in (localrouter.response.speech_done);
 // - and never more than HOLD_CAP_MS after the first piece.
 // A short reply on a free GPU is written before its first audio comes and starts as soon as it would have.
+// START_MS is a cushion for pieces coming late. Once a reply has shown how late its first LAG_SPAN_MS came (lastLag:
+// network and GPU jitter as this page sees them), the next one keeps that, with MARGIN and LAG_PAD_MS, between
+// MIN_START_MS and START_MS.
 const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000, MS_PER_CHAR = 65, MARGIN = 1.25;
+const MIN_START_MS = 100, LAG_SPAN_MS = 1000, LAG_PAD_MS = 25;
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
-const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
+const startMs = () => S.startMs ?? (generating() ? GEN_START_MS
+  : V.lastLag == null ? START_MS : Math.min(START_MS, Math.max(MIN_START_MS, V.lastLag * MARGIN + LAG_PAD_MS)));
 function decode(b64) {
   const bytes = fromB64(b64);
   const n = bytes.length >> 1;
@@ -2034,7 +2040,9 @@ function play(item, b64) {
   const piece = decode(b64);
   if (!piece) return;
   if (V.rec) V.rec.arrivals.push([Math.round(performance.now()), item, piece.buf.length]);
-  const got = V.got.get(item) || V.got.set(item, { first: performance.now(), ms: 0, firstMs: piece.buf.duration * 1000 }).get(item);
+  const got = V.got.get(item) || V.got.set(item, { first: performance.now(), ms: 0, firstMs: piece.buf.duration * 1000, lag: 0 }).get(item);
+  // How far this piece came behind a playhead started on the first piece: the start cushion that would have covered it.
+  if (got.ms < LAG_SPAN_MS) got.lag = Math.max(got.lag, performance.now() - got.first - got.ms);
   got.ms += piece.buf.duration * 1000;
   if (V.started.has(item)) return schedule(item, piece);
   if (!V.held.some(p => p.item === item)) V.firstAt.set(item, performance.now());
@@ -2058,7 +2066,7 @@ function startOrWait(item) {
   const rate = arrivalRate(item) ?? (V.textDone.has(item) && !generating() && V.lastRate >= KEEP_UP ? V.lastRate : null);
   const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
   if (ready || since >= HOLD_CAP_MS) {
-    if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
+    if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item), start_ms: Math.round(startMs()) });
     return release(item, 0.01);
   }
   if (rate != null && V.holding !== item) {
@@ -2423,6 +2431,7 @@ function handle(ev) {
       // How fast this reply's speech came (all of it is in now): the next written reply's start can trust it.
       const g = V.got.get(ev.item_id), span = g && performance.now() - g.first;
       if (g && span > 300) V.lastRate = (g.ms - g.firstMs) / span;
+      if (g && g.ms >= LAG_SPAN_MS) V.lastLag = g.lag;
       V.got.delete(ev.item_id);
       startOrWait(ev.item_id);
       break;
