@@ -41,16 +41,18 @@ pub const Item = struct {
 
 pub const Task = union(enum) {
     partial: Hearing,
+    early: Hearing, // the turn so far, transcribed while the speaker is quiet (see Session.early)
     final: Hearing,
     respond: Ask,
     warm: void, // a throwaway transcription of silence: speech started after the STT model sat idle
 
-    pub const Hearing = struct { item_id: []u8, pcm: []i16 };
+    /// key: session ms where the quiet the early transcript was made in began (a final with the same key may reuse it).
+    pub const Hearing = struct { item_id: []u8, pcm: []i16, key: u64 = 0 };
     pub const Ask = struct { auto: bool, instructions: ?[]u8 = null, audio: ?bool = null };
 
     pub fn free(t: Task, gpa: std.mem.Allocator) void {
         switch (t) {
-            .partial, .final => |h| {
+            .partial, .early, .final => |h| {
                 gpa.free(h.item_id);
                 gpa.free(h.pcm);
             },
@@ -61,6 +63,20 @@ pub const Task = union(enum) {
 };
 
 const Turn = struct { item_id: []u8, start_ms: u64, partial_ms: u64 };
+
+pub const Early = struct {
+    item_id: []u8,
+    key: u64,
+    text: ?[]u8 = null,
+    start_ns: i96 = 0,
+    end_ns: i96 = 0,
+    worker_ms: u64 = 0,
+
+    fn free(e: Early, gpa: std.mem.Allocator) void {
+        gpa.free(e.item_id);
+        if (e.text) |t| gpa.free(t);
+    }
+};
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -98,6 +114,10 @@ pub const Session = struct {
     primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
     priming: bool = false,
     speech_end_ns: i96 = 0, // the last spoken turn's quiet began (awake clock), for its response's timing
+    // The turn so far, transcribed once the speaker has been quiet for voice.early_stt_ms: while they stay quiet it is the
+    // whole turn, so when the wait ends the transcript is ready and only the answer is left. It is only the turn's words:
+    // nothing considers them before the wait ends.
+    early: ?Early = null,
     language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
     language_len: usize = 0,
 
@@ -143,6 +163,7 @@ pub const Session = struct {
         s.items.deinit(s.gpa);
         s.input.deinit(s.gpa);
         if (s.turn) |t| s.gpa.free(t.item_id);
+        s.dropEarly();
         s.settings_arena.deinit();
         s.gpa.free(s.id);
         s.gpa.destroy(s);
@@ -179,6 +200,7 @@ pub const Session = struct {
             s.input.clearRetainingCapacity();
             s.input_start_ms = s.nowMs();
             s.endTurn();
+            s.dropEarly();
             if (s.detector) |*d| d.reset();
             return s.emit.send(a, "input_audio_buffer.cleared", .{});
         }
@@ -223,7 +245,7 @@ pub const Session = struct {
     }
 
     fn resetDetector(s: *Session) void {
-        s.detector = if (s.settings.vad) |c| vad.Vad.init(c, rate) else null;
+        s.detector = if (s.settings.vad) |c| vad.Vad.init(withPause(c, s.voice.early_stt_ms), rate) else null;
         s.detector_ms = s.nowMs();
     }
 
@@ -249,7 +271,7 @@ pub const Session = struct {
         try s.detector.?.feed(a, pcm, &evs);
         for (evs.items) |e| switch (e.kind) {
             .speech_started => try s.speechStarted(a, s.detector_ms + e.ms),
-            .speech_paused => {}, // not asked for (pause_ms 0): nothing happens before the turn ends
+            .speech_paused => try s.speechPaused(s.detector_ms + e.ms),
             .speech_stopped => try s.speechStopped(a, s.detector_ms + e.ms),
         };
         if (s.turn == null and !s.detector.?.speaking()) s.trimSilence();
@@ -318,9 +340,57 @@ pub const Session = struct {
         s.stop_ns = s.clock();
         const silence = if (s.detector) |v| v.silenceMs() else 0;
         s.speech_end_ns = s.stop_ns - @as(i96, @intCast(@min(silence, ms))) * std.time.ns_per_ms;
-        try s.commit(a, t.item_id, t.start_ms, ms);
+        try s.commit(a, t.item_id, t.start_ms, ms, ms -| silence);
         s.endTurn();
         if (s.settings.create_response) try s.push(.{ .respond = .{ .auto = true } });
+    }
+
+    /// The speaker has been quiet since `ms` (for voice.early_stt_ms): the turn so far is transcribed on the worker.
+    fn speechPaused(s: *Session, ms: u64) !void {
+        const t = s.turn orelse return;
+        s.dropEarly();
+        const pcm = try s.gpa.dupe(i16, s.span(t.start_ms, s.nowMs()));
+        errdefer s.gpa.free(pcm);
+        const id = try s.gpa.dupe(u8, t.item_id);
+        errdefer s.gpa.free(id);
+        const mine = try s.gpa.dupe(u8, t.item_id);
+        errdefer s.gpa.free(mine);
+        try s.push(.{ .early = .{ .item_id = id, .pcm = pcm, .key = ms } });
+        s.early = .{ .item_id = mine, .key = ms };
+    }
+
+    /// Under the lock, for the worker: whether early task `h` is still the one to make (the speaker has not gone on).
+    pub fn earlyWanted(s: *const Session, h: Task.Hearing) bool {
+        const e = s.early orelse return false;
+        return e.key == h.key and eql(e.item_id, h.item_id);
+    }
+
+    /// Under the lock, for the worker: early task `h`'s transcript.
+    pub fn earlyDone(s: *Session, h: Task.Hearing, text: []const u8, began: i96, worker_ms: u64) void {
+        if (!s.earlyWanted(h)) return;
+        const e = &s.early.?;
+        e.text = s.gpa.dupe(u8, text) catch return;
+        e.start_ns = began;
+        e.end_ns = s.clock();
+        e.worker_ms = worker_ms;
+    }
+
+    /// Under the lock, for the worker: final task `h`'s transcript, if the early one is of the same audio (nobody spoke
+    /// after its quiet began), copied into `a`; null to transcribe the turn now.
+    pub fn reuseEarly(s: *Session, a: std.mem.Allocator, h: Task.Hearing) ?[]const u8 {
+        const e = s.early orelse return null;
+        if (e.key != h.key or !eql(e.item_id, h.item_id)) return null;
+        defer s.dropEarly();
+        const text = a.dupe(u8, e.text orelse return null) catch return null;
+        s.stt_start_ns = e.start_ns;
+        s.stt_end_ns = e.end_ns;
+        s.stt_worker_ms = e.worker_ms;
+        return text;
+    }
+
+    fn dropEarly(s: *Session) void {
+        if (s.early) |e| e.free(s.gpa);
+        s.early = null;
     }
 
     /// The language to transcribe in when the session sets none: the one the last transcript was in.
@@ -346,11 +416,12 @@ pub const Session = struct {
         defer s.gpa.free(id);
         s.endTurn();
         if (s.detector) |*d| d.reset();
-        try s.commit(a, id, from, s.nowMs());
+        s.dropEarly();
+        try s.commit(a, id, from, s.nowMs(), 0);
     }
 
     /// The turn [from_ms, to_ms) becomes a user item, transcribed whole on the worker.
-    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64) !void {
+    fn commit(s: *Session, a: std.mem.Allocator, item_id: []const u8, from_ms: u64, to_ms: u64, quiet_from: u64) !void {
         const pcm = try s.gpa.dupe(i16, s.span(from_ms, to_ms));
         errdefer s.gpa.free(pcm);
         s.consume(to_ms);
@@ -362,7 +433,7 @@ pub const Session = struct {
         s.emit.send(a, "conversation.item.created", .{ .previous_item_id = prev, .item = try itemValue(a, it, s.settings.audio) });
         const owned = try s.gpa.dupe(u8, item_id);
         errdefer s.gpa.free(owned);
-        try s.push(.{ .final = .{ .item_id = owned, .pcm = pcm } });
+        try s.push(.{ .final = .{ .item_id = owned, .pcm = pcm, .key = quiet_from } });
     }
 
     fn maybePartial(s: *Session) !void {
@@ -526,6 +597,12 @@ pub fn freeItem(gpa: std.mem.Allocator, it: *Item) void {
     it.spoken.deinit(gpa);
     it.arena.deinit();
     gpa.destroy(it);
+}
+
+fn withPause(c: vad.Config, pause_ms: u32) vad.Config {
+    var out = c;
+    out.pause_ms = pause_ms;
+    return out;
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

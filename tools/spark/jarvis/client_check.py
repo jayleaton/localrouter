@@ -558,7 +558,7 @@ def main():
             click(cdp, "mic")
             cdp.wait("window.jarvis.voice.connected && window.jarvis.ui.voiceState === 'listening'", 30, "the voice session")
             check("hold: the session's turn end is the wait", cdp.js(f"window.jarvis.debug.some(e => e.kind === 'voice.in' && e.type === 'session.updated' && e.session.turn_detection && e.session.turn_detection.silence_duration_ms === {a.wait_ms})"))
-            cdp.wait(f"{USERS}.length >= {a.hold_turns} && {BOTS}.length >= 1 && window.jarvis.voice.live === 0 && window.jarvis.ui.voiceState === 'listening'", 120, "the replies")
+            cdp.wait(f"{USERS}.length >= {a.hold_turns} && {BOTS}.length >= 1 && window.jarvis.voice.live === 0 && window.jarvis.ui.voiceState === 'listening'", max(120, a.timeout), "the replies")
             time.sleep(4)  # a turn or reply too many would be in by now
             ev = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.in' && ['input_audio_buffer.speech_stopped', 'input_audio_buffer.committed', 'response.created', 'response.audio_transcript.delta', 'localrouter.response.timing', 'localrouter.transcription.partial'].includes(e.type)).map(e => ({ t: e.t, type: e.type, ms: e.ms || null }))")
             audio = cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.first_audio').map(e => e.t)")
@@ -580,9 +580,10 @@ def main():
                 ms = e["ms"] or {}
                 if ms.get("first_audio") is None:
                     continue
-                lat.append({"wait_end_to_stt_end_ms": ms.get("stt_end"), "wait_end_to_first_token_ms": ms.get("first_token"), "wait_end_to_first_audio_ms": ms["first_audio"],
+                lat.append({"stages_ms": ms, "wait_end_to_stt_end_ms": ms.get("stt_end"), "wait_end_to_first_token_ms": ms.get("first_token"), "wait_end_to_first_audio_ms": ms["first_audio"],
                             "speech_end_to_first_audio_ms": ms["first_audio"] - ms["speech_end"] if ms.get("speech_end") is not None else None})
             results["hold"] = {"wait_ms": a.wait_ms, "turns": users, "replies": bots, "latency": lat,
+                               "page_holds": cdp.js("window.jarvis.debug.filter(e => e.kind === 'voice.held').map(e => ({ ms: e.ms, rate: e.rate, written: e.written }))"),
                                "client_first_audio_after_stop_ms": [round(t - max(s for s in stops if s <= t)) for t in audio if any(s <= t for s in stops)]}
             partials = [e["t"] for e in ev if e["type"] == "localrouter.transcription.partial" and e["t"] < (stops[0] if stops else float("inf"))]
             check("hold: nothing of the turn is transcribed before it ends", not partials, partials)

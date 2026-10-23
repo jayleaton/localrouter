@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1808,7 +1808,7 @@ function connect(my) {
     opened = true;
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'got']) V[k].clear();
     V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
@@ -2034,6 +2034,8 @@ function play(item, b64) {
   const piece = decode(b64);
   if (!piece) return;
   if (V.rec) V.rec.arrivals.push([Math.round(performance.now()), item, piece.buf.length]);
+  const got = V.got.get(item) || V.got.set(item, { first: performance.now(), ms: 0, firstMs: piece.buf.duration * 1000 }).get(item);
+  got.ms += piece.buf.duration * 1000;
   if (V.started.has(item)) return schedule(item, piece);
   if (!V.held.some(p => p.item === item)) V.firstAt.set(item, performance.now());
   V.held.push({ item, ...piece });
@@ -2051,7 +2053,9 @@ function arrivalRate(item) {
 function startOrWait(item) {
   if (!V.held.some(p => p.item === item)) return;
   const since = performance.now() - (V.firstAt.get(item) || performance.now());
-  const rate = arrivalRate(item);
+  // A reply already written, with the GPU free, comes at the rate the last reply did: its start need not wait
+  // RATE_MS to measure it (about 250 ms off a short reply's first audio).
+  const rate = arrivalRate(item) ?? (V.textDone.has(item) && !generating() && V.lastRate >= KEEP_UP ? V.lastRate : null);
   const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
   if (ready || since >= HOLD_CAP_MS) {
     if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
@@ -2414,10 +2418,15 @@ function handle(ev) {
     case 'localrouter.response.text_done':
       textDone(ev.item_id, ev.chars);
       break;
-    case 'localrouter.response.speech_done':
+    case 'localrouter.response.speech_done': {
       V.speechDone.add(ev.item_id);
+      // How fast this reply's speech came (all of it is in now): the next written reply's start can trust it.
+      const g = V.got.get(ev.item_id), span = g && performance.now() - g.first;
+      if (g && span > 300) V.lastRate = (g.ms - g.firstMs) / span;
+      V.got.delete(ev.item_id);
       startOrWait(ev.item_id);
       break;
+    }
     case 'response.created':
       V.resp = ev.response && ev.response.id;
       V.audioLogged = false;

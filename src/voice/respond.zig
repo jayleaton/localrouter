@@ -52,6 +52,7 @@ pub fn work(s: *Session) void {
         defer t.free(s.gpa);
         switch (t) {
             .partial => |h| hear(s, h, .partial),
+            .early => |h| hear(s, h, .early),
             .final => |h| hear(s, h, .final),
             .respond => |ask| run(s, ask),
             .warm => warm(s),
@@ -61,7 +62,7 @@ pub fn work(s: *Session) void {
 
 // ---------------------------------------------------------------- transcription
 
-const Pass = enum { partial, final };
+const Pass = enum { partial, early, final };
 
 /// Under the lock: the chat server reads the conversation as the next turn's request will begin it (the same system
 /// prompt, tools and history; `max_tokens` 1, the reply discarded), so that request finds it in the server's prefix
@@ -130,6 +131,11 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
         s.mutex.unlock(s.io);
         return;
     }
+    if (pass == .early and !s.earlyWanted(h)) return s.mutex.unlock(s.io); // the speaker went on
+    if (pass == .final) if (s.reuseEarly(a, h)) |early| { // made in the wait, of the same audio: nothing more to hear
+        defer s.mutex.unlock(s.io);
+        return completed(s, a, h.item_id, early, &why);
+    };
     const st = &s.settings;
     const language = if (st.language.len > 0) st.language else s.heardLanguage(); // no detection pass on each turn
     const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "", .greedy = s.voice.greedy_transcripts };
@@ -155,6 +161,7 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
             const turn = s.turn orelse return;
             if (std.mem.eql(u8, turn.item_id, h.item_id)) s.emit.send(a, "localrouter.transcription.partial", .{ .item_id = h.item_id, .transcript = std.mem.trim(u8, t, " \t\r\n") });
         },
+        .early => if (text) |t| s.earlyDone(h, std.mem.trim(u8, t, " \t\r\n"), began, worker_ms) else |_| {},
         .final => {
             s.stt_start_ns = began;
             s.stt_end_ns = s.clock();

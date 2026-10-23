@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Voice: the answer starts as the wait ends.
+  - The turn's words are transcribed while the speaker is quiet (150 ms into a pause, `voice.early_stt_ms`). If the
+    wait ends with nothing more said, that transcript is the turn's, so speech to text no longer runs after the wait.
+    Nothing considers the words before the wait ends.
+  - A reply already written, with no picture or video being made, starts at the arrival rate the previous reply
+    measured (if it kept up), instead of measuring for 250 ms first.
 - `client_check`: clicks are judged where a fault can be told from speech.
   - Playback: the output must equal each received piece once aligned on the audio clock; a sample off by over 0.05 is
     playback's.
