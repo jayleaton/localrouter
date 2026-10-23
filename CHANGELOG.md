@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Voice page: a reply plays to its end without running dry. While the chat model is still writing it and speech is not
+  keeping up (under 1.05x real time over its first 250 ms), its start waits for the writing to end (`text_done`, at most
+  10 s), then 200 ms in hand. Short replies are written before their first audio and start as before. The "smooth
+  start" setting and the rate-sized hold of #51 are gone. `client_check` now fails on any underrun anywhere in a reply.
 - Voice page: a reply no longer starts with only Drama 3's 46 ms first piece in hand.
   - While the chat model is still writing, its start waits for enough audio to play its first 3 s at the measured
     arrival rate: 3 s x (1 - rate), at least 200 ms, at most 1 s in hand, at most 1.5 s after the first piece. A stream
