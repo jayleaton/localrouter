@@ -7,7 +7,7 @@ dependencies = [
     "torch==2.13.0",
     "transformers==5.19.0",
     "requests>=2.32,<3",
-    "accelerate>=1.10,<2", # device_map: weights load straight to the GPU (no host copy first: half the load peak)
+    "accelerate>=1.10,<2", # transformers' own loader (KNOWLINE_STOCK_LOAD=1, the comparison run); serve.py loads without it
 ]
 
 [tool.uv]
