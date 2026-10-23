@@ -27,7 +27,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const tri = try qi.triton_k.specsFromCapture(a, io, cap.dir);
     const source: qi.pipeline.TritonSource = if (tri[0] != null) .{ .specs = tri } else .pack;
     const t0 = std.Io.Clock.awake.now(io);
-    const p = try qi.pipeline.Pipeline.create(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, @max(height, width));
+    const p = try qi.pipeline.Pipeline.create(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, @max(height, width), @as(u64, @max(height, width)) * @max(height, width));
     defer p.destroy();
     const load_ms = t0.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
 
@@ -87,12 +87,10 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         "\"first_ms\": {{\"encode\": {d:.1}, \"prefix\": {d:.1}, \"sample\": {d:.1}, \"decode\": {d:.1}}}, " ++
         "\"warm_ms\": {{\"encode\": {d:.1}, \"prefix\": {d:.1}, \"sample\": {d:.1}, \"decode\": {d:.1}}}, " ++
         "\"sample_ms_without_graphs\": {d:.1}, \"pixels_equal_without_graphs\": {}, \"twin_warm_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"decode\": {d:.1}}}, \"pass\": {}}}}}\n", .{
-        p.major,         p.minor,      p.dit_pack.precision, width,        height,      steps,       load_ms,
-        try std.json.Stringify.valueAlloc(a, p.load, .{}),
-        sigmas_equal,    ctx_equal,    lat_equal,            px_equal,     px_again,    first.encode, first.prefix,
-        first.sample,    first.decode, warm.encode,          warm.prefix,  warm.sample, warm.decode, nograph.sample,
-        px_nograph,      twin_ms[0],
-        twin_ms[1],      twin_ms[2],   pass,
+        p.major,                                           p.minor,      p.dit_pack.precision, width,       height,      steps,       load_ms,
+        try std.json.Stringify.valueAlloc(a, p.load, .{}), sigmas_equal, ctx_equal,            lat_equal,   px_equal,    px_again,    first.encode,
+        first.prefix,                                      first.sample, first.decode,         warm.encode, warm.prefix, warm.sample, warm.decode,
+        nograph.sample,                                    px_nograph,   twin_ms[0],           twin_ms[1],  twin_ms[2],  pass,
     });
     try std.Io.File.stdout().writeStreamingAll(io, out.written());
     return if (pass) 0 else 1;

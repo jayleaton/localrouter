@@ -11,11 +11,22 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model to run, and the image model comes back after it |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
-Memory, measured on DGX-01 (2026-10-22):
-- **With the warm set at full size** (chat 24 GiB with its 4 GiB prompt cache, Drama 3 43, Whisper 3.6, image 35.2):
-  about 9 GiB `MemAvailable` of about 115, and 13.7 GiB just after a start.
-- **The reserve is 6 GiB.** That leaves room for Whisper's 2 GiB working memory beside the full warm set; with 8 GiB,
-  each voice turn evicted the image model.
+Memory, measured on DGX-01 (2026-10-23), per process: GPU `used_memory` (nvidia-smi) plus host anonymous and shared
+memory, sampled every 0.5 s at idle, through a long voice reply (chat and Drama 3 at once), transcription, 1024x1024
+and 1664x1664 images and a 25k-token chat. Each server allocates its GPU memory at load, so the peaks are flat. The
+bookings in `config.json.in` are each peak plus 256 MiB:
+
+| Model | Measured peak | Booked |
+| --- | --- | --- |
+| Chat | 18.25 GiB GPU + 0.6 host + its prompt cache in host shared memory (76 KiB a token; capped at 3 GiB, one full 32k context) | 22.1 GiB |
+| Drama 3 | 38.3 GiB GPU (the 36.9 GiB weights and the 1.7 GiB codec, nothing else) + 0.6 host | 39.25 GiB |
+| Whisper | 2.0 GiB GPU + 1.5 host | 3.75 GiB, + 0.5 working |
+| Image | 31.2 GiB at `max_pixels` 1048576 (39.0 GiB before, at `max_side` 1664 squared) | 31.5 GiB |
+
+- **The reserve is 3 GiB.** earlyoom sends SIGTERM below 2% `MemAvailable` (2.4 GiB on this box); the rest covers the
+  measured drift of what is not booked (under 0.6 GiB).
+- **The image model's scratch** is sized by `max_pixels`, about 4.6 KiB a pixel: 1024x1024, 1360x768 and 768x1360 are
+  served, a larger area is refused before it loads, and the PNG bytes are the same as with the larger scratch.
 - **A 1024x1024 image** on the warm model evicts nothing; the lowest `MemAvailable` was 11.8 GiB.
 - **A 1 s video** (40 GiB) evicts only the image model; the lowest was 11.7 GiB. The image model is back about 30 s
   later.

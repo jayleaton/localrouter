@@ -4,7 +4,9 @@
 //! `weights` is a directory of packs: the DiT's (`<precision>/` for Qwen-Image 2.1, `turbo-<precision>/` for Turbo, with
 //! tfimage's Triton cubins in `triton/`), `te/` and `vae/` (`python -m stk_twin pack`). Options: `precision` (fp8s |
 //! nvfp4, default fp8s), `dit` (the DiT pack's directory, default as above), `max_side` (pixels, the largest side a
-//! request may ask for, default 1664), `steps` (default 25; Turbo 8, the only count its schedule has), `resident_mb`
+//! request may ask for, default 1664), `max_pixels` (width x height at most, default max_side squared: the scratch,
+//! about 4.6 KiB a pixel on GB10 FP8, is sized by it, so 1048576 serves 1024x1024, 1360x768 and 768x1360 in 8 GiB
+//! less than max_side 1664 does), `steps` (default 25; Turbo 8, the only count its schedule has), `resident_mb`
 //! (the scheduler's estimate). Neither runs classifier-free guidance: `guidance` and `negative_prompt` are not used.
 
 const std = @import("std");
@@ -51,8 +53,14 @@ fn maxSide(cfg: *const ToolConfig) u32 {
     return @intCast(engine.optionInt(cfg, "max_side", default_max_side) / 16 * 16);
 }
 
-/// Refuses before loading what the engine would refuse after: a side past `max_side`, and for a checkpoint that stores
-/// its schedule (Turbo) another step count.
+/// Width x height at most (multiples of 256): `max_pixels`, else max_side squared.
+fn maxPixels(cfg: *const ToolConfig) u64 {
+    const side: u64 = maxSide(cfg);
+    return @min(engine.optionInt(cfg, "max_pixels", side * side), side * side) / 256 * 256;
+}
+
+/// Refuses before loading what the engine would refuse after: a side past `max_side`, more pixels than `max_pixels`,
+/// and for a checkpoint that stores its schedule (Turbo) another step count.
 fn check(comptime v: Variant) fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     return struct {
         fn f(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
@@ -62,6 +70,10 @@ fn check(comptime v: Variant) fn (cfg: *const ToolConfig, req: *const Request, w
             };
             if (@max(img.width, img.height) > maxSide(cfg)) {
                 why.print("model '{s}' takes sizes up to {d} pixels a side", .{ cfg.id, maxSide(cfg) }) catch {};
+                return false;
+            }
+            if (@as(u64, img.width) * img.height > maxPixels(cfg)) {
+                why.print("model '{s}' takes at most {d} pixels (width x height), such as 1024x1024 or 1360x768", .{ cfg.id, maxPixels(cfg) }) catch {};
                 return false;
             }
             if (v == .turbo and img.steps != 0 and img.steps != v.steps(cfg)) {
@@ -81,7 +93,8 @@ test "turbo fixes its steps and DiT pack; both refuse oversized requests before 
         \\ {"id": "base", "kind": "image", "engine": "qwen_image"},
         \\ {"id": "turbo", "kind": "image", "engine": "qwen_image_turbo"},
         \\ {"id": "turbo4", "kind": "image", "engine": "qwen_image_turbo", "options": {"precision": "nvfp4", "max_side": 1024}},
-        \\ {"id": "own", "kind": "image", "engine": "qwen_image_turbo", "options": {"dit": "mine"}}
+        \\ {"id": "own", "kind": "image", "engine": "qwen_image_turbo", "options": {"dit": "mine"}},
+        \\ {"id": "mp", "kind": "image", "engine": "qwen_image_turbo", "options": {"max_side": 1360, "max_pixels": 1048576}}
         \\]}
     );
     var buf: [32]u8 = undefined;
@@ -107,6 +120,17 @@ test "turbo fixes its steps and DiT pack; both refuse oversized requests before 
     const big: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 768 } };
     try std.testing.expect(!check(.turbo)(c.tool("turbo4").?, &big, &why));
     try std.testing.expectEqualStrings("model 'turbo4' takes sizes up to 1024 pixels a side", why.buffered());
+    // max_pixels: about one megapixel in any shape the side allows, and not more
+    try std.testing.expectEqual(@as(u64, 1664 * 1664), maxPixels(c.tool("turbo").?));
+    try std.testing.expectEqual(@as(u64, 1048576), maxPixels(c.tool("mp").?));
+    for ([_][2]u32{ .{ 1024, 1024 }, .{ 1360, 768 }, .{ 768, 1360 } }) |wh| {
+        const r: Request = .{ .image = .{ .prompt = "a fox", .width = wh[0], .height = wh[1] } };
+        try std.testing.expect(check(.turbo)(c.tool("mp").?, &r, &why));
+    }
+    why = .fixed(&msg);
+    const wide: Request = .{ .image = .{ .prompt = "a fox", .width = 1360, .height = 1024 } };
+    try std.testing.expect(!check(.turbo)(c.tool("mp").?, &wide, &why));
+    try std.testing.expectEqualStrings("model 'mp' takes at most 1048576 pixels (width x height), such as 1024x1024 or 1360x768", why.buffered());
 }
 
 /// The scheduler's resident estimate in MiB: GB10's measured engine peaks at 1024x1024 (M5, MemAvailable) are 30 GiB
@@ -157,7 +181,7 @@ const QwenImage = struct {
             .te = try std.fs.path.join(a, &.{ root, "te" }),
             .vae = try std.fs.path.join(a, &.{ root, "vae" }),
         };
-        t.p = try qi.pipeline.Pipeline.create(t.env.gpa, t.env.io, packs, .pack, maxSide(t.cfg));
+        t.p = try qi.pipeline.Pipeline.create(t.env.gpa, t.env.io, packs, .pack, maxSide(t.cfg), maxPixels(t.cfg));
         // a schedule stored with the checkpoint (Turbo's sample_sigmas) fixes the step count: the config must agree
         if (qi.sampler.fixedSteps(t.p.?.sched)) |n| if (n != t.variant.steps(t.cfg)) {
             std.log.err("{s}: the DiT pack's schedule has {d} steps, the tool's steps option {d}", .{ packs.dit, n, t.variant.steps(t.cfg) });

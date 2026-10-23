@@ -94,13 +94,15 @@ pub const Pipeline = struct {
     sched: sampler.Config,
     max_h: u32,
     max_w: u32,
+    max_area: u32, // h * w at most, in 16x16 patches: what the scratch is sized for
     bufs: [4]cuda.DeviceBuffer, // latents, the next latents, velocity, pixels
     times: Times = .{},
     load: LoadTimes = .{},
     weights_bytes: u64 = 0,
 
-    /// Loads everything for images up to max_side x max_side pixels (multiples of 16).
-    pub fn create(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32) !*Pipeline {
+    /// Loads everything for images up to max_side pixels a side and max_pixels in all (multiples of 16; the scratch,
+    /// most of the memory past the weights, is sized by max_pixels).
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64) !*Pipeline {
         const p = try gpa.create(Pipeline);
         errdefer gpa.destroy(p);
         p.gpa = gpa;
@@ -109,6 +111,7 @@ pub const Pipeline = struct {
         errdefer p.arena.deinit();
         p.max_h = max_side / 16;
         p.max_w = max_side / 16;
+        p.max_area = @intCast(@min(max_pixels / 256, @as(u64, p.max_h) * p.max_w));
         p.times = .{};
         p.load = .{};
         var clock = LoadClock.start(io);
@@ -179,11 +182,11 @@ pub const Pipeline = struct {
         p.load.te = clock.lap();
         const om = try smath.omegas(kernels.rope_omega);
         const kk: @import("dit.zig").Kernels = .{ .ops = &p.ops, .nv = &p.nv, .tri = &p.tri, .major = p.major, .minor = p.minor };
-        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_h * p.max_w, max_tokens);
+        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_area, max_tokens);
         errdefer p.dit.deinit();
-        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, p.max_h, p.max_w);
+        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, p.max_h, p.max_w, p.max_area);
         errdefer p.vae.deinit();
-        const n: usize = 64 * @as(usize, p.max_h) * p.max_w;
+        const n: usize = 64 * @as(usize, p.max_area);
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, [_]usize{ 2 * n, 2 * n, 2 * n, 256 * n / 64 * 4 }) |*b, len| {
@@ -239,7 +242,7 @@ pub const Pipeline = struct {
         if (height % 16 != 0 or width % 16 != 0) return error.SizeNotMultipleOf16;
         const h = height / 16;
         const w = width / 16;
-        if (h > p.max_h or w > p.max_w) return error.ImageTooLarge;
+        if (h > p.max_h or w > p.max_w or h * w > p.max_area) return error.ImageTooLarge;
         if (pixels.len != @as(usize, height) * width * p.vae.out_channels) return error.BadPixelBuffer;
         const gpa = p.gpa;
         var clock = Clock{ .io = p.io, .s = p.s };
