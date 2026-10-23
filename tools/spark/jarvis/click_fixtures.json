@@ -1,0 +1,9 @@
+{
+  "about": "Received speech the earlier click measure flagged on DGX-01 (live, 2026-10-23, the lighthouse reply): sibilants at the 24 kHz wire rate, not clicks. Six samples around each flagged step, as the page received them.",
+  "sibilants": [
+    [0.081, -0.11, -0.14, 0.239, 0.059, -0.218],
+    [-0.071, 0.116, 0.192, -0.184, -0.196, 0.079],
+    [-0.122, 0.072, 0.12, -0.191, 0.071, 0.061],
+    [-0.081, -0.038, 0.186, -0.132, -0.063, 0.165]
+  ]
+}

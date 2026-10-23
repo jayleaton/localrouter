@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `client_check`: a click is now a discontinuity, one sample-to-sample step at least 0.05 and at least 6x the mean step
+  within 2 ms around it. The earlier measure (any step over max(4 x the window's 99th percentile, 0.2)) counted
+  sibilants at the 24 kHz wire rate as clicks; it is still reported as `clicks_old`. A click test checks the measure on
+  every run: recorded sibilant samples (`click_fixtures.json`) and the earlier measure's flags in that run's speech must
+  not count, and discontinuities spliced into its audio (at a piece edge, in quiet, in voiced speech) must.
 - Voice picture turns:
   - The spoken text ends where the model's tool call begins (`localrouter.response.text_done` with `tool_calls: true`); the
     arguments are never spoken. The page then waits for that short speech to be all sent

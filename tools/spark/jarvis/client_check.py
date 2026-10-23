@@ -443,6 +443,46 @@ def main():
             results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "stream_clicks": cdp.js("window.jarvis.streamClicks()"), "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
             check("voice: no reply runs dry anywhere (no underrun), and no click in a reply\x27s first 2 s", not bad, bad or onsets)
+            # The click measure on known cases: the recorded sibilant samples (fixtures) and every step the earlier measure
+            # flagged in this run's received speech must not count; discontinuities spliced into copies of this run's longest
+            # reply (at a piece's first sample, mid-piece in quiet audio, mid-piece in loud speech) must all count.
+            fixtures = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_fixtures.json")))
+            flagged = [cdp.js(f"window.jarvis.clickSteps({json.dumps(s)}).length") for s in fixtures["sibilants"]]
+            check("clicks: none of the recorded sibilant fixtures counts as a click", not any(flagged), flagged)
+            sc = results["playback"]["stream_clicks"] or {}
+            longest = max(sc, key=lambda k: sc[k]["ms"]) if sc else None
+            probe = cdp.js("""(key => {
+                const a = window.jarvis.streamAudio(key), x = Float32Array.from(a.samples), n = x.length, R = 24000, w = R / 100;
+                const rms = (k) => { let s = 0, c = 0; for (let j = Math.max(0, k - w); j < Math.min(n, k + w); j++) { s += x[j] * x[j]; c++; } return Math.sqrt(s / Math.max(c, 1)); };
+                const peak = (k) => { let m = 0; for (let j = Math.max(0, k - w); j < Math.min(n, k + w); j++) m = Math.max(m, Math.abs(x[j])); return m; };
+                const stepMean = (k) => { let s = 0, c = 0; for (let j = Math.max(1, k - w); j < Math.min(n, k + w); j++) { s += Math.abs(x[j] - x[j - 1]); c++; } return s / Math.max(c, 1); };
+                const edges = new Set(a.starts), find = f => { for (let k = w; k < n - w; k += 7) if (f(k)) return k; return -1; };
+                const cases = [
+                  ['piece edge, loud', a.starts.find(k => k > w && k < n - w && rms(k) > 0.05 && stepMean(k) < 0.03) ?? -1, 0.3],
+                  ['mid-piece, quiet', find(k => !edges.has(k) && peak(k) < 0.01), 0.15],
+                  ['mid-piece, loud voiced', find(k => !edges.has(k) && rms(k) > 0.08 && stepMean(k) < 0.03), 0.3]];
+                // The earlier measure's flags in the clean audio: speech, which the measure must leave alone.
+                const old = [];
+                for (let s = 0; s + 1 < n; s += 2 * R) {
+                  const e = Math.min(n, s + 2 * R), st = [];
+                  for (let k = s + 1; k < e; k++) st.push(Math.abs(x[k] - x[k - 1]));
+                  const lim = Math.max(4 * (Float32Array.from(st).sort()[Math.floor(st.length * 0.99)] || 0), 0.2);
+                  for (let k = s + 1; k < e; k++) if (Math.abs(x[k] - x[k - 1]) > lim) old.push(k);
+                }
+                const clean = window.jarvis.clickSteps(Array.from(x));
+                const out = { clean: clean.length, old_flags: old.length, old_flagged_now: old.filter(k => clean.some(c => Math.abs(c - k) <= 2)).length, cases: [] };
+                for (const [name, k, amp] of cases) {
+                  if (k < 0) { out.cases.push({ name, found: false }); continue; }
+                  const y = Array.from(x);
+                  for (let j = k; j < Math.min(n, k + 24); j++) y[j] += amp; // a 1 ms step up and back: two discontinuities
+                  const got = window.jarvis.clickSteps(y);
+                  out.cases.push({ name, at_ms: +(k / R * 1000).toFixed(1), amp, start: got.some(c => Math.abs(c - k) <= 1), end: got.some(c => Math.abs(c - (k + 24)) <= 1) });
+                }
+                return out;
+            })(%s)""" % json.dumps(longest)) if longest else None
+            results["click_test"] = probe
+            check("clicks: the earlier measure's flags in this run's speech do not count", probe and probe["old_flagged_now"] == 0, probe)
+            check("clicks: every spliced discontinuity counts (both of its edges)", probe and all(c.get("found") is not False and c["start"] and c["end"] for c in probe["cases"]), probe)
             click(cdp, "vbarEnd")
         # The reel, in a call: the fake microphone asks for a picture. The reel (and the chat) show a placeholder, then the
         # picture; nothing before it says it is ready, and a confirmation is spoken after it. A request the image model

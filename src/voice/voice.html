@@ -2149,27 +2149,61 @@ async function startTap() {
   node.port.onmessage = e => V.rec.chunks.push(e.data);
 }
 // Each speech onset (sound after 300 ms of quiet): within `windowMs` of it, the longest exact-zero run that
-// sound follows (a gap), how many ran over `gapMs`, and the clicks: steps over 4 times the window's 99th percentile.
-// The same click measure on each reply's audio as it was received (before playback): a click there is in the stream
-// (the speech model or the server), one only in the output is playback's.
+// sound follows (a gap), how many ran over `gapMs`, and the clicks (clickSteps; clicks_old: the earlier measure).
+// A click is a discontinuity: one sample-to-sample step far above the steps around it. Speech with strong high
+// frequencies (an "s" at the 24 kHz wire rate) has steps over 0.2, but so do its neighbours, so a fixed threshold on the
+// step alone (the earlier measure, kept as clicks_old) counted speech. Indices k where |x[k] - x[k-1]| >= CLICK_MIN
+// and >= CLICK_RATIO times the mean step within CLICK_SPAN_MS around it (the step itself and its two neighbours left
+// out, so a one-sample spike counts as well as a jump).
+const CLICK_MIN = 0.05, CLICK_RATIO = 6, CLICK_SPAN_MS = 2;
+function clickSteps(x, rate = RATE) {
+  const n = x.length, w = Math.max(4, Math.round(CLICK_SPAN_MS / 1000 * rate)), out = [];
+  const cum = new Float64Array(n + 1);
+  for (let k = 1; k < n; k++) cum[k + 1] = cum[k] + Math.abs(x[k] - x[k - 1]);
+  const step = k => cum[k + 1] - cum[k];
+  for (let k = 1; k < n; k++) {
+    const d = step(k);
+    if (d < CLICK_MIN) continue;
+    const lo = Math.max(1, k - w), hi = Math.min(n - 1, k + w);
+    let sum = cum[hi + 1] - cum[lo], count = hi - lo + 1;
+    for (const j of [k - 1, k, k + 1]) if (j >= lo && j <= hi) { sum -= step(j); count--; }
+    if (count > 0 && d >= CLICK_RATIO * (sum / count)) { out.push(k); k += 2; }
+  }
+  return out;
+}
+// The earlier measure, for comparison: steps over max(4 x the 99th percentile of the window's steps, 0.2).
+function clickStepsOld(x, win) {
+  let clicks = 0;
+  for (let s = 0; s + 1 < x.length; s += win) {
+    const e = Math.min(x.length, s + win), steps = new Float32Array(e - s - 1);
+    for (let k = s + 1; k < e; k++) steps[k - s - 1] = Math.abs(x[k] - x[k - 1]);
+    const lim = Math.max(4 * (Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0), 0.2);
+    clicks += steps.filter(v => v > lim).length;
+  }
+  return clicks;
+}
+// Each reply's audio as it was received (before playback), whole: a click there is in the stream (the speech model or the
+// server); one only in the output is playback's. `at`: where (ms into the reply) and whether on a piece's first sample.
 function streamClicks(windowMs = 2000) {
   if (!V.rec) return null;
   const out = {};
   for (const [key, parts] of V.rec.pcm) {
-    const n = parts.reduce((s, p) => s + p.length, 0), x = new Float32Array(n);
+    const n = parts.reduce((s, p) => s + p.length, 0), x = new Float32Array(n), starts = new Set();
     let o = 0;
-    for (const p of parts) { x.set(p, o); o += p.length; }
-    const win = Math.round(windowMs / 1000 * RATE);
-    let clicks = 0;
-    for (let s = 0; s + 1 < n; s += win) {
-      const e = Math.min(n, s + win), steps = new Float32Array(e - s - 1);
-      for (let k = s + 1; k < e; k++) steps[k - s - 1] = Math.abs(x[k] - x[k - 1]);
-      const lim = Math.max(4 * (Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0), 0.2);
-      clicks += steps.filter(v => v > lim).length;
-    }
-    out[key] = { ms: Math.round(n / RATE * 1000), clicks };
+    for (const p of parts) { starts.add(o); x.set(p, o); o += p.length; }
+    const at = clickSteps(x);
+    out[key] = { ms: Math.round(n / RATE * 1000), clicks: at.length, clicks_old: clickStepsOld(x, Math.round(windowMs / 1000 * RATE)),
+                 at: at.slice(0, 5).map(k => ({ ms: +(k / RATE * 1000).toFixed(1), piece_edge: starts.has(k) })) };
   }
   return out;
+}
+// The received audio of reply `key` (from streamClicks), whole, and its pieces' first samples: for the click test.
+function streamAudio(key) {
+  const parts = V.rec && V.rec.pcm.get(key);
+  if (!parts) return null;
+  const samples = [], starts = [];
+  for (const p of parts) { starts.push(samples.length); for (const v of p) samples.push(v); }
+  return { samples, starts };
 }
 function outputStats(windowMs = 2000, gapMs = 30) {
   if (!V.rec) return null;
@@ -2186,9 +2220,7 @@ function outputStats(windowMs = 2000, gapMs = 30) {
       const t = V.rec.t0 + i / r, sp = [...V.rec.spans.values()].find(s => t >= s.a - 0.1 && t < s.b);
       const end = Math.min(n, i + win, sp ? Math.max(i + 1, Math.round((sp.b - V.rec.t0) * r)) : n);
       let run = 0, longest = 0, longestAt = 0, gaps = 0, glitch = 0, glitches = 0;
-      const steps = new Float32Array(end - i - 1);
       for (let k = i + 1; k < end; k++) {
-        steps[k - i - 1] = Math.abs(x[k] - x[k - 1]);
         if (x[k] === 0) { run++; continue; }
         if (run) {
           // Silence with no audio scheduled is a delivery gap (the stream ran dry); silence while a source was scheduled to play
@@ -2200,9 +2232,8 @@ function outputStats(windowMs = 2000, gapMs = 30) {
           run = 0;
         }
       }
-      const p99 = Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0;
-      const clicks = steps.filter(s => s > Math.max(4 * p99, 0.2)).length;
-      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, gap_at_ms: Math.round(longestAt / r * 1000), reply: sp ? [...V.rec.spans].find(([, s]) => s === sp)[0] : null, reply_ms: sp ? Math.round((sp.b - sp.a) * 1000) : null, render_gap_ms: Math.round(glitch / r * 1000), render_gaps: glitches, clicks, p99_step: +p99.toFixed(4), window_ms: Math.round((end - i) / r * 1000) });
+      const seg = x.subarray(i, end), clicks = clickSteps(seg, r).length, clicksOld = clickStepsOld(seg, win);
+      out.push({ at_s: +(i / r).toFixed(2), longest_gap_ms: Math.round(longest / r * 1000), gaps_over: gaps, gap_at_ms: Math.round(longestAt / r * 1000), reply: sp ? [...V.rec.spans].find(([, s]) => s === sp)[0] : null, reply_ms: sp ? Math.round((sp.b - sp.a) * 1000) : null, render_gap_ms: Math.round(glitch / r * 1000), render_gaps: glitches, clicks, clicks_old: clicksOld, window_ms: Math.round((end - i) / r * 1000) });
       i = end - 1;
     }
     zeros = 0;
@@ -2599,7 +2630,7 @@ if (window.visualViewport) {
 
 // A test or another script can see the state without scraping the page.
 window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, socket: V.ws ? V.ws.readyState : null, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
-                  output: outputStats, streamClicks, recordOutput: false,
+                  output: outputStats, streamClicks, clickSteps: x => clickSteps(Float32Array.from(x)), streamAudio, recordOutput: false,
                   get engine() { return engine(); },
                   say: text => { $('text').value = text; sendText(); }, // a turn in the call, as typed
                   dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },
