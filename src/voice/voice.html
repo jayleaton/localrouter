@@ -2134,9 +2134,10 @@ function schedule(item, { buf, loudAt, rms }) {
   }
 }
 
-// For tests: the page's own output, recorded after the mixer (window.jarvis.recordOutput before voice starts), and
+// For tests: the page's own output, recorded after the mixer (window.jarvis.recordOutput before voice starts; silence too,
+// so the recording keeps the audio clock's timeline: with nothing playing the input has no channels), and
 // where it fell silent mid-speech: an exact-zero run in played audio is a gap in the schedule, not a pause in speech.
-const TAP = 'class Tap extends AudioWorkletProcessor { process(i) { const c = i[0] && i[0][0]; if (c) this.port.postMessage(c.slice(0)); return true; } } registerProcessor("tap", Tap);';
+const TAP = 'class Tap extends AudioWorkletProcessor { process(i) { const c = i[0] && i[0][0]; this.port.postMessage(c ? c.slice(0) : new Float32Array(128)); return true; } } registerProcessor("tap", Tap);';
 async function startTap() {
   const url = URL.createObjectURL(new Blob([TAP], { type: 'application/javascript' }));
   try { await V.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
@@ -2254,7 +2255,7 @@ function playbackDiffs(x = V.rec && recordedOutput(), shifts = null) {
 }
 // The click checks on known cases, on this call's own audio: fixtures (speech at a pretended seam: must not count), the
 // clean output and seams (must not count), and splices: 1 ms steps into a copy of the output inside a quiet and a
-// voiced piece (playback), a step and a dropped 10 ms at a seam of the received audio (stream). All must count.
+// voiced piece (playback), a step at a seam of the received audio, and the audio after one inverted (stream). All must count.
 function clickTest(fixtures) {
   const out = { fixtures: fixtures.map(f => seamClick(Float32Array.from(f.samples), f.at)) };
   const x = recordedOutput(), base = playbackDiffs(x);
@@ -2290,7 +2291,7 @@ function clickTest(fixtures) {
   const key = Object.keys(audio).sort((a, b) => audio[b].samples.length - audio[a].samples.length)[0];
   const a = key && audio[key], s = a && a.starts.find(k => k > SEAM_SPAN && k < a.samples.length - 2 * SEAM_SPAN && rms(a.samples.slice(k - 240, k + 240)) > 0.05);
   for (const [name, change] of [['stream, a step at a seam', y => { for (let j = s; j < s + 24; j++) y[j] += 0.3; return y; }],
-                                ['stream, 10 ms dropped at a seam', y => y.slice(0, s).concat(y.slice(s + 240))]]) {
+                                ['stream, the audio after a seam inverted', y => y.slice(0, s).concat(y.slice(s).map(v => -v))]]) {
     if (s == null) { out.cases.push({ name, found: false }); continue; }
     const y = change(a.samples.slice());
     out.cases.push({ name, caught: seamClick(Float32Array.from(y), s) });
