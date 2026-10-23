@@ -1744,7 +1744,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -1808,7 +1808,7 @@ function connect(my) {
     opened = true;
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars']) V[k].clear();
     V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
@@ -1838,7 +1838,10 @@ async function voiceStart() {
   if (V.ws) return;
   const my = ++V.run;
   try {
-    V.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // At the wire rate, each piece of a reply is a buffer at the context's own rate: the browser resamples the mixed
+    // output once, not each piece on its own, which left a step where two pieces met (a click on DGX-01).
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { V.ctx = new AC({ sampleRate: RATE }); } catch { V.ctx = new AC(); }
     V.ctx.resume();
     V.out = V.ctx.createGain();
     V.an = V.ctx.createAnalyser();
@@ -1996,16 +1999,18 @@ function bargeIn(cancel) {
   renderVoice();
 }
 // A reply's audio is held at its start, then scheduled back to back on the AudioContext clock, so that it plays to its
-// end without running dry. Speech comes faster than it plays (1.35x real time on DGX-01, 1.2x beside a picture, with
-// speech first), except while the chat model is still writing the reply: the two share the GPU, and speech came at
-// 0.55 to 0.67x for as long as the writing went on. No buffer of a fixed size covers that, since a reply's length is not
-// known until it is written (a 1 s "smooth start" still ran dry in a long reply). So the start waits for:
-// - the chat model done (localrouter.response.text_done), then START_MS in hand: Drama 3's 46 ms first piece alone ran
-//   dry at once. GEN_START_MS while a picture or video is being made: the step already on the GPU slows the first words;
-// - or, while it still writes, speech keeping up anyway (KEEP_UP over RATE_MS from the first piece), then START_MS;
-// - and never more than HOLD_CAP_MS after the first piece (a stream whose text_done never comes).
-// A short reply is written before its first audio comes, so it starts as soon as it would have.
-const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000;
+// end without running dry. Speech usually comes faster than it plays (1.35x real time on DGX-01), but not while it
+// shares the GPU: with the chat model writing the reply or its tool arguments (0.5 to 0.9x for as long as that goes on),
+// or beside a picture being made (0.47x measured). No buffer of a fixed size covers that, since a reply's length is not
+// known until it is written (a 1 s "smooth start" still ran dry in a long reply). So the start waits (holdNeed) until:
+// - the text is complete (localrouter.response.text_done, with its length) and enough is in hand to play all of it at
+//   the rate it is coming in (at least START_MS: Drama 3's 46 ms first piece alone ran dry at once; GEN_START_MS while
+//   a picture or video is being made);
+// - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
+// - or all of the reply's speech is in (localrouter.response.speech_done);
+// - and never more than HOLD_CAP_MS after the first piece.
+// A short reply on a free GPU is written before its first audio comes and starts as soon as it would have.
+const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000, MS_PER_CHAR = 65, MARGIN = 1.25;
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
 const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
 function decode(b64) {
@@ -2047,22 +2052,36 @@ function startOrWait(item) {
   if (!V.held.some(p => p.item === item)) return;
   const since = performance.now() - (V.firstAt.get(item) || performance.now());
   const rate = arrivalRate(item);
-  const ready = have(item) >= startMs() && (V.textDone.has(item) || (rate != null && rate >= KEEP_UP));
+  const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
   if (ready || since >= HOLD_CAP_MS) {
     if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
     return release(item, 0.01);
   }
-  if (rate != null && V.holding !== item) { // speech is not keeping up with the chat model still writing: wait for it
+  if (rate != null && V.holding !== item) {
     V.holding = item;
-    dbg('voice.hold', { item, have_ms: Math.round(have(item)), rate: +rate.toFixed(2) });
+    dbg('voice.hold', { item, have_ms: Math.round(have(item)), rate: +rate.toFixed(2), need_ms: Math.round(holdNeed(item, rate)) });
   }
   clearTimeout(V.holdTimer);
   V.holdTimer = setTimeout(() => startOrWait(item), 25);
 }
-function textDone(item) {
+// Audio in hand that plays the reply to its end without running dry, at audio coming in at `rate`. While its text is
+// still being written, its length is unknown: only a stream keeping up starts (otherwise Infinity: wait for the text).
+// Once the text is complete (text_done, with its length), the reply's audio is about MS_PER_CHAR a character, and
+// playing E ms of it while it arrives at rate p never runs dry with E x (1 - p) in hand (MARGIN over that). A fast
+// stream needs START_MS; speech still sharing the GPU (tool arguments being written, a picture being made) needs more.
+function holdNeed(item, rate) {
+  const r = Math.min(rate, 1);
+  if (!V.textDone.has(item)) return rate >= KEEP_UP ? startMs() : Infinity;
+  const est = (V.chars.get(item) || 0) * MS_PER_CHAR;
+  return Math.max(startMs(), est * (1 - r) * MARGIN);
+}
+function textDone(item, chars) {
   V.textDone.add(item);
+  V.chars.set(item, chars || 0);
   startOrWait(item);
 }
+// A time on the context's frame grid (rounded up), so pieces start exactly where the one before ends.
+const frame = t => Math.ceil(t * V.ctx.sampleRate - 1e-6) / V.ctx.sampleRate;
 // The held start of `item` goes out, `lead` s from now.
 function release(item, lead) {
   clearTimeout(V.holdTimer);
@@ -2073,7 +2092,7 @@ function release(item, lead) {
   V.started.add(item);
   const held = V.held.filter(p => p.item === item);
   V.held = V.held.filter(p => p.item !== item);
-  V.nextTime = Math.max(V.nextTime, V.ctx.currentTime + lead);
+  V.nextTime = Math.max(V.nextTime, frame(V.ctx.currentTime + lead));
   for (const p of held) schedule(item, p);
 }
 function schedule(item, { buf, loudAt, rms }) {
@@ -2085,15 +2104,15 @@ function schedule(item, { buf, loudAt, rms }) {
     (V.gaps.get(item) || V.gaps.set(item, []).get(item)).push({ ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
     dbg('voice.gap', { item, ms: gap, at_ms: Math.round(V.doneMs.get(item) || 0) });
     V.lead = Math.min(0.5, V.lead + (now - V.nextTime));
-    V.nextTime = now + V.lead;
+    V.nextTime = frame(now + V.lead);
   }
   const src = V.ctx.createBufferSource();
   src.buffer = buf;
   src.connect(V.out || V.ctx.destination);
   const start = V.nextTime;
   src.start(start);
-  V.nextTime = start + buf.duration;
-  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); }
+  V.nextTime = frame(start + buf.duration); // back to back on whole frames: no overlap or 1-frame hole between pieces
+  if (V.rec) { const key = `${V.conn}:${item}`, sp = V.rec.spans.get(key) || V.rec.spans.set(key, { a: start, b: start }).get(key); sp.b = V.nextTime; V.rec.srcs.push([start, V.nextTime]); (V.rec.pcm.get(key) || V.rec.pcm.set(key, []).get(key)).push(buf.getChannelData(0).slice()); }
   const e = { src, item, start, dur: buf.duration, rms };
   V.live.push(e);
   V.playRms = e.rms;
@@ -2126,11 +2145,32 @@ async function startTap() {
   sink.gain.value = 0;
   V.out.connect(node);
   node.connect(sink).connect(V.ctx.destination);
-  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), srcs: [], t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
+  V.rec = { rate: V.ctx.sampleRate, chunks: [], arrivals: [], spans: new Map(), srcs: [], pcm: new Map(), t0: V.ctx.currentTime }; // spans: each reply's scheduled audio
   node.port.onmessage = e => V.rec.chunks.push(e.data);
 }
 // Each speech onset (sound after 300 ms of quiet): within `windowMs` of it, the longest exact-zero run that
 // sound follows (a gap), how many ran over `gapMs`, and the clicks: steps over 4 times the window's 99th percentile.
+// The same click measure on each reply's audio as it was received (before playback): a click there is in the stream
+// (the speech model or the server), one only in the output is playback's.
+function streamClicks(windowMs = 2000) {
+  if (!V.rec) return null;
+  const out = {};
+  for (const [key, parts] of V.rec.pcm) {
+    const n = parts.reduce((s, p) => s + p.length, 0), x = new Float32Array(n);
+    let o = 0;
+    for (const p of parts) { x.set(p, o); o += p.length; }
+    const win = Math.round(windowMs / 1000 * RATE);
+    let clicks = 0;
+    for (let s = 0; s + 1 < n; s += win) {
+      const e = Math.min(n, s + win), steps = new Float32Array(e - s - 1);
+      for (let k = s + 1; k < e; k++) steps[k - s - 1] = Math.abs(x[k] - x[k - 1]);
+      const lim = Math.max(4 * (Float32Array.from(steps).sort()[Math.floor(steps.length * 0.99)] || 0), 0.2);
+      clicks += steps.filter(v => v > lim).length;
+    }
+    out[key] = { ms: Math.round(n / RATE * 1000), clicks };
+  }
+  return out;
+}
 function outputStats(windowMs = 2000, gapMs = 30) {
   if (!V.rec) return null;
   const n = V.rec.chunks.reduce((s, c) => s + c.length, 0);
@@ -2233,7 +2273,11 @@ function handle(ev) {
       break;
     }
     case 'localrouter.response.text_done':
-      textDone(ev.item_id);
+      textDone(ev.item_id, ev.chars);
+      break;
+    case 'localrouter.response.speech_done':
+      V.speechDone.add(ev.item_id);
+      startOrWait(ev.item_id);
       break;
     case 'response.created':
       V.resp = ev.response && ev.response.id;
@@ -2555,7 +2599,7 @@ if (window.visualViewport) {
 
 // A test or another script can see the state without scraping the page.
 window.jarvis = { get conversation() { return cur; }, get voice() { return { connected: !!V.ws, socket: V.ws ? V.ws.readyState : null, live: V.live.length, thinking: V.thinking, lead: V.lead, gaps: Object.fromEntries(V.gaps) }; },
-                  output: outputStats, recordOutput: false,
+                  output: outputStats, streamClicks, recordOutput: false,
                   get engine() { return engine(); },
                   say: text => { $('text').value = text; sendText(); }, // a turn in the call, as typed
                   dropVoiceSocket: () => { if (V.ws && V.ws.readyState === WebSocket.OPEN) V.ws.close(4000, 'test: dropped'); }, get arrivals() { return V.rec ? V.rec.arrivals : null; },

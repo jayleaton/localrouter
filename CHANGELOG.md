@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Voice picture turns:
+  - The spoken text ends where the model's tool call begins (`localrouter.response.text_done` with `tool_calls: true`); the
+    arguments are never spoken. The page then waits for that short speech to be all sent
+    (`localrouter.response.speech_done`, new), not for the arguments to be written.
+  - A reply waits until its text is complete and enough audio is in hand to play all of it at the rate it is coming in
+    (`text_done` carries the spoken length; about 65 ms of audio a character, 25% margin), or all its speech is in
+    (`speech_done`). A fast stream starts at 200 ms in hand. Slow speech beside a tool call's arguments or a picture
+    being made no longer starts too early.
+  - A picture or video call with nothing said first gets "Making that now." (a video adds that it takes a few minutes),
+    as the tool description asks. It is recorded as the assistant's text.
+  - The page plays at the wire rate (a 24 kHz AudioContext) and schedules pieces on whole frames: one resampling of
+    the mixed output, not one per piece (a seam click).
 - Voice page: a reply plays to its end without running dry. While the chat model is still writing it and speech is not
   keeping up (under 1.05x real time over its first 250 ms), its start waits for the writing to end (`text_done`, at most
   10 s), then 200 ms in hand. Short replies are written before their first audio and start as before. The "smooth
