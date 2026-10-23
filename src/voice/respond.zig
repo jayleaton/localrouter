@@ -328,7 +328,7 @@ const Feed = struct {
 
     /// The spoken text is complete (the stream ended, or its tool calls began): the last sentence goes to the speaker,
     /// which may finish once it is spoken, and the client hears of it (`tool_calls`: the model still writes arguments).
-    fn endText(f: *Feed, tool_calls: bool) void {
+    fn endText(f: *Feed, args_follow: bool) void {
         if (f.ended) return;
         f.ended = true;
         const rest = f.think.flush(f.s.gpa, f.r.arena.allocator()) catch "";
@@ -343,7 +343,7 @@ const Feed = struct {
         if (f.r.stop.cancelled()) return;
         var tmp: std.heap.ArenaAllocator = .init(f.s.gpa);
         defer tmp.deinit();
-        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = tool_calls });
+        f.s.emit.send(tmp.allocator(), "localrouter.response.text_done", .{ .response_id = f.r.id, .item_id = f.r.item_id, .tool_calls = args_follow });
     }
 };
 
