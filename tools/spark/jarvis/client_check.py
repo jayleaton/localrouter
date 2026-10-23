@@ -447,9 +447,9 @@ def main():
             playback_clicks = {k: v for k, v in (pb.get("per") or {}).items() if v["clicks"] or v["unchecked"]}
             stream_clicks = {k: v for k, v in seams.items() if v["clicks"]}
             bad = list(gaps) + ([{"playback": playback_clicks}] if playback_clicks else []) + ([{"stream": stream_clicks}] if stream_clicks else [])
-            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "playback_diffs": pb, "stream_seams": seams, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
+            results["playback"] = {"onsets": onsets, "schedule_gaps": gaps, "first_audio_ms": lat, "start_wait_ms": a.start_wait_ms, "playback_diffs": {k: v for k, v in pb.items() if k != "_shifts"}, "stream_seams": seams, "holds": cdp.js("window.jarvis.debug.filter(e => e.kind === \x27voice.held\x27).map(e => ({ item: e.item, ms: e.ms, rate: e.rate, written: e.written }))"), "arrivals": cdp.js("window.jarvis.arrivals")}
             check("voice: replies were recorded as played", len(onsets) >= 1 + min(a.replies, 1), len(onsets))
-            check("voice: the recording lines up with the audio received (the playback comparison is sound)", pb.get("skipped") or (pb.get("match") or 0) > 0.99, {k: pb.get(k) for k in ("shift", "match", "skipped")})
+            check("voice: the recording lines up with the audio received (the playback comparison is sound)", pb.get("skipped") or (pb.get("match") or 0) > 0.99, {k: pb.get(k) for k in ("shifts", "match", "skipped")})
             check("voice: no reply runs dry (no underrun), playback adds no click, and no click where received pieces join", not bad, bad)
             # The click checks on known cases, on this run's own audio (window.jarvis.clickTest): speech fixtures at a
             # pretended seam, and the clean output and seams, must not count; 1 ms steps spliced into a copy of the output
