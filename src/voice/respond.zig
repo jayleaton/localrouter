@@ -619,6 +619,7 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
     }
     s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
+    if (std.mem.eql(u8, status, "completed")) shadow(s, a, r, calls);
     prime(s);
 }
 
@@ -686,25 +687,64 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     if (instructions.len > 0) try msgs.append(a, .{ .role = "system", .content = try a.dupe(u8, instructions) });
     try history(s, a, &msgs);
     trim(&msgs, s.voice.max_history_chars, if (instructions.len > 0) 1 else 0);
+    const tools = try offered(s, a);
+    return .{
+        .model = if (st.model.len > 0) try a.dupe(u8, st.model) else null,
+        .messages = msgs.items,
+        .tools = tools,
+        .tool_choice = if (tools.len > 0) try events.chatToolChoice(a, st.tool_choice_json) else null,
+        .temperature = st.temperature,
+        .max_tokens = st.max_tokens,
+        .extra = s.voice.chat_extra,
+    };
+}
+
+/// Under the lock: the tools a reply is offered: the built-in image and video tools a model can serve, the model
+/// management tools when enabled, the computer tools when a helper is paired, then the client's own.
+fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
     var tools: std.ArrayList(chat.Tool) = .empty;
     const offer = s.backend.offer();
     if (s.voice.tools) {
         const all = try std.json.parseFromSliceLeaky([]const chat.Tool, a, builtin_tools, .{});
         if (offer.image) try tools.append(a, all[0]);
         if (offer.video) try tools.append(a, all[1]);
-        if (manage) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
+        if (s.voice.manage_models) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
         if (offer.computer) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, computer_tools, .{}));
     }
-    try tools.appendSlice(a, try events.chatTools(a, st.tools_json));
-    return .{
-        .model = if (st.model.len > 0) try a.dupe(u8, st.model) else null,
-        .messages = msgs.items,
-        .tools = tools.items,
-        .tool_choice = if (tools.items.len > 0) try events.chatToolChoice(a, st.tool_choice_json) else null,
-        .temperature = st.temperature,
-        .max_tokens = st.max_tokens,
-        .extra = s.voice.chat_extra,
-    };
+    try tools.appendSlice(a, try events.chatTools(a, s.settings.tools_json));
+    return tools.items;
+}
+
+/// Under the lock: a completed reply to a user's turn goes to the decision model in shadow (`voice.shadow_decisions`):
+/// the backend logs how it would have routed the turn beside what the chat model did, and nothing acts on it.
+fn shadow(s: *Session, a: std.mem.Allocator, r: *const Response, calls: []const chat.ToolCall) void {
+    if (!s.voice.shadow_decisions or !r.marks.from_turn) return;
+    const items = s.items.items;
+    var u = items.len;
+    while (u > 0) : (u -= 1) {
+        const it = items[u - 1];
+        if (it.kind == .user and it.text.len > 0 and !it.pending) break;
+    } else return; // no user words to decide about
+    var previous: []const u8 = "";
+    var p = u - 1;
+    while (p > 0) : (p -= 1) {
+        if (items[p - 1].kind == .assistant and items[p - 1].text.len > 0) {
+            previous = items[p - 1].text;
+            break;
+        }
+    }
+    const tools = offered(s, a) catch return;
+    const called = a.alloc([]const u8, calls.len) catch return;
+    for (called, calls) |*n, c| n.* = c.function.name;
+    s.backend.shadow(.{
+        .session_id = s.id,
+        .response_id = r.id,
+        .words = items[u - 1].text,
+        .previous = previous,
+        .tools = tools,
+        .called = called,
+        .turn_ms = @intCast(@divTrunc(@max(s.clock() - r.marks.t0, 0), std.time.ns_per_ms)),
+    });
 }
 
 /// The items as chat messages. A run of tool calls becomes one assistant message followed by a tool message for

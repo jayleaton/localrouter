@@ -11,6 +11,7 @@
 //!                    JSON (language, segments, words), else the job id; get_job returns the transcript once done
 //!   synthesize_speech waits for spoken text; returns the audio inline (WAV) and as a URL
 //!   chat             a chat completion from the chat model (whole): the reply's text, then the completion as JSON
+//!   decide           typed decisions (choice, noul, score) about a state from the decision model: checked probabilities
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
@@ -30,6 +31,8 @@ const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
+const decision = @import("decide.zig");
+const systemone = @import("../tool/systemone.zig");
 const audio = @import("../media/audio.zig");
 const config = @import("../config.zig");
 const sched_memory = @import("../sched/memory.zig");
@@ -149,6 +152,8 @@ fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, a
         synthesizeSpeech(app, a, host, args, out)
     else if (eql(name, "chat"))
         chatTool(app, a, args, out)
+    else if (eql(name, "decide"))
+        decideTool(app, a, args, out)
     else if (eql(name, "get_job"))
         getJob(app, a, host, args, out)
     else if (eql(name, "cancel_job"))
@@ -365,6 +370,7 @@ fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
+        .decision => .{ .decision = .{ .body = "" } },
     };
     if (b.size.len > 0) {
         const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
@@ -539,6 +545,31 @@ fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Co
     return true;
 }
 
+/// Typed decisions about `state`: one line a question (the choice and its probability, the noul's probability, the
+/// score), then the model's checked reply as JSON. Nothing acts on them; the caller decides what to do.
+fn decideTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    if (args != .object) return fail(a, out, "decide takes state and questions", .{});
+    var body: std.json.ObjectMap = .empty;
+    for ([_][]const u8{ "model", "state", "questions" }) |k| if (args.object.get(k)) |v| try body.put(a, k, v);
+    var why: decision.Refusal = .{};
+    const r = decision.decide(app, a, .{ .object = body }, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    var bad: []const u8 = "";
+    const qs = systemone.parseQuestions(a, .{ .object = body }, &bad) catch return fail(a, out, "{s}", .{bad});
+    var w: Io.Writer.Allocating = .init(a);
+    for (qs, r.answers) |q, an| {
+        const line = switch (an) {
+            .choice => |c| w.writer.print("{s}: {s} ({d:.3})\n", .{ q.name, q.ask.choice[c.choice].id, c.probabilities[c.choice] }),
+            .noul => |p| w.writer.print("{s}: yes {d:.3}\n", .{ q.name, p }),
+            .score => |s| w.writer.print("{s}: score {d:.2} of {d} (confidence {d:.3})\n", .{ q.name, s.score, q.ask.score.len - 1, s.confidence }),
+        };
+        line catch return error.OutOfMemory;
+    }
+    w.writer.print("model {s}, {d} ms", .{ r.model, r.ms }) catch return error.OutOfMemory;
+    try out.append(a, .{ .type = "text", .text = w.written() });
+    try out.append(a, .{ .type = "text", .text = r.raw });
+    return true;
+}
+
 fn chatMessage(a: std.mem.Allocator, role: []const u8, content: []const u8) !Value {
     var m: std.json.ObjectMap = .empty;
     try m.put(a, "role", .{ .string = role });
@@ -683,7 +714,7 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription or chat), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat or decision), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
     } },
     .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices, default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
@@ -780,6 +811,13 @@ const tool_list = [_]Tool{
     \\"tools":{"type":"array","items":{"type":"object"},"description":"OpenAI function tools the model may call."},
     \\"tool_choice":{"description":"none, auto, required, or {\"type\":\"function\",\"function\":{\"name\":...}}."},
     \\"response_format":{"type":"object","description":"{\"type\":\"json_object\"} or {\"type\":\"json_schema\",\"json_schema\":{...}} for structured output."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "decide", .title = "Decide", .description = "Typed decisions from the local decision model (the System One shape: choice, noul, score). Each question gets probabilities, checked before they are returned: a choice is always one of the offered options, a noul the probability that the statement is true, a score the expected level (0 = the first level). Use it to route or classify; it acts on nothing. Returns one line a question, then the model's reply as JSON.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["state","questions"],"properties":{
+    \\"state":{"description":"What every question refers to: text, an object or a list (a chat as {\"messages\":[...]} works)."},
+    \\"questions":{"type":"object","description":"name -> question, at most 64. {\"type\":\"choice\",\"instructions\":\"...\",\"criteria\":{\"option\":\"what it means\",...}} (2 to 255 options); {\"type\":\"noul\",\"instructions\":\"...\",\"criteria\":{\"true\":\"...\",\"false\":\"...\"}}; {\"type\":\"score\",\"instructions\":\"...\",\"criteria\":[\"lowest level\",...,\"highest\"]} (2 to 10 levels)."},
+    \\"model":{"type":"string","description":"A decision model id from list_models; default: the one whose default_for lists typed_decision."}},
     \\"additionalProperties":false}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =

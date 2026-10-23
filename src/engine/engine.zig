@@ -76,7 +76,7 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
             v.width = default_video_size[0];
             v.height = default_video_size[1];
         },
-        .image, .speech, .transcription, .chat => {},
+        .image, .speech, .transcription, .chat, .decision => {},
     }
 }
 
@@ -89,10 +89,10 @@ pub const entries = [_]Entry{
 };
 
 /// Whether the tool can serve `cap`: its configured capabilities, else its engine's, else its kind's plain one (text to
-/// image, text to video, text to speech, speech to text, chat completion); always within the tool's kind.
+/// image, text to video, text to speech, speech to text, chat completion, typed decision); always within the tool's kind.
 pub fn supports(cfg: *const ToolConfig, cap: Capability) bool {
     if (cap.kind() != cfg.kind) return false;
-    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text, .chat_completion };
+    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text, .chat_completion, .typed_decision };
     return std.mem.indexOfScalar(Capability, base, cap) != null;
 }
 

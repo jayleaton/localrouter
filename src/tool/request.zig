@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const Kind = enum { image, video, speech, transcription, chat };
+pub const Kind = enum { image, video, speech, transcription, chat, decision };
 
 /// What a model can do; a request needs exactly one (`Request.capability`).
 pub const Capability = enum {
@@ -13,6 +13,7 @@ pub const Capability = enum {
     text_to_speech,
     speech_to_text,
     chat_completion,
+    typed_decision,
 
     pub fn kind(c: Capability) Kind {
         return switch (c) {
@@ -21,6 +22,7 @@ pub const Capability = enum {
             .text_to_speech => .speech,
             .speech_to_text => .transcription,
             .chat_completion => .chat,
+            .typed_decision => .decision,
         };
     }
 };
@@ -102,13 +104,23 @@ pub const Chat = struct {
     seed: u64 = 0, // the request's own seed, if it named one (the server samples with it)
 };
 
-/// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}}, {"transcription": {...}} or {"chat": {...}}.
+/// Typed decisions (`systemone.zig`): `body` is a System One request (`{model, state, questions}`), already checked,
+/// with `model` set to the tool's id. The daemon posts it to the decision server its worker runs and keeps the reply as
+/// `decision.json`; callers read it through `systemone.parseAnswers`, never raw.
+pub const Decision = struct {
+    body: []const u8,
+    seed: u64 = 0, // decisions are deterministic: kept for the common request shape
+};
+
+/// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}}, {"transcription": {...}},
+/// {"chat": {...}} or {"decision": {...}}.
 pub const Request = union(Kind) {
     image: Image,
     video: Video,
     speech: Speech,
     transcription: Transcription,
     chat: Chat,
+    decision: Decision,
 
     pub fn kind(r: Request) Kind {
         return std.meta.activeTag(r);
@@ -122,6 +134,7 @@ pub const Request = union(Kind) {
             .speech => .text_to_speech,
             .transcription => .speech_to_text,
             .chat => .chat_completion,
+            .decision => .typed_decision,
         };
     }
 
@@ -147,6 +160,7 @@ pub const Limits = struct {
     max_audio_ms: u64 = 30 * 60 * 1000, // one transcription's audio
     max_transcription_prompt: usize = 4096,
     max_chat_body: usize = 16 << 20, // one chat request as sent to the model's server
+    max_decision_body: usize = 16 << 10, // one decision request (state and questions): its model is booked at the peak of one this large
 };
 
 pub const Invalid = error{Invalid};
@@ -183,6 +197,10 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
         .chat => |v| {
             if (v.body.len == 0) return fail(why, "the chat request is empty");
             if (v.body.len > l.max_chat_body) return fail(why, "the chat request is larger than 16 MB");
+        },
+        .decision => |v| {
+            if (v.body.len == 0) return fail(why, "the decision request is empty");
+            if (v.body.len > l.max_decision_body) return fail(why, "the decision request is larger than 16 KB: send a shorter state");
         },
     }
 }
@@ -294,4 +312,19 @@ test "chat requests: capability, limits and wire shape" {
     defer back.deinit();
     try std.testing.expectEqualStrings(ask.chat.body, back.value.chat.body);
     try std.testing.expect(back.value.chat.stream);
+}
+
+test "decision requests: capability, limits and wire shape" {
+    var why: []const u8 = "";
+    const ask: Request = .{ .decision = .{ .body = "{\"model\":\"d\",\"state\":\"s\",\"questions\":{}}" } };
+    try validate(ask, .{}, &why);
+    try std.testing.expectEqual(Capability.typed_decision, ask.capability());
+    try std.testing.expectEqual(Kind.decision, ask.capability().kind());
+    try std.testing.expectError(error.Invalid, validate(.{ .decision = .{ .body = "" } }, .{}, &why));
+    const big: [16 * 1024 + 1]u8 = @splat('a');
+    try std.testing.expectError(error.Invalid, validate(.{ .decision = .{ .body = &big } }, .{}, &why));
+    try std.testing.expectEqualStrings("the decision request is larger than 16 KB: send a shorter state", why);
+    const text = try std.json.Stringify.valueAlloc(std.testing.allocator, ask, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "{\"decision\":{\"body\":"));
 }

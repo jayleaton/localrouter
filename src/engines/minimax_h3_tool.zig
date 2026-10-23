@@ -39,7 +39,7 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
             v.width = l.width;
             v.height = l.height;
         },
-        .image, .speech, .transcription, .chat => {},
+        .image, .speech, .transcription, .chat, .decision => {},
     }
 }
 
@@ -48,7 +48,7 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     const v = switch (req.*) {
         .video => |x| x,
-        .image, .speech, .transcription, .chat => return true, // the kind check refuses it
+        .image, .speech, .transcription, .chat, .decision => return true, // the kind check refuses it
     };
     const l = limits(cfg);
     if (v.width > l.width or v.height > l.height or v.width % 32 != 0 or v.height % 32 != 0) {
@@ -72,7 +72,7 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image, .speech, .transcription, .chat => 0,
+        .image, .speech, .transcription, .chat, .decision => 0,
         // the frames and the waveform on the host, plus ffmpeg's own buffers
         .video => |v| blk: {
             const sh = P.shapes(v.width, v.height, v.seconds * fps) catch break :blk 0;
@@ -109,7 +109,7 @@ const MiniMaxH3 = struct {
         const t: *MiniMaxH3 = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .video => |x| x,
-            .image, .speech, .transcription, .chat => return engine.Refused.Refused,
+            .image, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
         if (v.first_frame != null) return refuse("this video engine does not take a first frame yet: send no image", .{});
         if (v.fps != fps) return refuse("this model makes {d} fps video: omit fps or send {d}", .{ fps, fps });

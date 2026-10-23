@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     it_opts.addOptionPath("localrouter_exe", exe.getEmittedBin());
     it_opts.addOptionPath("speech_worker", b.path("tests/fixtures/speech_worker.py"));
     it_opts.addOptionPath("chat_server", b.path("tests/fixtures/chat_server.py"));
+    it_opts.addOptionPath("decide_server", b.path("tests/fixtures/decide_server.py"));
     it_opts.addOptionPath("drama3_worker", b.path("tools/speech/drama3/drama3_worker.py"));
     it_opts.addOptionPath("drama3_pins", b.path("tools/speech/drama3/pins.json"));
     it_opts.addOptionPath("drama3_pilot", b.path("tests/fixtures/drama3_pilot.py"));

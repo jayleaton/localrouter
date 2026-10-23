@@ -18,6 +18,8 @@ const resample = @import("../voice/resample.zig");
 const Stop = @import("../voice/stop.zig").Stop;
 const gate = @import("../computer/gate.zig");
 const hub_mod = @import("../computer/hub.zig");
+const decide = @import("decide.zig");
+const systemone = @import("../tool/systemone.zig");
 
 const App = routes.App;
 const Why = backend.Why;
@@ -73,7 +75,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow };
 
 fn self(ptr: *anyopaque) *Local {
     return @ptrCast(@alignCast(ptr));
@@ -365,6 +367,132 @@ fn waitJob(ptr: *anyopaque, a: std.mem.Allocator, job: backend.Job, timeout_s: u
     const urls = a.alloc([]const u8, j.files.len) catch return .{ .status = "completed" };
     for (urls, j.files) |*u, f| u.* = std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ l.host, j.id, f }) catch "";
     return .{ .status = "completed", .urls = urls };
+}
+
+/// One shadow decision at a time: a turn that ends while one is asked is not asked about (shadow work never queues).
+var shadow_busy: std.atomic.Value(bool) = .init(false);
+
+/// A finished turn, copied for the shadow thread: the route question's options and the state it is asked about.
+const ShadowTurn = struct {
+    arena: std.heap.ArenaAllocator,
+    session_id: []const u8,
+    response_id: []const u8,
+    did: []const u8, // what the chat model did: the first tool it called, or "reply"
+    called: []const []const u8,
+    options: []systemone.Option,
+    state: []const u8, // JSON
+    words: []const u8,
+    turn_ms: u64,
+};
+
+/// How the decision model would have routed a finished voice turn, logged beside what the chat model did
+/// (`voice shadow decision {json}`). It runs on its own thread and touches only the app, never the session (which may
+/// be gone by then); nothing acts on the decision.
+fn shadow(ptr: *anyopaque, turn: backend.Shadow) void {
+    const app = self(ptr).app;
+    if (!decide.available(app)) return;
+    if (shadow_busy.swap(true, .acq_rel)) {
+        std.log.info("voice {s}: shadow decision skipped for {s}: the previous one is still being asked", .{ turn.session_id, turn.response_id });
+        return;
+    }
+    const t = app.gpa.create(ShadowTurn) catch return shadow_busy.store(false, .release);
+    t.* = copyTurn(app.gpa, turn) catch {
+        app.gpa.destroy(t);
+        return shadow_busy.store(false, .release);
+    };
+    const th = std.Thread.spawn(.{}, askShadow, .{ app, t }) catch {
+        t.arena.deinit();
+        app.gpa.destroy(t);
+        return shadow_busy.store(false, .release);
+    };
+    th.detach();
+}
+
+const reply_option = "reply";
+const max_words = 2000;
+
+fn copyTurn(gpa: std.mem.Allocator, turn: backend.Shadow) !ShadowTurn {
+    var t: ShadowTurn = .{ .arena = .init(gpa), .session_id = "", .response_id = "", .did = reply_option, .called = &.{}, .options = &.{}, .state = "", .words = "", .turn_ms = turn.turn_ms };
+    errdefer t.arena.deinit();
+    const a = t.arena.allocator();
+    t.session_id = try a.dupe(u8, turn.session_id);
+    t.response_id = try a.dupe(u8, turn.response_id);
+    t.words = try a.dupe(u8, clip(turn.words, max_words));
+    const called = try a.alloc([]const u8, turn.called.len);
+    for (called, turn.called) |*d, n| d.* = try a.dupe(u8, n);
+    t.called = called;
+    if (called.len > 0) t.did = called[0];
+    var opts: std.ArrayList(systemone.Option) = .empty;
+    for (turn.tools) |tool| {
+        if (opts.items.len + 1 >= systemone.max_options) break;
+        if (std.mem.eql(u8, tool.function.name, reply_option)) continue;
+        try opts.append(a, .{ .id = try a.dupe(u8, tool.function.name), .description = try a.dupe(u8, clip(tool.function.description, 400)) });
+    }
+    try opts.append(a, .{ .id = reply_option, .description = "Answer in speech; no tool is needed for this." });
+    t.options = opts.items;
+    t.state = try std.json.Stringify.valueAlloc(a, .{ .assistant_said_before = clip(turn.previous, 600), .user_said = t.words }, .{});
+    return t;
+}
+
+/// At most `n` bytes of `s`, cut at a UTF-8 boundary.
+fn clip(s: []const u8, n: usize) []const u8 {
+    if (s.len <= n) return s;
+    var end = n;
+    while (end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
+    return s[0..end];
+}
+
+fn askShadow(app: *App, t: *ShadowTurn) void {
+    defer {
+        t.arena.deinit();
+        app.gpa.destroy(t);
+        shadow_busy.store(false, .release);
+    }
+    const a = t.arena.allocator();
+    const qs = [_]systemone.Question{.{
+        .name = "route",
+        .instructions = "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+        .ask = .{ .choice = t.options },
+    }};
+    var why: decide.Refusal = .{};
+    const r = decide.ask(app, a, t.state, &qs, &why) orelse {
+        std.log.warn("voice {s}: shadow decision for {s} failed: {s}", .{ t.session_id, t.response_id, why.message });
+        return;
+    };
+    const c = r.answers[0].choice;
+    const chose = t.options[c.choice].id;
+    const Prob = struct { option: []const u8, p: f64 };
+    var top: [3]Prob = undefined;
+    const n = @min(top.len, t.options.len);
+    var used: [3]usize = undefined;
+    for (0..n) |k| { // the three most probable options, for reading the log
+        var best: usize = 0;
+        var best_p: f64 = -1;
+        for (c.probabilities, 0..) |p, i| {
+            if (std.mem.indexOfScalar(usize, used[0..k], i) != null) continue;
+            if (p > best_p) {
+                best = i;
+                best_p = p;
+            }
+        }
+        used[k] = best;
+        top[k] = .{ .option = t.options[best].id, .p = best_p };
+    }
+    const line = std.json.Stringify.valueAlloc(a, .{
+        .session = t.session_id,
+        .response = t.response_id,
+        .words = t.words,
+        .chat_did = t.did,
+        .chat_called = t.called,
+        .decision = chose,
+        .p = c.probabilities[c.choice],
+        .agree = std.mem.eql(u8, chose, t.did),
+        .top = top[0..n],
+        .model = r.model,
+        .decide_ms = r.ms,
+        .turn_ms = t.turn_ms,
+    }, .{}) catch return;
+    std.log.info("voice shadow decision {s}", .{line});
 }
 
 fn offer(ptr: *anyopaque) backend.Offer {

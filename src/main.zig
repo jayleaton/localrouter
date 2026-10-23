@@ -90,6 +90,8 @@ test {
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");
     _ = @import("api/chat.zig");
+    _ = @import("api/decide.zig");
+    _ = @import("tool/systemone.zig");
     _ = @import("tool/upstream.zig");
     _ = @import("engines/openai_server.zig");
     _ = @import("media/audio.zig");

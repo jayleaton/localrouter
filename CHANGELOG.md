@@ -32,6 +32,19 @@
     computer control refuses without them even when `pairing.required` is off. Pairing gains per-device scopes
     (`localrouter pair token|add NAME --scopes LIST`, `localrouter pair scopes ID|NAME LIST`): a device with none keeps
     `voice` and `mcp`, and a desktop helper's token (`desktop_helper` only) reaches neither `/mcp` nor `/v1/realtime`.
+
+- Typed decisions: a `decision` kind of model, `POST /v1/systemone` (TypeSafe's System One shape: choice, noul and
+  score questions about a state) and the MCP `decide` tool.
+  - Questions are checked before anything loads, and the model's answers against them before anyone reads them: each
+    question answered with its own type, a choice among the offered options, probabilities in [0, 1] summing to 1.
+    A System One client (SideBud's Jev client) only changes its base URL. At most 64 questions and 16 KB a request.
+  - Decision tools run on their own scheduler lane (`decide`), so a decision never waits behind a chat reply.
+  - Jarvis: KnowLine-4B Gen5.5 (`tools/decide/knowline`, Apache-2.0, bf16), the best open decision model that fits
+    beside the warm set; on demand at priority 5, not kept warm (its booking would leave under 5 GiB for jobs).
+  - Voice (`voice.shadow_decisions`, on in Jarvis): after each reply the decision model is asked how it would have
+    routed the turn among the tools the chat model was offered (or a spoken reply), only when it is already loaded,
+    one at a time, and the answer is logged beside what the chat model did (`voice shadow decision {...}`). Nothing
+    acts on it.
 - Voice: a picture or video turn answered in several tool calls is confirmed aloud, and the chat model no longer manages
   models around a picture.
   - The session checks memory itself: before a video, the `reserve_for` dry run, and when a voice model would go the

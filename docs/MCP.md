@@ -103,6 +103,7 @@ full machine says `insufficient_memory`.
 | `unload_model` | **`model`**, `hold_s` (120) | one model unloaded now, back by itself after `hold_s`. A chat model is refused |
 | `load_model` | **`model`**, `wait_s` | loads it (refused if it would need the chat model's memory) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning`, `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format` | the reply's text (or its tool calls as JSON), then the whole completion |
+| `decide` | **`state`**, **`questions`** (choice, noul, score; [AGENTS.md](AGENTS.md#decisions-the-system-one-shape)), `model` | one line a question (`route: generate_image (0.912)`), then the model's reply, checked against the questions. Acts on nothing |
 | `generate_image` | **`prompt`**, `size` (1024x1024), `n`, `seed`, `steps`, `negative_prompt`, `images` (edit inputs), `inline_images`, `wait_s` | PNGs inline and as URLs, the seed; or the job id |
 | `generate_video` | **`prompt`**, `size` (omit: the model's own), `seconds`, `fps`, `seed`, `steps`, `audio`, `image`, `wait_s` | the MP4's URL; or the job id |
 | `synthesize_speech` | **`input`**, `voice`, `model`, `speed`, `preset`, `format` (wav), `seed`, `references`, `inline_audio` | the audio inline and as a URL |

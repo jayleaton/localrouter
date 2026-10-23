@@ -10,7 +10,7 @@
 # --quick (about 1 min) skips the video, the barge-in, the picture turn and the after-image turns; the full run
 # (under 10 min) has them, then waits for the warm set to be whole again. Exit 0 only when every check passed. Writes
 # OUT/results.jsonl, OUT/summary.json, OUT/watch-{image,video}.txt and each check's files.
-# Env: CHAT, DRAMA, STT, IMAGE, VIDEO (model ids; the deploy's defaults), STT_FIXTURE (the pinned LibriSpeech
+# Env: CHAT, DRAMA, STT, IMAGE, VIDEO, DECIDE (model ids; the deploy's defaults), STT_FIXTURE (the pinned LibriSpeech
 # WAV, tools/speech/fixtures/manifest.json; found under ~/jarvis by its sha256 when unset), LOCK (~/jarvis/.dgx01.lock).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +25,7 @@ while [ $# -gt 0 ]; do
 done
 CHAT=${CHAT:-qwen3.8-27b} DRAMA=${DRAMA:-fishaudio/drama-3}
 STT=${STT:-whisper-large-v3-turbo} IMAGE=${IMAGE:-qwen-image-2.1-turbo} VIDEO=${VIDEO:-minimax-h3}
+DECIDE=${DECIDE:-knowline-4b}   # checked only when the deploy lists it
 FIXTURE_SHA=799f78ed4beb4de7ceae3a809262d4ce242394342ccd1d58cef7d49dbc2def46
 FIXTURE_TEXT="mister quilter is the apostle of the middle classes and we are glad to welcome his gospel"
 out=${out:-$HOME/jarvis/deploy/smoke/$(date -u +%Y%m%dT%H%M%SZ)$([ $quick = 1 ] && echo -quick)}
@@ -124,6 +125,18 @@ tts tts_drama "$DRAMA"
 voices=$(jq -r --arg id "$DRAMA" '.data[] | select(.id == $id) | .voices[]? | if type == "object" then (.id // .voice) else . end' <<< "$m")
 [ -n "$voices" ] || record previews false 0 "$DRAMA lists no voices"
 for v in $voices; do tts "preview_$v" "$DRAMA" "$v"; done
+
+# typed decisions, when a decision model is configured: a System One request under the name SideBud's client sends
+# (jev-latest), answered by the default decision model with an offered choice and probabilities that sum to 1. It
+# loads the model on demand, so the voice turns below run with shadow decisions on (voice.shadow_decisions).
+if jq -e --arg id "$DECIDE" '[.data[].id] | index($id)' <<< "$m" > /dev/null; then
+  t=$(now)
+  r=$(post /v1/systemone '{"model":"jev-latest","state":{"user_said":"draw me a red fox in the snow"},"questions":{"route":{"type":"choice","instructions":"Which one action should the assistant take for the user'"'"'s words?","criteria":{"generate_image":"Make a picture from a text description.","generate_video":"Make a short video clip.","reply":"Answer in speech; no tool is needed."}}}}' 600)
+  echo "$r" > "$out/decide.json"
+  ok=$(jq -e --arg id "$DECIDE" '.model == $id and (.answers.route.choice | IN("generate_image", "generate_video", "reply"))
+    and ((([.answers.route.probabilities[]] | add) - 1) as $d | ($d < 0.02 and $d > -0.02))' <<< "$r" > /dev/null 2>&1 && echo true || echo false)
+  record decide "$ok" "$(secs $t)" "$(jq -c '{model, choice: .answers.route.choice, p: .answers.route.probabilities}' <<< "$r" 2> /dev/null || head -c 200 <<< "$r")"
+fi
 
 # voice NAME OUT_SUBDIR DRIVER_ARGS...: the e2e driver over /v1/realtime; its checks recorded as NAME: ...
 voice() {
