@@ -47,7 +47,7 @@ const Need = @import("../pair.zig").Need;
 const App = routes.App;
 const Value = std.json.Value;
 
-const versions = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
+pub const versions = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
 const max_wait_s = 3000; // a tool call longer than this returns the job id; get_job picks it up
 
 pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, who: pair.Caller) !void {
@@ -57,6 +57,7 @@ pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8
     }
     caller_token = try a.dupe(u8, gate.token(req)); // the headers are gone once the body is read
     caller = who;
+    caller_scheme = h.scheme(req);
     const text = h.body(req, a) catch return rpcError(req, a, .null, -32600, "body too large");
     const msg = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return rpcError(req, a, .null, -32700, "parse error");
     if (msg != .object) return rpcError(req, a, .null, -32600, "one JSON-RPC message a request (no batches)");
@@ -83,7 +84,7 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
     try reply(req, a, id, .{
         .protocolVersion = version,
         .capabilities = .{ .tools = .{ .listChanged = false } },
-        .serverInfo = .{ .name = "localrouter", .version = "0.1.0" },
+        .serverInfo = .{ .name = "localrouter", .version = @import("capabilities.zig").server_version },
         .instructions = instructions,
     });
 }
@@ -121,11 +122,13 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
 }
 
 /// The text a tool call returns (its text contents, one a line) and whether it failed; for callers outside MCP (the
-/// voice session's model tools), as `who` (its scopes apply as over /mcp). Null for an unknown tool.
-pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, who: pair.Caller, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
+/// voice session's model tools), as `who` (its scopes apply as over /mcp), with output URLs in `scheme`. Null for an
+/// unknown tool.
+pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, scheme: []const u8, who: pair.Caller, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
     var out: std.ArrayList(Content) = .empty;
     caller_token = ""; // an in-process caller has no device: the computer tools refuse it
     caller = who;
+    caller_scheme = scheme;
     const result = invoke(app, a, host, name, args, &out) orelse return null;
     const ok = if (result) |x| x else |_| false;
     var w: Io.Writer.Allocating = .init(a);
@@ -197,6 +200,9 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
 threadlocal var calling: []const u8 = "";
 /// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
 threadlocal var caller_token: []const u8 = "";
+/// The scheme the caller reached the daemon with (`h.scheme`), for the output URLs it gets back.
+threadlocal var caller_scheme: []const u8 = "http";
+
 /// Who is calling (`pair.Caller`): the scopes each tool needs, the owner its jobs get, the jobs it may see.
 threadlocal var caller: pair.Caller = .{};
 
@@ -697,7 +703,7 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
     app.table.mutex.lockUncancelable(app.io);
     defer app.table.mutex.unlock(app.io);
     const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
-    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ host, j.id, j.files[i] });
+    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ caller_scheme, host, j.id, j.files[i] });
     const obj = .{
         .id = j.id,
         .model = app.scheduler.slots[j.tool].tool.config().id,
@@ -884,6 +890,14 @@ const tool_list = [_]Tool{
     .{ .name = "computer_stop", .title = "Computer stop", .description = "Stops a computer task before its next step (every running one without task_id). A pending approval for it can no longer be granted.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{"task_id":{"type":"string"}},"additionalProperties":false}
     } },
+};
+
+/// The tool names in tools/list order, for /v1/capabilities.
+pub const tool_name_list = blk: {
+    var names: [tool_list.len][]const u8 = undefined;
+    for (tool_list, 0..) |t, i| names[i] = t.name;
+    const out = names;
+    break :blk out;
 };
 
 /// "list_models, list_voices, ...": the tool names, for an unknown tool's error.

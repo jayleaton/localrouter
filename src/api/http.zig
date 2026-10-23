@@ -129,6 +129,15 @@ pub fn host(req: *const Request) []const u8 {
     return "localhost";
 }
 
+/// The scheme the client used: "https" when a TLS-terminating proxy in front of the daemon (`tailscale serve`) says so
+/// with X-Forwarded-Proto, else "http". For the absolute URLs the daemon hands back; a forged value only changes the
+/// scheme of the forger's own URLs.
+pub fn scheme(req: *const Request) []const u8 {
+    var it = req.iterateHeaders();
+    while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-proto") and std.ascii.eqlIgnoreCase(std.mem.trim(u8, h.value, " "), "https")) return "https";
+    return "http";
+}
+
 test "a bodiless POST keeps the connection serving" {
     const Ctx = struct {
         n: usize = 0,

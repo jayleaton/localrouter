@@ -25,6 +25,16 @@
     device paired before scopes) grants every service scope. Computer control's scopes grant no service scope.
   - The Jarvis deploy scripts read `/v1/tools` with a `read` token install.sh makes once pairing is on
     (`$DEPLOY/operator.token`); `smoke.sh` sends `$LOCALROUTER_TOKEN` on every request.
+- The harness contract (`docs/HARNESS.md`, contract `2026-10-23`): what a harness on another device may rely on
+  across Chat Completions, the realtime beta profile, MCP, `/v1/systemone`, model management and pairing, and what
+  is not offered. `GET /v1/capabilities` describes it per box (open, no secrets): profiles, which routes need which
+  scope, the MCP tools and protocol versions, the realtime events, and `unsupported` features with their status
+  (`coming` or `unsupported`). The requests our web page, mobile app and desktop helper actually sent the Jarvis box
+  are fixtures (`tests/fixtures/harness`, recorded with `tools/harness/record_proxy.py`), replayed by the
+  integration tests.
+- Output URLs keep the client's scheme: behind `tailscale serve` (`X-Forwarded-Proto: https`) the URLs in MCP results,
+  `response_format: url` images and `localrouter.job.done` are `https://`. They were `http://` on the TLS port, which
+  answers 400, so an outside harness could not open what the MCP tools returned.
 - Device pairing, off by default (`"pairing": {"required": true}`): `/v1/realtime` and `/mcp` then answer only a
   paired device's token, and refuse anything else with a 401 (`invalid_api_key`, `WWW-Authenticate: Bearer`) before
   the upgrade or the body. There is no loopback exemption (behind `tailscale serve` every peer is loopback); the other

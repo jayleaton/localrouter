@@ -161,6 +161,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     // Everything from the head is copied: the head's buffer is reused once the socket is read.
     const model = try a.dupe(u8, query(req.head.target, "model") orelse "");
     const host = try a.dupe(u8, h.host(req));
+    const scheme = h.scheme(req); // static
     const token = try a.dupe(u8, @import("../computer/gate.zig").token(req)); // a paired device's, for the computer tools
     var protocol: []const u8 = "";
     var hit = req.iterateHeaders();
@@ -179,6 +180,7 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     var url_buf: [96]u8 = undefined;
     var local = Local.init(app, host, &url_buf);
     local.as(token, caller.owner()); // `routes.handle` admitted it (pairing.required: a device with inference or voice)
+    local.scheme = scheme;
     var sink: Sink = .{ .c = &c };
     const s = Session.create(app.gpa, app.io, local.asBackend(), .{ .ctx = &sink, .send = Sink.send }, app.cfg.voice, if (model.len > 0) model else Local.defaultChatModel(app)) catch
         return c.close(1011, "could not start the session");
