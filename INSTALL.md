@@ -164,6 +164,26 @@ Tell the user:
   shows it at a glance.
 - **For their agent.** `claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp`, as in
   [docs/AGENTS.md](docs/AGENTS.md).
+- **For their phone.** The phone app ([apps/mobile](apps/mobile/README.md)) reaches the box over the tailnet URL; the
+  phone needs Tailscale on the same tailnet. Pair it from the box with
+  `deploy/jarvis/pair.sh add "<their phone>" --url https://<this machine>.<tailnet>.ts.net:10443` and give them the
+  code or the `localrouter://pair?…` link it prints (valid 10 minutes). The README says how to install the app.
+
+## Pairing devices
+
+Pairing is off by default: anyone who can reach the box can use its API, voice and MCP, as before. With
+`"pairing": {"required": true}` in the config (on a Jarvis box: `PAIRING_REQUIRED=1 deploy/jarvis/install.sh`, which
+restarts onto it once no voice session is open; later installs keep it, `PAIRING_REQUIRED=0` turns it off),
+`/v1/realtime` and `/mcp` answer only paired devices; the rest of the API is unchanged. Before turning it on:
+
+- pair every phone (`pair.sh add NAME --url URL`, the app enters the code);
+- mint a token for each MCP client and script (`pair.sh token NAME`, printed once) and give it to them:
+  `claude mcp add --transport http localrouter <url>/mcp --header "Authorization: Bearer <token>"`,
+  `localrouter mcp-stdio --token <token>`, and `LOCALROUTER_TOKEN=<token>` for the smoke and check scripts;
+- in the web page (`/voice`), paste a token into **Settings → API key**.
+
+`pair.sh list` shows the devices and `pair.sh revoke <id or name>` removes one (its next connection is refused).
+[docs/MCP.md](docs/MCP.md) has the details.
 
 ## The models
 

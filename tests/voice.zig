@@ -56,12 +56,17 @@ pub const Ws = struct {
     dog: ?std.Thread = null,
 
     pub fn open(w: *Ws, io: Io, a: std.mem.Allocator, port: u16, protocol: []const u8) !void {
+        return w.openAt(io, a, port, "/v1/realtime", protocol);
+    }
+
+    /// `open` with any request target (a query string such as `?api_key=`); `head` is the response head, whatever it is.
+    pub fn openAt(w: *Ws, io: Io, a: std.mem.Allocator, port: u16, target: []const u8, protocol: []const u8) !void {
         const addr = try Io.net.IpAddress.parse("127.0.0.1", port);
         w.* = .{ .io = io, .stream = try addr.connect(io, .{ .mode = .stream }) };
         w.reader = w.stream.reader(io, &w.rbuf);
         w.writer = w.stream.writer(io, &w.wbuf);
         const extra = if (protocol.len > 0) try std.fmt.allocPrint(a, "Sec-WebSocket-Protocol: {s}\r\n", .{protocol}) else "";
-        try w.writer.interface.print("GET /v1/realtime HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{s}\r\n", .{ port, extra });
+        try w.writer.interface.print("GET {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{s}\r\n", .{ target, port, extra });
         try w.writer.interface.flush();
         var head: std.ArrayList(u8) = .empty;
         while (true) {

@@ -10,13 +10,14 @@
 #    (lingering keeps it running without a login). A running service is restarted onto the new build once no voice
 #    session is open; until then (and when a check fails) current, the config and the unit stay as they were.
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (sudo; other serve entries are
-#    left as they are). The daemon itself listens on 127.0.0.1 only: LocalRouter has no API keys, so the tailnet (its
-#    ACLs) is who may connect; nothing binds 0.0.0.0.
+#    left as they are). The daemon itself listens on 127.0.0.1 only and nothing binds 0.0.0.0: the tailnet (its ACLs)
+#    is who may connect, and with pairing.required only paired devices open /v1/realtime and /mcp (pair.sh).
 # Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, UNIT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER,
 # DRAMA_PORT).
 # Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), BUILD_ONLY=1 (preflight of the tools and step 2 only: the
 # binary that the models' qualify.sh runs), TOOLS (the tool ids to serve, space separated; default: every tool in
-# config.json.in), NVCC, SM (121).
+# config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: /v1/realtime and /mcp need a paired device; 0: not; unset:
+# as the deployed config has it).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
@@ -97,11 +98,15 @@ render() {
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
       -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@WHISPER@|${whisper:-unused}|g" "$1"
 }
+# pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
+pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')
+case ${PAIRING_REQUIRED:-} in 1) pairing='{"required":true}' ;; 0) pairing='{}' ;; esac
 # the selected tools only (TOOLS), and the voice and defaults that name them
-render "$here/config.json.in" | jq --arg t " $TOOLS " '
+render "$here/config.json.in" | jq --arg t " $TOOLS " --argjson pairing "$pairing" '
   def kept: . as $id | $t | contains(" " + $id + " ");
   .tools |= map(select(.id | kept)) | .voice.speech_models |= map(select(kept))
-  | .defaults |= with_entries(select(.value | kept))' > "$DEPLOY/config.json.new"
+  | .defaults |= with_entries(select(.value | kept))
+  | if $pairing == {} then . else .pairing = $pairing end' > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
 mkdir -p "$HOME/.config/systemd/user"

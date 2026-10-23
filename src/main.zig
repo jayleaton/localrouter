@@ -3,7 +3,8 @@
 //!   localrouter worker                                                     one tool's worker (LOCALROUTER_TOOL holds its config)
 //!   localrouter gen image|video ...                                        the client (see cli/gen.zig)
 //!   localrouter models [--url URL]                                         the server's models: kind, capabilities, defaults
-//!   localrouter mcp-stdio [--url URL]                                      /mcp over stdio, for clients without HTTP MCP
+//!   localrouter mcp-stdio [--url URL] [--token T]                          /mcp over stdio, for clients without HTTP MCP
+//!   localrouter pair add|token|list|revoke ...                             paired devices (see cli/pair.zig)
 //!   localrouter check gpu                                                  driver and memory probe
 
 const std = @import("std");
@@ -14,6 +15,7 @@ const serve = @import("serve.zig");
 const gen = @import("cli/gen.zig");
 const check = @import("cli/check.zig");
 const mcp_stdio = @import("cli/mcp_stdio.zig");
+const pair = @import("cli/pair.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
@@ -36,6 +38,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, cmd, "gen")) return gen.run(gpa, io, arena, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "models")) return gen.models(gpa, io, arena, args[2..], init.environ_map);
     if (std.mem.eql(u8, cmd, "mcp-stdio")) return mcp_stdio.run(gpa, io, args[2..], init.environ_map);
+    if (std.mem.eql(u8, cmd, "pair")) return pair.run(io, arena, args[2..]);
     if (std.mem.eql(u8, cmd, "check")) return check.run(io, gpa, args[2..]);
     return usage();
 }
@@ -47,7 +50,11 @@ fn usage() u8 {
         \\  localrouter gen image PROMPT [-o FILE] [--size WxH] [--seed N] [--steps N] [--model ID] [--url URL]
         \\  localrouter gen video PROMPT [-o FILE] [--size WxH] [--seconds N] [--seed N] [--model ID] [--url URL]
         \\  localrouter models [--url URL]
-        \\  localrouter mcp-stdio [--url URL]
+        \\  localrouter mcp-stdio [--url URL] [--token T]
+        \\  localrouter pair add NAME [--config FILE] [--data DIR] [--url URL]
+        \\  localrouter pair token NAME [--config FILE] [--data DIR]
+        \\  localrouter pair list [--config FILE] [--data DIR]
+        \\  localrouter pair revoke ID|NAME [--config FILE] [--data DIR]
         \\  localrouter check gpu | selftest | health [URL]
         \\
     , .{});
@@ -77,6 +84,9 @@ test {
     _ = @import("cli/gen.zig");
     _ = @import("cli/check.zig");
     _ = @import("cli/mcp_stdio.zig");
+    _ = @import("cli/pair.zig");
+    _ = @import("pair.zig");
+    _ = @import("api/pair.zig");
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");
     _ = @import("api/chat.zig");

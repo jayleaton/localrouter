@@ -73,6 +73,12 @@ pub const Voice = struct {
     tool_wait_s: u32 = 1800, // how long a session waits for a tool's job
 };
 
+/// Device pairing (src/pair.zig): off by default, so every client that reaches the daemon may use it, as before.
+pub const Pairing = struct {
+    required: bool = false, // /v1/realtime and /mcp answer only paired devices (`localrouter pair`); no loopback exemption:
+    // behind `tailscale serve` every peer arrives as loopback
+};
+
 pub const Config = struct {
     host: []const u8 = bind.default_host, // an IP, localhost, all (0.0.0.0) or tailscale (this machine's tailnet IPv4)
     port: u16 = 8190,
@@ -87,6 +93,7 @@ pub const Config = struct {
     gpu_lock: []const u8 = "", // the host's GPU lock: the scheduler holds it (shared) while any tool is loaded, against GPU users outside LocalRouter
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     voice: Voice = .{},
+    pairing: Pairing = .{},
     tools: []const ToolConfig = &default_tools,
 
     pub fn tool(c: *const Config, id: []const u8) ?*const ToolConfig {
@@ -226,4 +233,12 @@ test "the default host is loopback; host accepts the keywords" {
     try std.testing.expectEqualStrings("127.0.0.1", d.host);
     const t = try parse(arena.allocator(), "{\"host\": \"tailscale\"}");
     try std.testing.expectEqualStrings("tailscale", t.host);
+}
+
+test "pairing is off unless the config requires it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect(!(try parse(arena.allocator(), "{}")).pairing.required);
+    try std.testing.expect((try parse(arena.allocator(), "{\"pairing\": {\"required\": true}}")).pairing.required);
+    try std.testing.expectError(error.UnknownField, parse(arena.allocator(), "{\"pairing\": {\"loopback\": true}}"));
 }

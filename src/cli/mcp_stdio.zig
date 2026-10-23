@@ -1,18 +1,26 @@
-//! `localrouter mcp-stdio [--url http://host:8190]`: the daemon's /mcp for clients that only speak MCP over stdio. A proxy
-//! with no state: each JSON-RPC line on stdin is POSTed to `<url>/mcp` and the response is written as one line on
+//! `localrouter mcp-stdio [--url http://host:8190] [--token T]`: the daemon's /mcp for clients that only speak MCP over
+//! stdio. A proxy with no state: each JSON-RPC line on stdin is POSTed to `<url>/mcp` and the response is written as one line on
 //! stdout (on one line). Notifications (the daemon answers 202) produce no output. A daemon that cannot be reached or answers
 //! something else yields a JSON-RPC error for the request's id, so the client does not hang. The URL defaults to
-//! $LOCALROUTER_URL, else http://127.0.0.1:8190.
+//! $LOCALROUTER_URL, else http://127.0.0.1:8190. With `pairing.required` on the daemon, `--token` (else
+//! $LOCALROUTER_TOKEN) is a paired device's token (`localrouter pair token NAME` on the box), sent as a Bearer token.
 
 const std = @import("std");
 const Io = std.Io;
 
 pub fn run(gpa: std.mem.Allocator, io: Io, args: []const []const u8, environ: *const std.process.Environ.Map) !u8 {
     var base: []const u8 = environ.get("LOCALROUTER_URL") orelse "http://127.0.0.1:8190";
-    if (args.len == 2 and std.mem.eql(u8, args[0], "--url")) base = args[1] else if (args.len != 0) {
-        std.debug.print("usage: localrouter mcp-stdio [--url http://host:8190]\n", .{});
+    var token: []const u8 = environ.get("LOCALROUTER_TOKEN") orelse "";
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 2) {
+        if (std.mem.eql(u8, args[i], "--url")) base = args[i + 1] else if (std.mem.eql(u8, args[i], "--token")) token = args[i + 1] else break;
+    }
+    if (i != args.len) {
+        std.debug.print("usage: localrouter mcp-stdio [--url http://host:8190] [--token T]\n", .{});
         return 2;
     }
+    const auth = if (token.len > 0) try std.fmt.allocPrint(gpa, "Bearer {s}", .{token}) else "";
+    defer if (token.len > 0) gpa.free(auth);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const endpoint = try std.fmt.allocPrint(gpa, "{s}/mcp", .{std.mem.trimEnd(u8, base, "/")});
@@ -30,7 +38,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, args: []const []const u8, environ: *c
         const eof = r.seek == r.end;
         if (std.mem.trim(u8, line.written(), " \t\r").len > 0) {
             _ = arena.reset(.retain_capacity);
-            try forward(&client, io, arena.allocator(), endpoint, std.mem.trim(u8, line.written(), "\r"));
+            try forward(&client, io, arena.allocator(), endpoint, auth, std.mem.trim(u8, line.written(), "\r"));
         }
         if (eof) return 0;
         r.toss(1);
@@ -38,18 +46,19 @@ pub fn run(gpa: std.mem.Allocator, io: Io, args: []const []const u8, environ: *c
 }
 
 /// POSTs one message and writes the answer, if any.
-fn forward(client: *std.http.Client, io: Io, a: std.mem.Allocator, endpoint: []const u8, msg: []const u8) !void {
+fn forward(client: *std.http.Client, io: Io, a: std.mem.Allocator, endpoint: []const u8, auth: []const u8, msg: []const u8) !void {
     var out: Io.Writer.Allocating = .init(a);
     const res = client.fetch(.{
         .location = .{ .url = endpoint },
         .method = .POST,
         .payload = msg,
         .response_writer = &out.writer,
-        .headers = .{ .content_type = .{ .override = "application/json" } },
+        .headers = .{ .content_type = .{ .override = "application/json" }, .authorization = if (auth.len > 0) .{ .override = auth } else .default },
         .extra_headers = &.{.{ .name = "accept", .value = "application/json, text/event-stream" }},
     }) catch |err| return reply(io, a, msg, try std.fmt.allocPrint(a, "cannot reach {s}: {s}", .{ endpoint, @errorName(err) }));
     if (res.status == .accepted or out.written().len == 0 and res.status == .ok) return;
-    if (res.status != .ok) return reply(io, a, msg, try std.fmt.allocPrint(a, "{s} answered {d}", .{ endpoint, @intFromEnum(res.status) }));
+    if (res.status == .unauthorized) return reply(io, a, msg, try std.fmt.allocPrint(a, "{s} answered 401: this client is not paired; pass --token (or set LOCALROUTER_TOKEN) to a token from `localrouter pair token NAME` on the box", .{endpoint}));
+    if (res.status != .ok) return reply(io, a, msg, try std.fmt.allocPrint(a, "{s} answered {d}", .{ endpoint, @backingInt(res.status) }));
     // One line per message: newlines in valid JSON are only whitespace between tokens (the schemas have some).
     const text = try a.dupe(u8, std.mem.trim(u8, out.written(), " \r\n"));
     std.mem.replaceScalar(u8, text, '\n', ' ');

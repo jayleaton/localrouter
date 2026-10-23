@@ -29,6 +29,7 @@ adding a model, or a new kind of model, does not touch the orchestration.
 | API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`; output files; `/v1/tools` for operators |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
 | Voice | `src/api/realtime.zig`, `src/voice/` | `/v1/realtime` (OpenAI Realtime API over a WebSocket) and the `/voice` page: VAD, STT, chat, sentence-chunked TTS, barge-in, tool jobs ([VOICE.md](dev/VOICE.md)) |
+| Pairing | `src/pair.zig`, `src/api/pair.zig`, `src/cli/pair.zig` | with `pairing.required`, `/v1/realtime` and `/mcp` answer paired devices only (401 before the body or upgrade); `/v1/pair` trades a one-time code for a token; `localrouter pair` makes codes and tokens; hashes in `<data_dir>/devices.json`, read on every check |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
 | Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech and transcription): admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
 | Tools | `src/tool/` | a tool is a model as the scheduler sees it: `needs`, `load`, `generate`, `unload`, `abort`, `state`. Today every tool is a worker process (`process.zig`) |

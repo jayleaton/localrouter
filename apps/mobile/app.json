@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "LocalRouter",
+    "slug": "localrouter-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "localrouter",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "icon": "./assets/images/icon.png",
+      "bundleIdentifier": "app.localrouter.mobile",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "LocalRouter listens on your phone for the wake phrase, then streams your voice to your own LocalRouter box for the conversation.",
+        "NSSpeechRecognitionUsageDescription": "Listens on your phone for the wake phrase (\"Hey Jarvis\") and for \"end call\" and \"mute audio\". Recognition runs on this phone; nothing is sent anywhere until a call opens.",
+        "UIBackgroundModes": ["audio", "voip"],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#151718",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "app.localrouter.mobile",
+      "permissions": ["android.permission.RECORD_AUDIO", "android.permission.MODIFY_AUDIO_SETTINGS"]
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-splash-screen", { "backgroundColor": "#151718", "image": "./assets/images/splash-icon.png", "imageWidth": 160 }],
+      "expo-secure-store",
+      "expo-video",
+      ["expo-build-properties", { "android": { "usesCleartextTraffic": true } }]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {}
+    }
+  }
+}

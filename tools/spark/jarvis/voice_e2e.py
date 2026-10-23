@@ -16,6 +16,7 @@ Python 3 standard library only (it runs on the GPU host with `python3 -I`). Step
 --smoke (tools/jarvis/smoke.sh): only the warm-up and one turn, then barge-in (--skip-barge: the turns only).
 Writes OUT/results.json, OUT/events.jsonl, OUT/prompts/*.wav, OUT/replies/*.wav, OUT/image.png. Exit 0 only when every
 check passed (fail closed: a missing measurement is a failed check).
+With pairing on (pairing.required), $LOCALROUTER_TOKEN is sent as a Bearer token on every request and the socket.
 """
 
 import argparse
@@ -51,10 +52,14 @@ def log(*args):
     print(time.strftime("%H:%M:%S"), *args, flush=True)
 
 
+TOKEN = os.environ.get("LOCALROUTER_TOKEN", "")
+AUTH = {"authorization": "Bearer " + TOKEN} if TOKEN else {}
+
+
 def http(url, body=None, timeout=900, method=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
-                                 headers={"content-type": "application/json"} if data else {})
+                                 headers={**({"content-type": "application/json"} if data else {}), **AUTH})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, dict(r.headers), r.read()
 
@@ -146,7 +151,7 @@ class Ws:
         key = base64.b64encode(os.urandom(16)).decode()
         self.sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
-                           "Sec-WebSocket-Protocol: realtime\r\n\r\n").encode())
+                           "Sec-WebSocket-Protocol: realtime\r\n" + "".join(f"{k}: {v}\r\n" for k, v in AUTH.items()) + "\r\n").encode())
         self.buf = b""
         while b"\r\n\r\n" not in self.buf:
             more = self.sock.recv(4096)
@@ -471,7 +476,7 @@ def leak_probe(args, extra, n):
         body = {"model": args.chat, "stream": True, "messages": [{"role": "system", "content": VOICE_INSTRUCTIONS},
                                                                    {"role": "user", "content": prompts[i % len(prompts)]}]}
         body.update(extra)
-        req = urllib.request.Request(f"{args.url}/v1/chat/completions", data=json.dumps(body).encode(), headers={"content-type": "application/json"})
+        req = urllib.request.Request(f"{args.url}/v1/chat/completions", data=json.dumps(body).encode(), headers={"content-type": "application/json", **AUTH})
         parts = []
         with urllib.request.urlopen(req, timeout=180) as r:
             for raw in r:

@@ -30,6 +30,14 @@ drama-tensorfold (https://github.com/plotarmordev/drama-tensorfold), Copyright 2
   flash-linear-attention (https://github.com/fla-org/flash-linear-attention, MIT License, Copyright (c) 2023-2025,
   Songlin Yang, Yu Zhang), and the port follows the SGLang-Omni Drama 3 reference implementation (Apache License 2.0).
 
+Sidebud (https://github.com/jayleaton/sidebud), Copyright 2026 Jay Leaton.
+  The phone app in apps/mobile/ is adapted from Sidebud's Expo app (apps/mobile-app/) at commit
+  70da540b2ecd5ebae6ed8dbfeb77a52489ae1028, contributed by its owner under LocalRouter's license: the native modules
+  modules/call-session/ and modules/voice-commands/ (copied unmodified), the voice helpers (src/lib/voice/: PCM,
+  echo gate, wake gate, spoken commands), the UI components and theme, the icon and splash images, and
+  patches/react-native-audio-api@0.13.5.patch. Its session layer (Sidebud's companion protocol) is replaced by
+  LocalRouter's realtime voice protocol (src/lib/localrouter/).
+
 Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
 by the installer from their publishers and remain under their own licenses.
 

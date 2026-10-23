@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["CallSessionModule"] },
+  "android": { "modules": ["expo.modules.callsession.CallSessionModule"] }
+}
