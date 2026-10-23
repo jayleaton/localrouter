@@ -100,7 +100,7 @@ fn manage(ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []
     const l = self(ptr);
     const args = std.json.parseFromSliceLeaky(std.json.Value, a, if (arguments.len > 0) arguments else "{}", .{}) catch
         return .{ .ok = false, .text = "the tool call's arguments are not JSON" };
-    std.log.info("voice: the chat model called {s} {s}", .{ name, arguments[0..@min(arguments.len, 200)] });
+    std.log.info("voice: model tool {s} {s}", .{ name, arguments[0..@min(arguments.len, 200)] }); // the chat model's call, or the session's own check
     const r = mcp.callText(l.app, a, l.host, name, args) orelse return .{ .ok = false, .text = "no such tool" };
     return .{ .ok = r.ok, .text = r.text };
 }

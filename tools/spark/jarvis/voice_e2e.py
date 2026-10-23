@@ -497,26 +497,46 @@ def picture(args, sess, mic, turns, checks, results):
     speech (first audio of the turn, the job done, the confirmation's first audio)."""
     mark = len(sess.events)
     r = turn(sess, "picture", mic["picture"], turns, checks, timeout=180, need_audio=False)  # it may be only the tool call
-    call = next((e for e in sess.events[mark:] if e["type"] == "response.function_call_arguments.done"), None)
-    job = sess.wait_for("localrouter.job.done", 900, mark)
-    confirm_created = sess.wait_for("response.created", 120, sess.index(job))
-    crid = confirm_created["response"]["id"]
-    confirm = sess.wait_for("response.done", 180, sess.index(confirm_created), lambda e: e["response"]["id"] == crid)
-    spoken = "".join(e.get("delta", "") for e in sess.events[sess.index(confirm_created):] if e["type"] == "response.audio_transcript.delta" and e["response_id"] == crid)
-    confirm_audio = next((e for e in sess.events[sess.index(confirm_created):] if e["type"] == "response.audio.delta" and e["response_id"] == crid), None)
+    # The turn's answer may take several responses and calls (each call's output asks for the next response): the
+    # picture is the generate_image call, whichever response makes it, and its confirmation is what the responses after
+    # the picture's output say, up to the first response that makes no further call.
+    try:
+        call = sess.wait_for("response.function_call_arguments.done", 180, mark, lambda e: e["name"] == "generate_image")
+    except TimeoutError:
+        calls = sorted({e["name"] for e in sess.events[mark:] if e["type"] == "response.function_call_arguments.done"})
+        results["tool"] = {"call": None, "calls": calls, "job": {}, "confirmation": ""}
+        for c in ("tool: the turn's calls are generate_image alone", "tool: the job made a PNG served at its URL", "tool: the assistant confirmed aloud"):
+            checks.append({"check": c, "ok": False, "detail": f"no generate_image call in 180 s; calls: {calls}"})
+        return
+    job = sess.wait_for("localrouter.job.done", 900, mark, lambda e: e["call_id"] == call["call_id"])
+    output = sess.wait_for("conversation.item.created", 180, sess.index(job),
+                           lambda e: e["item"].get("type") == "function_call_output" and e["item"].get("call_id") == call["call_id"])
+    spoken, confirm_audio, confirm, at = "", None, None, sess.index(output)
+    for _ in range(4):
+        created = sess.wait_for("response.created", 120, at)
+        crid = created["response"]["id"]
+        confirm = sess.wait_for("response.done", 180, sess.index(created), lambda e: e["response"]["id"] == crid)
+        span = sess.events[sess.index(created):sess.index(confirm)]
+        spoken += "".join(e.get("delta", "") for e in span if e["type"] == "response.audio_transcript.delta" and e["response_id"] == crid)
+        confirm_audio = confirm_audio or next((e for e in span if e["type"] == "response.audio.delta" and e["response_id"] == crid), None)
+        if not any(o.get("type") == "function_call" for o in confirm["response"].get("output", [])):
+            break
+        at = sess.index(confirm)
+    calls = sorted({e["name"] for e in sess.events[mark:sess.index(confirm) + 1] if e["type"] == "response.function_call_arguments.done"})
     png_ok = False
     if job.get("status") == "completed" and job.get("urls"):
         _, _, png = http(job["urls"][0], timeout=60)
         png_ok = png[:8] == b"\x89PNG\r\n\x1a\n"
         with open(f"{args.out}/image.png", "wb") as f:
             f.write(png)
-    results["tool"] = {"call": call and {"name": call["name"], "arguments": call["arguments"]}, "job": {k: job.get(k) for k in ("job_id", "status", "urls", "error")},
+    results["tool"] = {"call": {"name": call["name"], "arguments": call["arguments"]}, "calls": calls, "job": {k: job.get(k) for k in ("job_id", "status", "urls", "error")},
                        "speech_end_to_first_audio_ms": r["speech_end_to_first_audio_ms"],
                        "speech_end_to_job_done_s": round(job["_t"] - sess.t_end, 2),
                        "speech_end_to_confirmation_audio_s": round(confirm_audio["_t"] - sess.t_end, 2) if confirm_audio else None,
                        "confirmation": spoken, "confirmation_status": confirm["response"]["status"]}
     log("tool:", results["tool"])
-    checks.append({"check": "tool: the model called generate_image", "ok": bool(call) and call["name"] == "generate_image", "detail": call and call["name"]})
+    # the turn's calls as a set: the picture, and nothing to manage models (the session checks memory itself)
+    checks.append({"check": "tool: the turn's calls are generate_image alone", "ok": calls == ["generate_image"], "detail": calls})
     checks.append({"check": "tool: the job made a PNG served at its URL", "ok": png_ok, "detail": job.get("status")})
     checks.append({"check": "tool: the assistant confirmed aloud", "ok": confirm["response"]["status"] == "completed" and bool(spoken.strip()), "detail": spoken[:120]})
 

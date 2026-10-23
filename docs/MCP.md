@@ -87,9 +87,12 @@ being dropped.
 
 The procedure an agent follows to make room for a video and restore the models after (check with `reserve_for`
 `dry_run`, tell the user, reserve, run the job, confirm the models came back) is a skill:
-[skills/jarvis-model-manager/SKILL.md](../skills/jarvis-model-manager/SKILL.md). The Jarvis chat model follows the same
-steps (`voice.manage_models`). Voice sessions on the box are told before a voice model goes (`localrouter.voice.paused`)
-and stay open; the models come back by themselves when the job is done, even if no one calls `load_model`.
+[skills/jarvis-model-manager/SKILL.md](../skills/jarvis-model-manager/SKILL.md). The Jarvis chat model does not
+(`voice.manage_models` offers it the tools for when the user asks): its session checks memory itself. Before a video
+it runs the `reserve_for` dry run and, when a voice model would go, says that the voice pauses; after a job it lists
+any model still coming back in the call's result. Voice sessions on the box are told before a voice model goes
+(`localrouter.voice.paused`) and stay open; the models come back by themselves when the job is done, even if no one
+calls `load_model`.
 
 ## Examples
 

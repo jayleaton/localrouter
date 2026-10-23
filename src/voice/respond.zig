@@ -367,6 +367,15 @@ const Feed = struct {
         f.endText(false);
     }
 
+    /// The server's own memory check before a video, in place of the chat model calling reserve_for to find out: whether
+    /// making room for it unloads a voice model (then the user hears that the voice pauses).
+    fn pausesVoice(s: *Session, a: std.mem.Allocator) bool {
+        const m = s.backend.manage(a, "reserve_for", "{\"model\": \"video\", \"dry_run\": true}");
+        if (!m.ok) return false;
+        const plan = std.json.parseFromSliceLeaky(struct { pauses_voice: bool = false }, a, m.text, .{ .ignore_unknown_fields = true }) catch return false;
+        return plan.pauses_voice;
+    }
+
     /// The model has begun a tool call: the rest of the stream is its arguments, which nobody hears. A picture or video
     /// call with nothing said before it gets the short "making it" its tool description asks for, so the user hears
     /// that the turn was taken while the arguments are written and the job runs (DGX-01: 12 to 15 s of silence before).
@@ -379,6 +388,7 @@ const Feed = struct {
         const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
         const video = std.mem.eql(u8, name, "generate_video");
         if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
+        if (video and f.r.audio and pausesVoice(f.s, a)) f.add(ack_pause, false);
         f.endText(true);
     }
 
@@ -626,6 +636,8 @@ fn statusDetails(a: std.mem.Allocator, typ: []const u8, reason: []const u8, mess
 /// description asks it to.
 const ack_image = "Making that now.";
 const ack_video = "Making that now. A video takes a few minutes.";
+/// Said when making room for a video unloads a voice model (Feed.pausesVoice).
+const ack_pause = "My voice pauses while it is made, and comes back about half a minute after.";
 
 const builtin_tools =
     \\[{"type": "function", "function": {"name": "generate_image", "description": "Start making a picture on this machine from a detailed description. It takes several seconds and the user sees it when it is done. When you call this, only say briefly that you are making it (for example: Making that now). Never say or imply it is ready, and do not describe it: you get the result later as the tool output, and then you say it is ready, or that it failed.",

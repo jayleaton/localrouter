@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Voice: a picture or video turn answered in several tool calls is confirmed aloud, and the chat model no longer manages
+  models around a picture.
+  - The session checks memory itself: before a video, the `reserve_for` dry run, and when a voice model would go the
+    user hears that the voice pauses; after a job, its result lists any model still coming back (`coming_back`). The
+    model management instructions (`voice.manage_models`) now keep its tools for when the user asks, so a picture is
+    one `generate_image` call (on DGX-01 the chat model called `list_models` before and after it).
+  - `voice_e2e` (the smoke's picture turn) judges the turn's calls as a set (`generate_image` alone), and takes the
+    confirmation from the responses after the picture's output up to the first that makes no further call.
 - Voice: a session's first turn, and any reply still being written when its audio starts, start like later short ones.
   - `localrouter.response.text_done` carries `speech_rate`: how fast speech came the last time it had the GPU to
     itself. Once a reply is written, the page holds its start for that rate (200 ms in hand), not for the slower rate
