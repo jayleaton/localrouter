@@ -228,7 +228,7 @@ if [ $quick = 0 ]; then
   [ "$st" = completed ] && curl -s -m 60 -o "$out/video.mp4" "$url/v1/videos/$id/content"
   record video "$([ "$st" = completed ] && [ "$(head -c 8 "$out/video.mp4" 2> /dev/null | tail -c 4)" = ftyp ] && echo true || echo false)" "$(secs $t)" "job ${id:-none}: $st, $(stat -c %s "$out/video.mp4" 2> /dev/null || echo 0) B"
   w=$(watch_stop video); echo "video: lowest MemAvailable ${w%%|*} GiB"
-  only_lost video_evicted_only_image "${w#*|}" "$IMAGE"
+  only_lost video_evicted_only_image "${w#*|}" "$IMAGE" "$DECIDE" # the decision model is on demand, first to make room
   voice voice_after_video voice-after-video --voice default --skip-barge --count-warmup --max-median-ms 1700
   first_turn first_turn_after_video voice-after-video
   # then the warm set must be whole again (the image model back)
@@ -244,9 +244,12 @@ memory after
 # model out for the image model's return), at most once (no eviction loop)
 ev=$(journalctl --user -u "${UNIT:-localrouter-jarvis}" --since "@${t_all%.*}" --no-pager -o cat 2> /dev/null | grep 'evicting ' || true)
 trip="^info: evicting $IMAGE \(priority -?[0-9]+\) for $VIDEO:|^info: evicting $VIDEO \(priority -?[0-9]+\) for $IMAGE:"
-other=$(grep -vE "$trip" <<< "$ev" | grep -c . || true)
+# and the on-demand decision model, when a decision loaded it, out for the video once
+dec="^info: evicting $DECIDE \\(priority -?[0-9]+\\) for $VIDEO:"
+other=$(grep -vE "$trip|$dec" <<< "$ev" | grep -c . || true)
+decs=$(grep -cE "$dec" <<< "$ev" || true)
 trips=$(grep -cE "$trip" <<< "$ev" || true)
-record evictions "$([ "$other" = 0 ] && [ "$trips" -le 2 ] && echo true || echo false)" 0 "$(grep -c . <<< "$ev" || true) in the run, $trips of the video's round trip$(grep -vE "$trip" <<< "$ev" | head -3 | cut -c1-90 | sed 's/^/; /' | tr -d '\n')"
+record evictions "$([ "$other" = 0 ] && [ "$trips" -le 2 ] && [ "$decs" -le 1 ] && echo true || echo false)" 0 "$(grep -c . <<< "$ev" || true) in the run, $trips of the video's round trip, $decs of the decision model$(grep -vE "$trip|$dec" <<< "$ev" | head -3 | cut -c1-90 | sed 's/^/; /' | tr -d '\n')"
 
 jq -s --arg mode "$([ $quick = 1 ] && echo quick || echo full)" --argjson s "$(secs "$t_all")" --slurpfile b "$out/memory-before.json" --slurpfile a "$out/memory-after.json" \
   '{mode: $mode, seconds: $s, passed: ([.[] | select(.pass)] | length), failed: [.[] | select(.pass | not) | .check],
