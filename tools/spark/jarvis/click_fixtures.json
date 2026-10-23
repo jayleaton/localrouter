@@ -1,9 +1,12 @@
 {
-  "about": "Received speech the earlier click measure flagged on DGX-01 (live, 2026-10-23, the lighthouse reply): sibilants at the 24 kHz wire rate, not clicks. Six samples around each flagged step, as the page received them.",
-  "sibilants": [
-    [0.081, -0.11, -0.14, 0.239, 0.059, -0.218],
-    [-0.071, 0.116, 0.192, -0.184, -0.196, 0.079],
-    [-0.122, 0.072, 0.12, -0.191, 0.071, 0.061],
-    [-0.081, -0.038, 0.186, -0.132, -0.063, 0.165]
+  "about": "Received speech the earlier click measures flagged on DGX-01 (live, 2026-10-23): sibilants and plosive bursts at the 24 kHz wire rate, not clicks. Each is a few samples as the page received them; `at` is the flagged step's index, tested as if two pieces joined there (a seam): it must not count.",
+  "speech": [
+    {"what": "sibilant", "at": 3, "samples": [0.081, -0.11, -0.14, 0.239, 0.059, -0.218]},
+    {"what": "sibilant", "at": 3, "samples": [-0.071, 0.116, 0.192, -0.184, -0.196, 0.079]},
+    {"what": "sibilant", "at": 3, "samples": [-0.122, 0.072, 0.12, -0.191, 0.071, 0.061]},
+    {"what": "sibilant", "at": 3, "samples": [-0.081, -0.038, 0.186, -0.132, -0.063, 0.165]},
+    {"what": "plosive", "at": 4, "samples": [-0.039, -0.066, 0.042, 0.161, 0.175, 0.075, 0.065, 0.101]},
+    {"what": "plosive", "at": 4, "samples": [0.013, 0.006, -0.08, -0.04, 0.105, 0.108, 0.094, 0.09]},
+    {"what": "plosive", "at": 4, "samples": [-0.014, 0.018, 0.018, 0.032, 0.187, 0.216, 0.137, 0.076]}
   ]
 }
