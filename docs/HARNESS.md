@@ -313,5 +313,6 @@ python3 -I tools/harness/record_proxy.py --listen 127.0.0.1:18191 --upstream 127
 Qualified recipes for outside harnesses, each with its pinned version and what was run:
 [harnesses/OPENCODE.md](harnesses/OPENCODE.md) (OpenCode 1.19.4) and [harnesses/DEEPSEEK.md](harnesses/DEEPSEEK.md)
 (DeepSeek Harness 0.2.1-rc.2, and what DeepSeek-API clients need to change). `tools/harness/qualify.sh` repeats the
-qualification from the machine a harness runs on. Moving a user between harnesses is export and cancel: export the
+qualification from the machine a harness runs on. Our own reference harness is the desktop app, `apps/companion` (macOS first): realtime in client tool mode, its tools
+and computer control on the user's computer, the `/voice` page as its UI. Moving a user between harnesses is export and cancel: export the
 conversation from the old one, cancel its running work, then start the new one; no live session or approval moves.

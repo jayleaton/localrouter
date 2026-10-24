@@ -36,6 +36,7 @@ describe('the executor broker: final authority on this computer', () => {
     expect(outcome.status).toBe('done')
     expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
     expect(gate.asked.map((x) => x.id)).toEqual([c.id])
+    expect(mac.brought).toContain('Notes') // the approved app was brought back after the card
     const events = audit.lines.map((l) => l.event)
     expect(events).toEqual(expect.arrayContaining(['task.start', 'grant', 'approval.request', 'approval.answer', 'approval.end', 'task.end']))
   })

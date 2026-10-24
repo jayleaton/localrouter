@@ -44,6 +44,6 @@ export function fakeBroker(next: string[], extra: Partial<BrokerOptions> = {}) {
   const audit = new MemoryAudit()
   const gate = new TestGate()
   const decider = scriptedDecider(next)
-  const broker = new Broker({ executorId: 'exec_test', name: 'Test Mac', machine: { desktop: mac.desktop, tabs: null, dock: mac.dock, apps: mac.apps, controls: mac.controls }, decider, audit, gate, minDwellMs: 0, settleMs: 5, ...extra })
+  const broker = new Broker({ executorId: 'exec_test', name: 'Test Mac', machine: { desktop: mac.desktop, tabs: null, dock: mac.dock, apps: mac.apps, controls: mac.controls }, decider, audit, gate, minDwellMs: 0, settleMs: 5, refocusMs: 0, ...extra })
   return { broker, mac, audit, gate, decider }
 }
