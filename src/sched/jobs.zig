@@ -118,6 +118,73 @@ pub const Table = struct {
     }
 };
 
+/// Removes the job directories under `dir` last modified `keep_s` or more before `now` (unix seconds) and returns how
+/// many: the outputs of jobs from before a restart, which this process's table never held and so never expires. Run
+/// once at start, before any job exists; a directory's mtime is its last file's, so the age runs from the job's output.
+pub fn sweep(io: Io, gpa: std.mem.Allocator, dir: []const u8, now: i64, keep_s: u32) !u32 {
+    var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var old: std.ArrayList([]u8) = .empty; // collected first: removing entries while iterating may skip some
+    defer {
+        for (old.items) |name| gpa.free(name);
+        old.deinit(gpa);
+    }
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .directory) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        const mtime: i64 = @intCast(@divFloor(st.mtime.nanoseconds, std.time.ns_per_s));
+        if (now - mtime >= keep_s) try old.append(gpa, try gpa.dupe(u8, e.name));
+    }
+    var n: u32 = 0;
+    for (old.items) |name| {
+        d.deleteTree(io, name) catch |err| {
+            std.log.warn("jobs: could not remove {s}/{s}: {s}", .{ dir, name, @errorName(err) });
+            continue;
+        };
+        n += 1;
+    }
+    return n;
+}
+
+test "sweep removes job directories past the retention, keeps fresh ones and plain files" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, "/tmp/localrouter-sweep-{x}", .{std.mem.readInt(u64, &rnd, .little)});
+    const cwd = Io.Dir.cwd();
+    try cwd.createDirPath(io, dir);
+    defer cwd.deleteTree(io, dir) catch {};
+    var d = try cwd.openDir(io, dir, .{});
+    defer d.close(io);
+    const now: i64 = 1_800_000_000;
+    const day: u32 = 24 * 3600;
+    for ([_][]const u8{ "img_old", "img_fresh" }) |name| {
+        try d.createDirPath(io, name);
+        var sub = try d.openDir(io, name, .{});
+        defer sub.close(io);
+        try sub.writeFile(io, .{ .sub_path = "0.png", .data = "png" });
+    }
+    try d.writeFile(io, .{ .sub_path = "notes.txt", .data = "not a job" });
+    // last written a day and a minute before `now`, and an hour before it
+    const at = struct {
+        fn ts(s: i64) Io.File.SetTimestamp {
+            return .{ .new = .{ .nanoseconds = @as(i96, s) * std.time.ns_per_s } };
+        }
+    }.ts;
+    try d.setTimestamps(io, "img_old", .{ .modify_timestamp = at(now - day - 60) });
+    try d.setTimestamps(io, "img_fresh", .{ .modify_timestamp = at(now - 3600) });
+    try d.setTimestamps(io, "notes.txt", .{ .modify_timestamp = at(now - 30 * day) });
+
+    try std.testing.expectEqual(@as(u32, 1), try sweep(io, gpa, dir, now, day));
+    try std.testing.expectError(error.FileNotFound, d.statFile(io, "img_old", .{}));
+    _ = try d.statFile(io, "img_fresh/0.png", .{});
+    _ = try d.statFile(io, "notes.txt", .{});
+    try std.testing.expectEqual(@as(u32, 0), try sweep(io, gpa, dir, now, day)); // nothing more to do
+}
+
 fn destroy(gpa: std.mem.Allocator, j: *Job) void {
     j.arena.deinit();
     gpa.destroy(j);

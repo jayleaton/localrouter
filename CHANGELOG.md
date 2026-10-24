@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Job outputs no longer outlive a restart: on start the daemon removes job directories under `data_dir/jobs` older than
+  `keep_outputs_s` (24 h). Expiry only knew the jobs of the running process, so every restart left the earlier ones on
+  disk for good (on DGX-01: 6,483 job directories, 1.2 GiB, from three days of deploys).
+- `tools/spark/jarvis/client_check.py` removes the Chrome profile it made on every way out (a failure before Chrome
+  starts, Chrome exiting before its debugging port, `timeout`'s SIGTERM), after stopping Chrome's whole process group:
+  the browser's helpers kept writing into it, and 16 profiles (160 MB) had piled up in `/tmp`.
 - A voice call keeps its voice: while a realtime session is open, a request or an API load for a tool outside the
   voice loop (image, video, decision) never unloads a voice-loop model (chat, speech, transcription) of a higher
   priority. It is refused with 503 `insufficient_memory`, "busy: a voice call is open ...", which the chat model says.

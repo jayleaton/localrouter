@@ -64,6 +64,12 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const jobs_dir = try std.fs.path.join(arena, &.{ cfg.data_dir, "jobs" });
     const log_dir = try std.fs.path.join(arena, &.{ cfg.data_dir, "logs" });
     try Io.Dir.cwd().createDirPath(io, jobs_dir);
+    // jobs from before this start are in no table, so nothing would expire their outputs: remove the old ones now
+    const swept = jobs.sweep(io, gpa, jobs_dir, sched.nowUnix(io), cfg.keep_outputs_s) catch |err| blk: {
+        std.log.warn("jobs: sweeping {s} failed: {s}", .{ jobs_dir, @errorName(err) });
+        break :blk 0;
+    };
+    if (swept > 0) std.log.info("jobs: removed {d} job directories older than {d} s from before this start", .{ swept, cfg.keep_outputs_s });
     const gate_path = try std.fs.path.join(arena, &.{ cfg.data_dir, "locks", "speech.gate" }); // speech first (sched/speech_gate.zig)
     try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(gate_path).?);
 
