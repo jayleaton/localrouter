@@ -74,6 +74,8 @@ test {
     _ = @import("api/routes.zig");
     _ = @import("api/capabilities.zig");
     _ = @import("media/png.zig");
+    _ = @import("media/png_decode.zig");
+    _ = @import("media/image_in.zig");
     _ = @import("media/mp4.zig");
     _ = @import("media/marker.zig");
     _ = @import("engine/engine.zig");

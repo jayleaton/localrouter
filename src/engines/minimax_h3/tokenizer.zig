@@ -10,9 +10,20 @@ const std = @import("std");
 const qi = @import("qwen_image");
 
 pub const pad_id: u32 = 151643;
+pub const vision_start: u32 = 151652;
+pub const vision_end: u32 = 151653;
+pub const ImageTokens = struct {
+    ids: []u32,
+    tags: []u8,
+    start: u32,
+    pub fn deinit(x: ImageTokens, gpa: std.mem.Allocator) void {
+        gpa.free(x.ids);
+        gpa.free(x.tags);
+    }
+};
 /// The extra special tokens (te32.py EXTRA_TOKENS); `load` refuses a tokenizer.json that numbers them differently.
 pub const extra_tokens = [_]struct { []const u8, u32 }{
-    .{ "<d>", 151669 },          .{ "</d>", 151670 },            .{ "<|cutoff|>", 151671 },        .{ "<|lyrics_start|>", 151672 },
+    .{ "<d>", 151669 },            .{ "</d>", 151670 },              .{ "<|cutoff|>", 151671 },      .{ "<|lyrics_start|>", 151672 },
     .{ "<|lyrics_end|>", 151673 }, .{ "<|caption_start|>", 151674 }, .{ "<|caption_end|>", 151675 },
 };
 const keyword = "embedding:";
@@ -60,6 +71,27 @@ pub const Tokenizer = struct {
         try t.piece(gpa, text[at..], &out);
         if (out.items.len == 0) try out.append(gpa, pad_id);
         return out.toOwnedSlice(gpa);
+    }
+
+    /// Expanded one-image sequence: prefix, start marker, placeholders replaced by vision embeddings, end marker,
+    /// prompt. The markers and image rows are video modality; prefix/prompt are text modality.
+    pub fn imageIds(t: *const Tokenizer, gpa: std.mem.Allocator, prompt: []const u8, image_rows: u32) !ImageTokens {
+        const prefix = try t.ids(gpa, "<Picture 1>: ");
+        defer gpa.free(prefix);
+        const suffix = if (prompt.len > 0) try t.ids(gpa, prompt) else try gpa.alloc(u32, 0);
+        defer gpa.free(suffix);
+        const start: u32 = @intCast(prefix.len + 1);
+        const out = try gpa.alloc(u32, prefix.len + 2 + image_rows + suffix.len);
+        errdefer gpa.free(out);
+        const tags = try gpa.alloc(u8, out.len);
+        @memcpy(out[0..prefix.len], prefix);
+        out[prefix.len] = vision_start;
+        @memset(out[start .. start + image_rows], pad_id);
+        out[start + image_rows] = vision_end;
+        @memcpy(out[start + image_rows + 1 ..], suffix);
+        @memset(tags, 1);
+        @memset(tags[start - 1 .. start + image_rows + 1], 0);
+        return .{ .ids = out, .tags = tags, .start = start };
     }
 
     fn piece(t: *const Tokenizer, gpa: std.mem.Allocator, text: []const u8, out: *std.ArrayList(u32)) !void {

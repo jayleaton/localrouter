@@ -22,8 +22,9 @@ pub const Say = struct { model: []const u8 = "", voice: []const u8 = "" };
 
 pub const JobKind = enum { image, video };
 
-/// A tool call's job: what the model asked for.
-pub const JobSpec = struct { kind: JobKind, prompt: []const u8, size: []const u8 = "", seconds: u32 = 0 };
+/// A tool call's job: what the model asked for. An input image (an image's: an edit; a video's: its first frame) is
+/// `input_file`, a file an earlier job of this session made, or `input_url`, a URL the model gave.
+pub const JobSpec = struct { kind: JobKind, prompt: []const u8, size: []const u8 = "", seconds: u32 = 0, input_file: []const u8 = "", input_url: []const u8 = "" };
 
 /// A started job: its id, and the implementation's handle.
 pub const Job = struct { id: []const u8, kind: JobKind, handle: *anyopaque };
@@ -31,6 +32,7 @@ pub const Job = struct { id: []const u8, kind: JobKind, handle: *anyopaque };
 pub const Outcome = struct {
     status: []const u8, // completed, failed, cancelled or timeout
     urls: []const []const u8 = &.{},
+    files: []const []const u8 = &.{}, // the same outputs as paths on this machine (for the next job's input image)
     @"error": []const u8 = "",
 };
 
@@ -53,7 +55,7 @@ pub const Shadow = struct {
 pub const Role = enum { chat, speech, transcription };
 
 /// What the built-in tools can do here: a tool is offered only when a model can serve it.
-pub const Offer = struct { image: bool = false, video: bool = false, computer: bool = false };
+pub const Offer = struct { image: bool = false, image_edit: bool = false, video: bool = false, image_to_video: bool = false, computer: bool = false };
 
 /// Lines the session speaks while a computer task runs ("I need your OK on screen to send that"), from any thread.
 pub const Speaker = struct {

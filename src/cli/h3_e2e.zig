@@ -54,6 +54,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const want_ids = (cap.note("te32_ids") orelse return error.NoIds).object.get("ids").?.array.items;
     const result = (cap.note("result") orelse return error.NoResult).object;
     const sh = try pl.shapes(width, height, frames);
+    const rgb = try @import("h3_input.zig").canvas(gpa, io, &cap, width, height);
+    defer if (rgb) |pixels| gpa.free(pixels);
 
     const t0 = std.Io.Clock.awake.now(io);
     const p = try pl.Pipeline.create(gpa, io, .{ .pack = args[0], .te = args[1], .vae_audio = args[2], .vae_video = args[3] }, .{
@@ -72,7 +74,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     var r: qi.replay.Replay = .{ .gpa = gpa, .io = io, .d = &p.d, .s = p.s, .cap = &cap, .mode = .chained };
     defer r.deinit();
     p.probe = r.probe();
-    const res = try p.generate(prompt, width, height, frames, steps, seed, px, wav, null);
+    const res = try p.generateImage(prompt, width, height, frames, steps, seed, rgb, px, wav, null);
     p.probe = null;
     const first = p.times;
     const used_mib = blk: {
@@ -90,7 +92,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const light_ok = r.stats.differ == 0 and r.stats.unmatched == 0 and r.stats.equal > 0;
 
     // the same request again: warm times, the same bits
-    _ = try p.generate(prompt, width, height, frames, steps, seed, px, wav, null);
+    _ = try p.generateImage(prompt, width, height, frames, steps, seed, rgb, px, wav, null);
     const warm = p.times;
     const frames_equal_warm = std.mem.eql(u8, &sha(px), &frames_sha) and std.mem.eql(u8, &sha(std.mem.sliceAsBytes(wav)), &wav_sha);
 
@@ -100,8 +102,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     try out.writer.print("{{\"h3_e2e\": {{\"gpu\": \"sm_{d}{d}\", \"size\": \"{d}x{d}\", \"frames\": {d}, \"steps\": {d}, \"tokens\": {d}, " ++
         "\"load_ms\": {d}, \"weights_bytes\": {d}, \"gpu_used_mib\": {d}, \"ids_equal\": {}, " ++
         "\"light\": {{\"equal\": {d}, \"differ\": {d}, \"skipped\": {d}, \"unmatched\": {d}, \"first_diffs\": [", .{
-        p.major,         p.minor,           width,        height,          res.shapes.frames, steps,                  res.tokens,
-        load_ms,         p.weights_bytes,   used_mib,     ids_equal,       r.stats.equal,     r.stats.differ,         r.stats.skipped,
+        p.major,           p.minor,         width,    height,    res.shapes.frames, steps,          res.tokens,
+        load_ms,           p.weights_bytes, used_mib, ids_equal, r.stats.equal,     r.stats.differ, r.stats.skipped,
         r.stats.unmatched,
     });
     for (r.first_diffs.items, 0..) |m, i| try out.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", m });
@@ -109,11 +111,11 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         "\"first_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
         "\"warm_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
         "\"twin_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, \"pass\": {}}}}}\n", .{
-        frames_equal,                             wav_equal,                                   frames_equal_warm, &frames_sha,
-        first.encode,                             first.sample,                                first.audio,       first.video,
-        warm.encode,                              warm.sample,                                 warm.audio,        warm.video,
-        float(if (tw) |t| t.get("encode") else null), float(if (tw) |t| t.get("sample") else null), float(if (tw) |t| t.get("audio") else null),
-        float(if (tw) |t| t.get("video") else null), pass,
+        frames_equal,                                 wav_equal,                                    frames_equal_warm,                           &frames_sha,
+        first.encode,                                 first.sample,                                 first.audio,                                 first.video,
+        warm.encode,                                  warm.sample,                                  warm.audio,                                  warm.video,
+        float(if (tw) |t| t.get("encode") else null), float(if (tw) |t| t.get("sample") else null), float(if (tw) |t| t.get("audio") else null), float(if (tw) |t| t.get("video") else null),
+        pass,
     });
     try std.Io.File.stdout().writeStreamingAll(io, out.written());
     return if (pass) 0 else 1;

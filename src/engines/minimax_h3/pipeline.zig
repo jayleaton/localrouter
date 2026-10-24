@@ -25,6 +25,8 @@ const te32 = @import("te32.zig");
 const sampler = @import("sampler.zig");
 const vae_audio = @import("vae_audio.zig");
 const vae_video = @import("vae_video.zig");
+const vae_enc = @import("vae_video_enc.zig");
+const vision = @import("te_vision.zig");
 const tok_mod = @import("tokenizer.zig");
 const kernels = @import("minimax_kernels");
 
@@ -56,7 +58,7 @@ fn openInputs(gpa: std.mem.Allocator, io: std.Io, paths: Paths) anyerror!Opened 
 }
 
 /// The largest request this pipeline serves (width and height in pixels, multiples of 32; frames before alignment).
-pub const Limits = struct { width: u32 = 768, height: u32 = 448, frames: u32 = 56, tokens: u32 = 512 };
+pub const Limits = struct { width: u32 = 768, height: u32 = 448, frames: u32 = 56, tokens: u32 = 1536 };
 
 pub const Options = struct {
     /// Free the text encoder after each encode (see the memory note above).
@@ -149,6 +151,7 @@ pub const Result = struct {
 pub const Pipeline = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    paths: Paths,
     opts: Options,
     max: Shapes, // of `Limits`
     max_tokens: u32,
@@ -191,6 +194,7 @@ pub const Pipeline = struct {
         errdefer gpa.destroy(p);
         p.gpa = gpa;
         p.io = io;
+        p.paths = paths;
         p.opts = opts;
         p.probe = null;
         p.times = .{};
@@ -255,7 +259,7 @@ pub const Pipeline = struct {
         defer up.deinit();
         p.w = try dit_mod.Weights.load(gpa, io, &p.d, &p.pack, &p.nv, &up);
         errdefer p.w.deinit();
-        const max_s: u32 = limits.tokens + 2 * p.max.audio_t + p.max.latent_t * (p.max.lh / 2) * (p.max.lw / 2);
+        const max_s: u32 = limits.tokens + 2 * p.max.audio_t + (p.max.latent_t + 1) * (p.max.lh / 2) * (p.max.lw / 2);
         const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = &p.nv, .major = p.major, .minor = p.minor };
         p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens);
         errdefer p.dit.deinit();
@@ -354,6 +358,11 @@ pub const Pipeline = struct {
     /// One clip: `frames_out` gets the uint8 frames [F, height, width, 3] and `audio_out` the fp32 waveform [2, A * 800]
     /// at 32 kHz, both sized by `shapes(width, height, frames)`. The frame count snaps up to 17 k + 5.
     pub fn generate(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
+        return p.generateImage(prompt, width, height, frames, steps, seed, null, frames_out, audio_out, progress);
+    }
+
+    /// Optional canvas-sized fp32 RGB in [0,1]. PNG decode and Lanczos resize are done before entering this pipeline.
+    pub fn generateImage(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, rgb: ?[]const f32, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
         const sh = try shapes(width, height, frames);
         if (steps == 0) return error.NoSteps;
         if (width > p.max_width() or height > p.max_height() or sh.frames > p.max.frames) return error.RequestTooLarge;
@@ -367,21 +376,67 @@ pub const Pipeline = struct {
         try clock.start();
 
         // ---- encode: ids, the encoder, the bf16 hand-off, condition_proj and the token refiner
-        const ids = try p.tok.ids(gpa, prompt);
+        const it: ?tok_mod.ImageTokens = if (rgb != null) try p.tok.imageIds(gpa, prompt, (height / 32) * (width / 32)) else null;
+        defer if (it) |tokens| gpa.free(tokens.tags);
+        const ids = if (it) |tokens| tokens.ids else try p.tok.ids(gpa, prompt);
         if (p.ids.len > 0) gpa.free(p.ids);
         p.ids = ids;
         if (ids.len > p.max_tokens) return error.PromptTooLong;
         const l: u32 = @intCast(ids.len);
         try p.loadTe();
-        try p.pre("text_encoder", &.{});
-        const hidden = try p.te.?.forward(ids, p.opts.rope_mode);
+        var hidden: u64 = undefined;
+        var first_latent: ?cuda.DeviceBuffer = null;
+        defer if (first_latent) |*b| {
+            p.s.synchronize() catch {};
+            b.free();
+        };
+        if (rgb) |pixels| {
+            if (pixels.len != 3 * @as(u64, width) * height) return error.BadImage;
+            var input = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(pixels));
+            defer {
+                p.s.synchronize() catch {};
+                input.free();
+            }
+            first_latent = try cuda.DeviceBuffer.alloc(&p.d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
+            const zp = try first_latent.?.at(0);
+            var eops = try vae_enc.Ops.load(&p.d, kernels.vae_enc);
+            defer eops.unload();
+            var up = try qi.upload.Uploader.init(&p.d, p.io, p.s);
+            defer up.deinit();
+            var enc = try vae_enc.Encoder.init(gpa, p.io, &p.d, &eops, &p.v_ops, p.s, p.paths.vae_video, &up);
+            defer enc.deinit();
+            try enc.encode(try input.at(0), height, width, zp);
+            try p.pre("first_frame", &.{});
+            try p.post("first_frame", &.{ .{ .role = "rgb", .ptr = try input.at(0), .bytes = pixels.len * 4 }, .{ .role = "latent", .ptr = zp, .bytes = 24 * @as(u64, sh.lh) * sh.lw * 4 } });
+            var vops = try vision.Ops.load(&p.d, kernels.te_vision);
+            defer vops.unload();
+            var visual = try vision.VisionEncoder.init(gpa, p.io, &p.d, &vops, &p.hops, &p.te_ops, p.s, &p.te_pack, &up, (height / 16) * (width / 16));
+            defer visual.deinit();
+            const features = try visual.forward(pixels, width, height);
+            try p.pre("text_encoder", &.{});
+            hidden = try p.te.?.forwardImage(ids, features, it.?.start, p.opts.rope_mode);
+            try p.s.synchronize(); // visual scratch and features are freed at this branch boundary
+        } else {
+            try p.pre("text_encoder", &.{});
+            hidden = try p.te.?.forward(ids, p.opts.rope_mode);
+        }
         const text = try p.bufs[5].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.dit.prepare(text, l);
+        if (first_latent) |b| try p.dit.firstFrame(try b.at(0), sh.lh, sh.lw, seed, it.?.tags);
         try p.post("text_encoder", &.{
             .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
             .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
         });
+        if (it) |tokens| {
+            const tags = try gpa.alloc(i64, tokens.tags.len);
+            defer gpa.free(tags);
+            for (tags, tokens.tags) |*dst, tag| dst.* = tag;
+            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
+            defer tb.free();
+            try p.pre("text_tags", &.{});
+            try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
+        }
         if (p.opts.unload_te) {
             try p.s.synchronize();
             p.unloadTe();

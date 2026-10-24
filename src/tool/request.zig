@@ -38,6 +38,7 @@ pub const Image = struct {
     steps: u32 = 0, // 0: the tool's default
     guidance: f32 = 0, // 0: the tool's default
     references: []const []const u8 = &.{}, // file names in the job directory (edits)
+    mask: ?[]const u8 = null, // a file name in the job directory: an edit's mask (alpha 0 where the edit goes)
 };
 
 /// Video (optionally with audio). `seconds` x `fps` frames.
@@ -169,9 +170,16 @@ pub const Invalid = error{Invalid};
 pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
     switch (r) {
         .image => |v| {
-            try common(v.prompt, v.width, v.height, v.steps, l, why);
+            // an edit may leave its size (0 x 0) to the model: the input's shape
+            const own = v.width == 0 and v.height == 0 and v.references.len > 0;
+            try common(v.prompt, if (own) l.min_side else v.width, if (own) l.min_side else v.height, v.steps, l, why);
             if (v.n == 0 or v.n > l.max_n) return fail(why, "n must be 1 to 4");
             if (v.references.len > l.max_references) return fail(why, "at most 5 reference images");
+            for (v.references) |f| if (f.len == 0 or !token(f)) return fail(why, "references must name files in the job directory");
+            if (v.mask) |m| {
+                if (m.len == 0 or !token(m)) return fail(why, "mask must name a file in the job directory");
+                if (v.references.len == 0) return fail(why, "a mask needs an input image to edit");
+            }
         },
         .video => |v| {
             try common(v.prompt, v.width, v.height, v.steps, l, why);

@@ -40,6 +40,7 @@ pub const LoadTimes = struct {
     dit: f64 = 0,
     te: f64 = 0,
     vae: f64 = 0, // and the scratch buffers
+    edit: f64 = 0,
     total: f64 = 0,
     gib: f64 = 0, // weights copied to the device
     read: f64 = 0, // in pread
@@ -48,6 +49,9 @@ pub const LoadTimes = struct {
 };
 
 pub const max_tokens = 1024; // the template's tokens a prompt may take
+pub const edit_ref_pixels: u64 = 1024 * 1024; // each reference is resized to about this many pixels (the reference pipeline's calculate_dimensions)
+/// A reference's longest side after that resize, at most (4:1 at one megapixel); independent of the output's max_side.
+pub const edit_ref_side: u32 = 2048;
 
 /// Milliseconds between `create`'s phases (H3's `create` reports with it too).
 pub const LoadClock = struct {
@@ -95,14 +99,34 @@ pub const Pipeline = struct {
     max_h: u32,
     max_w: u32,
     max_area: u32, // h * w at most, in 16x16 patches: what the scratch is sized for
+    ref_area: u32 = 0, // the largest reference image, in 16x16 patches (0 without the edit weights); sides up to edit_ref_side
     bufs: [4]cuda.DeviceBuffer, // latents, the next latents, velocity, pixels
     times: Times = .{},
     load: LoadTimes = .{},
     weights_bytes: u64 = 0,
+    edit_state: ?*@import("pipeline_edit.zig").State = null,
 
     /// Loads everything for images up to max_side pixels a side and max_pixels in all (multiples of 16; the scratch,
     /// most of the memory past the weights, is sized by max_pixels).
     pub fn create(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64) !*Pipeline {
+        return createConfigured(gpa, io, packs, source, max_side, max_pixels, 0);
+    }
+
+    /// As `create`, plus the edit weights (the vision tower and the VAE encoder from the edit pack, `edit_pack`) and
+    /// scratch for `refs` reference images, each resized to about one megapixel (`edit_prepare.maxArea`).
+    pub fn createEdit(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64, refs: u32) !*Pipeline {
+        var ar: std.heap.ArenaAllocator = .init(gpa);
+        defer ar.deinit();
+        const te_dir = std.mem.trimEnd(u8, packs.te, "/");
+        const vae_dir = std.mem.trimEnd(u8, packs.vae, "/");
+        const root = std.fs.path.dirname(te_dir) orelse return error.BadEditPackPath;
+        if (!std.mem.eql(u8, std.fs.path.basename(te_dir), "te") or !std.mem.eql(u8, std.fs.path.basename(vae_dir), "vae") or !std.mem.eql(u8, std.fs.path.dirname(vae_dir) orelse "", root)) return error.BadEditPackPath;
+        const limit = try @import("edit_pack.zig").validate(ar.allocator(), io, root);
+        if (refs == 0 or refs > limit) return error.BadReferences;
+        return createConfigured(gpa, io, packs, source, max_side, max_pixels, refs);
+    }
+
+    fn createConfigured(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64, refs: u32) !*Pipeline {
         const p = try gpa.create(Pipeline);
         errdefer gpa.destroy(p);
         p.gpa = gpa;
@@ -112,6 +136,8 @@ pub const Pipeline = struct {
         p.max_h = max_side / 16;
         p.max_w = max_side / 16;
         p.max_area = @intCast(@min(max_pixels / 256, @as(u64, p.max_h) * p.max_w));
+        p.ref_area = if (refs > 0) @import("edit_prepare.zig").maxArea(edit_ref_pixels, edit_ref_side) else 0;
+        const ref_side: u32 = if (refs > 0) edit_ref_side / 16 else 0; // the VAE encodes references up to this side
         p.times = .{};
         p.load = .{};
         var clock = LoadClock.start(io);
@@ -176,15 +202,15 @@ pub const Pipeline = struct {
         try p.s.synchronize();
         p.load.dit = clock.lap();
         const inv = try te_mod.invFreq(p.arena.allocator(), kernels.te_inv_freq);
-        p.te = try te_mod.TextEncoder.init(gpa, &p.d, &p.tk, &p.ops, p.s, &p.te_pack, &up, inv, max_tokens);
+        p.te = try te_mod.TextEncoder.init(gpa, &p.d, &p.tk, &p.ops, p.s, &p.te_pack, &up, inv, max_tokens + refs * (p.ref_area / 4));
         errdefer p.te.deinit();
         try p.s.synchronize();
         p.load.te = clock.lap();
         const om = try smath.omegas(kernels.rope_omega);
         const kk: @import("dit.zig").Kernels = .{ .ops = &p.ops, .nv = &p.nv, .tri = &p.tri, .major = p.major, .minor = p.minor };
-        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_area, max_tokens);
+        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_area, max_tokens + refs * p.ref_area);
         errdefer p.dit.deinit();
-        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, p.max_h, p.max_w, p.max_area);
+        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, @max(p.max_h, ref_side), @max(p.max_w, ref_side), @max(p.max_area, p.ref_area));
         errdefer p.vae.deinit();
         const n: usize = 64 * @as(usize, p.max_area);
         var made: usize = 0;
@@ -195,6 +221,9 @@ pub const Pipeline = struct {
         }
         try p.s.synchronize();
         p.load.vae = clock.lap();
+        p.edit_state = null;
+        if (refs > 0) p.edit_state = try @import("pipeline_edit.zig").State.create(p, packs, &up, refs);
+        p.load.edit = clock.lap();
         p.load.total = clock.total();
         const ns_ms = 1e-6;
         p.load.gib = @as(f64, @floatFromInt(up.stats.bytes)) / (1 << 30);
@@ -206,6 +235,7 @@ pub const Pipeline = struct {
     }
 
     pub fn destroy(p: *Pipeline) void {
+        if (p.edit_state) |e| e.destroy();
         for (&p.bufs) |*b| b.free();
         p.vae.deinit();
         p.dit.deinit();
@@ -226,6 +256,11 @@ pub const Pipeline = struct {
         p.arena.deinit();
         const gpa = p.gpa;
         gpa.destroy(p);
+    }
+
+    pub fn edit(p: *Pipeline, prompt_text: []const u8, images: []const @import("edit_prepare.zig").Prepared, height: u32, width: u32, steps: u32, seed: u64, pixels: []u8, progress: ?Progress, probe: ?@import("dit.zig").Probe) !@import("pipeline_edit.zig").Result {
+        const state = p.edit_state orelse return error.EditWeightsUnavailable;
+        return state.generate(prompt_text, images, height, width, steps, seed, pixels, progress, probe);
     }
 
     /// The sigmas for this size and step count (`steps + 1` values, the last 0); caller frees.

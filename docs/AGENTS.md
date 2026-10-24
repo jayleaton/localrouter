@@ -34,6 +34,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | --- | --- |
 | `list_models` | the models: kind, capabilities, `default_for`, priority, `keep_loaded`, whether each is loaded, and `qualified` for a model gated on this machine's GPU |
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
+| `edit_image` | `prompt` and `image` (one base64 string, data URL or URL) or `images` (1 to 5), optional `mask`, `size` (omit it for the input's shape), `n`, `seed`, `model`: the edited PNG(s) as `generate_image` returns them. Needs a model that lists `image_edit` |
 | `generate_video` | `prompt`, `size` (omit it for the model's own size), `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
 | `list_voices` | each speech model's voices, its default voice, whether it is loaded and whether it is the default |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside the config's `local_files`), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
@@ -117,8 +118,20 @@ curl -s -m 900 $BASE/images/edits -F model=<edit-model> -F prompt='make it night
 
 `POST /v1/images/edits` takes `image` or `image[]` (1 to 5 files) and the fields of a generation (`prompt`, `size`,
 `n`, `seed`, `response_format`...). A JSON body works too: `"image": "<base64>"` or `"images": ["<base64>", "data:image/png;base64,...", "https://..."]`.
-Inputs must be PNG, JPEG or WebP, at most 32 MB each. URLs are fetched by the server (http and https only, 32 MB,
-30 s; see [Input URLs](#input-urls)). The model must list `image_edit` in its capabilities.
+Inputs may be PNG, JPEG or WebP, at most 32 MB each; the model's own limit on how many may be lower (Qwen-Image: 3 by
+default). URLs are fetched by the server (http and https only, 32 MB, 30 s; see [Input URLs](#input-urls)). The model
+must list `image_edit` in its capabilities, which an image model does only once its edit pack is installed.
+
+Without `size` (or with `auto`) the result keeps the input's shape (the last image's, for several), at a size the model
+picks (Qwen-Image: about 1 megapixel, sides in multiples of 32); with `size` it is that size. `mask` (one file, or one
+base64 string or URL in JSON) is a PNG of the first image's size whose alpha is 0 where the edit goes: wherever it is
+opaque the first image's pixels are kept, blended at the mask's soft edges (as OpenAI's edits). With `size` equal to
+the input's, the kept pixels are the input's exactly.
+
+```bash
+curl -s -m 900 $BASE/images/edits -F model=<edit-model> -F prompt='a lake at night' -F image=@fox.png -F mask=@mask.png \
+  -F size=1024x1024 -F response_format=url | jq -r '.data[0].url'
+```
 
 An edit carries the [images' label](#images-openai-images-api) with `AI-edited (machine-generated) from an input
 image` in its comment and the IPTC term for edits, `compositeWithTrainedAlgorithmicMedia`.
@@ -140,7 +153,16 @@ urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `comple
 `localrouter.job.created` and `localrouter.job.done` events carry the same id.
 
 Image to video: add `input_reference`, a file in a multipart body (`-F input_reference=@frame.png`, with the other
-fields as form fields) or a base64 string, data URL or URL in a JSON body. The model must list `image_to_video`.
+fields as form fields) or a base64 string, data URL or URL in a JSON body (PNG, JPEG or WebP). The model must list
+`image_to_video`. The image becomes the clip's first frame: it is cut to the clip's shape (centred) and resized to its
+size, so send one of that shape to keep all of it. Say what the image shows in the `prompt` too; a prompt about
+something else pulls the clip away from it.
+
+MiniMax H3 (`minimax-h3`) takes sizes up to its `max_width` x `max_height` and clips up to `max_seconds`, in multiples
+of 32 pixels (1280x720 is not one: send 1280x704); a request past them is refused with the limits named, before
+anything loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
+and 8 s, 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
+1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
 
 Every MP4 is labelled as machine-generated in `moov/udta/meta/ilst`, whichever model made it (the coded video and
 audio are untouched): `comment` (`©cmt`) `AI-generated (machine-generated) by model <id> with LocalRouter` (from a
@@ -334,7 +356,8 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | `partial_interval_ms` | extension: a `localrouter.transcription.partial` per this much speech (0: none) |
 | `localrouter` | extension: `{"tool_execution": "server"}` (default) or `"client"`; set it before the first response; with pairing it needs the `inference` scope |
 
-The chat model can also call LocalRouter's own `generate_image` and `generate_video`: the job runs, its URLs arrive as
+The chat model can also call LocalRouter's own `generate_image` and `generate_video` (and `edit_image`, which edits the
+session's last picture, when a model lists `image_edit`): the job runs, its URLs arrive as
 `localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. With
 `"tool_execution": "client"` only your `tools` exist (any names, built-in ones included) and none runs on the box: each
 call arrives once, complete, as `response.function_call_arguments.done`; return its `function_call_output` and send

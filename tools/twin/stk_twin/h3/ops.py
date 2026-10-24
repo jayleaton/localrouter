@@ -23,6 +23,7 @@ at::Tensor k_final_mod(at::Tensor x, at::Tensor w, at::Tensor scale, at::Tensor 
 at::Tensor k_scale(at::Tensor x, double c);
 void k_uncarry_(at::Tensor a, at::Tensor v, double c1, double c2);
 at::Tensor k_patchify(at::Tensor x);
+at::Tensor k_cond_rows(at::Tensor z, at::Tensor noise, double aug);
 at::Tensor k_unpatchify_neg(at::Tensor rows, int64_t C, int64_t T, int64_t H, int64_t W);
 at::Tensor k_pack_audio(at::Tensor a);
 at::Tensor k_unpack_audio_neg(at::Tensor rows, int64_t C, int64_t A);
@@ -45,6 +46,15 @@ _LAUNCH = r"""
 static unsigned cdiv(long long a, long long b) { return (unsigned)((a + b - 1) / b); }
 static void chk(const at::Tensor& t, at::ScalarType s, const char* n) {
     TORCH_CHECK(t.is_cuda() && t.scalar_type() == s && t.is_contiguous(), n, ": contiguous CUDA tensor of the right dtype");
+}
+at::Tensor k_cond_rows(at::Tensor z, at::Tensor noise, double aug) {
+    chk(z,at::kFloat,"z"); chk(noise,at::kFloat,"noise");
+    TORCH_CHECK(z.dim()==5 && z.size(0)==1 && z.size(1)==24 && z.size(2)==1 && z.size(3)%2==0 &&
+                z.size(4)%2==0 && noise.numel()==z.numel(), "first-frame latent/noise shape");
+    TORCH_CHECK(z.device()==noise.device(), "condition device");
+    auto out=at::empty({z.size(3)*z.size(4)/4,96},z.options());
+    h3_cond_rows<<<cdiv(out.numel(),256),256,0,STREAM>>>(F32(z),F32(noise),F32(out),z.size(3),z.size(4),(float)aug,(float)(1.0-aug));
+    return out;
 }
 void k_norm_mod(at::Tensor x, at::Tensor w, at::Tensor mod, at::Tensor idx, at::Tensor y, int64_t part, double eps) {
     chk(x, at::kBFloat16, "x"); chk(w, at::kFloat, "w"); chk(mod, at::kFloat, "mod"); chk(idx, at::kInt, "idx");
@@ -171,7 +181,7 @@ void k_scale32_(at::Tensor x, double c) {
 """
 
 NAMES = ["k_norm_mod", "k_gate_add_", "k_gate_add_norm_mod_", "k_swiglu", "k_silu_mul_split", "k_rms_norm", "k_final_mod", "k_scale",
-         "k_uncarry_", "k_patchify", "k_unpatchify_neg", "k_pack_audio", "k_unpack_audio_neg", "k_add", "k_gemm_f32",
+         "k_uncarry_", "k_patchify", "k_cond_rows", "k_unpatchify_neg", "k_pack_audio", "k_unpack_audio_neg", "k_add", "k_gemm_f32",
          "k_denoise", "k_euler32_", "k_res2_", "k_scale32_"]
 
 

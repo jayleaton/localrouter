@@ -6,6 +6,7 @@
 const std = @import("std");
 const Io = std.Io;
 const routes = @import("routes.zig");
+const inputs = @import("inputs.zig");
 const mcp = @import("mcp.zig");
 const speech = @import("speech.zig");
 const request = @import("../tool/request.zig");
@@ -372,17 +373,52 @@ fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *
     if (!l.may(.media)) return failed(why, "this device's token does not have the media scope: on the box, `localrouter pair scopes NAME ...` adds it");
     var ref: routes.Refusal = .{};
     const seed = routes.randomSeed(app.io);
+    // an input image: an edit's reference, a video's first frame
+    var files: []const inputs.File = &.{};
+    if (spec.input_file.len > 0 or spec.input_url.len > 0) {
+        const raw = try inputImage(l, a, spec, why);
+        var msg: []const u8 = "";
+        files = inputs.validate(a, if (spec.kind == .image) "ref" else "first_frame", &.{raw}, 1, &msg) catch return failed(why, msg);
+    }
     var r: request.Request = undefined;
     switch (spec.kind) {
         .image => {
-            const wh = request.parseSize(if (spec.size.len > 0) spec.size else "1024x1024") orelse return failed(why, "size must be WIDTHxHEIGHT, such as 1024x1024");
-            r = .{ .image = .{ .prompt = spec.prompt, .width = wh[0], .height = wh[1], .seed = seed } };
+            // an edit without a size keeps the input's shape (the model picks)
+            const wh: [2]u32 = if (spec.size.len == 0 and files.len > 0) .{ 0, 0 } else request.parseSize(if (spec.size.len > 0) spec.size else "1024x1024") orelse return failed(why, "size must be WIDTHxHEIGHT, such as 1024x1024");
+            const refs = try a.alloc([]const u8, files.len);
+            for (refs, files) |*d, f| d.* = f.name;
+            r = .{ .image = .{ .prompt = spec.prompt, .width = wh[0], .height = wh[1], .seed = seed, .references = refs } };
         },
-        .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = if (spec.seconds > 0) spec.seconds else 5, .seed = seed } },
+        .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = if (spec.seconds > 0) spec.seconds else 5, .seed = seed, .first_frame = if (files.len > 0) files[0].name else null } },
     }
     const tool = routes.resolve(app, null, r.capability(), &ref) orelse return failed(why, ref.message);
-    const j = routes.enqueue(app, tool, r, &.{}, l.owner, &ref) orelse return failed(why, ref.message);
+    const j = routes.enqueue(app, tool, r, files, l.owner, &ref) orelse return failed(why, ref.message);
     return .{ .id = try a.dupe(u8, j.id), .kind = spec.kind, .handle = j };
+}
+
+/// A voice job's input image: the file an earlier job of the session made, or the URL the model gave (this daemon's own
+/// /v1/files URL of one of the device's jobs is read from the job's directory; any other is fetched as the API does).
+fn inputImage(l: *Local, a: std.mem.Allocator, spec: backend.JobSpec, why: *Why) backend.Error![]const u8 {
+    const app = l.app;
+    var path = spec.input_file;
+    if (spec.input_url.len > 0) {
+        const at = std.mem.indexOf(u8, spec.input_url, "/v1/files/") orelse {
+            var msg: []const u8 = "";
+            return inputs.resolve(app.io, app.gpa, a, spec.input_url, app.policy(l.host), &msg) catch failed(why, msg);
+        };
+        const rest = spec.input_url[at + "/v1/files/".len ..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return failed(why, "image: a /v1/files URL names a job and one of its files");
+        const name = rest[slash + 1 ..];
+        const j = app.table.get(app.io, rest[0..slash]) orelse return failed(why, "image: no such picture on this machine (outputs expire): make a new one");
+        app.table.mutex.lockUncancelable(app.io);
+        const listed = for (j.files) |f| {
+            if (std.mem.eql(u8, f, name)) break true;
+        } else false;
+        app.table.mutex.unlock(app.io);
+        if (!listed or !std.mem.eql(u8, j.owner, l.owner)) return failed(why, "image: no such picture on this machine (outputs expire): make a new one");
+        path = try std.fs.path.join(a, &.{ j.dir, name });
+    }
+    return Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(inputs.max_bytes)) catch failed(why, "the picture could not be read (outputs expire): make a new one");
 }
 
 fn waitJob(ptr: *anyopaque, a: std.mem.Allocator, job: backend.Job, timeout_s: u32, stop: *Stop) backend.Outcome {
@@ -401,7 +437,9 @@ fn waitJob(ptr: *anyopaque, a: std.mem.Allocator, job: backend.Job, timeout_s: u
     if (j.status != .completed) return .{ .status = @tagName(j.status), .@"error" = a.dupe(u8, j.error_message) catch "" };
     const urls = a.alloc([]const u8, j.files.len) catch return .{ .status = "completed" };
     for (urls, j.files) |*u, f| u.* = std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ l.scheme, l.host, j.id, f }) catch "";
-    return .{ .status = "completed", .urls = urls };
+    const paths = a.alloc([]const u8, j.files.len) catch return .{ .status = "completed", .urls = urls };
+    for (paths, j.files) |*p, f| p.* = std.fs.path.join(a, &.{ j.dir, f }) catch "";
+    return .{ .status = "completed", .urls = urls, .files = paths };
 }
 
 /// One shadow decision at a time: a turn that ends while one is asked is not asked about (shadow work never queues).
@@ -537,7 +575,9 @@ fn offer(ptr: *anyopaque) backend.Offer {
         for (app.scheduler.slots) |slot| {
             const c = slot.tool.config();
             if (engine.supports(c, .text_to_image)) o.image = true;
+            if (engine.supports(c, .image_edit)) o.image_edit = true;
             if (engine.supports(c, .text_to_video)) o.video = true;
+            if (engine.supports(c, .image_to_video)) o.image_to_video = true;
         }
     }
     var why: []const u8 = "";

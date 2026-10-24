@@ -46,6 +46,9 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             return 2;
         };
     }
+    const tools = try arena.dupe(config.ToolConfig, cfg.tools);
+    try engine.resolve(io, arena, tools); // what each tool's weights can do, before anything lists it
+    cfg.tools = tools;
     var why_buf: [256]u8 = undefined;
     var why: Io.Writer = .fixed(&why_buf);
     if (!engine.checkDefaults(&cfg, &why)) {

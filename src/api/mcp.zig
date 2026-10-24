@@ -5,6 +5,7 @@
 //!
 //!   list_models      the tools, their kind, capabilities, priority and whether they are loaded
 //!   generate_image   waits for the image(s); returns them inline (PNG) and as URLs on this server; `images` makes it an edit
+//!   edit_image       the same for an edit: `image` (or `images`) changed as the prompt says, optionally within a `mask`
 //!   generate_video   queues a clip and waits up to `wait_s` (default 600): the MP4's URL when done, else the job id;
 //!                    `image` makes it image to video
 //!   transcribe_audio waits up to `wait_s` for the transcript of an audio file (base64, data URL or URL): its text and
@@ -93,7 +94,7 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
 const instructions =
     \\Chat, generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
     \\then answers in seconds; it unloads by itself when idle. Send one request at a time. Images come back inline and as
-    \\URLs; videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
+    \\URLs (edit_image changes a picture); videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
     \\JSON; speech as WAV inline and a URL; chat replies as text (chat keeps its model loaded, so it answers at once).
 ;
 
@@ -161,6 +162,8 @@ fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, a
         listVoices(app, a, out)
     else if (eql(name, "generate_image"))
         generateImage(app, a, host, args, out)
+    else if (eql(name, "edit_image"))
+        editImage(app, a, host, args, out)
     else if (eql(name, "generate_video"))
         generateVideo(app, a, host, args, out)
     else if (eql(name, "transcribe_audio"))
@@ -217,6 +220,7 @@ fn toolNeed(name: []const u8) ?Need {
         .{ "chat", .inference },         .{ "decide", .decisions },
         .{ "load_model", .manage },      .{ "unload_model", .manage },
         .{ "reserve_for", .manage },     .{ "release_models", .manage },
+        .{ "edit_image", .media },
     };
     for (needs) |x| if (eql(x[0], name)) return x[1];
     return null;
@@ -469,16 +473,40 @@ fn done(a: std.mem.Allocator, out: *std.ArrayList(Content), value: anytype) Tool
     return true;
 }
 
+/// generate_image's and edit_image's arguments: `image` or `images` (and `mask`) make it an edit.
+const ImageArgs = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, image: ?[]const u8 = null, images: []const []const u8 = &.{}, mask: ?[]const u8 = null, wait_s: u32 = 600 };
+
 fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "1024x1024", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, images: []const []const u8 = &.{}, wait_s: u32 = 600 };
-    const b = try parseArgs(Args, a, args, out);
-    const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
-    const files = try inputFiles(app, a, host, "ref", b.images, out);
+    const b = try parseArgs(ImageArgs, a, args, out);
+    if (b.image != null or b.mask != null) return fail(a, out, "generate_image takes input images as images (a list) and no mask: for one image or a mask, call edit_image", .{});
+    return drawImage(app, a, host, b, out);
+}
+
+fn editImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(ImageArgs, a, args, out);
+    if (b.image == null and b.images.len == 0) return fail(a, out, "edit_image needs the picture to edit: image (base64, a data URL or an http(s) URL, this server's own /v1/files URLs too) or images (1 to 5)", .{});
+    return drawImage(app, a, host, b, out);
+}
+
+/// generate_image and edit_image: the job, waited for up to `wait_s`; the PNGs inline (unless `inline_images` is false)
+/// and the summary with their URLs, or the job id. An edit without a size keeps the input's shape (the model picks).
+fn drawImage(app: *App, a: std.mem.Allocator, host: []const u8, b: ImageArgs, out: *std.ArrayList(Content)) ToolError!bool {
+    if (b.image != null and b.images.len > 0) return fail(a, out, "send image or images, not both", .{});
+    const one = [1][]const u8{b.image orelse ""};
+    const specs: []const []const u8 = if (b.image != null) &one else b.images;
+    const edit = specs.len > 0;
+    if (b.mask != null and !edit) return fail(a, out, "a mask goes with the image it masks: send image too", .{});
+    if (edit) try requireCapability(app, a, .image_edit, out);
+    const auto = b.size.len == 0 or eql(b.size, "auto");
+    const wh: [2]u32 = if (auto and edit) .{ 0, 0 } else request.parseSize(if (auto) "1024x1024" else b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+    const refs_files = try inputFiles(app, a, host, "ref", specs, out);
+    const mask_files = try inputFiles(app, a, host, "mask", if (b.mask) |m| &.{m} else &.{}, out);
+    const files = try std.mem.concat(a, inputs.File, &.{ refs_files, mask_files });
     var why: routes.Refusal = .{};
-    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
-    const refs = try a.alloc([]const u8, files.len);
-    for (refs, files) |*d, f| d.* = f.name;
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs } };
+    const tool = routes.resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const refs = try a.alloc([]const u8, refs_files.len);
+    for (refs, refs_files) |*d, f| d.* = f.name;
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     if (!finished(app, j)) return report(app, a, host, j, out); // still loading or drawing: the job id, for get_job
@@ -491,6 +519,19 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     };
     try summary(app, a, host, j, out);
     return true;
+}
+
+/// A tool error when no model on this machine lists `cap` (after `engine.resolve`), naming each model and what it can do.
+fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, out: *std.ArrayList(Content)) ToolError!void {
+    for (app.scheduler.slots) |slot| if (engine.supports(slot.tool.config(), cap)) return;
+    var w: Io.Writer.Allocating = .init(a);
+    for (app.scheduler.slots, 0..) |slot, i| {
+        const c = slot.tool.config();
+        w.writer.print("{s}{s} (", .{ if (i > 0) "; " else "", c.id }) catch return error.OutOfMemory;
+        for (try engine.capabilityList(a, c), 0..) |x, k| w.writer.print("{s}{s}", .{ if (k > 0) ", " else "", @tagName(x) }) catch return error.OutOfMemory;
+        w.writer.writeByte(')') catch return error.OutOfMemory;
+    }
+    return fail(a, out, "no model on this machine can do {s}: its models are {s}; an image model edits once its edit pack is installed (docs/dev/IMAGE-EDIT.md)", .{ @tagName(cap), if (w.written().len > 0) w.written() else "none" });
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -796,12 +837,28 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"What to draw."},
     \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_image, or image_edit with images)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360).","default":"1024x1024"},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360). Omit for 1024x1024, or for an edit the input's own shape."},
     \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
     \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
     \\"negative_prompt":{"type":"string"},
     \\"images":{"type":"array","maxItems":5,"items":{"type":"string"},"description":"Input images (PNG, JPEG or WebP, up to 32 MB each) as base64 strings, data URLs or http(s) URLs. Given: the request is an edit of these images, guided by the prompt."},
+    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "edit_image", .title = "Edit image", .description = "Changes a picture as the prompt says (\"make it night\", \"put a red hat on the dog\"): image (or up to 5 images; the first is the one edited, the others guide it) and optionally a mask that limits where it changes. Waits up to wait_s and returns the PNG(s) inline and as URLs on this server, as generate_image does; past wait_s it returns the job id for get_job. Needs a model whose capabilities (list_models) include image_edit; without one it is refused.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["prompt"],"properties":{
+    \\"prompt":{"type":"string","description":"The edit: what to change, and what to keep."},
+    \\"image":{"type":"string","description":"The picture to edit (PNG, JPEG or WebP, up to 32 MB) as a base64 string, a data URL or an http(s) URL, this server's own /v1/files URLs (from generate_image or edit_image) too. Send this or images."},
+    \\"images":{"type":"array","minItems":1,"maxItems":5,"items":{"type":"string"},"description":"Input images in the same forms, for an edit that combines several: the first is edited (and is what a mask applies to). The model's own limit may be lower. Send this or image."},
+    \\"mask":{"type":"string","description":"In the same forms: a PNG of the first image's size whose alpha is 0 where the edit goes; wherever it is opaque the first image's pixels are kept."},
+    \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists image_edit."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT of the result, multiples of 16; omit for the input's own shape (the model picks the size)."},
+    \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
+    \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
+    \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
+    \\"negative_prompt":{"type":"string"},
     \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."},
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
     \\"additionalProperties":false}

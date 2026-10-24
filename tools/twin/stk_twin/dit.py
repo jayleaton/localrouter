@@ -1,8 +1,8 @@
 """Qwen-Image 2.1 DiT, op by op: tfimage's arithmetic (its Triton kernels, its bf16 / FP8 / NVFP4 linears on
 TensorFold 0.6.1) with every GPU op inside `REC.op`, so a capture lists exactly the program the Zig engine runs.
 
-Sequence: [text (block-causal prefix, t = 0 modulation) | target latent rows]. The prefix's keys and values are built
-once per (prompt, target size) and kept; every step runs the target rows only. Weights use diffusers' names, which
+Sequence: [text with reference latent blocks spliced at image slots | target latent rows]. The prefix uses t = 0
+modulation and block-causal attention; its keys and values are built once per (prompt, references, slots, target size) and kept; every step runs the target rows only. Weights use diffusers' names, which
 are tfimage's too.
 """
 
@@ -24,6 +24,7 @@ from tfimage import linear as L
 
 from . import ops
 from .rec import REC
+from .edit import prefix_layout
 
 ATTN = os.environ.get("STK_ATTN", "cudnn")  # "stk": LocalRouter's attention kernel
 OPS = os.environ.get("STK_OPS", "torch")    # "stk": LocalRouter's small kernels (kernels/cuda/qwen_image/ops.cu)
@@ -58,6 +59,8 @@ class Prefix:
     context: torch.Tensor
     hw: tuple[int, int]
     next_pos: int = 0
+    refs: tuple[torch.Tensor, ...] = ()
+    slots: tuple[int, ...] = ()
     kv: list[tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
 
 
@@ -240,8 +243,32 @@ class QwenImageDiT:
             o.out(y=out)
         return out
 
-    def _attention(self, name: str, q, k, v, mask=None) -> torch.Tensor:
+    def _attention(self, name: str, q, k, v, mask=None, segments=None) -> torch.Tensor:
         """q [B, N, H, D], k / v [B, S, H, D] -> [B, N, H * D]; cuDNN first (M3 swaps in LocalRouter's kernel)."""
+        if segments is not None:
+            from .attn import attention
+            parts = []
+            for i, (start, end, causal) in enumerate(segments):
+                qq, kk, vv = q[:, start:end].contiguous(), k[:, :end].contiguous(), v[:, :end].contiguous()
+                attrs = {"impl": ATTN, "causal": causal, "p0": start, "nkeys": end}
+                with REC.op(f"{name}.seg{i}", "attention", attrs, q=qq, k=kk, v=vv) as o:
+                    if ATTN == "stk":
+                        if q.shape[0] != 1:
+                            raise ValueError("segmented attention supports batch 1")
+                        y = attention(qq[0], kk[0], vv[0], causal=causal, p0=start)[None]
+                    else:
+                        allow = None
+                        if causal:
+                            allow = torch.arange(end, device=q.device)[None] <= torch.arange(start, end, device=q.device)[:, None]
+                        y = F.scaled_dot_product_attention(qq.transpose(1, 2), kk.transpose(1, 2), vv.transpose(1, 2),
+                                                           attn_mask=allow).transpose(1, 2).contiguous()
+                    y = y.reshape(q.shape[0], end - start, -1)
+                    o.out(y=y)
+                parts.append(y)
+            with REC.op(f"{name}.join", "concat", {"dim": 1}, **{f"part{i}": p for i, p in enumerate(parts)}) as o:
+                y = torch.cat(parts, dim=1)
+                o.out(y=y)
+            return y
         if ATTN == "stk":  # LocalRouter's kernel, the one Zig launches (B = 1)
             from .attn import attention
             with REC.op(name, "attention", {"impl": "stk", "causal": mask is not None}, q=q, k=k, v=v) as o:
@@ -301,7 +328,7 @@ class QwenImageDiT:
         h = self._pointwise("txt.gelu", "gelu_tanh", self._dense("txt.in1", y, self.txt_in1))
         return self._dense("txt.in2", h, self.txt_in2)
 
-    def _block(self, i: int, b: Block, x, mod, cos, sin, kv=None, mask=None, keep=None):
+    def _block(self, i: int, b: Block, x, mod, cos, sin, kv=None, mask=None, keep=None, segments=None):
         s1, g1, s2, g2 = mod
         B, N, _ = x.shape
         H, D = self.cfg.heads, self.cfg.head_dim
@@ -328,7 +355,7 @@ class QwenImageDiT:
             with REC.op(f"{tag}.v", "copy", {}, src=qkv[:, :, 2]) as o:
                 ops.copy_rows(vv[:, P:], qkv[:, :, 2]) if OPS == "stk" else vv[:, P:].copy_(qkv[:, :, 2])
                 o.out(y=vv)
-        a = self._attention(f"{tag}.attn", q, kk, vv, mask)
+        a = self._attention(f"{tag}.attn", q, kk, vv, mask, segments)
         self._residual(f"{tag}.res1", x, self._linear(f"{tag}.out", b.out, a.reshape(B * N, -1)).view(B, N, -1), g1)
         h2 = self._adaln(f"{tag}.adaln2", x, s2).reshape(B * N, -1)
         y = None
@@ -341,30 +368,63 @@ class QwenImageDiT:
             y = self._linear(f"{tag}.down", b.down, self._swiglu(f"{tag}.swiglu", self._linear(f"{tag}.gate_up", b.gate_up, h2)))
         self._residual(f"{tag}.res2", x, y.view(B, N, -1), g2)
 
-    def _build_prefix(self, context, hw, zero_mod) -> Prefix:
-        """Text tokens through every block once (t = 0 modulation, causal among themselves); keys and values kept."""
-        x = self._text(context)
-        B, P = x.shape[:2]
-        allow = torch.ones((P, P), dtype=torch.bool, device=self.dev).tril()
-        cos, sin = (t.to(self.dev) for t in rope_table(torch.arange(P, dtype=torch.float32)[:, None].expand(P, 3), self.cfg))
-        pre = Prefix(context.clone(), hw, next_pos=P)
+    def _build_prefix(self, context, hw, zero_mod, refs=(), slots=()) -> Prefix:
+        """Build the step-independent text / reference prefix; image segments are internally bidirectional."""
+        txt = self._text(context)
+        if not refs:  # keep the established text-only op stream unchanged
+            B, P = txt.shape[:2]
+            allow = torch.ones((P, P), dtype=torch.bool, device=self.dev).tril()
+            cos, sin = (t.to(self.dev) for t in rope_table(torch.arange(P, dtype=torch.float32)[:, None].expand(P, 3), self.cfg))
+            pre = Prefix(context.clone(), hw, next_pos=P)
+            for i, b in enumerate(self.blocks):
+                self._block(i, b, txt, zero_mod, cos, sin, mask=allow, keep=pre.kv)
+            return pre
+        pieces, segments, next_pos = prefix_layout(txt.shape[1], [r.shape[-2:] for r in refs], slots)
+        parts, ids, pos = [], [], 0
+        for start, end, index in pieces:
+            n = end - start
+            if n:
+                parts.append(txt[:, start:end])
+                ids.append(torch.arange(pos, pos + n, dtype=torch.float32)[:, None].expand(n, 3))
+                pos += n
+            if index is not None:
+                ref = refs[index]
+                h, w = ref.shape[-2:]
+                parts.append(self._dense(f"ref{index}.img_in", ref.flatten(2).transpose(1, 2).contiguous(), self.img_in))
+                ids.append(image_ids(h, w, pos, hw))
+                pos += max(h, w)
+        with REC.op("prefix.join", "concat", {"dim": 1}, **{f"part{i}": p for i, p in enumerate(parts)}) as o:
+            x = torch.cat(parts, dim=1)
+            o.out(y=x)
+        cos, sin = (t.to(self.dev) for t in rope_table(torch.cat(ids), self.cfg))
+        REC.note("edit_prefix", segments=segments, slots=list(slots), next_pos=next_pos)
+        pre = Prefix(context.clone(), hw, next_pos=next_pos, refs=tuple(r.clone() for r in refs), slots=tuple(slots))
         for i, b in enumerate(self.blocks):
-            self._block(i, b, x, zero_mod, cos, sin, mask=allow, keep=pre.kv)
+            self._block(i, b, x, zero_mod, cos, sin, segments=segments, keep=pre.kv)
         return pre
 
     @torch.inference_mode()
-    def __call__(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        """x [B, 64, H, W], t [B] in [0, 1], context [B, L, 4096] -> velocity [B, 64, H, W] bf16."""
+    def __call__(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor, ref_latents=None, image_slots=None) -> torch.Tensor:
+        """x [B,64,H,W], t [B], context [B,L,D], optional references [B,64,h,w] and retained-text slots -> velocity."""
         B, C, H, W = x.shape
         context = context.to(self.dev, torch.bfloat16)
+        refs = tuple(r.to(self.dev, torch.bfloat16).contiguous() for r in (ref_latents or ()))
+        slots = tuple(image_slots or ())
+        if len(refs) > 5 or any(r.ndim != 4 or r.shape[:2] != (B, C) for r in refs):
+            raise ValueError("references must be 1..5 [B,64,h,w] latents")
+        if refs:
+            prefix_layout(context.shape[1], [r.shape[-2:] for r in refs], slots)
+        elif slots:
+            raise ValueError("image slots require reference latents")
         temb = self._time(t.to(self.dev, torch.float32).reshape(-1).expand(B).contiguous())
         step_mod, zero_mod = self._modulation(temb, B)
         pre = next((p for p in self.prefixes if p.hw == (H, W) and p.context.shape == context.shape
-                    and torch.equal(p.context, context)), None)
+                    and torch.equal(p.context, context) and p.slots == slots and len(p.refs) == len(refs)
+                    and all(a.shape == b.shape and torch.equal(a, b) for a, b in zip(p.refs, refs))), None)
         if pre is None:
             if len(self.prefixes) >= self.MAX_PREFIXES:
                 self.prefixes.pop(0)
-            pre = self._build_prefix(context, (H, W), zero_mod)
+            pre = self._build_prefix(context, (H, W), zero_mod, refs, slots)
             self.prefixes.append(pre)
         h = self._dense("img_in", x.to(torch.bfloat16).flatten(2).transpose(1, 2).contiguous(), self.img_in).contiguous()
         cos, sin = (v.to(self.dev) for v in rope_table(image_ids(H, W, pre.next_pos, (H, W)), self.cfg))

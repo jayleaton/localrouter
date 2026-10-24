@@ -263,7 +263,7 @@ const ImageBody = struct {
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
     n: u32 = 1,
-    size: []const u8 = "1024x1024",
+    size: []const u8 = "", // "": 1024x1024, or for an edit the input's shape
     response_format: []const u8 = "b64_json",
     seed: ?u64 = null,
     steps: u32 = 0,
@@ -304,14 +304,20 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, sc
     var raws: std.ArrayList([]const u8) = .empty;
     const b = (if (edit) parseBody(ImageBody, app, a, host, text, ctype, &.{ "image", "image[]", "images" }, &raws, &why) else parseBody(ImageBody, app, a, host, text, ctype, &.{}, &raws, &why)) catch
         return h.fail(req, a, 400, "invalid_request_error", why);
-    const files = inputs.validate(a, "ref", raws.items, (request.Limits{}).max_references, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
-    if (edit and files.len == 0) return h.fail(req, a, 400, "invalid_request_error", "image is required: send image (or image[]) as files, base64 or URLs");
-    const wh = request.parseSize(if (eql(b.size, "auto")) "1024x1024" else b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
-    const refs = try a.alloc([]const u8, files.len);
-    for (refs, files) |*d, f| d.* = f.name;
+    var mask_raw: std.ArrayList([]const u8) = .empty;
+    if (edit) _ = parseBody(struct {}, app, a, host, text, ctype, &.{"mask"}, &mask_raw, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    if (mask_raw.items.len > 1) return h.fail(req, a, 400, "invalid_request_error", "send one mask");
+    const refs_files = inputs.validate(a, "ref", raws.items, (request.Limits{}).max_references, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    if (edit and refs_files.len == 0) return h.fail(req, a, 400, "invalid_request_error", "image is required: send image (or image[]) as files, base64 or URLs");
+    const mask_files = inputs.validate(a, "mask", mask_raw.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    const files = try std.mem.concat(a, inputs.File, &.{ refs_files, mask_files });
+    // an edit without a size (or "auto") keeps the input's shape, at the size the model picks
+    const wh = if (edit and (b.size.len == 0 or eql(b.size, "auto"))) [2]u32{ 0, 0 } else request.parseSize(if (b.size.len == 0 or eql(b.size, "auto")) "1024x1024" else b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
+    const refs = try a.alloc([]const u8, refs_files.len);
+    for (refs, refs_files) |*d, f| d.* = f.name;
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs } };
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);

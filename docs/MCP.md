@@ -37,7 +37,7 @@ Issue a harness the least it needs (`--scopes LIST` on `token` or `add`; `GET /v
 | Scope | HTTP | MCP tools | Voice session (`/v1/realtime`) |
 | --- | --- | --- | --- |
 | `inference` | `POST /v1/chat/completions` | `chat` | opens the socket (its speech in and out is part of it) |
-| `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture and video tools |
+| `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
 | `decisions` | `POST /v1/systemone` | `decide` | |
 | `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager` | `list_models`, `list_voices` | `list_models` |
 | `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release` | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
@@ -114,7 +114,7 @@ a daemon it cannot reach answers each request with a JSON-RPC error rather than 
 ## Tools
 
 Call `list_models` first. A model that is not loaded loads on its first call; the chat model and the voice models are
-kept warm. Long jobs never need a long tool call: `generate_image`, `generate_video` and `transcribe_audio` take
+kept warm. Long jobs never need a long tool call: `generate_image`, `edit_image`, `generate_video` and `transcribe_audio` take
 `wait_s` (default 600, at most 3000) and return the job id when it passes; `get_job` with its own `wait_s` picks the
 job up. Output files come back as `resource_link` URLs on the server (kept 24 h), images and speech also inline.
 
@@ -132,7 +132,8 @@ full machine says `insufficient_memory`.
 | `load_model` | **`model`**, `wait_s` | loads it (refused if it would need the chat model's memory) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning`, `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format` | the reply's text (or its tool calls as JSON), then the whole completion |
 | `decide` | **`state`**, **`questions`** (choice, noul, score; [AGENTS.md](AGENTS.md#decisions-the-system-one-shape)), `model` | one line a question (`route: generate_image (0.912)`), then the model's reply, checked against the questions. Acts on nothing |
-| `generate_image` | **`prompt`**, `size` (1024x1024), `n`, `seed`, `steps`, `negative_prompt`, `images` (edit inputs), `inline_images`, `wait_s` | PNGs inline and as URLs, the seed; or the job id |
+| `generate_image` | **`prompt`**, `size` (1024x1024; for an edit, the input's shape), `n`, `seed`, `steps`, `negative_prompt`, `images` (edit inputs), `inline_images`, `wait_s` | PNGs inline and as URLs, the seed; or the job id |
+| `edit_image` | **`prompt`**, `image` or `images` (1 to 5), `mask`, `size` (omit: the input's shape), `model`, `n`, `seed`, `steps`, `negative_prompt`, `inline_images`, `wait_s` | as `generate_image`; refused when no model lists `image_edit` |
 | `generate_video` | **`prompt`**, `size` (omit: the model's own), `seconds`, `fps`, `seed`, `steps`, `audio`, `image`, `wait_s` | the MP4's URL; or the job id |
 | `synthesize_speech` | **`input`**, `voice`, `model`, `speed`, `preset`, `instructions` (for a model whose `instructions` is true; Drama 3 speaks them as `[...]` before the text), `format` (wav), `seed`, `references`, `inline_audio` | the audio inline and as a URL |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside `local_files`), `language`, `prompt`, `timestamps`, `temperature`, `wait_s` | the text, then JSON (language, duration, segments, words) |
@@ -151,6 +152,21 @@ typing into a field that is not a search box each wait for the user's tap in the
 
 Every schema is strict (`additionalProperties: false`), so a misspelled argument shows up in the client rather than
 being dropped.
+
+### Editing a picture
+
+`edit_image` changes a picture as its `prompt` says. Send the picture as `image`: a base64 string, a data URL or an
+http(s) URL (this server's own `/v1/files/...` output URLs too, so the URL `generate_image` returned works as is; with
+pairing on, or behind `tailscale serve`, send base64 instead: the daemon fetches a URL without your token). Several
+inputs go in `images` (1 to 5; the model's own limit may be lower): the first is the one edited, the others guide it.
+PNG, JPEG or WebP, up to 32 MB each.
+
+Without `size` the result keeps the input's shape (the last input's), at a size the model picks; with `size` it is
+that size. `mask` (the same forms) is a PNG of the first image's size whose alpha is 0 where the edit goes; wherever
+it is opaque the first image's pixels are kept (exactly, when `size` is the input's own). It needs a model whose
+`capabilities` in `list_models` include `image_edit`; an image model lists it only once its edit pack is installed
+([dev/IMAGE-EDIT.md](dev/IMAGE-EDIT.md)). Without one the call is a tool error naming the models and what each can do.
+On a GB10 (Qwen-Image 2.1 Turbo, FP8) a warm 1024x1024 edit of one input takes 11 to 12.5 s, of two inputs about 16 s.
 
 ### Making room for a heavy job
 
@@ -172,6 +188,8 @@ Each line is a `tools/call` request body for `POST /mcp` (or a line on the bridg
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_voices","arguments":{}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"chat","arguments":{"prompt":"Three facts about Canberra.","reasoning":false,"max_tokens":200}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"a red fox in fresh snow","size":"1024x1024","seed":7,"wait_s":120}}}
+{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"edit_image","arguments":{"prompt":"make it night","image":"http://127.0.0.1:8190/v1/files/img_…/0.png","wait_s":300}}}
+{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"edit_image","arguments":{"prompt":"a lake at night","image":"<base64 PNG>","mask":"<base64 PNG, left half transparent>","size":"1024x1024"}}}
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"generate_video","arguments":{"prompt":"waves at dusk, gulls calling","seconds":2,"wait_s":30}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_job","arguments":{"id":"video_…","wait_s":300}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"synthesize_speech","arguments":{"input":"Hello from the GPU box.","voice":"Mae"}}}

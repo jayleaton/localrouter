@@ -32,6 +32,7 @@ SHIFT_V, SHIFT_A = 12.0, 3.0
 FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 FRAME_RESCALE = 5.0 / 3.0
 LINEARS = ("qkv", "out", "fc1", "fc2")
+VISUAL_COND_TIMESTEP = 0.999
 SOURCE = {"qkv": "attn.qkv_proj", "out": "attn.out_proj", "fc1": "mlp.fc1", "fc2": "mlp.fc2"}
 
 
@@ -96,6 +97,8 @@ class Layout:
     H: int
     W: int
     A: int
+    first_frame: bool = False
+    text_tags: np.ndarray | None = None
     pos: np.ndarray = field(init=False)
     S: int = field(init=False)
 
@@ -115,16 +118,20 @@ class Layout:
         video = np.empty((self.T, frame.shape[0], 3))
         video[:, :, 0] = tgrid[:, None]
         video[:, :, 1:] = frame[None]
-        self.pos = np.concatenate([text, audio, video.reshape(-1, 3)])
+        cond = np.empty((frame.shape[0] if self.first_frame else 0, 3))
+        cond[:, 0] = cursor
+        cond[:, 1:] = frame if self.first_frame else frame[:0]
+        self.pos = np.concatenate([text, cond, audio, video.reshape(-1, 3)])
         self.S = self.pos.shape[0]
 
     @property
     def audio_rows(self) -> tuple[int, int]:
-        return self.L, self.L + 2 * self.A
+        start = self.L + ((self.H//2)*(self.W//2) if self.first_frame else 0)
+        return start, start + 2 * self.A
 
     @property
     def video_rows(self) -> tuple[int, int]:
-        return self.L + 2 * self.A, self.S
+        return self.audio_rows[1], self.S
 
     def rope_table(self, inv_freq: np.ndarray) -> torch.Tensor:
         """[1, S, 1, 48, 2, 2] bf16: ComfyUI's rope_rotation_table of the fp32 angles pos * inv_freq, cos / sin by the
@@ -140,11 +147,14 @@ class Layout:
     def mod_rows(self, t_v: float, t_a: float) -> tuple[list[float], np.ndarray, int, int]:
         """unique timesteps, the int32 [S] modulation row of every token (t_row * 3 + tag: video 0, text 1,
         audio 2), and the final layer's rows for video and audio."""
-        unique_t = sorted({t_v, t_a})
+        t_cond = max(t_v, VISUAL_COND_TIMESTEP)
+        unique_t = sorted({t_v, t_a} | ({t_cond} if self.first_frame else set()))
         t_row = {t: i for i, t in enumerate(unique_t)}
         idx = np.empty(self.S, dtype=np.int32)
         a0, a1 = self.audio_rows
-        idx[: self.L] = t_row[t_v] * 3 + 1
+        idx[: self.L] = t_row[t_v] * 3 + (self.text_tags if self.text_tags is not None else 1)
+        if self.first_frame:
+            idx[self.L:a0] = t_row[t_cond] * 3  # the first frame's rows (none in text to video)
         idx[a0:a1] = t_row[t_a] * 3 + 2
         idx[a1:] = t_row[t_v] * 3 + 0
         return unique_t, idx, t_row[t_v], t_row[t_a]
@@ -184,6 +194,9 @@ class H3Dit:
                 b[name] = self._linear(wt, None if acts is None else acts.get(f"{i}.{name}"))
             self.blocks.append(b)
         self.context = None
+        self.first_frame = None
+        self.cond_rows = None
+        self.text_tags = None
         self._layout_key = None
 
     @classmethod
@@ -227,10 +240,18 @@ class H3Dit:
         return y
 
     # ---------------------------------------------------------------- text (once a run)
-    def prepare(self, text: torch.Tensor) -> torch.Tensor:
+    def prepare(self, text: torch.Tensor, *, first_frame=None, seed=0, text_tags=None) -> torch.Tensor:
         """Qwen3-VL layer-50 states [1, L, 5120] (bf16) -> refined text rows [L, 5376]: condition_proj, the 2-block
         token refiner (no RoPE), final norm."""
         r = self.refiner
+        self.first_frame = first_frame
+        self._layout_key = None
+        self.cond_rows = None
+        if isinstance(text_tags, torch.Tensor):
+            text_tags = text_tags.detach().cpu().numpy()
+        self.text_tags = None if text_tags is None else np.asarray(text_tags, dtype=np.int32)
+        if self.text_tags is not None and (self.text_tags.shape != (text.shape[1],) or not np.isin(self.text_tags, [0, 1]).all()):
+            raise ValueError("text_tags must have one video/text tag per expanded text row")
         x = text[0].to(self.dev, torch.bfloat16).contiguous()
         with REC.op("refiner.condition_proj", "linear", {"kind": "bf16"}, x=x) as o:
             x = tops.gemm_bf16(x, r["condition_proj.weight"], r["condition_proj.bias"])
@@ -256,6 +277,16 @@ class H3Dit:
             m = self._gemm(f"refiner.{i}.fc2", m, r[p + "mlp.fc2.weight"])
             x = self._add(f"refiner.{i}.mlp_residual", m, x)
         self.context = self._rms("refiner.final_norm", x, r["token_refiner.final_norm.weight"])
+        # the first frame's rows after the text, in the engine's order (they depend on the latent and the noise only)
+        if first_frame is not None:
+            from ..qwen_image import noise
+            z = first_frame.to(self.dev, torch.float32).contiguous()
+            if z.ndim != 5 or tuple(z.shape[:3]) != (1, 24, 1) or z.shape[3]%2 or z.shape[4]%2:
+                raise ValueError("first_frame must be normalized [1,24,1,H,W] with even latent sides")
+            n = torch.from_numpy(noise(seed, z.numel())).to(self.dev).contiguous()
+            with REC.op("cond_rows", "condition_rows", {"seed": seed, "aug": VISUAL_COND_TIMESTEP}, z=z, noise=n) as o:
+                self.cond_rows = H.mod().k_cond_rows(z, n, VISUAL_COND_TIMESTEP)
+                o.out(y=self.cond_rows)
         return self.context
 
     def _rms(self, name, x, w):
@@ -278,9 +309,11 @@ class H3Dit:
 
     # ---------------------------------------------------------------- one step
     def layout(self, T: int, Hh: int, Ww: int, A: int) -> Layout:
-        key = (self.context.shape[0], T, Hh, Ww, A)
+        key = (self.context.shape[0], T, Hh, Ww, A, self.first_frame is not None)
         if key != self._layout_key:
-            self._lay = Layout(*key)
+            if self.first_frame is not None and tuple(self.first_frame.shape[3:]) != (Hh, Ww):
+                raise ValueError("first-frame and video canvas mismatch")
+            self._lay = Layout(*key, text_tags=self.text_tags)
             self._rope = self._lay.rope_table(self.inv_freq).to(self.dev)
             self._layout_key = key
         return self._lay
@@ -311,7 +344,11 @@ class H3Dit:
             o.out(y=ar)
         ve = self._gemm32("video_patch_proj", vr, self.side["video_patch_proj.weight"], self.side["video_patch_proj.bias"])
         ae = self._gemm32("audio_patch_proj", ar, self.side["audio_patch_proj.weight"], self.side["audio_patch_proj.bias"])
-        h = torch.cat([self.context, ae.to(torch.bfloat16), ve.to(torch.bfloat16)]).contiguous()  # exact rounds + moves
+        pieces = [self.context]
+        if self.cond_rows is not None:
+            ce = self._gemm32("cond_patch_proj", self.cond_rows, self.side["video_patch_proj.weight"], self.side["video_patch_proj.bias"])
+            pieces.append(ce.to(torch.bfloat16))
+        h = torch.cat(pieces + [ae.to(torch.bfloat16), ve.to(torch.bfloat16)]).contiguous()
 
         if fused():
             h = self.blocks_fused(h, t_emb, idx, lay.S)

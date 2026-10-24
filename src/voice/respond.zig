@@ -399,7 +399,8 @@ const Feed = struct {
         const said = std.mem.trim(u8, f.r.text.items, " \t\r\n").len > 0;
         f.r.ack_at = f.r.text.items.len; // what is added from here is the session's, about this call
         const video = std.mem.eql(u8, name, "generate_video");
-        if (!said and f.r.audio and (video or std.mem.eql(u8, name, "generate_image"))) f.add(if (video) ack_video else ack_image, false);
+        const picture = std.mem.eql(u8, name, "generate_image") or std.mem.eql(u8, name, "edit_image");
+        if (!said and f.r.audio and (video or picture)) f.add(if (video) ack_video else ack_image, false);
         if (!said and f.r.audio and std.mem.eql(u8, name, "computer_use")) f.add(ack_computer, false);
         if (video and f.r.audio and pausesVoice(f.s, a)) f.add(ack_pause, false);
         f.endText(true);
@@ -670,7 +671,14 @@ const builtin_tools =
     \\  "size": {"type": "string", "description": "WIDTHxHEIGHT in multiples of 16, e.g. 1024x1024 (default) or 1344x768"}}, "required": ["prompt"]}}},
     \\ {"type": "function", "function": {"name": "generate_video", "description": "Start making a short video clip with sound on this machine from a description. It takes minutes. When you call this, only say that you are making it and that it takes a few minutes. Never say it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
     \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "what happens, in detail"},
-    \\  "seconds": {"type": "integer", "description": "length, 1 to 20 (default 5)"}}, "required": ["prompt"]}}}]
+    \\  "seconds": {"type": "integer", "description": "length, 1 to 20 (default 5)"}}, "required": ["prompt"]}}},
+    \\ {"type": "function", "function": {"name": "generate_video", "description": "Start making a short video clip with sound on this machine from a description, or from the last picture of this conversation (from_last_image: when the user asks to animate it or bring it to life). It takes minutes. When you call this, only say that you are making it and that it takes a few minutes. Never say it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
+    \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "what happens, in detail"},
+    \\  "seconds": {"type": "integer", "description": "length, 1 to 20 (default 5)"},
+    \\  "from_last_image": {"type": "boolean", "description": "true: the video starts from the last picture made or edited in this conversation"}}, "required": ["prompt"]}}},
+    \\ {"type": "function", "function": {"name": "edit_image", "description": "Change a picture as the user asks (make it night, add a hat, change the colours): by default the last picture made or edited in this conversation. Use it, not generate_image, when the user wants that picture changed. It takes several seconds. When you call this, only say briefly that you are on it (for example: Making that now). Never say or imply it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
+    \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "the change, in detail: what to change and what to keep"},
+    \\  "image": {"type": "string", "description": "the URL of another picture from an earlier result; omit for the last picture"}}, "required": ["prompt"]}}}]
 ;
 
 /// The model management procedure (`voice.manage_models`): appended to the instructions, with its tools offered.
@@ -715,7 +723,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     };
 }
 
-/// Under the lock: the tools a reply is offered: the built-in image and video tools a model can serve, the model
+/// Under the lock: the tools a reply is offered: the built-in image, edit and video tools a model can serve, the model
 /// management tools when enabled, the computer tools when a helper is paired, then the client's own (only those with
 /// client tool execution).
 fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
@@ -724,7 +732,8 @@ fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
     if (s.voice.tools and s.settings.tool_execution == .server) {
         const all = try std.json.parseFromSliceLeaky([]const chat.Tool, a, builtin_tools, .{});
         if (offer.image) try tools.append(a, all[0]);
-        if (offer.video) try tools.append(a, all[1]);
+        if (offer.image_edit) try tools.append(a, all[3]);
+        if (offer.video) try tools.append(a, if (offer.image_to_video) all[2] else all[1]); // from_last_image only with a model for it
         if (s.voice.manage_models) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
         if (offer.computer) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, computer_tools, .{}));
     }

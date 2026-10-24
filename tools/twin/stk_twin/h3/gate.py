@@ -1,4 +1,4 @@
-"""python -m stk_twin.h3.gate --models DIR [--size 768x448 --frames 56 --steps 8 --prompt ...]
+"""python -m stk_twin.h3.gate --models DIR [--size 768x448 --frames 56 --steps 8 --prompt ... --image first.png]
 
 The video twin's DiT against ComfyUI 0.37.0's own MiniMaxH3Model on identical inputs (the structure gate, as the
 image twin's M2 gate): ComfyUI as a library (its text encoder, its DiT at bf16 with SDPA), the twin in bf16 mode
@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from .shapes import PROMPT, latent_shapes
@@ -35,12 +36,14 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--prompt", default=PROMPT)
     ap.add_argument("--attn", default="bf16", help="the twin's attention: bf16 or int8")
+    ap.add_argument("--image", help="optional first-frame PNG; uses ComfyUI's image text and VAE conditioning")
     a = ap.parse_args()
     sys.path.insert(0, os.environ["COMFY"])
     import comfy.model_management as mm
     import comfy.ops
     import comfy.samplers
     import comfy.sd
+    import comfy.utils
     from torch.nn.attention import SDPBackend
 
     from .dit import H3Dit
@@ -50,11 +53,30 @@ def main() -> None:
     res = {"size": a.size, "frames": a.frames, "steps": a.steps}
     t0 = time.time()
 
-    # ComfyUI's text encoder: the Qwen3-VL 32B layer-50 states [1, L, 5120] fp32
+    # Use one canvas image, image text embedding, and VAE latent for both paths.
+    canvas = first_frame = None
+    if a.image:
+        from PIL import Image
+        from comfy_extras.nodes_minimax_h3 import _resize
+
+        rgb = np.asarray(Image.open(a.image).convert("RGB"), dtype=np.uint8).astype(np.float32) / np.float32(255)
+        canvas = _resize(torch.from_numpy(rgb).unsqueeze(0), W, Hh, "disabled")
+        vae_sd = comfy.utils.load_torch_file(str(models / "vae/minimax_h3_video_vae_fp16.safetensors"))
+        vae = comfy.sd.VAE(sd=vae_sd)
+        with torch.inference_mode():
+            first_frame = vae.encode(canvas)
+        del vae, vae_sd
+        mm.soft_empty_cache()
+
+    # ComfyUI's text encoder: Qwen3-VL 32B layer-50 states [1, L, 5120] fp32.
     clip = comfy.sd.load_clip([str(models / "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")],
                               clip_type=comfy.sd.CLIPType.MINIMAX)
-    enc = clip.encode_from_tokens(clip.tokenize(a.prompt), return_dict=True)
+    with torch.inference_mode():
+        enc = clip.encode_from_tokens(clip.tokenize(a.prompt, images=[canvas] if canvas is not None else []), return_dict=True)
     cond = enc["cond"].to(torch.bfloat16)
+    tags = enc.get("minimax_token_tags")
+    if canvas is not None and tags is None:
+        raise RuntimeError("ComfyUI image conditioning did not return minimax_token_tags")
     res["text_tokens"] = cond.shape[1]
     del clip, enc
     mm.soft_empty_cache()
@@ -76,15 +98,27 @@ def main() -> None:
     with torch.inference_mode():
         ctx = dm.preprocess_text_embeds(cond.to(dev))                       # ComfyUI: extra_conds, once a run
         twin = H3Dit({k: v for k, v in dm.state_dict().items()}, kind="bf16", attn=a.attn, device=dev)
-        ours = twin.prepare(cond)
+        payload = {"audio_scale": 4.0}
+        if first_frame is not None:
+            first_frame = first_frame.to(dev)
+            tags = tags.to(dev)
+            payload.update({"seed": a.seed, "text_token_tags": tags,
+                            "keyframes": [{"resolved_frame_index": 0, "latent": first_frame}],
+                            "cond_video_latents": [first_frame]})
+        ours = twin.prepare(cond, first_frame=first_frame, seed=a.seed, text_tags=tags)
         res["context"] = cmp(ours, ctx[0])
+        if first_frame is not None:
+            # ComfyUI uses CPU torch.randn per condition; copy its augmented rows into the twin so this gate
+            # isolates packed DiT structure and velocity from the portable-noise substitution.
+            twin.cond_rows = dm._cond_video_rows(payload, dev)
+            res["condition_rows"] = "ComfyUI _cond_video_rows copied to twin"
+            res["image_latent_shape"] = list(first_frame.shape)
+            res["text_tags"] = tags.detach().cpu().tolist()
 
         vs, as_ = latent_shapes(W, Hh, a.frames)
         g = torch.Generator(device="cpu").manual_seed(a.seed)
         xv = torch.randn(vs, generator=g).to(dev)
         xa = torch.randn(as_, generator=g).to(dev)
-        payload = {"audio_scale": 4.0}
-
         def comfy_call(v, au, sigma, prio):
             comfy.ops.SDPA_BACKEND_PRIORITY[:] = prio
             t = torch.full((1,), float(sigma), dtype=torch.float32, device=dev) * 1000.0
@@ -112,6 +146,7 @@ def main() -> None:
         res["worst_ratio"] = max(max(r["video"]["ratio"], r["audio"]["ratio"]) for r in steps)
         res["pass"] = res["worst_ratio"] <= 1.5 and res["context"]["cos"] > 0.999
     print(json.dumps({"h3_gate": res}))
+    raise SystemExit(0 if res["pass"] else 1)
 
 
 if __name__ == "__main__":

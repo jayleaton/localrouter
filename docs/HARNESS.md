@@ -61,7 +61,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
-| `media` | the media and job routes |
+| `media` | the media and job routes, `image_edit` and `image_to_video` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
 | `model_management` | the operator routes and the MCP tools that change what is loaded |
 | `computer` | `enabled`, the helper and approval routes, and `placement` (`box_policy` today) |
 | `unsupported` | `[{feature, status, note}]`: `status` is `unsupported` or `coming`; `note` says what to use instead |
@@ -255,7 +255,8 @@ for a mode the box lacks finds out at once.
   `localrouter.function_call.cancelled` says so, so a late result is never spoken in a later turn. With pairing
   required, the session's device needs the `inference` scope for this mode (the legacy `voice` profile includes it).
 - **`server` (default, what our web page and app use).** The client's `tools` plus, unless the operator turned them
-  off, the box's built-ins (`realtime.server_tools`): `generate_image`, `generate_video`, the model management tools
+  off, the box's built-ins (`realtime.server_tools`): `generate_image`, `generate_video`, `edit_image` (when a model
+  lists `image_edit`: `server_tools.image_edit`), the model management tools
   with `voice.manage_models`, and `computer_control` / `computer_use` while a desktop helper is paired. Client calls
   return as above; a built-in runs on the box, its job's events (`localrouter.job.*`) arrive and the assistant follows
   up by itself. A client tool may not reuse a built-in's name.
@@ -275,13 +276,13 @@ a command use `localrouter mcp-stdio --url URL [--token TOKEN]`, a stateless bri
 `$LOCALROUTER_TOKEN`).
 
 Tools (`mcp.tools`; schemas strict, `additionalProperties: false`): `list_models`, `list_voices`, `reserve_for`,
-`unload_model`, `load_model`, `generate_image`, `generate_video`, `transcribe_audio`, `synthesize_speech`, `chat`,
+`unload_model`, `load_model`, `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech`, `chat`,
 `decide`, `get_job`, `cancel_job`, `release_models`, `computer_control`, `computer_use`, `computer_status`,
 `computer_stop`. Arguments and results: [MCP.md](MCP.md#tools).
 
 - **Failures** are tool results with `isError: true` whose text says what to change; a JSON-RPC error means the call
   itself was malformed (unknown tool, bad params).
-- **Long jobs never need a long call:** `generate_image`, `generate_video` and `transcribe_audio` take `wait_s`
+- **Long jobs never need a long call:** `generate_image`, `edit_image`, `generate_video` and `transcribe_audio` take `wait_s`
   (default 600, at most 3000) and return the job id when it passes; `get_job {id, wait_s}` picks it up and
   `cancel_job` ends it. A client with a short tool timeout passes a small `wait_s` and polls.
 - **Outputs** come back as `resource_link` URLs on the box (`/v1/files/...`, kept 24 h) and, for images and speech,

@@ -36,6 +36,8 @@ const sources = [_]Source{
     .{ .name = "te32", .file = "kernels/cuda/minimax/te32.cu", .extra = &.{"-O3"} }, // no fast math (h3/te32.py)
     .{ .name = "vae_audio", .file = "kernels/cuda/minimax/vae_audio.cu", .extra = &.{ "-O3", "--fmad=false" } }, // h3/vae_audio.py
     .{ .name = "gemm_f16", .file = "kernels/cuda/minimax/gemm_f16.cu", .extra = &.{"-O3"} }, // h3/vae_video.py
+    .{ .name = "te_vision", .file = "kernels/cuda/minimax/te_vision.cu", .extra = &.{"-O3"} },
+    .{ .name = "vae_enc", .file = "kernels/cuda/minimax/vae_enc.cu", .extra = &.{"-O3"} },
     .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"} },
 };
 

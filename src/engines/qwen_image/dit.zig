@@ -19,6 +19,10 @@ const eps: f32 = 1e-6;
 const tile: u32 = 12; // the prompt tile the twin passes (the bulk-copy GEMM)
 
 /// A device tensor an op reads or writes, by the twin's role name. `contiguous` false: a strided view (not reloadable).
+pub const Reference = struct { latent: u64, h: u32, w: u32, slot: u32 };
+const layout = @import("edit_layout.zig");
+const Segment = layout.Segment;
+
 pub const Io = struct { role: []const u8, ptr: u64, bytes: u64, contiguous: bool = true };
 
 pub const Probe = struct {
@@ -45,25 +49,66 @@ pub const Dit = struct {
     max_rows: u32,
     max_prefix: u32,
     // side path
-    t: u64 = 0, emb: u64 = 0, h1: u64 = 0, h1s: u64 = 0, temb: u64 = 0, ts: u64 = 0, m: u64 = 0,
-    g1c: u64 = 0, g2c: u64 = 0, tg1: u64 = 0, tg2: u64 = 0, s1f: u64 = 0, s2f: u64 = 0, s1z: u64 = 0, s2z: u64 = 0,
+    t: u64 = 0,
+    emb: u64 = 0,
+    h1: u64 = 0,
+    h1s: u64 = 0,
+    temb: u64 = 0,
+    ts: u64 = 0,
+    m: u64 = 0,
+    g1c: u64 = 0,
+    g2c: u64 = 0,
+    tg1: u64 = 0,
+    tg2: u64 = 0,
+    s1f: u64 = 0,
+    s2f: u64 = 0,
+    s1z: u64 = 0,
+    s2z: u64 = 0,
     // per pass
-    hn: u64 = 0, qkv: u64 = 0, q: u64 = 0, attn: u64 = 0, o: u64 = 0, h2: u64 = 0, y: u64 = 0,
-    qc: u64 = 0, qs: u64 = 0, gc: u64 = 0, gs: u64 = 0, gu: u64 = 0, sw: u64 = 0,
-    kbuf: u64 = 0, vbuf: u64 = 0, cos: u64 = 0, sin: u64 = 0, scos: u64 = 0, ssin: u64 = 0,
+    hn: u64 = 0,
+    qkv: u64 = 0,
+    q: u64 = 0,
+    attn: u64 = 0,
+    o: u64 = 0,
+    h2: u64 = 0,
+    y: u64 = 0,
+    qc: u64 = 0,
+    qs: u64 = 0,
+    gc: u64 = 0,
+    gs: u64 = 0,
+    gu: u64 = 0,
+    sw: u64 = 0,
+    kbuf: u64 = 0,
+    vbuf: u64 = 0,
+    cos: u64 = 0,
+    sin: u64 = 0,
+    scos: u64 = 0,
+    ssin: u64 = 0,
     // the tables the next block pass reads: the prefix's (cos / sin) or the step's (scos / ssin, kept per size)
-    rcos: u64 = 0, rsin: u64 = 0,
+    rcos: u64 = 0,
+    rsin: u64 = 0,
     step_tables: ?[3]u32 = null, // (h, w, prefix rows) whose image tables scos / ssin hold
     /// Steps replay as CUDA graphs (one per size, prefix length and buffer pair) unless a probe is set.
     graphs: bool = true,
     step_graphs: std.ArrayList(StepGraph) = .empty,
     sigma_host: f32 = 0,
-    xp: u64 = 0, tn: u64 = 0, th: u64 = 0, tg: u64 = 0, xin: u64 = 0, h: u64 = 0,
-    os: u64 = 0, nob: u64 = 0, nof: u64 = 0, hout: u64 = 0, po: u64 = 0,
+    xp: u64 = 0,
+    tn: u64 = 0,
+    th: u64 = 0,
+    tg: u64 = 0,
+    xin: u64 = 0,
+    h: u64 = 0,
+    os: u64 = 0,
+    nob: u64 = 0,
+    nof: u64 = 0,
+    hout: u64 = 0,
+    po: u64 = 0,
     // the kept prefix: per block k and v [P, 4096]
     pk: [W.layers]u64 = undefined,
     pv: [W.layers]u64 = undefined,
     prefix_rows: u32 = 0,
+    next_pos: u32 = 0,
+    segments: std.ArrayList(Segment) = .empty,
     mod_sigma: ?f32 = null,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const W.Weights, s: cuda.Stream, om: [64]f64, max_rows: u32, max_prefix: u32) !Dit {
@@ -73,11 +118,11 @@ pub const Dit = struct {
         const qr = plan.rows(@intCast(r), F, plan.TB); // the widest quantized rows (K up to 12288)
         const bf = 2;
         inline for (.{
-            .{ "t", 4 },                  .{ "emb", 2 * 256 * bf },      .{ "h1", 2 * D * bf },          .{ "h1s", 2 * D * bf },
-            .{ "temb", 2 * D * bf },      .{ "ts", 2 * D * bf },         .{ "m", 2 * 4 * D * bf },      .{ "g1c", 2 * D * bf },
-            .{ "g2c", 2 * D * bf },       .{ "tg1", 2 * D * bf },        .{ "tg2", 2 * D * bf },         .{ "s1f", D * 4 },
-            .{ "s2f", D * 4 },            .{ "s1z", D * 4 },             .{ "s2z", D * 4 },              .{ "os", D * bf },
-            .{ "nob", D * bf },           .{ "nof", D * 4 },
+            .{ "t", 4 },             .{ "emb", 2 * 256 * bf }, .{ "h1", 2 * D * bf },    .{ "h1s", 2 * D * bf },
+            .{ "temb", 2 * D * bf }, .{ "ts", 2 * D * bf },    .{ "m", 2 * 4 * D * bf }, .{ "g1c", 2 * D * bf },
+            .{ "g2c", 2 * D * bf },  .{ "tg1", 2 * D * bf },   .{ "tg2", 2 * D * bf },   .{ "s1f", D * 4 },
+            .{ "s2f", D * 4 },       .{ "s1z", D * 4 },        .{ "s2z", D * 4 },        .{ "os", D * bf },
+            .{ "nob", D * bf },      .{ "nof", D * 4 },
         }) |e| @field(x, e[0]) = try x.alloc(e[1]);
         inline for (.{ "hn", "q", "attn", "o", "h2", "y", "h", "hout" }) |nm| @field(x, nm) = try x.alloc(r * D * bf);
         x.qkv = try x.alloc(r * 3 * D * bf);
@@ -94,7 +139,7 @@ pub const Dit = struct {
         x.scos = try x.alloc(@as(u64, max_rows) * 64 * 4);
         x.ssin = try x.alloc(@as(u64, max_rows) * 64 * 4);
         inline for (.{ "xp", "tn", "th", "tg" }) |nm| @field(x, nm) = try x.alloc(@as(u64, max_prefix) * D * bf);
-        x.xin = try x.alloc(@as(u64, max_rows) * 64 * bf);
+        x.xin = try x.alloc(r * 64 * bf);
         x.po = try x.alloc(@as(u64, max_rows) * 64 * bf);
         for (0..W.layers) |i| {
             x.pk[i] = try x.alloc(@as(u64, max_prefix) * D * bf);
@@ -108,6 +153,7 @@ pub const Dit = struct {
         x.step_graphs.deinit(x.gpa);
         for (x.bufs.items) |*b| b.free();
         x.bufs.deinit(x.gpa);
+        x.segments.deinit(x.gpa);
     }
 
     fn alloc(x: *Dit, n: u64) !u64 {
@@ -215,14 +261,35 @@ pub const Dit = struct {
             try x.k.ops.copyRows(x.s, vdst, x.qkv + 2 * D * 2, rows, D * 2, 3 * D * 2, D * 2);
             try x.post(name, &.{.{ .role = "y", .ptr = if (prefix) x.pv[i] else x.vbuf, .bytes = @as(u64, if (prefix) rows else P + rows) * D * 2 }});
         }
-        { // attention over the kept prefix (+ this pass's rows)
-            const name = nm(&nb, tag, i, "attn");
+        { // Each prefix segment sees keys through its end; reference blocks are bidirectional.
             const keys: u32 = if (prefix) rows else P + rows;
             const kp = if (prefix) x.pk[i] else x.kbuf;
             const vp = if (prefix) x.pv[i] else x.vbuf;
-            try x.pre(name, &.{ .{ .role = "q", .ptr = x.q, .bytes = @as(u64, rows) * D * 2 }, .{ .role = "k", .ptr = kp, .bytes = @as(u64, keys) * D * 2 }, .{ .role = "v", .ptr = vp, .bytes = @as(u64, keys) * D * 2 } });
-            try x.k.ops.attention(x.s, x.q, kp, vp, x.attn, rows, H, H, keys, prefix, 0);
-            try x.post(name, &.{.{ .role = "y", .ptr = x.attn, .bytes = @as(u64, rows) * D * 2 }});
+            if (prefix and x.segments.items.len > 0) {
+                var sn: [48]u8 = undefined;
+                var parts: [11]Io = undefined;
+                var roles: [11][16]u8 = undefined;
+                for (x.segments.items, 0..) |seg, j| {
+                    const off = @as(u64, seg.start) * D * 2;
+                    const bytes = @as(u64, seg.end - seg.start) * D * 2;
+                    const name = try std.fmt.bufPrint(&sn, "P{d}.attn.seg{d}", .{ i, j });
+                    try x.pre(name, &.{ .{ .role = "q", .ptr = x.q + off, .bytes = bytes }, .{ .role = "k", .ptr = kp, .bytes = @as(u64, seg.end) * D * 2 }, .{ .role = "v", .ptr = vp, .bytes = @as(u64, seg.end) * D * 2 } });
+                    try x.k.ops.attention(x.s, x.q + off, kp, vp, x.attn + off, seg.end - seg.start, H, H, seg.end, seg.causal, seg.start);
+                    try x.post(name, &.{.{ .role = "y", .ptr = x.attn + off, .bytes = bytes }});
+                    parts[j] = .{ .role = try std.fmt.bufPrint(&roles[j], "part{d}", .{j}), .ptr = x.attn + off, .bytes = bytes };
+                }
+                const name = try std.fmt.bufPrint(&sn, "P{d}.attn.join", .{i});
+                try x.pre(name, parts[0..x.segments.items.len]);
+                // Separate destination preserves captured concat inputs under alone replay.
+                try x.k.ops.copyRows(x.s, x.o, x.attn, rows, D * 2, D * 2, D * 2);
+                try x.post(name, &.{.{ .role = "y", .ptr = x.o, .bytes = @as(u64, rows) * D * 2 }});
+                try x.k.ops.copyRows(x.s, x.attn, x.o, rows, D * 2, D * 2, D * 2);
+            } else {
+                const name = nm(&nb, tag, i, "attn");
+                try x.pre(name, &.{ .{ .role = "q", .ptr = x.q, .bytes = @as(u64, rows) * D * 2 }, .{ .role = "k", .ptr = kp, .bytes = @as(u64, keys) * D * 2 }, .{ .role = "v", .ptr = vp, .bytes = @as(u64, keys) * D * 2 } });
+                try x.k.ops.attention(x.s, x.q, kp, vp, x.attn, rows, H, H, keys, prefix, 0);
+                try x.post(name, &.{.{ .role = "y", .ptr = x.attn, .bytes = @as(u64, rows) * D * 2 }});
+            }
         }
         try x.linear(nm(&nb, tag, i, "out"), b.out, x.attn, x.o, rows);
         try x.residual(nm(&nb, tag, i, "res1"), stream, x.o, if (prefix) x.tg1 + D * 2 else x.tg1, rows);
@@ -284,6 +351,9 @@ pub const Dit = struct {
     /// The text prefix through every block (t = 0 modulation, causal), keys and values kept. `ctx` [p, 4096] bf16.
     pub fn buildPrefix(x: *Dit, ctx: u64, p: u32, sigma: f32) !void {
         if (p > x.max_prefix) return error.PrefixTooLong;
+        x.segments.clearRetainingCapacity();
+        x.next_pos = p;
+        x.step_tables = null;
         try x.modulation(sigma);
         try x.pre("txt.norm", &.{ .{ .role = "x", .ptr = ctx, .bytes = @as(u64, p) * D * 2 }, .{ .role = "w", .ptr = x.w.txt_norm, .bytes = D * 4 } });
         try x.k.ops.rmsNorm(x.s, ctx, x.w.txt_norm, x.tn, p, D, eps);
@@ -299,6 +369,71 @@ pub const Dit = struct {
         for (0..W.layers) |i| try x.block(i, x.xp, p, true);
     }
 
+    /// Interleave transformed text with img_in reference rows, then cache the full segmented prefix.
+    pub fn buildEditPrefix(x: *Dit, ctx: u64, text_rows: u32, refs: []const Reference, target_h: u32, target_w: u32, sigma: f32) !void {
+        if (refs.len == 0 or refs.len > 5) return error.BadReferences;
+        var count: u64 = text_rows;
+        var prev: u32 = 0;
+        for (refs) |r| {
+            if (r.slot < prev or r.slot > text_rows or r.h == 0 or r.w == 0) return error.BadReferences;
+            count += @as(u64, r.h) * r.w;
+            prev = r.slot;
+        }
+        if (count > x.max_prefix) return error.PrefixTooLong;
+        // Run the same text projection, but defer blocks until the references have been joined.
+        try x.modulation(sigma);
+        try x.pre("txt.norm", &.{ .{ .role = "x", .ptr = ctx, .bytes = @as(u64, text_rows) * D * 2 }, .{ .role = "w", .ptr = x.w.txt_norm, .bytes = D * 4 } });
+        try x.k.ops.rmsNorm(x.s, ctx, x.w.txt_norm, x.tn, text_rows, D, eps);
+        try x.post("txt.norm", &.{.{ .role = "y", .ptr = x.tn, .bytes = @as(u64, text_rows) * D * 2 }});
+        try x.dense("txt.in1", x.tn, x.w.txt_in1, x.th, text_rows, D, D);
+        try x.pointwise("txt.gelu", .gelu_tanh, x.th, x.tg, @as(u64, text_rows) * D);
+        try x.dense("txt.in2", x.tg, x.w.txt_in2, x.tn, text_rows, D, D);
+        var ar: std.heap.ArenaAllocator = .init(x.gpa);
+        defer ar.deinit();
+        const shapes = try ar.allocator().alloc(layout.Reference, refs.len);
+        for (shapes, refs) |*dst, r| dst.* = .{ .h = r.h, .w = r.w, .slot = r.slot };
+        const lp = try layout.plan(ar.allocator(), text_rows, shapes, target_h, target_w);
+        x.segments.clearRetainingCapacity();
+        try x.segments.appendSlice(x.gpa, lp.segments);
+        var parts: [11]Io = undefined;
+        var roles: [11][16]u8 = undefined;
+        var part_count: usize = 0;
+        var row: u32 = 0;
+        var start: u32 = 0;
+        var namebuf: [32]u8 = undefined;
+        for (0..refs.len + 1) |j| {
+            const end = if (j < refs.len) refs[j].slot else text_rows;
+            if (end > start) {
+                const n = end - start;
+                const dst = x.xp + @as(u64, row) * D * 2;
+                const src = x.tn + @as(u64, start) * D * 2;
+                try x.k.ops.copyRows(x.s, dst, src, n, D * 2, D * 2, D * 2);
+                parts[part_count] = .{ .role = try std.fmt.bufPrint(&roles[part_count], "part{d}", .{part_count}), .ptr = dst, .bytes = @as(u64, n) * D * 2 };
+                part_count += 1;
+                row += n;
+            }
+            if (j < refs.len) {
+                const r = refs[j];
+                const n = r.h * r.w;
+                try x.k.ops.transpose(x.s, r.latent, x.xin, 64, n);
+                const dst = x.xp + @as(u64, row) * D * 2;
+                try x.dense(try std.fmt.bufPrint(&namebuf, "ref{d}.img_in", .{j}), x.xin, x.w.img_in, dst, n, D, 64);
+                parts[part_count] = .{ .role = try std.fmt.bufPrint(&roles[part_count], "part{d}", .{part_count}), .ptr = dst, .bytes = @as(u64, n) * D * 2 };
+                part_count += 1;
+                row += n;
+            }
+            start = end;
+        }
+        try x.pre("prefix.join", parts[0..part_count]);
+        try x.k.ops.copyRows(x.s, x.h, x.xp, row, D * 2, D * 2, D * 2);
+        try x.post("prefix.join", &.{.{ .role = "y", .ptr = x.h, .bytes = @as(u64, row) * D * 2 }});
+        try x.uploadRope(lp.ids, x.cos, x.sin);
+        x.prefix_rows = row;
+        x.next_pos = lp.next_pos;
+        x.step_tables = null;
+        for (0..W.layers) |i| try x.block(i, x.h, row, true);
+    }
+
     /// One denoising step: latents `lat` [64, h * w] (CHW, bf16) at `sigma` -> velocity `vel` [64, h * w].
     /// The prefix must be built (`buildPrefix`) for this prompt; the modulation is recomputed for sigma. Without a
     /// probe the step's launches are captured once per (size, prefix length, lat, vel) and replayed as a CUDA graph:
@@ -306,11 +441,11 @@ pub const Dit = struct {
     pub fn step(x: *Dit, lat: u64, sigma: f32, h: u32, w: u32, vel: u64) !void {
         const n = h * w;
         if (n > x.max_rows) return error.ImageTooLarge;
-        const key: [3]u32 = .{ h, w, x.prefix_rows };
+        const key: [3]u32 = .{ h, w, x.next_pos };
         if (x.step_tables == null or !std.mem.eql(u32, &x.step_tables.?, &key)) {
             const ids = try x.gpa.alloc([3]f32, n);
             defer x.gpa.free(ids);
-            rope.imageIds(ids, h, w, x.prefix_rows, h, w);
+            rope.imageIds(ids, h, w, x.next_pos, h, w);
             try x.uploadRope(ids, x.scos, x.ssin);
             x.step_tables = key;
         }
