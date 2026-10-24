@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Responses API: `POST /v1/responses` serves OpenAI's Responses shape over the chat model, for harnesses that speak
+  only that (Codex). Stateless (`store: false`, the conversation replayed each turn): message, `function_call`,
+  `function_call_output` and `reasoning` items; `instructions` and `developer` messages as system messages in place;
+  function tools with the model server's call ids; `reasoning.effort`; `text.format`; `max_output_tokens` and the
+  `incomplete` status. Reasoning returns as a `reasoning` item, never as output text. Stored state
+  (`previous_response_id`, `store: true`), hosted, custom and namespace tools, background mode, summaries, images and
+  any unknown field are 400s naming the field, listed in `/v1/capabilities` (`responses`, `unsupported`). Needs the
+  `inference` scope. Streaming comes next.
 - Voice picture turns: a reply cancelled by barge-in while it wrote a tool call no longer leaves the session's own
   "Making that now." in the history (the call is dropped, so the line promised a picture that never came, and the model
   copied it). `voice.temperature` sets a session's starting chat temperature; the Jarvis config runs Qwen with thinking off

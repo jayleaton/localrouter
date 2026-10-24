@@ -5,7 +5,9 @@ test can check what LocalRouter forwarded (`received` echoes the parsed request 
 CLI: --port N --name ID [--hold-mib 8] [--fail-start]. Binds 127.0.0.1, logs to stderr, exits 0 on SIGTERM.
 Refusals: n != 1 and logprobs (400), a model other than --name (404). Test hooks by message text: "overload" (503),
 "explode" (500), "die" (exits without replying), "slow" (40 words streamed 0.25 s apart), "midfail" (two content
-chunks streamed, then the process exits mid-stream).
+chunks streamed, then the process exits mid-stream), "parallel" (with tools: two calls of the first tool). With tools,
+the reply is a call of the first tool unless tool_choice is "none" or the last message is a tool's result, which is
+answered as text (so a tool loop ends).
 """
 
 import json
@@ -51,10 +53,17 @@ def parse_args(argv):
     return out
 
 
+def last_role(messages):
+    last = messages[-1] if isinstance(messages, list) and messages else None
+    return last.get("role") if isinstance(last, dict) else None
+
+
 def last_text(messages):
     for m in reversed(messages if isinstance(messages, list) else []):
         if isinstance(m, dict) and m.get("role") in ("user", "tool"):
             content = m.get("content")
+            if isinstance(content, list):  # text parts
+                return "".join(p.get("text", "") for p in content if isinstance(p, dict))
             return content if isinstance(content, str) else ""
     return ""
 
@@ -78,11 +87,12 @@ def generate(body, text):
     """The deterministic reply: reasoning, content, tool call, finish reason and completion tokens."""
     kwargs = body.get("chat_template_kwargs")
     thinking = body.get("reasoning_effort") != "none" and not (isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False)
-    out = {"reasoning": "thinking about " + text if thinking else None, "content": None, "call": None, "finish": "stop", "tokens": 0}
+    out = {"reasoning": "thinking about " + text if thinking else None, "content": None, "calls": [], "finish": "stop", "tokens": 0}
     tools = body.get("tools")
-    if isinstance(tools, list) and tools and body.get("tool_choice") != "none":
+    if isinstance(tools, list) and tools and body.get("tool_choice") != "none" and last_role(body.get("messages")) != "tool":
         name = tools[0]["function"]["name"]
-        out["call"] = {"id": "call_1", "type": "function", "function": {"name": name, "arguments": json.dumps({"echo": text})}}
+        n = 2 if text == "parallel" else 1
+        out["calls"] = [{"id": f"call_{i + 1}", "type": "function", "function": {"name": name, "arguments": json.dumps({"echo": text, "n": i + 1} if n > 1 else {"echo": text})}} for i in range(n)]
         out["finish"] = "tool_calls"
         return out
     fmt = body.get("response_format")
@@ -117,8 +127,8 @@ def whole(body, out):
     message = {"role": "assistant", "content": out["content"]}
     if out["reasoning"] is not None:
         message["reasoning_content"] = out["reasoning"]
-    if out["call"]:
-        message["tool_calls"] = [out["call"]]
+    if out["calls"]:
+        message["tool_calls"] = out["calls"]
     return {"id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": NAME,
             "choices": [{"index": 0, "message": message, "finish_reason": out["finish"]}],
             "usage": usage(body, out), "received": body}
@@ -221,12 +231,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 os._exit(1)
             self.delta({"content": piece}, pause=pause)
-        if out["call"]:
-            fn = out["call"]["function"]
-            self.delta({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": fn["name"], "arguments": ""}}]})
+        for i, call in enumerate(out["calls"]):
+            fn = call["function"]
+            self.delta({"tool_calls": [{"index": i, "id": call["id"], "type": "function", "function": {"name": fn["name"], "arguments": ""}}]})
             half = len(fn["arguments"]) // 2
             for part in (fn["arguments"][:half], fn["arguments"][half:]):
-                self.delta({"tool_calls": [{"index": 0, "function": {"arguments": part}}]})
+                self.delta({"tool_calls": [{"index": i, "function": {"arguments": part}}]})
         self.delta({}, finish=out["finish"])
         options = body.get("stream_options")
         if isinstance(options, dict) and options.get("include_usage"):

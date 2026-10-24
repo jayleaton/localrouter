@@ -327,6 +327,7 @@ test "service scopes: a wrong or missing scope is refused on every route class; 
         .{ .method = .POST, .path = "/v1/audio/speech", .body = "{\"input\":\"hi\"}", .wrong = judge, .right = other },
         .{ .method = .POST, .path = "/v1/videos", .body = "{\"prompt\":\"x\"}", .wrong = judge, .right = other },
         .{ .method = .POST, .path = "/v1/chat/completions", .body = "{\"messages\":[]}", .wrong = other, .right = coder },
+        .{ .method = .POST, .path = "/v1/responses", .body = "{\"input\":\"hi\",\"store\":true}", .wrong = other, .right = coder },
         .{ .method = .POST, .path = "/v1/systemone", .body = "{}", .wrong = coder, .right = judge },
         .{ .method = .POST, .path = "/v1/tools/release", .body = "{}", .wrong = coder, .right = operator },
         .{ .method = .POST, .path = "/mcp", .body = list_tools, .wrong = helper, .right = judge },

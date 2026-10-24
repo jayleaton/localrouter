@@ -1,0 +1,137 @@
+{
+  "about": "A full function-call conversation, replayed statelessly: the model calls the caller's function, the caller sends function_call_output for the call_id it got and the model answers; then two calls in one turn and both outputs. Every earlier output item (reasoning, function_call) goes back as it was returned. expect.input_tokens is the number of chat messages (an assistant turn's reasoning, text and calls are one message).",
+  "request": {
+    "instructions": "Use the tools.",
+    "store": false,
+    "tool_choice": "auto",
+    "parallel_tool_calls": true,
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "description": "The weather in a city.",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "turns": [
+    {
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "weather in Paris"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "function_call"
+        ],
+        "calls": [
+          {
+            "call_id": "call_1",
+            "name": "get_weather",
+            "arguments": "{\"echo\": \"weather in Paris\"}"
+          }
+        ],
+        "input_tokens": 2
+      }
+    },
+    {
+      "input": [
+        {
+          "type": "function_call_output",
+          "call_id": "$call_1",
+          "output": "sunny"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "message"
+        ],
+        "reasoning": "thinking about sunny",
+        "text": "echo: sunny",
+        "input_tokens": 4
+      }
+    },
+    {
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": "parallel"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "function_call",
+          "function_call"
+        ],
+        "calls": [
+          {
+            "call_id": "call_1",
+            "name": "get_weather",
+            "arguments": "{\"echo\": \"parallel\", \"n\": 1}"
+          },
+          {
+            "call_id": "call_2",
+            "name": "get_weather",
+            "arguments": "{\"echo\": \"parallel\", \"n\": 2}"
+          }
+        ],
+        "input_tokens": 6
+      }
+    },
+    {
+      "input": [
+        {
+          "type": "function_call_output",
+          "call_id": "$call_1",
+          "output": [
+            {
+              "type": "input_text",
+              "text": "rain"
+            }
+          ]
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "$call_2",
+          "output": "cloudy"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "message"
+        ],
+        "text": "echo: cloudy",
+        "input_tokens": 9
+      }
+    }
+  ]
+}

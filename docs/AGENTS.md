@@ -6,7 +6,7 @@ for its TTL.
 
 Base URL: `http://<host>:8190/v1` (any API key, or none). When the operator turns on device pairing
 (`pairing.required`), every route but `/health` and `/v1/pair` needs a paired device's token as
-`Authorization: Bearer <token>`, with the scope the route needs: `inference` (chat, `/v1/realtime`), `media` (images,
+`Authorization: Bearer <token>`, with the scope the route needs: `inference` (chat, responses, `/v1/realtime`), `media` (images,
 videos, speech, transcription), `decisions` (`/v1/systemone`), `read` (models, voices, residency) or `manage` (load,
 unload, release). No token is a 401 `invalid_api_key`, a missing scope a 403 naming it; ask the operator for a token with
 what you need (`localrouter pair token NAME --scopes inference,media,read` on the box; `GET /v1/pair` shows yours).
@@ -225,6 +225,22 @@ does not take (that refusal is a 400 with the server's message). For the Qwen3.8
 A streamed request the model refuses gets an ordinary JSON error, not a stream. If a stream breaks off after it began,
 it ends with `data: {"error": {...}}` and `data: [DONE]`. Closing the connection cancels the request; the model stays
 loaded. A model that is not yet qualified on this machine (`"qualified": false` in `/models`) is refused with a 503.
+
+## Responses (OpenAI Responses API)
+
+```bash
+curl -s $BASE/responses -H 'content-type: application/json' -d '{
+  "instructions": "Be brief.", "input": "Summarise the plan in three bullets.", "store": false
+}' | jq -r '.output[] | select(.type == "message") | .content[0].text'
+```
+
+`POST /v1/responses` is the same chat model behind OpenAI's Responses API, for clients that speak only that (Codex).
+It is stateless: send `store: false` and the whole conversation in `input` each turn, the previous `output` items
+included as they came back; `previous_response_id` is refused. Function tools only (hosted tools are refused): a
+`function_call` output item is yours to run, then send `{"type": "function_call_output", "call_id": ..., "output":
+...}`. Reasoning comes back as a `reasoning` item (`reasoning_text`), never as message text; `"reasoning": {"effort":
+"none"}` switches it off. Streaming (`stream: true`) is coming. What is and is not taken, field by field:
+[HARNESS.md](HARNESS.md#responses).
 
 ## Decisions (the System One shape)
 
