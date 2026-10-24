@@ -296,7 +296,7 @@ if [ $quick = 0 ]; then
     record image_to_video false 0 "no input picture: the image check failed"
   else
     t=$(now)
-    id=$(curl -s -m 120 "$url/v1/videos" -F "model=$i2v_model" -F "prompt=the fox looks up as snow starts to fall, wind in the trees" \
+    id=$(curl -s -m 120 "$url/v1/videos" -F "model=$i2v_model" -F "prompt=the scene in the picture comes to life: gentle natural motion and its natural sound" \
          -F size=768x448 -F seconds=2 -F steps=8 -F seed=1 -F "input_reference=@$out/image.png" | jq -r '.id // ""')
     st=none
     for _ in $(seq 900); do
@@ -304,9 +304,10 @@ if [ $quick = 0 ]; then
       st=$(curl -fs -m 10 "$url/v1/videos/$id" | jq -r .status); [ "$st" = completed ] || [ "$st" = failed ] && break; sleep 1
     done
     [ "$st" = completed ] && curl -s -m 60 -o "$out/i2v.mp4" "$url/v1/videos/$id/content"
-    streams=$([ -s "$out/i2v.mp4" ] && command -v ffprobe > /dev/null && ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$out/i2v.mp4" 2> /dev/null | sort -u | tr '\n' ' ')
+    probe=$(command -v ffprobe || echo "$HOME/jarvis/bin/ffprobe") # the box keeps ffmpeg's tools in ~/jarvis/bin
+    streams=$([ -s "$out/i2v.mp4" ] && [ -x "$probe" ] && "$probe" -v error -show_entries stream=codec_type -of csv=p=0 "$out/i2v.mp4" 2> /dev/null | sort -u | tr '\n' ' ')
     record image_to_video "$([ "$st" = completed ] && grep -q video <<< "$streams" && grep -q audio <<< "$streams" && echo true || echo false)" "$(secs $t)" \
-      "$i2v_model job ${id:-none}: $st, streams: ${streams:-none$(command -v ffprobe > /dev/null || echo ' (no ffprobe)')}"
+      "$i2v_model job ${id:-none}: $st, streams: ${streams:-none$([ -x "$probe" ] || echo ' (no ffprobe)')}"
   fi
   voice voice_after_video voice-after-video --voice default --skip-barge --count-warmup --max-median-ms 1700
   first_turn first_turn_after_video voice-after-video
