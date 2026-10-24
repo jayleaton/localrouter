@@ -54,6 +54,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const want_ids = (cap.note("te32_ids") orelse return error.NoIds).object.get("ids").?.array.items;
     const result = (cap.note("result") orelse return error.NoResult).object;
     const sh = try pl.shapes(width, height, frames);
+    const rgb = try @import("h3_input.zig").canvas(gpa, io, &cap, width, height);
+    defer if (rgb) |pixels| gpa.free(pixels);
 
     const t0 = std.Io.Clock.awake.now(io);
     const p = try pl.Pipeline.create(gpa, io, .{ .pack = args[0], .te = args[1], .vae_audio = args[2], .vae_video = args[3] }, .{
@@ -72,7 +74,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     var r: qi.replay.Replay = .{ .gpa = gpa, .io = io, .d = &p.d, .s = p.s, .cap = &cap, .mode = .chained };
     defer r.deinit();
     p.probe = r.probe();
-    const res = try p.generate(prompt, width, height, frames, steps, seed, px, wav, null);
+    const res = try p.generateImage(prompt, width, height, frames, steps, seed, rgb, px, wav, null);
     p.probe = null;
     const first = p.times;
     const used_mib = blk: {
@@ -90,7 +92,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const light_ok = r.stats.differ == 0 and r.stats.unmatched == 0 and r.stats.equal > 0;
 
     // the same request again: warm times, the same bits
-    _ = try p.generate(prompt, width, height, frames, steps, seed, px, wav, null);
+    _ = try p.generateImage(prompt, width, height, frames, steps, seed, rgb, px, wav, null);
     const warm = p.times;
     const frames_equal_warm = std.mem.eql(u8, &sha(px), &frames_sha) and std.mem.eql(u8, &sha(std.mem.sliceAsBytes(wav)), &wav_sha);
 

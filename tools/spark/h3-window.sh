@@ -11,6 +11,8 @@
 # Env (all optional): LOCALROUTER_HOME ($HOME/localrouter), WINDOW_OPEN, WINDOW_CLOSE, HF_TOKEN (passed in), and for re-runs after a fix,
 # passed to h3-inner.sh: SKIP_SETUP=1, SKIP_TWIN_TESTS=1, SKIP_PACK=1 (reuse the pack), SKIP_CAPTURE=1 (reuse the captures,
 # kept), ONLY="h3-te h3-replay" (only these steps; captures kept), KEEP_CAPTURES=1, KITCHEN_SRC_BUILD=1 (see h3-inner.sh).
+# H3_I2V=1 also runs image-conditioning gates; stage a PNG at $LOCALROUTER_HOME/input/h3-i2v.png.
+# H3_I2V_IMAGE is a container path; SIZE, FRAMES, STEPS, SEED and PROMPT overrides are forwarded below.
 # Output: $LOCALROUTER_HOME/results/h3-<time>/ (steps.jsonl, summary.jsonl, one .log per step, memavail.log, window.log);
 # $LOCALROUTER_HOME/results/h3-latest points at it.
 set -uo pipefail
@@ -52,7 +54,8 @@ others=$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader | grep -
 
 envs=(-e "H3_RUN=$RUN")
 for v in SKIP_SETUP SKIP_TWIN_TESTS SKIP_PACK SKIP_CAPTURE ONLY KEEP_CAPTURES KITCHEN_SRC_BUILD HF_TOKEN \
-         H3_SPEED_VAE H3_SPEED_DIT H3_SPEED_MEM STOP_ON_BUILD_FAIL WITH_COMFY; do
+         H3_SPEED_VAE H3_SPEED_DIT H3_SPEED_MEM STOP_ON_BUILD_FAIL WITH_COMFY \
+         H3_I2V H3_I2V_IMAGE H3_I2V_SIZE H3_I2V_FRAMES H3_I2V_STEPS H3_I2V_SEED H3_I2V_PROMPT; do
     [[ -z ${!v:-} ]] || envs+=(-e "$v")
 done
 step "container ($NGC)"

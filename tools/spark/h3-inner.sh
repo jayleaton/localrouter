@@ -14,6 +14,7 @@
 # the twin's own stack and skips kitchen-probe and test-h3-ops, test-vae-audio, test-vae-video, test-kitchen (test-te32 then runs its
 # ComfyUI-free checks only). The
 # build / capture / generate steps never need ComfyUI.
+# H3_I2V=1 sources h3-i2v-window.sh after the baseline gates (real PNG required; see that fragment for overrides).
 # KITCHEN_SRC_BUILD=1 reinstalls comfy-kitchen from the source tree setup clones ($STK/src/comfy-kitchen, v0.2.35) if
 # the wheel pip chose has no CUDA backend or no sm_120/121 code (see kitchen-probe.log). UNTESTED: its build recipe is
 # the repo's, it needs nvcc and cmake in the image.
@@ -135,5 +136,6 @@ CG5=$CAP/h3-gen-124
 cap e2e124-generate $CG5 python -m stk_twin.h3.generate --models $VMODELS --pack $P --out $CG5 --size 768x448 --frames 124
 run e2e124-check $S check h3-e2e $P $TE $VA $VV $CG5
 drop $CG5
+[[ ${H3_I2V:-0} != 1 ]] || source "$STK/repo/tools/spark/h3-i2v-window.sh"
 [[ ${H3_SPEED_MEM:-0} != 1 ]] || source $STK/repo/tools/spark/h3-speed-mem.sh   # last: it wants the GPU idle
 echo "[h3 $(date +%T)] done: $R"

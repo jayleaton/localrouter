@@ -1,4 +1,4 @@
-//! The `minimax_h3` engine: MiniMax H3 text to video + audio on LocalRouter's Zig pipeline (`minimax_h3.pipeline`), one
+//! The `minimax_h3` engine: MiniMax H3 text or image to video + audio on LocalRouter's Zig pipeline (`minimax_h3.pipeline`), one
 //! MP4 a request (24 fps H.264, the 32 kHz stereo track as AAC unless `audio` is false). `weights` is a directory laid
 //! out like ComfyUI's models folder plus the pack: `<pack>/` (`python -m stk_twin.h3.build`: the DiT with the Turbo
 //! LoRA merged and `tokenizer.json`), `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`,
@@ -10,11 +10,12 @@
 const std = @import("std");
 const engine = @import("../engine/engine.zig");
 const mp4 = @import("../media/mp4.zig");
+const image_in = @import("../media/image_in.zig");
 const h3 = @import("minimax_h3");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license }; // image_to_video: the first-frame path is not ported yet
+pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license };
 
 /// The weights' licence, unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{
@@ -54,7 +55,7 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
 }
 
 /// Refuses what `generate` would, before the 40 GB load evicts anything: a size past the pipeline's buffers or off its
-/// 32-pixel grid, a clip longer than `max_seconds`, another frame rate, or a first frame.
+/// 32-pixel grid, a clip longer than `max_seconds`, or another frame rate.
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     const v = switch (req.*) {
         .video => |x| x,
@@ -71,10 +72,6 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     }
     if (v.fps != fps) {
         why.print("model '{s}' makes {d} fps video: omit fps or send {d}", .{ cfg.id, fps, fps }) catch {};
-        return false;
-    }
-    if (v.first_frame != null) {
-        why.print("model '{s}' does not take a first frame yet", .{cfg.id}) catch {};
         return false;
     }
     return true;
@@ -121,7 +118,6 @@ const MiniMaxH3 = struct {
             .video => |x| x,
             .image, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
-        if (v.first_frame != null) return refuse("this video engine does not take a first frame yet: send no image", .{});
         if (v.fps != fps) return refuse("this model makes {d} fps video: omit fps or send {d}", .{ fps, fps });
         const p = t.p orelse return error.NotLoaded;
         const start = std.Io.Clock.awake.now(t.env.io);
@@ -133,10 +129,21 @@ const MiniMaxH3 = struct {
         const audio = try gpa.alloc(f32, sh.audioFloats());
         defer gpa.free(audio);
         var bridge: Bridge = .{ .sink = sink };
-        _ = p.generate(v.prompt, v.width, v.height, v.seconds * fps, steps, v.seed, frames, audio, bridge.progress()) catch |err| switch (err) {
+        var rgb: ?[]f32 = null;
+        defer if (rgb) |pixels| gpa.free(pixels);
+        if (v.first_frame) |name| {
+            // as ComfyUI's LoadImage: RGB, the alpha dropped; then resized and cropped to the clip's canvas
+            const in = image_in.load(t.env.io, arena, job.dir, name) catch |err| return refuse("the first frame could not be read ({s}): send a PNG, JPEG or WebP", .{@errorName(err)});
+            const pix = try arena.alloc(u8, @as(usize, in.width) * in.height * 3);
+            for (0..@as(usize, in.width) * in.height) |i| @memcpy(pix[i * 3 ..][0..3], in.rgba[i * 4 ..][0..3]);
+            rgb = try gpa.alloc(f32, @as(usize, v.width) * v.height * 3);
+            h3.image.canvas(gpa, .{ .width = in.width, .height = in.height, .data = pix }, v.width, v.height, rgb.?) catch |err| return refuse("the first frame of {d}x{d} cannot be fitted to {d}x{d} ({s})", .{ in.width, in.height, v.width, v.height, @errorName(err) });
+        }
+        _ = p.generateImage(v.prompt, v.width, v.height, v.seconds * fps, steps, v.seed, rgb, frames, audio, bridge.progress()) catch |err| switch (err) {
             error.SizeNotMultipleOf32 => return refuse("size {d}x{d}: each side must be a multiple of 32", .{ v.width, v.height }),
             error.RequestTooLarge => return refuse("{d}x{d} for {d} s is more than this model takes: lower size or seconds", .{ v.width, v.height, v.seconds }),
-            error.PromptTooLong => return refuse("the prompt is longer than the text encoder takes: shorten it", .{}),
+            error.PromptTooLong => return refuse("the prompt (with the first frame's tokens) is longer than the text encoder takes: shorten it", .{}),
+            error.BadVisionCanvas, error.VisionCanvasTooLarge, error.BadImageCanvas => return refuse("the first frame does not fit a {d}x{d} canvas: send another size", .{ v.width, v.height }),
             else => return err,
         };
 

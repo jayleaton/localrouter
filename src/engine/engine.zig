@@ -1,5 +1,5 @@
 //! The worker-side contract every compiled-in engine implements, and the table of engines in this binary.
-//! `needs` is a pure function of the config and request, so the daemon prices a request without starting a worker.
+//! `needs` prices the current pack and request without starting a worker.
 
 const std = @import("std");
 const tool = @import("../tool/tool.zig");
@@ -56,6 +56,9 @@ pub const Env = struct {
 pub const Entry = struct {
     name: []const u8,
     capabilities: []const Capability, // what the engine can do; a tool's `kind` picks its share
+    /// Whether a capability the engine declares works with this tool's weights (an optional pack that may be absent).
+    /// Called once per tool when the daemon starts (`resolve`), never per request.
+    available: ?*const fn (io: std.Io, cfg: *const ToolConfig, cap: Capability) bool = null,
     needs: *const fn (cfg: *const ToolConfig, req: *const Request) Needs,
     create: *const fn (env: Env, cfg: *const ToolConfig) anyerror!Engine,
     /// Refuses a request this model cannot serve (a step count its schedule lacks, a size past its buffers) before it
@@ -109,6 +112,20 @@ pub fn capabilityList(a: std.mem.Allocator, cfg: *const ToolConfig) ![]const Cap
     var list: std.ArrayList(Capability) = .empty;
     for (std.enums.values(Capability)) |c| if (supports(cfg, c)) try list.append(a, c);
     return list.items;
+}
+
+/// Narrows each tool's capabilities to what its weights can do (the engine's `available`), once at start: an engine
+/// capability whose optional weights are missing or stale is dropped, even when the config lists it, so `/v1/models`,
+/// `/v1/capabilities` and the request checks never offer it.
+pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
+    for (tools) |*t| {
+        const e = find(t.engine) orelse continue;
+        const f = e.available orelse continue;
+        const declared = try capabilityList(a, t);
+        var kept: std.ArrayList(Capability) = .empty;
+        for (declared) |c| if (f(io, t, c)) try kept.append(a, c) else std.log.info("tool '{s}': {s} is not available with its weights (see its engine's docs)", .{ t.id, @tagName(c) });
+        t.capabilities = kept.items;
+    }
 }
 
 /// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`; a `cmd` tool
@@ -568,4 +585,13 @@ test "a tool's licence is its config's, else its engine's, else none" {
     try std.testing.expect(h3.notice.len > 0);
     try std.testing.expectEqualStrings("Qwen Research License Agreement", license(c.tool("turbo").?).?.name);
     try std.testing.expect(license(c.tool("cmd").?) == null);
+}
+
+test "resolve drops an engine capability its weights lack, even when the config lists it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var tools = [_]ToolConfig{.{ .id = "edit-test", .kind = .image, .engine = "qwen_image", .weights = "/nonexistent/localrouter-edit-test", .capabilities = &.{ .text_to_image, .image_edit } }};
+    try resolve(std.testing.io, arena.allocator(), &tools);
+    try std.testing.expect(supports(&tools[0], .text_to_image));
+    try std.testing.expect(!supports(&tools[0], .image_edit));
 }

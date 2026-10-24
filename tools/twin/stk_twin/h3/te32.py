@@ -344,16 +344,27 @@ class TextEncoder32:
         return y
 
     @torch.inference_mode()
-    def forward(self, ids) -> torch.Tensor:
+    def forward(self, ids, image_embeds=None, image_start=0, deepstack=None, positions=None) -> torch.Tensor:
         """ids [L] -> [L, 5120] fp32: the residual stream after layer index 49 (ComfyUI's CLIP.encode_from_tokens, [0])."""
         m = mod()
         ids = torch.as_tensor(ids).reshape(-1).to(self.dev, torch.int32)
         L = ids.numel()
-        cos, sin = (t.to(self.dev) for t in rope_tables(L))
+        if positions is None:
+            cos, sin = (t.to(self.dev) for t in rope_tables(L))
+        else:
+            from .te_vision import mrope_tables
+            cos, sin = (t.to(self.dev) for t in mrope_tables(positions))
         with REC.op("te.embed", "te32_embed", {"weight": self.embed_key, "bf16_round": 1}, ids=ids) as o:
             h = (m.k_embed_i8(self.embed, self.embed_scale, ids, 1) if self.embed_scale is not None
                  else m.k_embed_bf16(self.embed, ids))
             o.out(y=h)
+        if image_embeds is not None:
+            end = image_start + image_embeds.shape[0]
+            if image_start < 1 or end >= L or image_embeds.shape[1] != D:
+                raise ValueError("invalid image embedding span")
+            with REC.op("te.image_insert", "te_image_insert", {"start": image_start}, h=h, image=image_embeds) as o:
+                h[image_start:end].copy_(image_embeds)
+                o.out(y=h)
         for i, w in enumerate(self.layers):
             p, a = f"te.{i}", f"model.layers.{i}."
             x = self._norm(f"{p}.input_layernorm", h, w["input_layernorm"], a + "input_layernorm.weight")
@@ -378,7 +389,17 @@ class TextEncoder32:
                 gu = m.k_silu_mul(g, u)
                 o.out(y=gu)
             h = self._add(f"{p}.mlp_residual", h, self._lin(f"{p}.down_proj", gu, w["down_proj"]))
+            if deepstack is not None and i < len(deepstack):
+                h[image_start:end].copy_(self._add(f"{p}.deepstack", h[image_start:end].contiguous(), deepstack[i]))
         return h
+
+    def encode_image(self, prompt, rgb, vision):
+        """Image-conditioned raw residual, expanded token ids and DiT modality tags."""
+        from .te_vision import image_sequence
+        merged, deep = vision.forward(rgb)
+        ids, tags, positions, start = image_sequence(prompt, rgb.shape[0]//16, rgb.shape[1]//16)
+        REC.note("te32_ids", ids=ids, tags=tags, image_start=start)
+        return self.forward(ids, merged, start, deep, positions), ids, torch.tensor(tags, device=self.dev, dtype=torch.int64)
 
     def encode(self, prompt: str) -> torch.Tensor:
         ids = tokenize(prompt)

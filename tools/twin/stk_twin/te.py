@@ -29,15 +29,22 @@ def inv_freq() -> list[float]:
     return json.loads((KROOT / "qwen_image" / "te_inv_freq.json").read_text())["inv_freq"]
 
 
-def rope_tables(n: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """cos / sin [n, 64] f32 for positions 0..n-1."""
+def rope_tables(n: int, positions: torch.Tensor | None = None, sections=(24, 20, 20)) -> tuple[torch.Tensor, torch.Tensor]:
+    """cos / sin [n,64] fp32, Qwen3-VL interleaved mrope (T default; H/W every third frequency)."""
     import numpy as np
 
     inv = np.array(inv_freq(), dtype=np.float32)
-    cos = np.empty((n, 64), dtype=np.float32)
-    sin = np.empty((n, 64), dtype=np.float32)
+    if positions is None:
+        positions = torch.arange(n, dtype=torch.float32).expand(3, n)
+    if tuple(positions.shape) != (3, n) or sum(sections) != 64:
+        raise ValueError("expected [3,L] positions and 64 mrope frequencies")
+    axis = np.zeros(64, dtype=np.int64)
+    axis[1:sections[1] * 3:3] = 1
+    axis[2:sections[2] * 3:3] = 2
+    pos = positions.cpu().numpy().astype(np.float32)
+    cos, sin = np.empty((n, 64), dtype=np.float32), np.empty((n, 64), dtype=np.float32)
     for p in range(n):
-        f = inv * np.float32(p)  # the f32 product, as transformers' fp32 matmul of one term
+        f = inv * pos[axis, p]
         for j in range(64):
             s, c = sincos(float(f[j]))
             sin[p, j], cos[p, j] = s, c
@@ -56,6 +63,8 @@ class TextEncoder:
         self.heads, self.kv_heads = cfg.num_attention_heads, cfg.num_key_value_heads
         self.embed = lm.embed_tokens.weight
         self.layers = list(lm.layers)
+        rope = getattr(cfg, "rope_parameters", None) or getattr(cfg, "rope_scaling", None) or {}
+        self.sections = tuple(rope.get("mrope_section", (24, 20, 20)))
 
     def _gemm(self, name: str, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         with REC.op(name, "gemm_bf16", {"weight": name}, x=x) as o:
@@ -76,14 +85,20 @@ class TextEncoder:
         return y
 
     @torch.inference_mode()
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, ids: torch.Tensor, positions: torch.Tensor | None = None, spans=(), embeds=(), deepstack=()) -> torch.Tensor:
         """ids [L] int -> [L, 4096] bf16: the last decoder layer's output (no final norm)."""
         L = ids.numel()
-        cos, sin = (t.to(self.dev) for t in rope_tables(L))
+        cos, sin = (t.to(self.dev) for t in rope_tables(L, positions, self.sections))
         ids = ids.to(self.dev, torch.int32)
         with REC.op("te.embed", "embed", {}, ids=ids) as o:
             h = ops.embed(self.embed, ids)
             o.out(y=h)
+        if len(spans) != len(embeds) or len(spans) != len(deepstack):
+            raise ValueError("one embedding and deepstack bundle per image span")
+        for j, (span, visual) in enumerate(zip(spans, embeds)):
+            if visual.shape != (span.count, h.shape[1]) or len(deepstack[j]) != 3:
+                raise ValueError("vision output does not match reserved token rows")
+            self._copy(f"te.visual{j}.embed", h[span.start:span.start + span.count], visual)
         for i, layer in enumerate(self.layers):
             p, a, m = f"te.{i}", layer.self_attn, layer.mlp
             x = self._norm(f"{p}.input_layernorm", h, layer.input_layernorm.weight)
@@ -107,7 +122,20 @@ class TextEncoder:
                 gu = ops.silu_mul(g, u)
                 o.out(y=gu)
             h = self._add(f"{p}.mlp_residual", h, self._gemm(f"{p}.down_proj", gu, m.down_proj.weight))
+            if i < 3:
+                for j, (span, bundle) in enumerate(zip(spans, deepstack)):
+                    rows = h[span.start:span.start + span.count]
+                    added = self._add(f"{p}.visual{j}.deepstack", rows, bundle[i])
+                    self._copy(f"{p}.visual{j}.scatter", rows, added)
         return h
+
+    def _copy(self, name: str, dst: torch.Tensor, src: torch.Tensor) -> None:
+        with REC.op(name, "copy", {}, src=src) as o:
+            ops.copy_rows(dst[None], src[None])
+            o.out(y=dst)
+
+    def forward_mm(self, ids, positions, spans, embeds, deepstack) -> torch.Tensor:
+        return self.forward(ids, positions, spans, embeds, deepstack)
 
 
 def prompt_ids(pipe, prompt: str) -> tuple[torch.Tensor, int]:

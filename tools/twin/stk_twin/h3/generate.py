@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -82,35 +83,64 @@ def sha(t: torch.Tensor) -> str:
 
 @torch.inference_mode()
 def generate(models: Path, pack: str, prompt: str, seed: int, width: int, height: int, frames: int, steps: int,
-             out: Path, dev=torch.device("cuda")) -> dict:
+             out: Path, dev=torch.device("cuda"), image: str | Path | None = None) -> dict:
     if width % 32 or height % 32:
         raise SystemExit(f"--size {width}x{height}: width and height must be multiples of 32")
+    if (Path(out)/"ops.jsonl").exists():
+        raise SystemExit("capture already exists; choose a fresh output directory")
     requested, frames = frames, align_frames(frames)
     ms: dict[str, float] = {}
+    if image is not None:
+        Path(out).mkdir(parents=True, exist_ok=True)
+        if Path(image).resolve() != (Path(out)/"input.png").resolve():
+            shutil.copyfile(image, Path(out)/"input.png")
     REC.start(out)
     REC.note("request", prompt=prompt, seed=seed, width=width, height=height, frames=frames, frames_requested=requested,
-             steps=steps)
+             steps=steps, image="input.png" if image else None,
+             image_sha256=hashlib.sha256(Path(image).read_bytes()).hexdigest() if image else None)
     sig = sampler.sigmas(steps)
     plan = sampler.plan(sig)
     REC.note("sigmas", values=sig)
 
     # ---- encode: tokens, the 32B encoder (freed after), the bf16 hand-off, condition_proj + token refiner
     t0 = sync()
+    rgb, first_frame, tags = None, None, None
+    if image is not None:
+        from .image import load_canvas
+        rgb = load_canvas(image, width, height)
+        REC.note("input_image", path="input.png", sha256=hashlib.sha256(Path(image).read_bytes()).hexdigest())
+        with quiet():
+            from .vae_video_enc import VideoEncoder
+            enc = VideoEncoder.from_checkpoint(Path(models)/VAE_VIDEO, device=dev)
+            first_frame = enc.encode(torch.from_numpy(rgb).to(dev))
+            del enc
+            torch.cuda.empty_cache()
+        with REC.op("first_frame", "first_frame", {}) as o:
+            o.out(rgb=torch.from_numpy(rgb), latent=first_frame)
     ids = tokenize(prompt)
-    REC.note("te32_ids", ids=ids)
     with quiet():
         te = TextEncoder32(Path(models) / TE)
         t1 = sync()
-        hidden = te.forward(torch.tensor(ids))                      # fp32 [L, 5120]
+        if rgb is None:
+            hidden = te.forward(torch.tensor(ids))
+        else:
+            from .te_vision import VisionEncoder
+            vision = VisionEncoder(Path(models)/TE, device=dev)
+            hidden, ids, tags = te.encode_image(prompt, rgb, vision)
+            del vision
         context = hidden.to(torch.bfloat16).contiguous()            # [L, 5120]
         del te
         torch.cuda.empty_cache()
         t2 = sync()
         dit = H3Dit.from_pack(pack, attn="int8", device=dev)
         t3 = sync()
-        dit.prepare(context.unsqueeze(0))
+        dit.prepare(context.unsqueeze(0), first_frame=first_frame, seed=seed, text_tags=tags)
+    REC.note("te32_ids", ids=ids, tags=tags.cpu().tolist() if tags is not None else None)
     with REC.op("text_encoder", "text_encoder", {}) as o:
         o.out(hidden=hidden, context=context)
+    if tags is not None:
+        with REC.op("text_tags", "text_tags", {}) as o:
+            o.out(tags=tags)
     t4 = sync()
     ms["encode"] = ((t2 - t1) + (t4 - t3)) * 1e3
 
@@ -175,7 +205,7 @@ def generate(models: Path, pack: str, prompt: str, seed: int, width: int, height
     REC.note("result", **res)
     REC.stop()
     (out / "result.json").write_text(json.dumps({"request": {"prompt": prompt, "seed": seed, "width": width,
-                                                              "height": height, "frames": frames, "steps": steps},
+                                                              "height": height, "frames": frames, "steps": steps, "image": "input.png" if image else None},
                                                   **res, "twin_ms": ms}, indent=1))
     return {"out": str(out), "ops": REC.n, "ms": {k: round(v, 1) for k, v in ms.items()}, **res}
 
@@ -190,11 +220,12 @@ def main() -> None:
     ap.add_argument("--size", default="768x448")
     ap.add_argument("--frames", type=int, default=56)
     ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--image", help="first-frame PNG; JPEG and WebP are unsupported")
     a = ap.parse_args()
     w, h = (int(v) for v in a.size.lower().split("x"))
     Path(a.out).mkdir(parents=True, exist_ok=True)
     print(json.dumps({"h3_generate": generate(Path(a.models), a.pack, a.prompt, a.seed, w, h, a.frames, a.steps,
-                                              Path(a.out))}))
+                                              Path(a.out), image=a.image)}))
 
 
 if __name__ == "__main__":

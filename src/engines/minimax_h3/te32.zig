@@ -90,8 +90,19 @@ pub const TextEncoder = struct {
     inv_freq: [64]f32 = undefined,
     max_l: u32,
     // scratch
-    ids: u64 = 0, h: u64 = 0, x: u64 = 0, q: u64 = 0, kk: u64 = 0, v: u64 = 0, at: u64 = 0, o: u64 = 0,
-    g: u64 = 0, u: u64 = 0, gu: u64 = 0, cos: u64 = 0, sin: u64 = 0,
+    ids: u64 = 0,
+    h: u64 = 0,
+    x: u64 = 0,
+    q: u64 = 0,
+    kk: u64 = 0,
+    v: u64 = 0,
+    at: u64 = 0,
+    o: u64 = 0,
+    g: u64 = 0,
+    u: u64 = 0,
+    gu: u64 = 0,
+    cos: u64 = 0,
+    sin: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_l: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .s = s, .store = .init(d, gpa), .max_l = max_l };
@@ -112,10 +123,10 @@ pub const TextEncoder = struct {
         t.inv_freq = try invFreq(gpa);
         const r: u64 = max_l;
         inline for (.{
-            .{ "ids", r * 4 },             .{ "h", r * dim * 4 },        .{ "x", r * dim * 4 },              .{ "q", r * heads * head_dim * 4 },
-            .{ "kk", r * kv_heads * head_dim * 4 }, .{ "v", r * kv_heads * head_dim * 4 }, .{ "at", r * heads * head_dim * 4 },
-            .{ "o", r * dim * 4 },         .{ "g", r * mlp * 4 },        .{ "u", r * mlp * 4 },              .{ "gu", r * mlp * 4 },
-            .{ "cos", r * 64 * 4 },        .{ "sin", r * 64 * 4 },
+            .{ "ids", r * 4 },                      .{ "h", r * dim * 4 },                 .{ "x", r * dim * 4 },               .{ "q", r * heads * head_dim * 4 },
+            .{ "kk", r * kv_heads * head_dim * 4 }, .{ "v", r * kv_heads * head_dim * 4 }, .{ "at", r * heads * head_dim * 4 }, .{ "o", r * dim * 4 },
+            .{ "g", r * mlp * 4 },                  .{ "u", r * mlp * 4 },                 .{ "gu", r * mlp * 4 },              .{ "cos", r * 64 * 4 },
+            .{ "sin", r * 64 * 4 },
         }) |e| @field(t, e[0]) = try st.alloc(@max(e[1], 256));
         try st.done(up); // the weights have landed (the scratch above is plain device memory)
         return t;
@@ -208,6 +219,15 @@ pub const TextEncoder = struct {
     /// ids -> the residual stream after layer index 49, [L, 5120] fp32 at the returned pointer. `rope_mode`: which
     /// product of the rotation is fused (the twin's choice, from its pod test against ComfyUI).
     pub fn forward(t: *TextEncoder, ids: []const u32, rope_mode: i32) !u64 {
+        return t.forwardInner(ids, rope_mode, null, 0);
+    }
+
+    pub fn forwardImage(t: *TextEncoder, ids: []const u32, image: @import("te_vision.zig").Features, image_start: u32, rope_mode: i32) !u64 {
+        if (image_start < 1 or @as(u64, image_start) + image.rows() >= ids.len or image.merged == 0) return error.BadImageSequence;
+        return t.forwardInner(ids, rope_mode, image, image_start);
+    }
+
+    fn forwardInner(t: *TextEncoder, ids: []const u32, rope_mode: i32, image: ?@import("te_vision.zig").Features, image_start: u32) !u64 {
         const L: u32 = @intCast(ids.len);
         if (L == 0 or L > t.max_l) return error.PromptTooLong;
         const Lu: u64 = L;
@@ -215,7 +235,20 @@ pub const TextEncoder = struct {
             const tab = try t.gpa.alloc(f32, 2 * @as(usize, L) * 64);
             defer t.gpa.free(tab);
             for (0..L) |pos| for (t.inv_freq, 0..) |inv, j| {
-                const r = smath.sincos(@as(f64, @as(f32, @floatFromInt(pos)) * inv));
+                var position: usize = pos;
+                if (image) |im| {
+                    const count = im.rows();
+                    if (pos >= image_start and pos < image_start + count) {
+                        const offset = pos - image_start;
+                        const axis: usize = if (j % 3 == 1 and j < 60) 1 else if (j % 3 == 2 and j < 60) 2 else 0;
+                        position = image_start + switch (axis) {
+                            1 => offset / (im.grid_w / 2),
+                            2 => offset % (im.grid_w / 2),
+                            else => 0,
+                        };
+                    } else if (pos >= image_start + count) position = image_start + @max(im.grid_h, im.grid_w) / 2 + pos - image_start - count;
+                }
+                const r = smath.sincos(@as(f64, @as(f32, @floatFromInt(position)) * inv));
                 tab[pos * 64 + j] = @floatCast(r.cos);
                 tab[@as(usize, L) * 64 + pos * 64 + j] = @floatCast(r.sin);
             };
@@ -233,6 +266,12 @@ pub const TextEncoder = struct {
             try Ops.go(t.k.embed_fn, t.s, .{ .x = blocks(dim), .y = L }, block, 0, &a);
         }
         try t.post("te.embed", &.{.{ .role = "y", .ptr = t.h, .bytes = Lu * dim * 4 }});
+        if (image) |im| {
+            const bytes = @as(u64, im.rows()) * dim * 4;
+            try t.pre("te.image_insert", &.{ .{ .role = "h", .ptr = t.h, .bytes = Lu * dim * 4 }, .{ .role = "image", .ptr = im.merged, .bytes = bytes } });
+            try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.h + @as(u64, image_start) * dim * 4, im.merged, bytes, t.s.handle), "cuMemcpyDtoDAsync");
+            try t.post("te.image_insert", &.{.{ .role = "y", .ptr = t.h, .bytes = Lu * dim * 4 }});
+        }
         var nb: [48]u8 = undefined;
         const nm = struct {
             fn f(buf: []u8, j: usize, op: []const u8) []const u8 {
@@ -281,6 +320,12 @@ pub const TextEncoder = struct {
             try t.post(sn, &.{.{ .role = "y", .ptr = t.gu, .bytes = Lu * mlp * 4 }});
             try t.lin(nm(&nb, i, "down_proj"), l.lin[6], t.gu, t.o, Lu);
             try t.add(nm(&nb, i, "mlp_residual"), t.h, t.o, t.h, Lu * dim);
+            if (image) |im| {
+                if (i < 3) {
+                    const span = t.h + @as(u64, image_start) * dim * 4;
+                    try t.add(nm(&nb, i, "deepstack"), span, im.deepstack[i], span, @as(u64, im.rows()) * dim);
+                }
+            }
         }
         return t.h;
     }

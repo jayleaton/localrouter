@@ -17,10 +17,12 @@ pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-replay")) return @import("h3_replay.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-avae")) return @import("h3_avae.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-vvae")) return @import("h3_vvae.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-i2v")) return @import("h3_i2v.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-e2e")) return @import("h3_e2e.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-step-bench")) return @import("h3_stepbench.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-bench")) return @import("h3_bench.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-vae")) return @import("qwen_vae.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-edit")) return @import("qwen_edit.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-e2e")) return @import("qwen_e2e.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-te")) return @import("qwen_te.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-replay")) return @import("qwen_replay.zig").run(io, gpa, args[1..]);

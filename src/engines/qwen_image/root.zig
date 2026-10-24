@@ -34,4 +34,17 @@ test {
     _ = te;
     _ = sampler;
     _ = memcap;
+    _ = vision;
+    _ = vae_enc;
+    _ = edit_pack;
+    _ = edit_prompt;
+    _ = @import("edit_layout.zig");
+    _ = edit_prepare;
 }
+
+pub const edit_pack = @import("edit_pack.zig");
+pub const edit_prompt = @import("edit_prompt.zig");
+
+pub const vision = @import("vision.zig");
+pub const vae_enc = @import("vae_enc.zig");
+pub const edit_prepare = @import("edit_prepare.zig");

@@ -21,6 +21,7 @@ pub const Replay = struct {
     cap: *const Capture,
     mode: Mode,
     next: usize = 0,
+    missed_ops: usize = 0,
     cur: ?usize = null,
     stats: Stats = .{},
     first_diffs: std.ArrayList([]const u8) = .empty,
@@ -47,8 +48,10 @@ pub const Replay = struct {
         r.cur = r.cap.find(name, r.next);
         const i = r.cur orelse {
             r.stats.unmatched += 1;
+            try r.note("{s}: not in the capture", .{name});
             return;
         };
+        r.missed_ops += i - r.next;
         if (r.mode != .alone) return;
         const op = &r.cap.ops[i];
         for (ins) |in| {

@@ -18,3 +18,6 @@ pub const te: []const u8 = if (with_kernels) &Blob("qwen_fatbin_te").bytes else 
 pub const vae: []const u8 = if (with_kernels) &Blob("qwen_fatbin_vae").bytes else &.{};
 pub const rope_omega: []const u8 = @embedFile("qwen_rope_omega");
 pub const te_inv_freq: []const u8 = @embedFile("qwen_te_inv_freq");
+
+pub const vision: []const u8 = if (with_kernels) &Blob("qwen_fatbin_vision").bytes else &.{};
+pub const vae_enc: []const u8 = if (with_kernels) &Blob("qwen_fatbin_vae_enc").bytes else &.{};

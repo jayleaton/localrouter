@@ -15,7 +15,7 @@ const torch_flags = [_][]const u8{
     "-O3",
 };
 
-const sources = [_][]const u8{ "ops", "attention", "gemm", "te", "vae" };
+const sources = [_][]const u8{ "ops", "attention", "gemm", "te", "vae", "vision", "vae_enc" };
 
 /// `nvcc` / `sms` as given to build/cuda.zig (-Dnvcc, -Dsm); `cuda` the runtime, `nvfp4` the TensorFold kernel module.
 pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, cuda: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {

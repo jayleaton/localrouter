@@ -46,6 +46,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             return 2;
         };
     }
+    try engine.resolve(io, arena, @constCast(cfg.tools)); // what each tool's weights can do, before anything lists it
     var why_buf: [256]u8 = undefined;
     var why: Io.Writer = .fixed(&why_buf);
     if (!engine.checkDefaults(&cfg, &why)) {

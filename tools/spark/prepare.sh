@@ -101,6 +101,8 @@ fi
 if packs; then
 [[ -f $W/te/manifest.json ]] || { step "pack te"; $T pack --model $MODEL --precision te --out $W/te; }
 [[ -f $W/vae/manifest.json ]] || { step "pack vae"; $T pack --model $MODEL --precision vae --out $W/vae; }
+# image edit: the vision tower into te/, the VAE encoder into vae/, then edit.json (the tool lists image_edit only with it)
+[[ -f $W/edit.json ]] || { step "pack edit"; $T pack --model $MODEL --precision edit --out $W; }
 python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.files import readable; readable('$W')"
 fi
 step "image done$(packs || echo ' (DOWNLOAD_ONLY: the checkpoints only)'): $(du -sh $W | cut -f1) in $W"

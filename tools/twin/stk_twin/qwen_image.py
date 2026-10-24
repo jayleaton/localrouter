@@ -93,7 +93,7 @@ class QwenImage:
         from diffusers import QwenImage21Pipeline
 
         self.dev = torch.device(device)
-        self.pipe = QwenImage21Pipeline.from_pretrained(str(model_dir), transformer=None, torch_dtype=torch.bfloat16)
+        self.pipe = QwenImage21Pipeline.from_pretrained(str(model_dir), transformer=None, torch_dtype=torch.bfloat16, local_files_only=True)
         self.pipe.text_encoder.to(self.dev)
         self.pipe.vae.to(self.dev)
         self.dit = dit
@@ -128,7 +128,7 @@ class QwenImage:
         return [float(s) for s in sc.sigmas]
 
     @torch.inference_mode()
-    def sample(self, context: torch.Tensor, height: int, width: int, steps: int, seed: int, record_step: int = -1):
+    def sample(self, context: torch.Tensor, height: int, width: int, steps: int, seed: int, record_step: int = -1, ref_latents=None, image_slots=None):
         """Euler as the diffusers scheduler steps it: fp32 update, latents back to bf16 each step."""
         H, W = height // 16, width // 16
         sig = self.sigmas(height, width, steps)
@@ -137,7 +137,7 @@ class QwenImage:
         on = REC.on
         for i in range(len(sig) - 1):
             REC.on = on and (record_step < 0 or i == record_step)
-            v = self.dit(x, torch.tensor([sig[i]], device=self.dev), context)
+            v = self.dit(x, torch.tensor([sig[i]], device=self.dev), context, ref_latents, image_slots)
             with REC.op(f"step{i}.euler", "euler", {"sigma": sig[i], "sigma_next": sig[i + 1]}, x=x, v=v) as o:
                 x = ops.euler(x, v, sig[i + 1] - sig[i]) if OPS == "stk" else (x.float() + (sig[i + 1] - sig[i]) * v.float()).to(torch.bfloat16)
                 o.out(y=x)
@@ -171,6 +171,64 @@ class QwenImage:
         sync()
         t["decode"] = time.perf_counter() - t0
         return Result(img, x, t)
+
+    @torch.inference_mode()
+    def encode_edit(self, prompt: str, images):
+        """Own vision + multimodal text kernels and VAE encoder; returns context, reference latents, slots, images."""
+        from .edit import prepare, prompt_inputs
+        from .vision import VisionEncoder
+        from . import vae_enc
+
+        refs = prepare(images)
+        te = self.te or TextEncoder(self.pipe.text_encoder, self.dev)
+        vision = VisionEncoder(self.pipe.text_encoder.model.visual, self.dev)
+        embeds, stacks = [], []
+        for i, ref in enumerate(refs):
+            with REC.op(f"edit.ref{i}.patches", "host_input", {"grid": list(ref.grid)}) as o:
+                patches = ref.patches.to(self.dev)
+                o.out(y=patches)
+            emb, stack = vision.forward(patches, ref.grid)
+            embeds.append(emb)
+            stacks.append(stack)
+        ids, spans, pos, keep, slots = prompt_inputs(self.pipe.processor.tokenizer, prompt, refs, self.pipe._drop_idx)
+        REC.note("te_edit_ids", ids=ids.tolist(), positions=pos.tolist(), drop=self.pipe._drop_idx,
+                 spans=[{"start": s.start, "count": s.count, "grid": list(s.grid)} for s in spans], slots=list(slots))
+        hidden = te.forward_mm(ids, pos, spans, embeds, stacks)
+        with REC.op("te.edit.keep", "gather_rows", {}, x=hidden, rows=keep.nonzero().flatten().to(self.dev, torch.int32)) as o:
+            context = hidden[keep.to(self.dev)].unsqueeze(0).contiguous()
+            o.out(y=context)
+        vae_enc.patch(self.pipe.vae)
+        latents = []
+        for i, ref in enumerate(refs):
+            with REC.op(f"edit.ref{i}.rgba", "host_input", {}) as o:
+                pixels = torch.from_numpy(np.asarray(ref.rgba).copy()).to(self.dev)
+                o.out(y=pixels)
+            latents.append(vae_enc.encode(self.pipe.vae, pixels))
+        return context, latents, slots, refs
+
+    def generate_edit(self, prompt: str, images, height: int | None = None, width: int | None = None,
+                      steps: int = 25, seed: int = 0) -> Result:
+        """Text + 1..5 images -> image. Implicit target size follows the last reference, explicit sizes use t2i rules."""
+        if (height is None) != (width is None):
+            raise ValueError("specify both target dimensions or neither")
+        if height is not None and (min(height, width) < 16 or height % 16 or width % 16):
+            raise ValueError("target dimensions must be positive multiples of 16")
+        t, sync = {}, torch.cuda.synchronize
+        t0 = time.perf_counter()
+        context, refs, slots, prepared = self.encode_edit(prompt, images)
+        if height is None:
+            width, height = prepared[-1].rgba.size
+        sync()
+        t["encode"] = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        x = self.sample(context, height, width, steps, seed, ref_latents=refs, image_slots=slots)
+        sync()
+        t["sample"] = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        image = self.decode(x)
+        sync()
+        t["decode"] = time.perf_counter() - t0
+        return Result(image, x, t)
 
 
 def load_transformer(model_dir: str | Path) -> dict[str, torch.Tensor]:

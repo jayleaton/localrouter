@@ -11,6 +11,9 @@ pub const te32 = @import("te32.zig");
 pub const vae_audio = @import("vae_audio.zig");
 pub const vae_video = @import("vae_video.zig");
 pub const tokenizer = @import("tokenizer.zig");
+pub const image = @import("image.zig");
+pub const vae_video_enc = @import("vae_video_enc.zig");
+pub const te_vision = @import("te_vision.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const kernels = @import("minimax_kernels");
 
@@ -23,5 +26,8 @@ test {
     _ = vae_audio;
     _ = vae_video;
     _ = tokenizer;
+    _ = image;
+    _ = vae_video_enc;
+    _ = te_vision;
     _ = pipeline;
 }
