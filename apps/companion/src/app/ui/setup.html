@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalRouter settings</title>
+<link rel="stylesheet" href="setup.css">
+</head>
+<body>
+<main>
+  <h1>LocalRouter</h1>
+  <p class="lead">Jarvis on your own computer. The models run on your Spark; the tools, your history and every permission stay here.</p>
+
+  <section id="spark">
+    <h2>1. Your Spark</h2>
+    <div id="unpaired">
+      <p>On the Spark, make a one-time code (ten minutes, single use):</p>
+      <pre>deploy/jarvis/pair.sh add "<span id="suggestName">My Mac</span>" --scopes inference,media,read</pre>
+      <label>Spark address <input id="base" placeholder="https://your-spark.your-tailnet.ts.net:10443" autocomplete="off" spellcheck="false"></label>
+      <label>This computer’s name <input id="name" autocomplete="off"></label>
+      <label>Pairing code <input id="code" placeholder="XXXX-XXXX" autocomplete="off" spellcheck="false"></label>
+      <button id="pair" class="primary">Pair</button>
+    </div>
+    <div id="paired" hidden>
+      <p>Paired with <b id="pairedBase"></b> as <b id="pairedName"></b>. The token is kept <span id="secrets"></span>.</p>
+      <button id="open" class="primary">Open Jarvis</button> <button id="unpair">Unpair</button>
+    </div>
+    <p class="error" id="pairError" hidden></p>
+  </section>
+
+  <section>
+    <h2>2. Permissions on this Mac</h2>
+    <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows). macOS asks about Automation the first time Jarvis uses an app.</p>
+    <div class="row"><span>Microphone</span><span class="status" id="pMic"></span><button data-perm="microphone">Allow</button></div>
+    <div class="row"><span>Accessibility</span><span class="status" id="pAx"></span><button data-perm="accessibility">Open System Settings</button></div>
+    <div class="row"><span>Screen Recording</span><span class="status" id="pScreen"></span><button data-perm="screen">Open System Settings</button></div>
+    <div class="row"><span>Automation</span><span class="status">asked on first use</span><button data-perm="automation">Open System Settings</button></div>
+    <p class="note">After granting Accessibility or Screen Recording, quit and reopen LocalRouter.</p>
+  </section>
+
+  <section>
+    <h2>3. This computer</h2>
+    <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
+    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner.</p>
+  </section>
+
+  <section>
+    <h2>4. Folders Jarvis may read</h2>
+    <ul id="folders"></ul>
+    <button id="addFolder">Share a folder…</button>
+  </section>
+
+  <section>
+    <h2>5. Other harnesses on this computer (MCP)</h2>
+    <p class="note">OpenCode, Claude Code, Codex and others can use this computer through LocalRouter’s executor, with the same rules and approvals. Add one to get its token (shown once).</p>
+    <div class="row"><input id="callerName" placeholder="opencode"><button id="enroll">Add</button></div>
+    <pre id="enrolled" hidden></pre>
+    <ul id="callers"></ul>
+  </section>
+
+  <section>
+    <h2>6. Older clients (phone app, the Spark’s web page)</h2>
+    <p class="note">They ask the Spark to use this computer. Every request still goes through this computer’s rules and approvals. On the Spark: <code>deploy/jarvis/pair.sh add "<span class="nm">My Mac</span> helper" --scopes desktop_helper</code></p>
+    <label class="check"><input type="checkbox" id="legacy"> Let older clients use this computer</label>
+    <div class="row"><input id="legacyCode" placeholder="XXXX-XXXX (only to switch it on)"><span class="status" id="legacyStatus"></span></div>
+  </section>
+
+  <section>
+    <h2>7. Switching harness</h2>
+    <p class="note">Export your conversations (messages and tool receipts, no tokens) for another harness, then quit LocalRouter. Nothing running moves across.</p>
+    <button id="export">Export conversations…</button> <span class="status" id="exported"></span>
+  </section>
+
+  <p class="foot">LocalRouter <span id="version"></span></p>
+</main>
+<script src="setup.js"></script>
+</body>
+</html>

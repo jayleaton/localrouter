@@ -1,0 +1,94 @@
+name: Companion (macOS)
+on:
+  push:
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-mac.yml
+  pull_request:
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-mac.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - name: type-check (tsc --noEmit)
+        run: npm run type-check
+      - name: lint (eslint)
+        run: npm run lint
+      - name: tests (vitest)
+        run: npm test
+      - name: build and package (esbuild, @electron/packager, ad-hoc codesign, dmg, zip)
+        run: npm run package:mac
+      - name: smoke (the packaged app starts, its UI loads, the executor answers; the MCP launcher lists its tools)
+        run: |
+          app="out/LocalRouter-darwin-arm64/LocalRouter.app"
+          bin="$app/Contents/MacOS/LocalRouter"
+          version=$(node -p 'require("./package.json").version')
+          # macOS has no timeout(1): perl's alarm kills the process after 90 s.
+          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+          limit 90 "$bin" --version > "$RUNNER_TEMP/version.txt" 2> "$RUNNER_TEMP/version.err" || { cat "$RUNNER_TEMP/version.err"; exit 1; }
+          cat "$RUNNER_TEMP/version.txt"
+          grep -qx "LocalRouter $version" "$RUNNER_TEMP/version.txt" || { echo "::error::--version did not print LocalRouter $version"; exit 1; }
+
+          set +e
+          limit 90 "$bin" --smoke > "$RUNNER_TEMP/smoke.txt" 2> "$RUNNER_TEMP/smoke.err"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/smoke.txt"
+          echo "--- stderr"; cat "$RUNNER_TEMP/smoke.err"
+          smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke.txt" | sed 's/^COMPANION_SMOKE //' || true)
+          [ -n "$smoke" ] || { echo "::error::no COMPANION_SMOKE line (exit $code)"; exit 1; }
+          printf '%s\n' "$smoke" > "$RUNNER_TEMP/smoke.json"
+          [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] || { echo "::error::smoke not ok (exit $code): $smoke"; exit 1; }
+          [ "$code" -eq 0 ] || { echo "::error::smoke ok but exit $code"; exit 1; }
+
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | limit 90 "$app/Contents/Resources/localrouter-executor-mcp" > "$RUNNER_TEMP/mcp.txt"
+          cat "$RUNNER_TEMP/mcp.txt"
+          tools=$(jq -c 'select(.id == 2) | [.result.tools[].name]' "$RUNNER_TEMP/mcp.txt")
+          echo "tools: $tools"
+          [ "$(jq 'index("computer_use") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list has no computer_use"; exit 1; }
+      - name: job summary
+        if: always()
+        run: |
+          {
+            echo "### LocalRouter for macOS (arm64, ad-hoc signed)"
+            echo
+            echo "| File | Size |"
+            echo "| --- | --- |"
+            for f in out/*.dmg out/*.zip; do
+              [ -f "$f" ] && echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo "Smoke: \`$(cat "$RUNNER_TEMP/smoke.json" 2>/dev/null || echo 'not run')\`"
+            echo
+            echo "Install: open the dmg, drag LocalRouter to Applications, then right-click > Open (or \`xattr -dr com.apple.quarantine /Applications/LocalRouter.app\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalRouter-macos-arm64
+          path: |
+            apps/companion/out/*.dmg
+            apps/companion/out/*.zip
+          retention-days: 14
+          if-no-files-found: error

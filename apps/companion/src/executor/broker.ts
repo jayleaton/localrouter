@@ -80,6 +80,8 @@ export type BrokerOptions = {
   minDwellMs?: number
   /** Time for the screen to settle after an action (the controller's 600 ms by default). */
   settleMs?: number
+  /** Time for the approved app to come back to the front after the approval card (400 ms). */
+  refocusMs?: number
   now?: () => number
   log?: Logger
 }
@@ -432,6 +434,7 @@ export class Broker {
     }
     const g = await this.awaitApproval(task, { step: request.step, app: obs.app, title: obs.title, url: obs.url ?? '', action: act, why: d.why })
     if (!g.ok) return deny(g.denied)
+    await this.refocus(obs.app)
     const stale = await this.revalidate(request)
     if (stale) return deny(stale)
     this.options.audit.record('grant', { task_id: task.id, step: request.step, action: actionLog(act), app: clip(obs.app), approved: true })
@@ -450,6 +453,18 @@ export class Broker {
     } catch {
       return null
     }
+  }
+
+  /**
+   * The approval card brought LocalRouter forward: bring the approved app back (a named surface, which the rules
+   * allow), so the person's screen is the one approved again. Revalidation then decides whether it still is.
+   */
+  private async refocus(app: string) {
+    const apps = this.machine.apps
+    if (!app || this.isOwn(app) || !apps) return
+    await apps.activate(app).catch(() => undefined)
+    const ms = this.options.refocusMs ?? 400
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms))
   }
 
   /**
