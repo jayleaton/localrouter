@@ -242,8 +242,8 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     const first = (try chat.stats(&d, a))[0];
     try testing.expect(first.completed);
     try testing.expectEqualStrings("hello there", first.messages[first.messages.len - 1].object.get("content").?.string);
-    try testing.expectEqualStrings("generate_image", first.tools[0]); // an image model exists; generate_video too
-    try testing.expectEqual(@as(usize, 2), first.tools.len);
+    try testing.expectEqualStrings("generate_image", first.tools[0]); // an image model exists; generate_video, and edit_image (it edits) too
+    try testing.expectEqual(@as(usize, 3), first.tools.len);
 
     // Barge-in: talking over a long reply stops the audio at once and cancels the chat stream.
     try turn(&w, a, 660, 900);
