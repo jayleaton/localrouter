@@ -24,3 +24,5 @@ pre { white-space: pre-wrap; word-break: break-all; background: #8881; padding: 
 .error { color: var(--err); }
 ul { padding-left: 18px; }
 kbd { font: 12px ui-monospace, Menlo, monospace; border: 1px solid #8886; border-radius: 4px; padding: 0 4px; }
+.card.warn { border: 1px solid #ff9f0a; border-radius: 10px; padding: 10px 12px; margin: 8px 0 12px; background: #ff9f0a14; }
+.row.wrap { flex-wrap: wrap; }

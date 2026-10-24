@@ -37,7 +37,21 @@ jobs:
       - name: tests (vitest)
         run: npm test
       - name: build and package (esbuild, @electron/packager, ad-hoc codesign, dmg, zip)
-        run: npm run package:mac
+        run: |
+          if [ -z "$LR_SIGN_P12" ]; then
+            # No stable identity yet: a throwaway one, so the signing path is still what is built and checked.
+            bash scripts/make-signing-identity.sh --dry-run --keep "$RUNNER_TEMP/throwaway" > /dev/null
+            LR_SIGN_P12=$(base64 < "$RUNNER_TEMP/throwaway/localrouter-signing.p12" | tr -d '\n')
+            LR_SIGN_PASSWORD=$(cat "$RUNNER_TEMP/throwaway/localrouter-signing.password")
+            export LR_SIGN_P12 LR_SIGN_PASSWORD LR_SIGN_THROWAWAY=1
+            rm -rf "$RUNNER_TEMP/throwaway"
+          fi
+          npm run package:mac
+        env:
+          # One self-signed identity for every build (scripts/make-signing-identity.sh), so macOS keeps Accessibility
+          # and Screen Recording across updates. Absent: an ad-hoc build, with a warning.
+          LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
       - name: smoke (the packaged app starts, its UI loads, the executor answers; the MCP launcher lists its tools)
         run: |
           app="out/LocalRouter-darwin-arm64/LocalRouter.app"
@@ -72,7 +86,9 @@ jobs:
         if: always()
         run: |
           {
-            echo "### LocalRouter for macOS (arm64, ad-hoc signed)"
+            echo "### LocalRouter for macOS (arm64)"
+            echo
+            echo "Signed by: $(cat out/signed-by.txt 2>/dev/null || echo unknown)"
             echo
             echo "| File | Size |"
             echo "| --- | --- |"

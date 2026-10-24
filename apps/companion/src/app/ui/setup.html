@@ -30,6 +30,18 @@
 
   <section>
     <h2>2. Permissions on this Mac</h2>
+    <div class="card warn" id="stale" role="alert" hidden>
+      <p><b id="staleText"></b></p>
+      <p class="note">System Settings may still show LocalRouter switched on: that entry belongs to an older build. In the list, select LocalRouter, remove it with −, add it again with +, then quit and reopen LocalRouter. Or reset it here and switch it on again.</p>
+      <div class="row wrap">
+        <button data-pane="accessibility" id="staleAx">Open Accessibility settings</button>
+        <button data-pane="screen" id="staleScreen">Open Screen Recording settings</button>
+        <button data-reset="accessibility" id="resetAx">Reset Accessibility for LocalRouter</button>
+        <button data-reset="screen" id="resetScreen">Reset Screen Recording for LocalRouter</button>
+        <button id="relaunch" class="primary">Quit and reopen</button>
+      </div>
+      <p class="note" id="resetResult" hidden></p>
+    </div>
     <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows). macOS asks about Automation the first time Jarvis uses an app.</p>
     <div class="row"><span>Microphone</span><span class="status" id="pMic"></span><button data-perm="microphone">Allow</button></div>
     <div class="row"><span>Accessibility</span><span class="status" id="pAx"></span><button data-perm="accessibility">Open System Settings</button></div>

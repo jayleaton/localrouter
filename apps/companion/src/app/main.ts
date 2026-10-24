@@ -1,9 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
+import { grantStates } from './grants.ts'
+import type { Permission } from './grants.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
@@ -34,7 +37,8 @@ const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 const ORIGIN = 'lr://app'
 
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean }
+/** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>> }
 type Secrets = { token: string; legacy_token: string }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
@@ -140,12 +144,21 @@ async function startRuntimeFromSettings(): Promise<void> {
       if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
     }
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
+    if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })
   if (settings.legacy && secrets.legacy_token) {
     legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: runtime.executor.broker, access: runtime.executor.built.access, log })
     legacy.start()
   }
   refreshTray()
+}
+
+/** A computer task failed for lack of access: if macOS kept an older build's grant, say so and show the fix. */
+async function checkStale() {
+  const p = await permissions().catch(() => null)
+  if (!p || (!p.stale.accessibility && !p.stale.screen)) return
+  if (Notification.isSupported()) new Notification({ title: 'LocalRouter needs its permission again', body: STALE_GRANT }).show()
+  showSetup()
 }
 
 async function stopRuntime() {
@@ -349,6 +362,22 @@ function registerIpc() {
     saveSecrets({ token: '', legacy_token: '' })
     return state()
   })
+  setup('setup:resetGrant', async (kind) => {
+    if (process.platform !== 'darwin') return { ok: false, text: 'not a Mac', state: await state() }
+    const r = await resetGrant(kind === 'screen' ? 'ScreenCapture' : 'Accessibility')
+    if (r.ok) {
+      // Asks again (macOS shows its prompt and lists LocalRouter, off) and opens the pane to switch it on.
+      if (kind !== 'screen') systemPreferences.isTrustedAccessibilityClient(true)
+      await shell.openExternal(PANES[kind === 'screen' ? 'screen' : 'accessibility'])
+      settings = { ...settings, grants: { ...(settings.grants ?? {}), [kind === 'screen' ? 'screen' : 'accessibility']: undefined } }
+      saveSettings(settings)
+    }
+    return { ...r, state: await state() }
+  })
+  setup('setup:relaunch', () => {
+    app.relaunch()
+    app.exit(0)
+  })
   setup('setup:permission', async (kind) => {
     if (process.platform !== 'darwin') return state()
     if (kind === 'microphone') await systemPreferences.askForMediaAccess('microphone')
@@ -373,10 +402,10 @@ function registerIpc() {
     saveSettings(settings)
     return state()
   })
-  setup('setup:enroll', (name) => {
+  setup('setup:enroll', async (name) => {
     if (!runtime) throw new Error('Pair with your Spark first')
     const { caller, token } = runtime.executor.enrollment.add(String(name))
-    return { caller: { id: caller.id, name: caller.name }, token, socket: executorSocket(dir), command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), state: state() }
+    return { caller: { id: caller.id, name: caller.name }, token, socket: executorSocket(dir), command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), state: await state() }
   })
   setup('setup:revoke', (id) => {
     runtime?.executor.enrollment.revoke(String(id))
@@ -424,12 +453,57 @@ function callEnded() {
   }
 }
 
-function permissions() {
-  if (process.platform !== 'darwin') return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a' }
-  return { microphone: systemPreferences.getMediaAccessStatus('microphone'), accessibility: systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'not-granted', screen: systemPreferences.getMediaAccessStatus('screen') }
+// ------------------------------------------------------------------ macOS permissions, and grants macOS kept from an older build
+
+export const BUNDLE_ID = 'com.localrouter.companion'
+export const STALE_GRANT = 'macOS kept a permission from an older LocalRouter. Open Settings, remove LocalRouter, add it again.'
+
+/** This build, as far as a grant is concerned: the version and when the app's executable was written. */
+function buildId(): string {
+  let at = 0
+  try {
+    at = Math.round(statSync(app.getPath('exe')).mtimeMs)
+  } catch {
+    // Not a file we can read: the version alone.
+  }
+  return `${VERSION}@${at}`
 }
 
-function state() {
+/**
+ * What macOS says, what actually works (the executor's own check: an AX read and a screen capture, through the same
+ * osascript the computer control uses), and whether a grant is stale: macOS says granted but it does not work, or it
+ * worked in another build and does not now. macOS ties a grant to the build's code requirement: an older build's grant
+ * still shows as on in System Settings and does nothing for this one.
+ */
+async function permissions() {
+  if (process.platform !== 'darwin') return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false } }
+  const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted' }
+  const works = runtime ? await runtime.executor.built.access().then((a) => ({ accessibility: a.accessibility, screen: a.screen_recording }), () => null) : null
+  const { state: grant, grants } = grantStates(said, works, settings.grants ?? {}, buildId())
+  if (JSON.stringify(grants) !== JSON.stringify(settings.grants ?? {})) {
+    settings = { ...settings, grants }
+    saveSettings(settings)
+  }
+  const stale = { accessibility: grant.accessibility === 'stale', screen: grant.screen === 'stale' }
+  return { microphone: systemPreferences.getMediaAccessStatus('microphone'), accessibility: grant.accessibility, screen: grant.screen, stale }
+}
+
+/** `tccutil reset` for this app only: runs as the user, no admin. What it said, and whether it worked. */
+function resetGrant(service: 'Accessibility' | 'ScreenCapture'): Promise<{ ok: boolean; text: string }> {
+  return new Promise((resolve) => {
+    execFile('/usr/bin/tccutil', ['reset', service, BUNDLE_ID], { timeout: 10_000 }, (error, stdout, stderr) => {
+      const text = `${stdout}${stderr}`.trim()
+      resolve({ ok: !error, text: text || (error ? error.message : 'done') })
+    })
+  })
+}
+
+const PANES: Record<string, string> = {
+  accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+  screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+}
+
+async function state() {
   const callers = runtime?.executor.enrollment.list().map((c) => ({ id: c.id, name: c.name, created: c.created })) ?? []
   return {
     version: VERSION,
@@ -443,7 +517,8 @@ function state() {
     secrets: safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only',
     control: runtime ? !runtime.executor.broker.disabled : false,
     machine: machineKind(),
-    permissions: permissions(),
+    permissions: await permissions(),
+    stale_message: STALE_GRANT,
     callers,
     mcp: { command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), socket: executorSocket(dir) },
   }

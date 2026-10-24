@@ -21,7 +21,12 @@ function render(s) {
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
   if (s.base && !$('base').value) $('base').value = s.base;
   const p = s.permissions;
-  const word = (v) => (v === 'granted' ? 'granted' : v === 'n/a' ? 'not a Mac' : v.replace('-', ' '));
+  const word = (v) => (v === 'granted' ? 'granted' : v === 'n/a' ? 'not a Mac' : v === 'stale' ? 'kept from an older build: grant it again' : v.replace('-', ' '));
+  const stale = p.stale || {};
+  $('stale').hidden = !(stale.accessibility || stale.screen);
+  $('staleText').textContent = s.stale_message;
+  $('staleAx').hidden = $('resetAx').hidden = !stale.accessibility;
+  $('staleScreen').hidden = $('resetScreen').hidden = !stale.screen;
   $('pMic').textContent = word(p.microphone);
   $('pAx').textContent = word(p.accessibility);
   $('pScreen').textContent = word(p.screen);
@@ -69,6 +74,15 @@ $('pair').onclick = () => guarded(async () => {
 $('unpair').onclick = () => guarded(() => api.unpair());
 $('open').onclick = () => api.openVoice();
 for (const b of document.querySelectorAll('[data-perm]')) b.onclick = () => guarded(() => api.permission(b.dataset.perm));
+for (const b of document.querySelectorAll('[data-pane]')) b.onclick = () => guarded(() => api.permission(b.dataset.pane));
+for (const b of document.querySelectorAll('[data-reset]')) b.onclick = () => guarded(async () => {
+  const r = await api.resetGrant(b.dataset.reset);
+  const out = $('resetResult');
+  out.hidden = false;
+  out.textContent = r.ok ? 'Reset. Switch LocalRouter on in the list that opened, then Quit and reopen.' : `macOS did not reset it (${r.text}): remove LocalRouter in the list by hand, add it again, then Quit and reopen.`;
+  return r.state;
+});
+$('relaunch').onclick = () => api.relaunch();
 $('control').onchange = () => guarded(() => api.control($('control').checked));
 $('addFolder').onclick = () => guarded(() => api.addFolder());
 $('enroll').onclick = () => guarded(async () => {
