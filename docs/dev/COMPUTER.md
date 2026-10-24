@@ -155,6 +155,30 @@ While a task runs, the helper checks the pointer every 250 ms and before each ac
 
 A task start shows a macOS notification saying what Jarvis is doing and how to stop it.
 
+## On the device: the companion's executor (the new placement)
+
+JJ's decision moves authority to the controlled computer. `apps/companion` carries an **executor** that is the final
+authority on its own computer, whoever asks: our harness, a voice session in client tool mode, a third-party harness
+over MCP, or this box through `/v1/desktop`. It reuses the helper's controller and Mac backend above, and enforces
+beneath every API:
+
+| Rule | Where |
+| --- | --- |
+| The policy (auto, approval, judged, refused) | `src/executor/policy.ts`, a port of `src/computer/policy.zig`; both read `src/computer/policy_golden.json` in their tests |
+| Approvals: bound to the executor installation, task, step, screen and exact action by SHA-256; 60 s; single use | `src/executor/approvals.ts` (a port of `approvals.zig`) |
+| One task at a time (the lease), 15 steps, 90 s working time, the decision budget | `src/executor/broker.ts` |
+| Approval only on this computer, through the app's card, confirmed by the presence gate (Touch ID where the Mac has it); never while the executor itself is injecting input; never in the first moment a card shows | `Broker.answer`; no MCP tool, socket operation or box frame can answer |
+| After an approval, the screen must still be the approved one (app, window title, page, the exact control; for Enter the field) | `Broker.revalidate` |
+| LocalRouter's own windows are never a target | `ownApps` |
+| Stop and the local switch work with no network and no model | `Broker.stop`, `setDisabled` |
+| Audit on the device, typed text as length and digest | `src/executor/audit.ts` |
+
+The box's decisions (the chat model asked as `decide.Qwen` asks it) are advice: they choose steps and judge clicks, and
+a failed judgment asks. With the legacy bridge on, the box's `authorize` grant is one more input: a refusal there holds,
+an allow does not replace the local rules or approval. New harnesses need none of `desktop_helper`, `computer` or
+`approve`. Other harnesses on the computer use the executor through `localrouter-executor-mcp` (MCP stdio), after the
+person enrolls them in the app.
+
 ## Status
 
 Not yet run on a real Mac: AX observation, OCR fallback, CGEvent clicks and keys, the corner stop and the TCC grants

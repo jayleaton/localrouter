@@ -1,0 +1,28 @@
+{
+  "name": "localrouter-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LocalRouter's reference harness for the user's own computer: the local computer executor (its policy and approvals), the harness runtime, and the desktop app",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "localrouter-executor-mcp": "src/executor/mcpMain.ts"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "check": "npm run type-check && npm run lint && npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/node": "^24.3.0",
+    "eslint": "^9.36.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.44.0",
+    "vitest": "^3.2.4"
+  }
+}

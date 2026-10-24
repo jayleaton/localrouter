@@ -69,3 +69,22 @@ jobs:
         run: npm run type-check
       - name: tests (vitest, fake backend)
         run: npm test
+  companion:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - name: type-check (tsc --noEmit, the executor and the helper code it reuses)
+        run: npm run type-check
+      - name: lint (eslint)
+        run: npm run lint
+      - name: tests (vitest; policy parity with the box, approvals, the broker on the fake Mac)
+        run: npm test
