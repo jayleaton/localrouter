@@ -46,6 +46,10 @@ test "images: deterministic, validated, and concurrent requests queue" {
     try testing.expectEqual(std.http.Status.ok, r1.status);
     const png1 = try firstPng(a, r1.body);
     try testing.expectEqualSlices(u8, "\x89PNG\r\n\x1a\n", png1[0..8]);
+    // the machine-generated label: tEXt Comment naming the tool, and the IPTC source type in the XMP packet
+    try testing.expect(std.mem.indexOf(u8, png1, "Comment\x00AI-generated (machine-generated) by model tp with LocalRouter") != null);
+    try testing.expect(std.mem.indexOf(u8, png1, "XML:com.adobe.xmp") != null);
+    try testing.expect(std.mem.indexOf(u8, png1, "digitalsourcetype/trainedAlgorithmicMedia") != null);
     const png2 = try firstPng(a, (try image(&d, a, "tp", ",\"seed\":7")).body);
     try testing.expectEqualSlices(u8, png1, png2); // same seed, same bytes
     const png3 = try firstPng(a, (try image(&d, a, "tp", ",\"seed\":8")).body);
@@ -201,6 +205,10 @@ test "a killed worker fails one job; the next one reloads; cancel and idle unloa
     const mp4 = try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/videos/{s}/content", .{v3.id}), null);
     try testing.expectEqual(std.http.Status.ok, mp4.status);
     try testing.expectEqualSlices(u8, "ftyp", mp4.body[4..8]);
+    // the machine-generated label: the ilst comment (©cmt) naming the tool, and the IPTC source type
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "\xa9cmt") != null);
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "AI-generated (machine-generated) by model slow with LocalRouter") != null);
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "digitalsourcetype/trainedAlgorithmicMedia") != null);
     try testing.expectEqualStrings("ready", try d.toolState(a, "slow"));
     sleepMs(io, 2500);
     try testing.expectEqualStrings("unloaded", try d.toolState(a, "slow"));

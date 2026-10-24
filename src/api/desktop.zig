@@ -92,7 +92,8 @@ fn complete(ctx: *anyopaque, a: std.mem.Allocator, body: Value, why: *decide.Why
     var b = body;
     if (app.cfg.computer.decision_model.len > 0 and b == .object) b.object.put(a, "model", .{ .string = app.cfg.computer.decision_model }) catch {};
     var refusal: routes.Refusal = .{};
-    const j = chat.startChat(app, a, b, "", &refusal) orelse { // the daemon's own job: no device sees it
+    var plan: @import("budget.zig").Plan = .{};
+    const j = chat.startChat(app, a, b, "", &refusal, &plan) orelse { // the daemon's own job: no device sees it
         why.set("the decision model refused: {s}", .{refusal.message});
         return null;
     };

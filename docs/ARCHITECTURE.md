@@ -147,8 +147,10 @@ the model: input decoding, response encodings, and the limits checked before a t
   change it quietly. Better: declare the limits in the tool's `options` so the daemon refuses before loading:
   `voices` and `default_voice` (an empty voice becomes the default before the worker sees it), `presets` (the
   model-native styles `preset` may name; none: every preset is refused), `min_speed` / `max_speed` (1 and 1 for a
-  model without a speed control), `max_input_chars` (at most 4096) and, for transcription, `max_audio_s`. `/v1/models`
-  and `list_models` show them.
+  model without a speed control), `max_input_chars` (at most 4096), `instructions` (a template with one `{s}`, such
+  as Drama 3's `"[{s}] "`: the daemon writes a request's `instructions` into `input` with it, after leading white
+  space and `<|...|>` tags, and checks `max_input_chars` on the result; absent: `instructions` are refused) and, for
+  transcription, `max_audio_s`. `/v1/models` and `list_models` show them.
 - A reply may say why the audio ended and where long-form segments start: `{"ok":true,"files":["speech.wav"],
   "finish_reason":"length","segments":"2;220500"}`. `/v1/audio/speech` sends them as `x-finish-reason` and
   `x-long-form-segments` (printable ASCII only; anything else is dropped).
@@ -161,7 +163,7 @@ the model: input decoding, response encodings, and the limits checked before a t
   the daemon has checked.
 - A refusal's `type` is `invalid_request_error` (400), `service_unavailable` (503: the model's own server is busy or
   not ready, retry later) or anything else (500).
-- Not offered by the API, and refused with a reason: translation, SSE streams, speech `instructions`.
+- Not offered by the API, and refused with a reason: translation, SSE streams.
 
 ### Models that wrap their own server
 

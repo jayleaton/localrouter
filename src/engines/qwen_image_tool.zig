@@ -17,8 +17,16 @@ const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
 // image_edit is not ported yet, so the engines declare text to image only.
-pub const entry: engine.Entry = .{ .name = "qwen_image", .capabilities = &.{.text_to_image}, .needs = needs, .create = create(.base), .check = check(.base) };
-pub const turbo_entry: engine.Entry = .{ .name = "qwen_image_turbo", .capabilities = &.{.text_to_image}, .needs = needs, .create = create(.turbo), .check = check(.turbo) };
+pub const entry: engine.Entry = .{ .name = "qwen_image", .capabilities = &.{.text_to_image}, .needs = needs, .create = create(.base), .check = check(.base), .license = license };
+pub const turbo_entry: engine.Entry = .{ .name = "qwen_image_turbo", .capabilities = &.{.text_to_image}, .needs = needs, .create = create(.turbo), .check = check(.turbo), .license = license };
+
+/// Both checkpoints' weights (the same LICENSE file at each revision), unless a tool's config names its own.
+pub const license: @import("../config.zig").License = .{
+    .name = "Qwen Research License Agreement",
+    .url = "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+    .use = "non-commercial: research or evaluation only; commercial use needs a separate licence from Qwen (model-business@notice.qwencloud.com)",
+    .commercial = false,
+};
 
 const default_precision = "fp8s"; // closer to the original model; "nvfp4" is the faster option
 const default_max_side = 1664;
@@ -222,7 +230,7 @@ const QwenImage = struct {
             var buf: [64 * 1024]u8 = undefined;
             var fw = file.writer(t.env.io, &buf);
             const fmt: png.Format = if (p.vae.out_channels == 4) .rgba8 else .rgb8;
-            try png.encode(&fw.interface, pixels, v.width, v.height, fmt, .{ .level = .fastest, .text = &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed_s } } });
+            try png.encode(&fw.interface, pixels, v.width, v.height, fmt, .{ .level = .fastest, .text = &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed_s } }, .marker = .{ .model = t.cfg.id } });
             try fw.interface.flush();
         }
         const ms = start.durationTo(std.Io.Clock.awake.now(t.env.io)).toMilliseconds();

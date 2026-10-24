@@ -102,6 +102,7 @@ const speech_tools =
     \\{"id": "tone", "kind": "speech", "engine": "testpattern", "options": {"voices": ["alpha", "beta"]}},
     \\{"id": "fixed", "kind": "speech", "engine": "testpattern", "options": {"voices": ["Bruno", "Rosie"], "default_voice": "Rosie",
     \\  "min_speed": 1, "max_speed": 1, "presets": ["stable"], "max_input_chars": 20}},
+    \\{"id": "styled", "kind": "speech", "engine": "testpattern", "options": {"voices": ["Mae"], "instructions": "[{s}] ", "max_input_chars": 20}},
     \\{"id": "ears", "kind": "transcription", "engine": "testpattern"},
     \\{"id": "short-ears", "kind": "transcription", "engine": "testpattern", "options": {"max_audio_s": 1}}
 ;
@@ -157,6 +158,16 @@ test "text to speech: HTTP and MCP, formats, voices, speed and refusals" {
     try expectStatus(by_voice, .ok, &.{});
     try testing.expectEqualSlices(u8, (try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"fixed\",\"input\":\"hi\",\"seed\":4,\"voice\":\"Bruno\"}")).body, by_voice.body);
     try expectStatus(try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\",\"voice\":\"Bruno\"}"), .bad_request, &.{"model 'tone' has no voice 'Bruno'"});
+    // A tool whose instructions option is a template gets them written into its input: "[calm] hello", 12 characters
+    // at 60 ms each.
+    const styled = try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"styled\",\"input\":\"hello\",\"instructions\":\" calm \"}");
+    try expectStatus(styled, .ok, &.{});
+    try testing.expectEqual(@as(usize, 17280), (try wavInfo(styled.body)).samples);
+    try expectStatus(try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"styled\",\"input\":\"hello\",\"instructions\":\"calm] loud\"}"), .bad_request, &.{"instructions may not hold ']': model 'styled' writes them into the text as [{s}] "});
+    try expectStatus(try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"styled\",\"input\":\"hello\",\"instructions\":\"calm\\nloud\"}"), .bad_request, &.{"instructions may not hold a line break"});
+    try expectStatus(try d.call(a, .POST, "/v1/audio/speech", "{\"model\":\"styled\",\"input\":\"hello\",\"instructions\":\"very very slowly\"}"), .bad_request, &.{"model 'styled' takes at most 20 characters of input, the instructions written in included"});
+    const long: [501]u8 = @splat('x');
+    try expectStatus(try d.call(a, .POST, "/v1/audio/speech", try std.fmt.allocPrint(a, "{{\"model\":\"styled\",\"input\":\"hi\",\"instructions\":\"{s}\"}}", .{&long})), .bad_request, &.{"instructions take at most 500 characters"});
     // Raw PCM says what it is in headers: rate, channels, and 16-bit little-endian samples.
     const head = try headers(&d, a, "/v1/audio/speech", "{\"model\":\"tone\",\"input\":\"hi\",\"response_format\":\"pcm\"}");
     for ([_][]const u8{ "content-type: audio/pcm", "x-sample-rate: 24000", "x-channels: 1", "x-sample-format: s16le" }) |n| if (std.mem.indexOf(u8, head, n) == null) {
@@ -167,7 +178,7 @@ test "text to speech: HTTP and MCP, formats, voices, speed and refusals" {
 
     // /v1/models lists the voices and what each model serves by default.
     const models = try d.call(a, .GET, "/v1/models", null);
-    try expectStatus(models, .ok, &.{ "\"voices\":[\"Bruno\",\"Rosie\"],\"default_voice\":\"Rosie\",\"presets\":[\"stable\"],\"speed\":[1,1],\"max_input_chars\":20", "\"max_audio_s\":1800", "\"voices\":[\"alpha\",\"beta\"]", "\"kind\":\"speech\"", "\"default_for\":[\"text_to_speech\"]", "\"default_for\":[\"speech_to_text\"]" });
+    try expectStatus(models, .ok, &.{ "\"voices\":[\"Bruno\",\"Rosie\"],\"default_voice\":\"Rosie\",\"presets\":[\"stable\"],\"speed\":[1,1],\"max_input_chars\":20", "\"max_audio_s\":1800", "\"voices\":[\"alpha\",\"beta\"]", "\"references\":false,\"instructions\":true", "\"kind\":\"speech\"", "\"default_for\":[\"text_to_speech\"]", "\"default_for\":[\"speech_to_text\"]" });
 
     // MCP: the audio inline (WAV) and a URL to the same file.
     const res = try mcpCall(&d, a, "synthesize_speech", "{\"input\":\"hello\",\"voice\":\"alpha\",\"seed\":1}");
@@ -183,6 +194,13 @@ test "text to speech: HTTP and MCP, formats, voices, speed and refusals" {
     try testing.expectEqualSlices(u8, r.body, file.body);
     const bad = try mcpCall(&d, a, "synthesize_speech", "{\"input\":\"hello\",\"voice\":\"gamma\"}");
     try testing.expect(bad.object.get("isError").?.bool);
+    // MCP passes instructions through the same way.
+    const said = try mcpCall(&d, a, "synthesize_speech", "{\"model\":\"styled\",\"input\":\"hello\",\"instructions\":\"calm\"}");
+    try testing.expect(!said.object.get("isError").?.bool);
+    try testing.expectEqual(@as(usize, 17280), (try wavInfo(try decode(a, said.object.get("content").?.array.items[0].object.get("data").?.string))).samples);
+    const unsaid = try mcpCall(&d, a, "synthesize_speech", "{\"model\":\"tone\",\"input\":\"hello\",\"instructions\":\"calm\"}");
+    try testing.expect(unsaid.object.get("isError").?.bool);
+    try testing.expect(std.mem.indexOf(u8, unsaid.object.get("content").?.array.items[0].object.get("text").?.string, "model 'tone' does not take instructions") != null);
 }
 
 test "speech to text: uploads decode to 16 kHz mono, response formats, limits and refusals" {

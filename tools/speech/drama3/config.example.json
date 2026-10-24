@@ -26,6 +26,7 @@
         "max_input_chars": 4096,
         "stream": true,
         "references": true,
+        "instructions": "[{s}] ",
         "port": 18793,
         "max_frames": 1024,
         "long_form": false,

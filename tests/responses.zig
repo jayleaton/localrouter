@@ -339,3 +339,39 @@ test "responses: string input, instructions, json format, tool_choice none, and 
     try testing.expectEqualStrings("none", str(get(none, &.{"tool_choice"})));
     try testing.expectEqualStrings("get_weather", str(get(none.object.get("tools").?.array.items[0], &.{"name"})));
 }
+
+test "responses thinking budget: a small max_output_tokens answers without thinking; spent reasoning says so" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try start(a, "responses-budget");
+    defer d.stop();
+
+    // Below min_thinking_tokens, no reasoning.effort: thinking off, an answer, and the warning.
+    for ([_]bool{ false, true }) |stream| {
+        const body = try std.fmt.allocPrint(a, "{{\"input\":\"ponder\",\"max_output_tokens\":16,\"stream\":{s}}}", .{if (stream) "true" else "false"});
+        const r = if (stream) try streamed(a, try post(&d, a, body)) else try response(a, try post(&d, a, body));
+        try testing.expectEqualStrings("completed", str(get(r, &.{"status"})));
+        const out = get(r, &.{"output"}).array.items;
+        try testing.expectEqual(@as(usize, 1), out.len);
+        try testing.expectEqualStrings("echo: ponder", str(get(out[0].object.get("content").?.array.items[0], &.{"text"})));
+        const w = get(r, &.{"warnings"}).array.items;
+        try testing.expectEqualStrings("thinking_off_for_small_budget", str(get(w[0], &.{"code"})));
+        try testing.expect(std.mem.indexOf(u8, str(get(w[0], &.{"message"})), "max_output_tokens 16") != null);
+    }
+    // Thinking chosen: the reasoning uses the limit, incomplete with only a reasoning item, and the warning says why.
+    for ([_]bool{ false, true }) |stream| {
+        const body = try std.fmt.allocPrint(a, "{{\"input\":\"ponder\",\"max_output_tokens\":16,\"reasoning\":{{\"effort\":\"high\"}},\"stream\":{s}}}", .{if (stream) "true" else "false"});
+        const r = if (stream) try streamed(a, try post(&d, a, body)) else try response(a, try post(&d, a, body));
+        try testing.expectEqualStrings("incomplete", str(get(r, &.{"status"})));
+        try testing.expectEqualStrings("max_output_tokens", str(get(r, &.{ "incomplete_details", "reason" })));
+        const out = get(r, &.{"output"}).array.items;
+        try testing.expectEqual(@as(usize, 1), out.len);
+        try testing.expectEqualStrings("reasoning", str(get(out[0], &.{"type"})));
+        const w = get(r, &.{"warnings"}).array.items;
+        try testing.expectEqualStrings("reasoning_used_budget", str(get(w[0], &.{"code"})));
+        try testing.expect(std.mem.indexOf(u8, str(get(w[0], &.{"message"})), "reasoning.effort: none") != null);
+    }
+    // Room to think: no warnings member.
+    try testing.expect(get(try response(a, try post(&d, a, "{\"input\":\"ponder\"}")), &.{"warnings"}) == .null);
+}

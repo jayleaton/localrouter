@@ -69,7 +69,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         defer file.close(io);
         var buf: [64 * 1024]u8 = undefined;
         var fw = file.writer(io, &buf);
-        try png.encode(&fw.interface, pixels, width, height, if (p.vae.out_channels == 4) .rgba8 else .rgb8, .{ .level = .fastest, .text = &.{} });
+        try png.encode(&fw.interface, pixels, width, height, if (p.vae.out_channels == 4) .rgba8 else .rgb8, .{ .level = .fastest, .text = &.{}, .marker = .{ .model = "qwen-image" } });
         try fw.interface.flush();
     }
     var twin_ms: [3]f64 = .{ 0, 0, 0 };

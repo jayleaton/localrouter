@@ -30,7 +30,8 @@ Service without a separate licence, so this tool stays on loopback.
 | Length | 1024 frames (47.55 s) a synthesis; `max_frames` raises it (4096: about 190 s in one synthesis); `long_form` speaks long inputs in joined segments |
 | Finish | `x-finish-reason`: `stop`, `length` (clipped at the frame limit) or `silence` (10 s below -40 dBFS, which also ends a collapse into a steady hum); long form adds `x-long-form-segments: N;S2,S3,...` |
 | Markup | point tags in the text, such as `[sighs]` and `[laughs]`, where the event should land; the model card lists no full vocabulary |
-| Refused (400) | `speed` other than 1, `preset`, `instructions` (the daemon, before loading); an unknown voice, references the model refuses, a prompt longer than the model takes (the server, in its own words) |
+| Instructions | no native control: the system prompt is the fixed `convert the provided text to speech` (`drama_prompt.zig`), and SGLang-Omni's server refuses `instructions`. The tool's `"instructions": "[{s}] "` option has the daemon write them as a bracketed direction before the line (after a leading speaker tag): `[whispering, nervous] I'm fine.` |
+| Refused (400) | `speed` other than 1, `preset`, `instructions` holding `[`, `]`, a line break or a tag (the daemon, before loading); an unknown voice, references the model refuses, a prompt longer than the model takes (the server, in its own words) |
 | Not offered | audio upload for cloning (voice files are encoded offline, below); SSE streams; `seed` (the engine seeds each synthesis from its prompt, so the reply's seed is 0) |
 
 A streamed reply ends with the plain last chunk when the audio ended by itself, with the `x-finish-reason` trailer

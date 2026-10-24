@@ -15,14 +15,14 @@ const Daemon = harness.Daemon;
 const mcpCall = harness.mcpCall;
 const Value = std.json.Value;
 
-/// chat 40 MiB (priority 100), mouth 8 (60), ears 8 (50), img 40 (10): 96 MiB warm. A testpattern video at its default
+/// chat 40 MiB (priority 100), mouth 8 (60), ears 8 (50), img 40 (10, with a licence): 96 MiB warm. A testpattern video at its default
 /// 1344x768 needs 32 MiB loaded and about 69.9 MiB working: 101.9 MiB.
 fn config(a: std.mem.Allocator, budget_mib: u64) ![]const u8 {
     return std.fmt.allocPrint(a, "{{{s}, \"budget_bytes\": {d}, \"voice\": {{\"prime_chat\": false, \"warm_speech\": false}}, \"tools\": [" ++
         "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 41943040, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
         "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 60, \"options\": {{\"voices\": [\"plain\"]}}}}," ++
         "{{\"id\": \"ears\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"priority\": 50}}," ++
-        "{{\"id\": \"img\", \"kind\": \"image\", \"engine\": \"testpattern\", \"keep_loaded\": true, \"priority\": 10, \"options\": {{\"resident_mb\": 40}}}}," ++
+        "{{\"id\": \"img\", \"kind\": \"image\", \"engine\": \"testpattern\", \"keep_loaded\": true, \"priority\": 10, \"options\": {{\"resident_mb\": 40}}, \"license\": {{\"name\": \"Research Only\", \"use\": \"research\", \"commercial\": false}}}}," ++
         "{{\"id\": \"vid\", \"kind\": \"video\", \"engine\": \"testpattern\", \"idle_ttl_s\": 2, \"options\": {{\"step_ms\": 300}}}}]}}", .{ harness.reserve, budget_mib << 20, opts.chat_server, opts.speech_worker, opts.speech_worker });
 }
 
@@ -156,4 +156,20 @@ test "model tools: the chat model is never unloaded; unload_model comes back aft
     const skill = try d.call(a, .GET, "/v1/skills/model-manager", null);
     try testing.expect(std.mem.indexOf(u8, skill.body, "\"enabled\":false") != null);
     try testing.expect(std.mem.indexOf(u8, skill.body, "reserve_for") != null);
+
+    // The image model's configured licence is listed by /v1/models and /v1/tools; the others state none.
+    for ([_][]const u8{ "/v1/models", "/v1/tools" }) |path| {
+        const list = try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .GET, path, null)).body, .{});
+        for (list.object.get("data").?.array.items) |m| {
+            const lic = m.object.get("license");
+            if (!std.mem.eql(u8, m.object.get("id").?.string, "img")) {
+                try testing.expect(lic == null or lic.? == .null);
+                continue;
+            }
+            try testing.expectEqualStrings("Research Only", lic.?.object.get("name").?.string);
+            try testing.expectEqualStrings("research", lic.?.object.get("use").?.string);
+            try testing.expect(!lic.?.object.get("commercial").?.bool);
+            try testing.expectEqual(@as(usize, 0), lic.?.object.get("excluded_regions").?.array.items.len);
+        }
+    }
 }

@@ -53,7 +53,7 @@ agents is `skill/localrouter/SKILL.md`. The HTTP API below is the same jobs with
 ## Find the tools
 
 ```bash
-curl -s $BASE/models | jq '.data[] | {id, kind, running}'
+curl -s $BASE/models | jq '.data[] | {id, kind, running, license: .license.name}'
 curl -s $BASE/capabilities | jq '{contract, unsupported}'   # what this box offers a harness, and what it does not
 ```
 
@@ -63,13 +63,17 @@ version, each surface's profile and authorization, the MCP tools and the feature
 `kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now.
 `capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
 `text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
-`max_input_chars`, `stream` (whether `stream: true` works) and `references` (whether voice references do);
+`max_input_chars`, `stream` (whether `stream: true` works), `references` (whether voice references do) and
+`instructions` (whether `instructions` do);
 transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
 Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
 refused with a 400 naming the model and the capability; a model of the other kind is a 400 and an unknown one a 404,
 both listing the models that can do it. A model's own limits (a larger size than it was set up for, a step count its
 schedule lacks) are refused before it loads. `localrouter models` prints the same table on the command line.
+`license`, where the operator's config or the model's engine states one, is the weights' licence: `name`, `url`,
+`use`, `commercial` (omitted when not stated), `excluded_regions` and `notice` (what a product or its outputs must
+show). A model without one has no `license`. See [Licences](#licences).
 
 | Image model | Steps | Notes |
 | --- | --- | --- |
@@ -97,6 +101,13 @@ curl -s -m 900 $BASE/images/generations -H 'content-type: application/json' -d '
 The request is synchronous: it returns when the image is done. Use a client timeout of at least 15 minutes, so a
 cold load fits.
 
+Every PNG is labelled as machine-generated in its metadata, whichever model made it (the pixels are untouched): tEXt
+`Software` `LocalRouter`, tEXt `Comment` `AI-generated (machine-generated) by model <id> with LocalRouter`, and an
+XMP packet (iTXt `XML:com.adobe.xmp`) with the IPTC digital source type `Iptc4xmpExt:DigitalSourceType`
+`http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia`, the machine-readable AI-generated label.
+Read it with `exiftool -Comment -XMP-iptcExt:DigitalSourceType fox.png`. No C2PA manifest is attached: one needs a
+signing certificate and a manifest store, and an unsigned one proves nothing.
+
 ## Image edits (OpenAI Images API)
 
 ```bash
@@ -108,6 +119,9 @@ curl -s -m 900 $BASE/images/edits -F model=<edit-model> -F prompt='make it night
 `n`, `seed`, `response_format`...). A JSON body works too: `"image": "<base64>"` or `"images": ["<base64>", "data:image/png;base64,...", "https://..."]`.
 Inputs must be PNG, JPEG or WebP, at most 32 MB each. URLs are fetched by the server (http and https only, 32 MB,
 30 s; see [Input URLs](#input-urls)). The model must list `image_edit` in its capabilities.
+
+An edit carries the [images' label](#images-openai-images-api) with `AI-edited (machine-generated) from an input
+image` in its comment and the IPTC term for edits, `compositeWithTrainedAlgorithmicMedia`.
 
 ## Videos (OpenAI Videos API)
 
@@ -128,6 +142,13 @@ urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `comple
 Image to video: add `input_reference`, a file in a multipart body (`-F input_reference=@frame.png`, with the other
 fields as form fields) or a base64 string, data URL or URL in a JSON body. The model must list `image_to_video`.
 
+Every MP4 is labelled as machine-generated in `moov/udta/meta/ilst`, whichever model made it (the coded video and
+audio are untouched): `comment` (`©cmt`) `AI-generated (machine-generated) by model <id> with LocalRouter` (from a
+first frame: `AI-edited ... from an input image`) and `description` (`desc`), the IPTC digital source type URI
+(`.../digitalsourcetype/trainedAlgorithmicMedia`, or `compositeWithTrainedAlgorithmicMedia` from a first frame).
+Read it with `ffprobe -v error -show_entries format_tags out.mp4`. `encoder` stays ffmpeg's (`Lavf...`): its CLI
+overwrites that tag. No XMP box and no C2PA manifest (see [Images](#images-openai-images-api)).
+
 ## Speech (OpenAI Audio API)
 
 ```bash
@@ -144,9 +165,10 @@ curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
 | `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
 | `stream` | Extension, for a model whose `stream` is true: `true` with `response_format: "pcm"` sends the audio as HTTP/1.1 chunks while it is made |
 | `references` | Extension, for a model whose `references` is true: `[{"text": "...", "vq_codes": [[...], ...]}]`, a clip's exact transcript and its codec codes (one list a codebook), spoken into the prompt before the model's voice |
+| `instructions` | for a model whose `instructions` is true: how to say it (delivery, emotion, pace), up to 500 characters, without line breaks, speaker tags or the characters the model's direction is written with (Drama 3: `[` and `]`). It is written into the text as the model's own markup, and counts toward `max_input_chars` |
 
-`instructions` and `stream_format: "sse"` are refused (400): the models take no style prompt. Anything a model cannot
-do is refused before it loads, never approximated.
+`stream_format: "sse"` is refused (400), and so are `instructions` for a model whose `instructions` is false (it takes
+no style prompt). Anything a model cannot do is refused before it loads, never approximated.
 
 A model that says why its audio ended sets `x-finish-reason`: `stop` (it ended by itself), `length` (clipped at its
 frame limit; the audio is cut short) or `silence` (its silence guard ended a reply that fell silent or into a steady hum
@@ -167,7 +189,10 @@ with `long_form`). Its voices are fixed speakers (`voices` in `/v1/models`; Loca
 invented, `Mae` by default): the same voice is the same speaker in every reply, so a conversation keeps one voice. The
 model's built-in voice is not one speaker (each text lands on its own), so it is not offered unless the operator lists
 `default`. There is no `speed` or `preset`, and `seed` is ignored (the engine seeds each synthesis from its prompt). Write
-delivery cues in the text, such as `[sighs]` or `[laughs]` where they should land. Clone only a voice the model
+delivery cues in the text, such as `[sighs]` or `[laughs]` where they should land. Drama 3 has no separate style
+control (its system prompt is fixed), so `instructions` become such a bracketed direction before the line:
+`{"input": "I'm fine.", "instructions": "whispering, nervous"}` speaks `[whispering, nervous] I'm fine.` (after a
+leading `<|speaker:N|>` tag, when the text starts with one). Clone only a voice the model
 invented, your own, or one whose owner has consented on record: the model's licence forbids imitating anyone else.
 Until the operator has qualified it on the machine's GPU it is listed with `"qualified": false` and every request gets
 a 503 saying it is not GPU-qualified on this host.
@@ -222,6 +247,21 @@ does not take (that refusal is a 400 with the server's message). For the Qwen3.8
 | `stream`, `stream_options.include_usage` | server-sent events; with `include_usage` a last event carries `usage` (`"choices": []`) |
 | `n` | 1 only (else 400) |
 
+**Small limits and thinking.** The model reasons before it answers, and the reasoning counts against `max_tokens`. So a
+request whose `max_tokens` (or `max_completion_tokens`) is below the model's `min_thinking_tokens` (1024 by default; the
+operator's tool config, `0` never) and that does not choose reasoning itself (`reasoning_effort`, `reasoning`,
+`thinking` or `chat_template_kwargs.enable_thinking`) is answered with thinking off. Choose it, and it is as you asked. A
+reply that still runs out while reasoning keeps `finish_reason: "length"` and its empty `content`. Either way the reply
+says what happened in `warnings`, an extension (a streamed reply sends it in a last chunk with `choices: []`, before
+`data: [DONE]`):
+
+```json
+"warnings": [{"code": "reasoning_used_budget", "message": "the reply reached max_tokens 16 while still reasoning (16 reasoning tokens), so it has no content: raise max_tokens, or switch thinking off (reasoning_effort: none)"}]
+```
+
+`thinking_off_for_small_budget` says thinking was switched off for a small limit. A reply without warnings has no
+`warnings` member. The MCP `chat` tool's first text is the warning when there is no reply.
+
 A streamed request the model refuses gets an ordinary JSON error, not a stream. If a stream breaks off after it began,
 it ends with `data: {"error": {...}}` and `data: [DONE]`. Closing the connection cancels the request; the model stays
 loaded. A model that is not yet qualified on this machine (`"qualified": false` in `/models`) is refused with a 503.
@@ -239,7 +279,9 @@ It is stateless: send `store: false` and the whole conversation in `input` each 
 included as they came back; `previous_response_id` is refused. Function tools only (hosted tools are refused): a
 `function_call` output item is yours to run, then send `{"type": "function_call_output", "call_id": ..., "output":
 ...}`. Reasoning comes back as a `reasoning` item (`reasoning_text`), never as message text; `"reasoning": {"effort":
-"none"}` switches it off. `stream: true` sends the Responses events (`response.output_text.delta`...,
+"none"}` switches it off. The [small-limit rule](#chat-openai-chat-completions-api) is the same, with `max_output_tokens`
+and `reasoning.effort`: below `min_thinking_tokens` and not chosen, thinking is off, and the response object carries
+the `warnings`. `stream: true` sends the Responses events (`response.output_text.delta`...,
 `response.completed`); closing the connection cancels. What is and is not taken, field by field:
 [HARNESS.md](HARNESS.md#responses).
 
@@ -360,6 +402,24 @@ not kept may still go) and leaving room for the kept tools' working bytes. A req
 with a 503 `insufficient_memory` naming `spare_room_only`, before anything is unloaded; the shadow decisions then skip
 the turns. An operator can still make room for it on purpose with MCP `reserve_for`.
 `GET /v1/tools` shows `priority`, `keep_loaded`, `spare_room_only` and `capabilities`.
+
+## Licences
+
+Each model's weights keep their publisher's licence. `GET /v1/models` lists it per model as `license`, and
+`GET /v1/capabilities` lists them all (`models.licenses`); an operator sets one per tool in the config (`license`,
+the same shape), and the compiled-in image and video engines state their own when the config does not. LocalRouter
+informs and enforces nothing: check the terms before you use or publish what a model makes. The Jarvis box's models
+(a summary, not legal advice; the [README](../README.md#credits) has the links):
+
+| Model | Licence | Use | Restrictions / notice |
+| --- | --- | --- | --- |
+| `qwen3.8-27b` | Apache 2.0 | any | |
+| `knowline-4b` | Apache 2.0 | any | |
+| `whisper-large-v3-turbo` | MIT | any | |
+| `fishaudio/drama-3` | Fish Audio Community License v1.0 | research and non-commercial; commercial only under USD 500,000 annual revenue | no Hosted Service (third parties generating speech through an API) without a separate licence; "Built with Fish Audio" |
+| `kitten-tts-2` (optional) | Stellon Labs Community License | commercial after registering, until USD 1,000,000 revenue or funding | outputs may not train another model; "Powered by Stellon Labs" |
+| `qwen-image-2.1`, `qwen-image-2.1-turbo` | Qwen Research License | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
+| `minimax-h3` | MiniMax H3 Community License | outside the excluded territories; commercial included (over USD 20 million yearly revenue: MiniMax's written authorization) | not licensed in the US, EU, UK or South Korea; public content disclosed as machine-generated; "MiniMax H3" on a commercial product's interface |
 
 ## Errors
 

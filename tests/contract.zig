@@ -16,13 +16,14 @@ const Value = std.json.Value;
 
 const contract = "2026-10-23";
 
-/// A chat model (the fake TensorFold server), speech and transcription (the fake workers), an image model.
+/// A chat model (the fake TensorFold server), speech and transcription (the fake workers), an image model with a licence.
 fn config(a: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"voice\": {{\"prime_chat\": false, \"warm_speech\": false}}, \"tools\": [" ++
         "{{\"id\": \"chat\", \"kind\": \"chat\", \"engine\": \"openai_server\", \"resident_bytes\": 41943040, \"options\": {{\"server\": [\"python3\", \"{s}\", \"--port\", \"{{port}}\", \"--name\", \"{{id}}\"]}}}}," ++
         "{{\"id\": \"mouth\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true, \"options\": {{\"voices\": [\"plain\"]}}}}," ++
         "{{\"id\": \"ears\", \"kind\": \"transcription\", \"cmd\": [\"python3\", \"{s}\"], \"resident_bytes\": 8388608, \"keep_loaded\": true}}," ++
-        "{{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {{\"step_ms\": 5}}}}]}}", .{ opts.chat_server, opts.speech_worker, opts.speech_worker });
+        "{{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {{\"step_ms\": 5}}, " ++
+        "\"license\": {{\"name\": \"Test Licence\", \"url\": \"https://example.org/licence\", \"commercial\": false, \"excluded_regions\": [\"Nowhere\"]}}}}]}}", .{ opts.chat_server, opts.speech_worker, opts.speech_worker });
 }
 
 fn get(v: Value, path: []const []const u8) Value {
@@ -59,6 +60,25 @@ test "capabilities: the contract version, and every surface it lists answers as 
     const kinds = try strings(a, get(caps, &.{ "models", "kinds" }));
     for ([_][]const u8{ "chat", "speech", "transcription", "image" }) |k| try testing.expect(has(kinds, k));
     try testing.expect(!get(caps, &.{ "decisions", "available" }).bool); // no decision model here
+
+    // Each model's licence, as /v1/models lists it: the configured one, and none (omitted) where nothing states one.
+    const models = get(try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .GET, "/v1/models", null)).body, .{}), &.{"data"}).array.items;
+    const licenses = get(caps, &.{ "models", "licenses" }).array.items;
+    try testing.expectEqual(models.len, licenses.len);
+    for (models, licenses) |m, l| {
+        const id = m.object.get("id").?.string;
+        try testing.expectEqualStrings(id, l.object.get("id").?.string);
+        try testing.expectEqual(std.mem.eql(u8, id, "tp"), m.object.get("license") != null);
+        try testing.expectEqual(m.object.get("license") != null, l.object.get("license") != null);
+    }
+    for (models) |m| {
+        const l = m.object.get("license") orelse continue;
+        try testing.expectEqualStrings("Test Licence", l.object.get("name").?.string);
+        try testing.expectEqualStrings("https://example.org/licence", l.object.get("url").?.string);
+        try testing.expect(!l.object.get("commercial").?.bool);
+        try testing.expectEqualStrings("Nowhere", l.object.get("excluded_regions").?.array.items[0].string);
+    }
+    for (licenses) |l| if (l.object.get("license")) |x| try testing.expectEqualStrings("Test Licence", x.object.get("name").?.string);
 
     // MCP: the same tool names in the same order, and the version initialize negotiates is listed, as is the server's.
     const listed = try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");

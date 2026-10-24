@@ -34,6 +34,7 @@ const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
+const budget = @import("budget.zig");
 const decision = @import("decide.zig");
 const systemone = @import("../tool/systemone.zig");
 const audio = @import("../media/audio.zig");
@@ -296,12 +297,12 @@ fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wai
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded, .license = engine.license(c), .min_thinking_tokens = if (c.kind == .chat) c.min_thinking_tokens else null };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
@@ -538,11 +539,11 @@ fn localFile(app: *App, a: std.mem.Allocator, path: []const u8, out: *std.ArrayL
 }
 
 fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, format: []const u8 = "wav", inline_audio: bool = true, references: ?Value = null };
+    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, instructions: []const u8 = "", format: []const u8 = "wav", inline_audio: bool = true, references: ?Value = null };
     const b = try parseArgs(Args, a, args, out);
     const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
     var why: routes.Refusal = .{};
-    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_audio) {
@@ -579,11 +580,15 @@ fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Co
         if (!r.bool) try body.put(a, "reasoning_effort", .{ .string = "none" });
     };
     var why: routes.Refusal = .{};
-    const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    var plan: budget.Plan = .{};
+    const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why, &plan) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
-    const text = chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
-    try out.append(a, .{ .type = "text", .text = replyText(a, text) catch "" });
+    const text = try budget.annotate(a, chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message }), plan);
+    const said = replyText(a, text) catch "";
+    const warned = if (said.len > 0) @as([]const budget.Warning, &.{}) else try budget.ofCompletion(a, text, plan);
+    // No text: the warning says why (its reasoning used max_tokens), rather than an empty reply.
+    try out.append(a, .{ .type = "text", .text = if (warned.len > 0) try std.fmt.allocPrint(a, "warning: {s}", .{warned[warned.len - 1].message}) else said });
     try out.append(a, .{ .type = "text", .text = text });
     return true;
 }
@@ -835,6 +840,7 @@ const tool_list = [_]Tool{
     \\"voice":{"type":"string","description":"A voice id from the model's voices in list_models; omit for its default."},
     \\"speed":{"type":"number","minimum":0.25,"maximum":4,"default":1,"description":"Within the model's own speed range (list_models speed); a model without a speed control takes only 1."},
     \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
+    \\"instructions":{"type":"string","maxLength":500,"description":"How to say it (delivery, emotion, pace), for a model whose list_models entry says instructions: true; others refuse it. Drama 3 hears it as a bracketed direction before the text: [whispering, nervous]."},
     \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
     \\"seed":{"type":"integer","minimum":0},
     \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},

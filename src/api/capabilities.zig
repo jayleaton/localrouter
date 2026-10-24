@@ -15,6 +15,13 @@ const pair = @import("../pair.zig");
 
 const App = routes.App;
 
+/// The small-limit rule of the chat path (`budget.zig`), for both chat APIs.
+const thinking_budget = .{
+    .rule = "a limit below the model's min_thinking_tokens, with reasoning not chosen, answers with thinking off",
+    .warnings = "warnings: [{code, message}] (streamed chat: a last chunk with choices: [])",
+    .codes = [_][]const u8{ "thinking_off_for_small_budget", "reasoning_used_budget" },
+};
+
 /// The contract this daemon implements: docs/HARNESS.md under the same version. A date, changed whenever a documented
 /// surface changes shape; additions a client may ignore keep the date.
 pub const contract = "2026-10-23";
@@ -114,7 +121,7 @@ const gaps = [_]Gap{
     .{ .feature = "own_urls_as_inputs_via_proxy", .status = "unsupported", .note = "behind a TLS proxy (tailscale serve) this daemon's https output URLs are refused as inputs: send the file as base64" },
     .{ .feature = "audio_translations", .status = "unsupported", .note = "/v1/audio/translations is a 404" },
     .{ .feature = "transcription_streaming", .status = "unsupported", .note = "stream=true is refused; transcription answers once per file" },
-    .{ .feature = "speech_instructions", .status = "unsupported", .note = "instructions and stream_format sse are refused" },
+    .{ .feature = "speech_sse", .status = "unsupported", .note = "stream_format sse is refused; instructions are refused by a speech model whose /v1/models entry lacks instructions: true" },
     .{ .feature = "embeddings", .status = "unsupported", .note = "/v1/embeddings is not served" },
     .{ .feature = "completions_legacy", .status = "unsupported", .note = "/v1/completions is not served" },
     .{ .feature = "files_upload", .status = "unsupported", .note = "/v1/files serves outputs only (GET, kept keep_outputs_s)" },
@@ -122,16 +129,21 @@ const gaps = [_]Gap{
     .{ .feature = "mcp_sessions", .status = "unsupported", .note = "stateless Streamable HTTP: no Mcp-Session-Id, no server-sent notifications, no resources or prompts" },
 };
 
+/// A model's licence as `/v1/models` lists it (`license` omitted when unknown): stated, not enforced.
+const ModelLicense = struct { id: []const u8, license: ?@import("../config.zig").License };
+
 pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
     var kinds: std.ArrayList([]const u8) = .empty;
     var caps: std.ArrayList(engine.Capability) = .empty;
     var chat_models: std.ArrayList([]const u8) = .empty;
+    var licenses: std.ArrayList(ModelLicense) = .empty;
     for (app.scheduler.slots) |slot| {
         const c = slot.tool.config();
         const k = @tagName(c.kind);
         if (!contains(kinds.items, k)) try kinds.append(a, k);
         for (try engine.capabilityList(a, c)) |cap| if (std.mem.indexOfScalar(engine.Capability, caps.items, cap) == null) try caps.append(a, cap);
         if (c.kind == .chat) try chat_models.append(a, c.id);
+        try licenses.append(a, .{ .id = c.id, .license = engine.license(c) });
     }
     const has = struct {
         fn f(list: []const engine.Capability, cap: request.Capability) bool {
@@ -157,7 +169,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .open = [_][]const u8{ "/health", "/v1/pair", "/v1/capabilities", "/voice" }, // with pairing off, every route is open
             .jobs_owned = true, // a job and its files answer only the device that asked for them (when paired)
         },
-        .models = .{ .list = "/v1/models", .kinds = kinds.items, .capabilities = caps.items },
+        .models = .{ .list = "/v1/models", .kinds = kinds.items, .capabilities = caps.items, .licenses = licenses.items },
         .chat = .{
             .available = has(caps.items, .chat_completion),
             .api = "chat_completions",
@@ -169,6 +181,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .tool_choice = [_][]const u8{ "none", "auto", "required", "function" },
             .response_format = [_][]const u8{ "json_object", "json_schema" },
             .reasoning = .{ .field = "reasoning_content", .off = "reasoning_effort: none, or chat_template_kwargs.enable_thinking: false" },
+            .thinking_budget = thinking_budget,
             .input = [_][]const u8{"text"},
             .n = 1,
             .cancel = "close the connection",
@@ -188,6 +201,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .tool_choice = [_][]const u8{ "none", "auto", "required", "function" },
             .text_format = [_][]const u8{ "text", "json_object", "json_schema" },
             .reasoning = .{ .effort = "reasoning_effort on the model's server: none switches thinking off", .summary = [_][]const u8{ "auto", "none" }, .item = "reasoning_text", .encrypted_content = false },
+            .thinking_budget = thinking_budget,
             .events = responses.stream_events,
             .cancel = "close the connection",
         },

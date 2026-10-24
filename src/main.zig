@@ -75,6 +75,7 @@ test {
     _ = @import("api/capabilities.zig");
     _ = @import("media/png.zig");
     _ = @import("media/mp4.zig");
+    _ = @import("media/marker.zig");
     _ = @import("engine/engine.zig");
     _ = @import("engine/memcap_coverage.zig");
     _ = @import("engines/testpattern.zig");
@@ -91,6 +92,7 @@ test {
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");
     _ = @import("api/chat.zig");
+    _ = @import("api/budget.zig");
     _ = @import("api/responses.zig");
     _ = @import("api/decide.zig");
     _ = @import("tool/systemone.zig");

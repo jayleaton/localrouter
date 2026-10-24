@@ -105,6 +105,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     try expectError(try mcpCall(&d, a, "generate_image", "{\"size\":\"256x256\"}"), "invalid arguments for generate_image: a required argument is missing");
     try expectError(try mcpCall(&d, a, "generate_image", "{\"prompt\":\"bars\",\"n\":\"two\"}"), "an argument has the wrong type");
     try expectError(try mcpCall(&d, a, "synthesize_speech", "{\"input\":\"hi\",\"voice\":\"Zed\"}"), "model 'tone' has no voice 'Zed'; its voices: Mae, Arlo");
+    try expectError(try mcpCall(&d, a, "synthesize_speech", "{\"input\":\"hi\",\"instructions\":\"calm\"}"), "model 'tone' does not take instructions; send the text to speak as input");
     try expectError(try mcpCall(&d, a, "transcribe_audio", "{}"), "audio (base64, a data URL or an http(s) URL) or path (a file on this machine) is required");
     try expectError(try mcpCall(&d, a, "transcribe_audio", "{\"path\":\"/etc/hostname\"}"), "path is off on this server");
     const unknown = try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"make_music\",\"arguments\":{}}}");

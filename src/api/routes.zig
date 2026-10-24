@@ -134,26 +134,27 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i) };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i), .license = engine.license(c) };
         const info = engine.audioInfo(c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
         if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way
+        if (c.kind == .chat) e.min_thinking_tokens = c.min_thinking_tokens; // a smaller limit answers without thinking
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
 }
 
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8 };
+    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8, license: ?@import("../config.zig").License };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
+        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message, .license = engine.license(c) };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });

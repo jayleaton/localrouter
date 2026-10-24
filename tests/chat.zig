@@ -180,7 +180,7 @@ test "chat whole replies: the body passes through, reasoning on by default and o
     var d = try start(a, "chat-whole", "", try chatTool(a, "chat", "", ""));
     defer d.stop();
 
-    const body = "{\"model\":\"chat\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0,\"top_p\":0.9,\"seed\":5,\"max_tokens\":50," ++
+    const body = "{\"model\":\"chat\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0,\"top_p\":0.9,\"seed\":5,\"max_tokens\":50,\"reasoning_effort\":\"low\"," ++
         "\"stop\":[\"zzz\"],\"top_k\":3,\"x_extra\":\"y\",\"response_format\":{\"type\":\"text\"}}";
     const r = try post(&d, a, body);
     const o = try whole(a, r);
@@ -243,6 +243,95 @@ test "chat streaming: SSE framing, deltas join to the whole reply, the usage chu
         return error.TestExpectedEqual;
     };
     try testing.expect(std.mem.indexOf(u8, try headers(&d, a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"), "content-type: application/json") != null);
+}
+
+/// The codes of a reply's `warnings`, comma-joined ("" when it has none).
+fn warningCodes(a: std.mem.Allocator, o: Obj) ![]const u8 {
+    const w = o.get("warnings") orelse return "";
+    var codes: std.ArrayList(u8) = .empty;
+    for (w.array.items, 0..) |x, i| {
+        if (i > 0) try codes.append(a, ',');
+        try codes.appendSlice(a, str(x.object, "code").?);
+    }
+    return codes.items;
+}
+
+/// The `warnings` chunk of an SSE body: the one before `data: [DONE]`, with no choices.
+fn streamWarnings(a: std.mem.Allocator, r: Daemon.Resp) !Obj {
+    _ = try sse(a, r);
+    const end = std.mem.lastIndexOf(u8, r.body, "data: [DONE]").?;
+    const before = std.mem.trimEnd(u8, r.body[0..end], "\n");
+    const line = before[(std.mem.lastIndexOfScalar(u8, before, '\n') orelse return error.TestExpectedEqual) + 1 ..];
+    const o = (try std.json.parseFromSliceLeaky(Value, a, line["data: ".len..], .{})).object;
+    try testing.expectEqual(@as(usize, 0), o.get("choices").?.array.items.len);
+    return o;
+}
+
+test "chat thinking budget: a small limit answers without thinking; reasoning that uses the limit says so" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try std.mem.join(a, ",", &.{
+        try chatTool(a, "chat", "", ""),
+        try chatTool(a, "chat-thinks", ",\"min_thinking_tokens\": 0", ""),
+        try chatTool(a, "chat-own", ",\"thinking_off\": {\"reasoning_effort\": \"none\"}", ""),
+    });
+    var d = try start(a, "chat-budget", "", tools);
+    defer d.stop();
+
+    const listed = (try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .GET, "/v1/models", null)).body, .{})).object.get("data").?.array.items;
+    try testing.expectEqual(@as(i64, 1024), listed[0].object.get("min_thinking_tokens").?.integer);
+    try testing.expectEqual(@as(i64, 0), listed[1].object.get("min_thinking_tokens").?.integer);
+
+    // Below min_thinking_tokens (1024 by default), not choosing: thinking off, merged into the request's own kwargs.
+    const off = try whole(a, try ask(&d, a, "ponder", ",\"model\":\"chat\",\"max_tokens\":16,\"chat_template_kwargs\":{\"x\":1}"));
+    try testing.expectEqualStrings("echo: ponder", str(message(off), "content").?);
+    try testing.expect(message(off).get("reasoning_content") == null);
+    try testing.expectEqualStrings("stop", str(first(off), "finish_reason").?);
+    try testing.expectEqualStrings("thinking_off_for_small_budget", try warningCodes(a, off));
+    const kw = off.get("received").?.object.get("chat_template_kwargs").?.object;
+    try testing.expect(!kw.get("enable_thinking").?.bool);
+    try testing.expectEqual(@as(i64, 1), kw.get("x").?.integer);
+
+    // Chosen explicitly: the model thinks, its reasoning uses the limit, and the reply says so (finish_reason length).
+    const spent = try whole(a, try ask(&d, a, "ponder", ",\"model\":\"chat\",\"max_tokens\":16,\"reasoning_effort\":\"high\""));
+    try testing.expectEqualStrings("", str(message(spent), "content").?);
+    try testing.expectEqualStrings("length", str(first(spent), "finish_reason").?);
+    try testing.expectEqualStrings("reasoning_used_budget", try warningCodes(a, spent));
+    const why = str(spent.get("warnings").?.array.items[0].object, "message").?;
+    try testing.expect(std.mem.indexOf(u8, why, "max_tokens 16") != null and std.mem.indexOf(u8, why, "16 reasoning tokens") != null);
+
+    // The same, streamed: a last chunk with the warnings, then [DONE].
+    const sr = try ask(&d, a, "ponder", ",\"model\":\"chat\",\"max_tokens\":16,\"reasoning_effort\":\"high\",\"stream\":true");
+    const s = try sse(a, sr);
+    try testing.expectEqualStrings("", s.content);
+    try testing.expectEqualStrings("length", s.finish);
+    try testing.expectEqualStrings("reasoning_used_budget", try warningCodes(a, try streamWarnings(a, sr)));
+    const so = try ask(&d, a, "ponder", ",\"model\":\"chat\",\"max_completion_tokens\":16,\"stream\":true");
+    try testing.expectEqualStrings("echo: ponder", (try sse(a, so)).content);
+    try testing.expectEqualStrings("thinking_off_for_small_budget", try warningCodes(a, try streamWarnings(a, so)));
+
+    // At the floor, or with no limit: as asked, and no warnings member.
+    for ([_][]const u8{ ",\"max_tokens\":1024", "" }) |extra| {
+        const as_asked = try whole(a, try ask(&d, a, "ponder", try std.fmt.allocPrint(a, ",\"model\":\"chat\"{s}", .{extra})));
+        try testing.expect(message(as_asked).get("reasoning_content") != null);
+        try testing.expect(as_asked.get("warnings") == null);
+    }
+    const plain = try ask(&d, a, "hi", ",\"model\":\"chat\",\"stream\":true");
+    try testing.expect(std.mem.indexOf(u8, plain.body, "warnings") == null);
+
+    // A tool's own floor (0: never) and its own members.
+    const never = try whole(a, try ask(&d, a, "ponder", ",\"model\":\"chat-thinks\",\"max_tokens\":16"));
+    try testing.expectEqualStrings("reasoning_used_budget", try warningCodes(a, never));
+    const own = try whole(a, try ask(&d, a, "ponder", ",\"model\":\"chat-own\",\"max_tokens\":16"));
+    try testing.expectEqualStrings("none", str(own.get("received").?.object, "reasoning_effort").?);
+    try testing.expect(own.get("received").?.object.get("chat_template_kwargs") == null);
+
+    // MCP: the first text says why there is no reply.
+    const mcp_spent = try mcpCall(&d, a, "chat", "{\"model\":\"chat\",\"prompt\":\"ponder\",\"max_tokens\":16,\"reasoning\":true}");
+    try testing.expect(std.mem.startsWith(u8, text(mcp_spent, 0), "warning: the reply reached max_tokens 16 while still reasoning"));
+    const mcp_off = try mcpCall(&d, a, "chat", "{\"model\":\"chat\",\"prompt\":\"ponder\",\"max_tokens\":16}");
+    try testing.expectEqualStrings("echo: ponder", text(mcp_off, 0));
 }
 
 test "chat tool calls: whole and streamed, tool_choice none, and the follow-up with the tool's result" {
