@@ -386,11 +386,17 @@ pub const Pipeline = struct {
         try p.loadTe();
         var hidden: u64 = undefined;
         var first_latent: ?cuda.DeviceBuffer = null;
-        defer if (first_latent) |*b| { p.s.synchronize() catch {}; b.free(); };
+        defer if (first_latent) |*b| {
+            p.s.synchronize() catch {};
+            b.free();
+        };
         if (rgb) |pixels| {
             if (pixels.len != 3 * @as(u64, width) * height) return error.BadImage;
             var input = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(pixels));
-            defer { p.s.synchronize() catch {}; input.free(); }
+            defer {
+                p.s.synchronize() catch {};
+                input.free();
+            }
             first_latent = try cuda.DeviceBuffer.alloc(&p.d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
             const zp = try first_latent.?.at(0);
             var eops = try vae_enc.Ops.load(&p.d, kernels.vae_enc);
@@ -401,8 +407,7 @@ pub const Pipeline = struct {
             defer enc.deinit();
             try enc.encode(try input.at(0), height, width, zp);
             try p.pre("first_frame", &.{});
-            try p.post("first_frame", &.{ .{ .role = "rgb", .ptr = try input.at(0), .bytes = pixels.len * 4 },
-                .{ .role = "latent", .ptr = zp, .bytes = 24 * @as(u64, sh.lh) * sh.lw * 4 } });
+            try p.post("first_frame", &.{ .{ .role = "rgb", .ptr = try input.at(0), .bytes = pixels.len * 4 }, .{ .role = "latent", .ptr = zp, .bytes = 24 * @as(u64, sh.lh) * sh.lw * 4 } });
             var vops = try vision.Ops.load(&p.d, kernels.te_vision);
             defer vops.unload();
             var visual = try vision.VisionEncoder.init(gpa, p.io, &p.d, &vops, &p.hops, &p.te_ops, p.s, &p.te_pack, &up, (height / 16) * (width / 16));

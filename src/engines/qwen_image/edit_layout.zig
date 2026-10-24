@@ -20,7 +20,9 @@ pub fn plan(a: std.mem.Allocator, text_rows: u32, refs: []const Reference, targe
     const ids = try a.alloc([3]f32, @intCast(count));
     const pieces = try a.alloc(Piece, refs.len + 1);
     var segments: std.ArrayList(Segment) = .empty;
-    var start: u32 = 0; var row: u32 = 0; var pos: u32 = 0;
+    var start: u32 = 0;
+    var row: u32 = 0;
+    var pos: u32 = 0;
     for (pieces, 0..) |*piece, j| {
         const end = if (j < refs.len) refs[j].slot else text_rows;
         piece.* = .{ .text_start = start, .text_end = end, .ref_index = if (j < refs.len) j else null };
@@ -28,13 +30,16 @@ pub fn plan(a: std.mem.Allocator, text_rows: u32, refs: []const Reference, targe
         if (n > 0) {
             rope.textIds(ids[row..][0..n], pos);
             try segments.append(a, .{ .start = row, .end = row + n, .causal = true });
-            row += n; pos = try std.math.add(u32, pos, n);
+            row += n;
+            pos = try std.math.add(u32, pos, n);
         }
         if (j < refs.len) {
-            const r = refs[j]; const nr = r.h * r.w;
+            const r = refs[j];
+            const nr = r.h * r.w;
             rope.imageIds(ids[row..][0..nr], r.h, r.w, pos, target_h, target_w);
             try segments.append(a, .{ .start = row, .end = row + nr, .causal = false });
-            row += nr; pos = try std.math.add(u32, pos, @max(r.h, r.w));
+            row += nr;
+            pos = try std.math.add(u32, pos, @max(r.h, r.w));
         }
         start = end;
     }
@@ -42,7 +47,8 @@ pub fn plan(a: std.mem.Allocator, text_rows: u32, refs: []const Reference, targe
 }
 
 test "duplicate insertion slots keep separate image attention boundaries and target parity" {
-    var ar: std.heap.ArenaAllocator = .init(std.testing.allocator); defer ar.deinit();
+    var ar: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer ar.deinit();
     const refs = [_]Reference{ .{ .h = 2, .w = 2, .slot = 1 }, .{ .h = 1, .w = 3, .slot = 1 } };
     const p = try plan(ar.allocator(), 3, &refs, 3, 2);
     try std.testing.expectEqual(@as(u32, 8), p.next_pos);

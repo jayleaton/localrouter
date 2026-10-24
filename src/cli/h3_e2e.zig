@@ -102,8 +102,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     try out.writer.print("{{\"h3_e2e\": {{\"gpu\": \"sm_{d}{d}\", \"size\": \"{d}x{d}\", \"frames\": {d}, \"steps\": {d}, \"tokens\": {d}, " ++
         "\"load_ms\": {d}, \"weights_bytes\": {d}, \"gpu_used_mib\": {d}, \"ids_equal\": {}, " ++
         "\"light\": {{\"equal\": {d}, \"differ\": {d}, \"skipped\": {d}, \"unmatched\": {d}, \"first_diffs\": [", .{
-        p.major,         p.minor,           width,        height,          res.shapes.frames, steps,                  res.tokens,
-        load_ms,         p.weights_bytes,   used_mib,     ids_equal,       r.stats.equal,     r.stats.differ,         r.stats.skipped,
+        p.major,           p.minor,         width,    height,    res.shapes.frames, steps,          res.tokens,
+        load_ms,           p.weights_bytes, used_mib, ids_equal, r.stats.equal,     r.stats.differ, r.stats.skipped,
         r.stats.unmatched,
     });
     for (r.first_diffs.items, 0..) |m, i| try out.writer.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", m });
@@ -111,11 +111,11 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         "\"first_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
         "\"warm_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
         "\"twin_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, \"pass\": {}}}}}\n", .{
-        frames_equal,                             wav_equal,                                   frames_equal_warm, &frames_sha,
-        first.encode,                             first.sample,                                first.audio,       first.video,
-        warm.encode,                              warm.sample,                                 warm.audio,        warm.video,
-        float(if (tw) |t| t.get("encode") else null), float(if (tw) |t| t.get("sample") else null), float(if (tw) |t| t.get("audio") else null),
-        float(if (tw) |t| t.get("video") else null), pass,
+        frames_equal,                                 wav_equal,                                    frames_equal_warm,                           &frames_sha,
+        first.encode,                                 first.sample,                                 first.audio,                                 first.video,
+        warm.encode,                                  warm.sample,                                  warm.audio,                                  warm.video,
+        float(if (tw) |t| t.get("encode") else null), float(if (tw) |t| t.get("sample") else null), float(if (tw) |t| t.get("audio") else null), float(if (tw) |t| t.get("video") else null),
+        pass,
     });
     try std.Io.File.stdout().writeStreamingAll(io, out.written());
     return if (pass) 0 else 1;

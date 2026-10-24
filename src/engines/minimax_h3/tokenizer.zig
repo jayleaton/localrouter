@@ -23,7 +23,7 @@ pub const ImageTokens = struct {
 };
 /// The extra special tokens (te32.py EXTRA_TOKENS); `load` refuses a tokenizer.json that numbers them differently.
 pub const extra_tokens = [_]struct { []const u8, u32 }{
-    .{ "<d>", 151669 },          .{ "</d>", 151670 },            .{ "<|cutoff|>", 151671 },        .{ "<|lyrics_start|>", 151672 },
+    .{ "<d>", 151669 },            .{ "</d>", 151670 },              .{ "<|cutoff|>", 151671 },      .{ "<|lyrics_start|>", 151672 },
     .{ "<|lyrics_end|>", 151673 }, .{ "<|caption_start|>", 151674 }, .{ "<|caption_end|>", 151675 },
 };
 const keyword = "embedding:";

@@ -9,7 +9,11 @@ pub const Prepared = struct {
     rgba: []u8,
     rgb: []u8,
     patches: []f32,
-    pub fn deinit(p: Prepared, a: std.mem.Allocator) void { a.free(p.rgba); a.free(p.rgb); a.free(p.patches); }
+    pub fn deinit(p: Prepared, a: std.mem.Allocator) void {
+        a.free(p.rgba);
+        a.free(p.rgb);
+        a.free(p.patches);
+    }
 };
 
 /// Python dimensions(): round-to-even at each 32-pixel grid conversion.
@@ -56,7 +60,8 @@ test "maxArea bounds every reference dimensions() returns within the side limit"
 }
 
 fn roundEven(x: f64) f64 {
-    const f = @floor(x); const d = x - f;
+    const f = @floor(x);
+    const d = x - f;
     if (d < 0.5) return f;
     if (d > 0.5) return f + 1;
     return if (@mod(f, 2.0) == 0) f else f + 1;
@@ -81,11 +86,13 @@ pub fn prepare(a: std.mem.Allocator, rgba: []const u8, width: u32, height: u32, 
     const patches = a.alloc(f32, patch_rows * 1536) catch return error.OutOfMemory;
     errdefer a.free(patches);
     var row: usize = 0;
-    const blocks_y: usize = dim.height / 32; const blocks_x: usize = dim.width / 32;
+    const blocks_y: usize = dim.height / 32;
+    const blocks_x: usize = dim.width / 32;
     for (0..blocks_y) |by| for (0..blocks_x) |bx| for (0..2) |my| for (0..2) |mx| {
         var at = row * 1536;
         for (0..3) |c| for (0..2) |_| for (0..16) |py| for (0..16) |px| {
-            const y = by * 32 + my * 16 + py; const x = bx * 32 + mx * 16 + px;
+            const y = by * 32 + my * 16 + py;
+            const x = bx * 32 + mx * 16 + px;
             const v: f32 = @floatFromInt(rgb[(y * dim.width + x) * 3 + c]);
             const scaled = v * (1.0 / 255.0);
             patches[at] = (scaled - 0.5) / 0.5;
@@ -130,7 +137,8 @@ fn coefficients(a: std.mem.Allocator, source: usize, target: usize) Error![]Coef
     const out = a.alloc(Coeff, target) catch return error.OutOfMemory;
     errdefer a.free(out);
     const scale = @as(f64, @floatFromInt(source)) / @as(f64, @floatFromInt(target));
-    const filter_scale = @max(1.0, scale); const support = 3.0 * filter_scale;
+    const filter_scale = @max(1.0, scale);
+    const support = 3.0 * filter_scale;
     for (0..target) |i| {
         const center = (@as(f64, @floatFromInt(i)) + 0.5) * scale;
         const lo = @max(0, @as(i64, @intFromFloat(@floor(center - support + 0.5))));
@@ -139,7 +147,11 @@ fn coefficients(a: std.mem.Allocator, source: usize, target: usize) Error![]Coef
         const w = a.alloc(i32, n) catch return error.OutOfMemory;
         errdefer a.free(w);
         var sum: f64 = 0;
-        for (0..n) |j| { const x = (@as(f64, @floatFromInt(lo + @as(i64, @intCast(j)))) + 0.5 - center) / filter_scale; const q = if (@abs(x) < 3) sinc(x) * sinc(x / 3) else 0; sum += q; }
+        for (0..n) |j| {
+            const x = (@as(f64, @floatFromInt(lo + @as(i64, @intCast(j)))) + 0.5 - center) / filter_scale;
+            const q = if (@abs(x) < 3) sinc(x) * sinc(x / 3) else 0;
+            sum += q;
+        }
         if (sum == 0) return error.InvalidDimensions;
         for (0..n) |j| {
             const x = (@as(f64, @floatFromInt(lo + @as(i64, @intCast(j)))) + 0.5 - center) / filter_scale;
@@ -152,26 +164,38 @@ fn coefficients(a: std.mem.Allocator, source: usize, target: usize) Error![]Coef
 }
 
 fn lanczos(a: std.mem.Allocator, src: []const u8, sw: u32, sh: u32, dw: u32, dh: u32) Error![]u8 {
-    const cx = try coefficients(a, @intCast(sw), @intCast(dw)); defer { for (cx) |c| a.free(c.weights); a.free(cx); }
-    const cy = try coefficients(a, @intCast(sh), @intCast(dh)); defer { for (cy) |c| a.free(c.weights); a.free(cy); }
+    const cx = try coefficients(a, @intCast(sw), @intCast(dw));
+    defer {
+        for (cx) |c| a.free(c.weights);
+        a.free(cx);
+    }
+    const cy = try coefficients(a, @intCast(sh), @intCast(dh));
+    defer {
+        for (cy) |c| a.free(c.weights);
+        a.free(cy);
+    }
     const tmp = a.alloc(u8, @as(usize, dw) * @as(usize, sh) * 4) catch return error.OutOfMemory;
     defer a.free(tmp);
     for (0..@as(usize, sh)) |y| for (0..@as(usize, dw)) |x| for (0..4) |c| {
-        const cf = cx[x]; var sum: i64 = 0;
+        const cf = cx[x];
+        var sum: i64 = 0;
         for (cf.weights, 0..) |weight, j| sum += @as(i64, src[(y * @as(usize, sw) + cf.first + j) * 4 + c]) * @as(i64, weight);
         tmp[(y * @as(usize, dw) + x) * 4 + c] = clampFixed(sum);
     };
     const dst = a.alloc(u8, @as(usize, dw) * @as(usize, dh) * 4) catch return error.OutOfMemory;
     errdefer a.free(dst);
     for (0..@as(usize, dh)) |y| for (0..@as(usize, dw)) |x| for (0..4) |c| {
-        const cf = cy[y]; var sum: i64 = 0;
+        const cf = cy[y];
+        var sum: i64 = 0;
         for (cf.weights, 0..) |weight, j| sum += @as(i64, tmp[((cf.first + j) * @as(usize, dw) + x) * 4 + c]) * @as(i64, weight);
         dst[(y * @as(usize, dw) + x) * 4 + c] = clampFixed(sum);
     };
     return dst;
 }
 
-fn clampFixed(sum: i64) u8 { return @intCast(@max(0, @min(255, @divFloor(sum + precision / 2, precision)))); }
+fn clampFixed(sum: i64) u8 {
+    return @intCast(@max(0, @min(255, @divFloor(sum + precision / 2, precision))));
+}
 
 test "same-size preparation preserves transparent RGBA samples" {
     const a = std.testing.allocator;

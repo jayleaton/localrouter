@@ -112,8 +112,19 @@ pub const TextEncoder = struct {
     embed_w: u64 = 0,
     w: [layers]Layer = undefined,
     // scratch
-    ids: u64 = 0, h: u64 = 0, x: u64 = 0, q: u64 = 0, kk: u64 = 0, v: u64 = 0, at: u64 = 0, o: u64 = 0,
-    g: u64 = 0, u: u64 = 0, gu: u64 = 0, cos: u64 = 0, sin: u64 = 0,
+    ids: u64 = 0,
+    h: u64 = 0,
+    x: u64 = 0,
+    q: u64 = 0,
+    kk: u64 = 0,
+    v: u64 = 0,
+    at: u64 = 0,
+    o: u64 = 0,
+    g: u64 = 0,
+    u: u64 = 0,
+    gu: u64 = 0,
+    cos: u64 = 0,
+    sin: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, inv: [64]f32, max_rows: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .ops = ops, .s = s, .inv = inv, .max_rows = max_rows, .mem = .init(d, gpa) };
@@ -122,10 +133,10 @@ pub const TextEncoder = struct {
         var nb: [64]u8 = undefined;
         for (&t.w, 0..) |*l, i| {
             inline for (.{
-                .{ "input_layernorm", dim, 0 },          .{ "q_proj", heads * head_dim, dim }, .{ "k_proj", kv, dim },
-                .{ "v_proj", kv, dim },                  .{ "q_norm", head_dim, 0 },           .{ "k_norm", head_dim, 0 },
-                .{ "o_proj", dim, heads * head_dim },    .{ "post_attention_layernorm", dim, 0 }, .{ "gate_proj", mlp, dim },
-                .{ "up_proj", mlp, dim },                .{ "down_proj", dim, mlp },
+                .{ "input_layernorm", dim, 0 },       .{ "q_proj", heads * head_dim, dim },    .{ "k_proj", kv, dim },
+                .{ "v_proj", kv, dim },               .{ "q_norm", head_dim, 0 },              .{ "k_norm", head_dim, 0 },
+                .{ "o_proj", dim, heads * head_dim }, .{ "post_attention_layernorm", dim, 0 }, .{ "gate_proj", mlp, dim },
+                .{ "up_proj", mlp, dim },             .{ "down_proj", dim, mlp },
             }) |e| {
                 const name = try std.fmt.bufPrint(&nb, "te.{d}.{s}", .{ i, e[0] });
                 @field(l, e[0]) = try t.tensor(up, p, name, &.{ e[1], e[2] });

@@ -18,12 +18,15 @@ pub const Ops = struct {
         errdefer m.unload();
         return .{ .module = m, .avg = try m.function("stk_avg_down"), .normalize = try m.function("stk_chan_normalize"), .from_u8 = try m.function("stk_from_u8_rgba") };
     }
-    pub fn unload(o: *Ops) void { o.module.unload(); }
+    pub fn unload(o: *Ops) void {
+        o.module.unload();
+    }
 };
 const Down = struct { cin: u32, cout: u32, factor_t: u32, fs: u32, group_size: u32 };
 const Manifest = struct {
     encoder: struct {
-        latent_channels: u32, quant_channels: u32,
+        latent_channels: u32,
+        quant_channels: u32,
         convs: std.json.ArrayHashMap(struct { stride: u32, pad: [4]u32 }),
         norms: std.json.ArrayHashMap(f64),
         downs: std.json.ArrayHashMap(Down),
@@ -42,7 +45,7 @@ pub const Encoder = struct {
         var e: Encoder = .{ .v = v, .k = k, .store = .init(v.d, gpa) };
         errdefer e.deinit();
         const a = v.arena.allocator();
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{dir, "manifest.json"}), a, .limited(64 << 20));
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(64 << 20));
         const m = (try std.json.parseFromSliceLeaky(Manifest, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).encoder;
         if (m.latent_channels != 64 or m.quant_channels != 128) return error.UnsupportedEncoder;
         var nb: [192]u8 = undefined;
@@ -94,7 +97,9 @@ pub const Encoder = struct {
         e.stdv = try e.store.tensorOf(up, p, stdv);
         return e;
     }
-    pub fn deinit(e: *Encoder) void { e.store.deinit(); }
+    pub fn deinit(e: *Encoder) void {
+        e.store.deinit();
+    }
 
     fn avg(e: *Encoder, name: []const u8, x: u64, sh: Shape, y: u64) !Shape {
         const d = e.downs.get(name) orelse return error.MissingDown;
@@ -102,7 +107,8 @@ pub const Encoder = struct {
         const out: Shape = .{ .c = d.cout, .h = sh.h / d.fs, .w = sh.w / d.fs };
         try e.v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = vae.Vae.bytesOf(sh) }});
         var args: cuda.launch.Args = .{};
-        args.add(x); args.add(y);
+        args.add(x);
+        args.add(y);
         inline for (.{ sh.c, sh.h, sh.w, d.cout, d.factor_t, d.fs }) |n| args.add(@as(i32, @intCast(n)));
         try vae.Vae.go(e.k.avg, e.v.s, .{ .x = @intCast((vae.Vae.bytesOf(out) / 2 + block - 1) / block) }, .{ .x = block }, &args);
         try e.v.post(name, &.{.{ .role = "y", .ptr = y, .bytes = vae.Vae.bytesOf(out) }});
@@ -131,10 +137,11 @@ pub const Encoder = struct {
         var cur = xi;
         var cs = sh;
         var j: usize = 0;
-        while (v.convs.contains(try std.fmt.bufPrint(&nb, "{s}.resnets.{d}.conv1", .{name, j}))) : (j += 1) {
-            const r = try v.resBlock(try std.fmt.bufPrint(&nb, "{s}.resnets.{d}", .{name, j}), cur, cs);
+        while (v.convs.contains(try std.fmt.bufPrint(&nb, "{s}.resnets.{d}.conv1", .{ name, j }))) : (j += 1) {
+            const r = try v.resBlock(try std.fmt.bufPrint(&nb, "{s}.resnets.{d}", .{ name, j }), cur, cs);
             if (cur != xi) v.give(cur);
-            cur = r[0]; cs = r[1];
+            cur = r[0];
+            cs = r[1];
         }
         if (cur == xi) return error.UnsupportedEncoder;
         const dn = try std.fmt.bufPrint(&nb, "{s}.downsampler.resample.1", .{name});
@@ -148,8 +155,9 @@ pub const Encoder = struct {
         const ash = try e.avg(try std.fmt.bufPrint(&nb, "{s}.avg_shortcut", .{name}), v.pool[xi], sh, v.pool[ai]);
         if (ash.c != cs.c or ash.h != cs.h or ash.w != cs.w) return error.ShapeMismatch;
         try v.add(try std.fmt.bufPrint(&nb, "{s}.shortcut_add", .{name}), v.pool[cur], v.pool[ai], v.pool[cur], vae.Vae.bytesOf(cs));
-        v.give(ai); v.give(xi);
-        return .{cur, cs};
+        v.give(ai);
+        v.give(xi);
+        return .{ cur, cs };
     }
 
     /// CUDA RGBA u8 HWC -> normalized bf16 CHW [64,H/16,W/16], posterior mean only.
@@ -164,7 +172,10 @@ pub const Encoder = struct {
         const hw: u64 = @as(u64, h) * w;
         try v.pre("vae.from_u8", &.{.{ .role = "x", .ptr = rgba, .bytes = hw * 4 }});
         var args: cuda.launch.Args = .{};
-        args.add(rgba); args.add(v.pool[ii]); args.add(@as(i32, @intCast(h))); args.add(@as(i32, @intCast(w)));
+        args.add(rgba);
+        args.add(v.pool[ii]);
+        args.add(@as(i32, @intCast(h)));
+        args.add(@as(i32, @intCast(w)));
         try vae.Vae.go(e.k.from_u8, v.s, .{ .x = @intCast((hw * 4 + block - 1) / block) }, .{ .x = block }, &args);
         try v.post("vae.from_u8", &.{.{ .role = "y", .ptr = v.pool[ii], .bytes = vae.Vae.bytesOf(sh) }});
         var cur = try v.take();
@@ -173,24 +184,33 @@ pub const Encoder = struct {
         var i: usize = 0;
         var nb: [128]u8 = undefined;
         while (v.convs.contains(try std.fmt.bufPrint(&nb, "vae.encoder.down_blocks.{d}.resnets.0.conv1", .{i}))) : (i += 1) {
-            const r = try e.downBlock(i, cur, cs); cur = r[0]; cs = r[1];
+            const r = try e.downBlock(i, cur, cs);
+            cur = r[0];
+            cs = r[1];
         }
-        const r0 = try v.resBlock("vae.encoder.mid_block.resnets.0", cur, cs); v.give(cur);
-        const ai = try v.attention("vae.encoder.mid_block.attentions.0", r0[0], r0[1]); v.give(r0[0]);
-        const r1 = try v.resBlock("vae.encoder.mid_block.resnets.1", ai, r0[1]); v.give(ai);
-        cur = r1[0]; cs = r1[1];
+        const r0 = try v.resBlock("vae.encoder.mid_block.resnets.0", cur, cs);
+        v.give(cur);
+        const ai = try v.attention("vae.encoder.mid_block.attentions.0", r0[0], r0[1]);
+        v.give(r0[0]);
+        const r1 = try v.resBlock("vae.encoder.mid_block.resnets.1", ai, r0[1]);
+        v.give(ai);
+        cur = r1[0];
+        cs = r1[1];
         try v.norm("vae.encoder.norm_out", v.pool[cur], cs, v.pool[cur]);
         try v.silu("vae.encoder.act_out", v.pool[cur], cs);
         const oi = try v.take();
-        const os = try v.conv("vae.encoder.conv_out", v.pool[cur], cs, v.pool[oi]); v.give(cur);
+        const os = try v.conv("vae.encoder.conv_out", v.pool[cur], cs, v.pool[oi]);
+        v.give(cur);
         const qi = try v.take();
-        const qs = try v.conv("vae.quant_conv", v.pool[oi], os, v.pool[qi]); v.give(oi);
+        const qs = try v.conv("vae.quant_conv", v.pool[oi], os, v.pool[qi]);
+        v.give(oi);
         if (qs.c != 128 or qs.h != h / 16 or qs.w != w / 16) return error.ShapeMismatch;
         const elems: u64 = @as(u64, 64) * qs.h * qs.w;
         try v.pre("vae.normalize", &.{ .{ .role = "x", .ptr = v.pool[qi], .bytes = elems * 2 }, .{ .role = "mean", .ptr = e.mean, .bytes = 128 }, .{ .role = "std", .ptr = e.stdv, .bytes = 128 } });
         args = .{};
-        inline for (.{v.pool[qi], e.mean, e.stdv, out}) |ptr| args.add(ptr);
-        args.add(@as(i64, @intCast(@as(u64, qs.h) * qs.w))); args.add(@as(i64, @intCast(elems)));
+        inline for (.{ v.pool[qi], e.mean, e.stdv, out }) |ptr| args.add(ptr);
+        args.add(@as(i64, @intCast(@as(u64, qs.h) * qs.w)));
+        args.add(@as(i64, @intCast(elems)));
         try vae.Vae.go(e.k.normalize, v.s, .{ .x = @intCast((elems + block - 1) / block) }, .{ .x = block }, &args);
         try v.post("vae.normalize", &.{.{ .role = "y", .ptr = out, .bytes = elems * 2 }});
     }

@@ -54,7 +54,6 @@ pub fn prepare(a: std.mem.Allocator, p: *const Prompt, prompt: []const u8, grids
     return .{ .ids = ids.items, .positions = pos_tables, .spans = spans, .keep = keep.items, .slots = slots };
 }
 
-
 /// Text advances once a token; merged image rows use frame/row/column positions and advance by max side.
 pub fn positions(a: std.mem.Allocator, length: u32, spans: []const Span, grids: []const Grid) ![][3]f32 {
     if (spans.len != grids.len) return error.BadVisualSpan;
