@@ -132,14 +132,22 @@ for v in $voices; do tts "preview_$v" "$DRAMA" "$v"; done
 
 # typed decisions, when a decision model is configured: a System One request under the name SideBud's client sends
 # (jev-latest), answered by the default decision model with an offered choice and probabilities that sum to 1. It
-# loads the model on demand, so the voice turns below run with shadow decisions on (voice.shadow_decisions).
+# loads the model on demand when there is spare room, so the voice turns below run with shadow decisions on
+# (voice.shadow_decisions). The model is spare_room_only: when it fits only by unloading a kept model it is refused
+# (503 insufficient_memory naming spare_room_only) and the warm set must be intact; anything else fails.
 if jq -e --arg id "$DECIDE" '[.data[].id] | index($id)' <<< "$m" > /dev/null; then
   t=$(now)
   r=$(post /v1/systemone '{"model":"jev-latest","state":{"user_said":"draw me a red fox in the snow"},"questions":{"route":{"type":"choice","instructions":"Which one action should the assistant take for the user'"'"'s words?","criteria":{"generate_image":"Make a picture from a text description.","generate_video":"Make a short video clip.","reply":"Answer in speech; no tool is needed."}}}}' 600)
   echo "$r" > "$out/decide.json"
   ok=$(jq -e --arg id "$DECIDE" '.model == $id and (.answers.route.choice | IN("generate_image", "generate_video", "reply"))
     and ((([.answers.route.probabilities[]] | add) - 1) as $d | ($d < 0.02 and $d > -0.02))' <<< "$r" > /dev/null 2>&1 && echo true || echo false)
-  record decide "$ok" "$(secs $t)" "$(jq -c '{model, choice: .answers.route.choice, p: .answers.route.probabilities}' <<< "$r" 2> /dev/null || head -c 200 <<< "$r")"
+  detail=$(jq -c '{model, choice: .answers.route.choice, p: .answers.route.probabilities}' <<< "$r" 2> /dev/null || head -c 200 <<< "$r")
+  if [ "$ok" = false ] && jq -e '.error.type == "insufficient_memory" and (.error.message | test("spare_room_only"))' <<< "$r" > /dev/null 2>&1; then
+    kept=$(curl -s -m 10 "$url/v1/tools" | jq -r '[.data[] | select(.keep_loaded) | "\(.id)=\(.state)"] | join(" ")')
+    ! grep -qv '=ready' <<< "$(tr ' ' '\n' <<< "$kept")" && ok=true
+    detail="refused without unloading a kept model (no spare room): $kept"
+  fi
+  record decide "$ok" "$(secs $t)" "$detail"
 fi
 
 # voice NAME OUT_SUBDIR DRIVER_ARGS...: the e2e driver over /v1/realtime; its checks recorded as NAME: ...

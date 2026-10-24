@@ -149,11 +149,11 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
 }
 
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8 };
+    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8 };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
+        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });

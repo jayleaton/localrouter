@@ -45,7 +45,7 @@
    "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}},
   {"id": "knowline-4b", "kind": "decision", "name": "KnowLine-4B Gen5.5 (typed decisions, System One shape; bf16, transformers)",
    "engine": "openai_server", "weights": "@J@/models/decide/knowline-4b-gen5.5",
-   "resident_bytes": 13290209280, "working_bytes": 0, "keep_loaded": false, "priority": 5, "idle_ttl_s": 600,
+   "resident_bytes": 13290209280, "working_bytes": 0, "keep_loaded": false, "spare_room_only": true, "priority": 5, "idle_ttl_s": 600,
    "load_timeout_s": 300, "generate_timeout_s": 60,
    "options": {"server": ["@J@/venvs/decide/bin/python", "-I", "@SRC@/tools/decide/knowline/serve.py", "{weights}",
                           "--port", "{port}", "--served-model-name", "{id}"],

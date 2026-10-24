@@ -354,7 +354,12 @@ fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again
 idle for a couple of seconds: if it does not fit, it unloads idle tools of lower priority, as a request would (never one
 of its own priority or above), so a video job's model gives the room back right after the job rather than at its idle
 TTL. It can still be evicted by a request that needs the room, and `POST /v1/tools/{id}/unload` (or `release`) keeps it down until it is next used or loaded.
-`GET /v1/tools` shows `priority`, `keep_loaded` and `capabilities`.
+`spare_room_only` (default false) marks an on-demand model nothing waits on, such as the decision model behind the
+voice loop's shadow decisions: it loads only into spare room, never unloading a `keep_loaded` tool (idle tools that are
+not kept may still go) and leaving room for the kept tools' working bytes. A request it cannot serve so is refused
+with a 503 `insufficient_memory` naming `spare_room_only`, before anything is unloaded; the shadow decisions then skip
+the turns. An operator can still make room for it on purpose with MCP `reserve_for`.
+`GET /v1/tools` shows `priority`, `keep_loaded`, `spare_room_only` and `capabilities`.
 
 ## Errors
 
