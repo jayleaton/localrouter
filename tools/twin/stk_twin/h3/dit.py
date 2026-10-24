@@ -153,7 +153,8 @@ class Layout:
         idx = np.empty(self.S, dtype=np.int32)
         a0, a1 = self.audio_rows
         idx[: self.L] = t_row[t_v] * 3 + (self.text_tags if self.text_tags is not None else 1)
-        idx[self.L:a0] = t_row[t_cond] * 3
+        if self.first_frame:
+            idx[self.L:a0] = t_row[t_cond] * 3  # the first frame's rows (none in text to video)
         idx[a0:a1] = t_row[t_a] * 3 + 2
         idx[a1:] = t_row[t_v] * 3 + 0
         return unique_t, idx, t_row[t_v], t_row[t_a]
