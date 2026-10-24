@@ -255,9 +255,9 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     try w.print("{{\"h3_bench\": {{\"gpu\": \"sm_{d}{d}\", \"size\": \"{d}x{d}\", \"frames\": {d}, \"steps\": {d}, \"unload_te\": {}, \"runs\": {d}, " ++
         "\"shapes\": {{\"latent_t\": {d}, \"latent_grid\": \"{d}x{d}\", \"audio_t\": {d}, \"text_tokens\": {d}, \"video_tokens\": {d}, \"audio_tokens\": {d}, \"seq_tokens\": {d}}}, " ++
         "\"load_ms\": {d}, \"weights_bytes\": {d}, \"weights\": {{\"dit\": {d}, \"te\": {d}, \"vae_audio\": {d}, \"vae_video\": {d}}}, ", .{
-        p.major,       p.minor,    o.width, o.height, sh.frames,  o.steps,       o.unload_te, o.runs,
-        sh.latent_t,   sh.lh,      sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
-        load_ms,       p.weights_bytes, w_dit, w_te,   w_aud,    w_vid,
+        p.major,     p.minor,         o.width, o.height,   sh.frames,   o.steps,                                           o.unload_te,              o.runs,
+        sh.latent_t, sh.lh,           sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
+        load_ms,     p.weights_bytes, w_dit,   w_te,       w_aud,       w_vid,
     });
     try w.print("\"load_phases_ms\": {s}, ", .{try std.json.Stringify.valueAlloc(a, p.load, .{})}); // where load_ms went
     try w.writeAll("\"first_ms\": ");
