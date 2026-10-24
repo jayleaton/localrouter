@@ -409,7 +409,10 @@ export class Broker {
     if (this.worked(task) > this.limits.timeoutMs) return deny('It was taking too long.')
     task.authorized += 1
     const obs = request.observation
-    if (this.isOwn(obs.app) || (act.kind === 'surface' && this.isOwn(act.name))) return deny(OWN_TARGET)
+    // Bringing an app forward acts on the app it brings, not on the one in front: leaving LocalRouter for Chrome is
+    // the usual case (the person talks to Jarvis in LocalRouter's window). Anything done on screen acts on the app in
+    // front, so LocalRouter there is refused, as is bringing LocalRouter itself forward.
+    if (act.kind === 'surface' ? this.isOwn(act.name) : this.isOwn(obs.app)) return deny(OWN_TARGET)
     let d = policy.screen(act)
     let judged: number | null = null
     if (d.verdict === 'judge') {

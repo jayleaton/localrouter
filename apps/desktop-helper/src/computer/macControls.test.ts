@@ -1,7 +1,7 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/macControls.test.ts), reused in LocalRouter with the owner's permission.
 import { describe, expect, it } from 'vitest'
-import { ControlError, MacControls, parseControl } from './macControls.ts'
-import type { CommandRunner } from './macControls.ts'
+import { ControlError, MacControls, parseControl, plistNames, resolveInstalled } from './macControls.ts'
+import type { CommandRunner, InstalledApp } from './macControls.ts'
 
 type Call = { file: string; args: string[] }
 
@@ -193,5 +193,53 @@ describe('parseControl', () => {
         expect((error as ControlError).code).toBe('invalid')
       }
     }
+  })
+})
+
+// A Mac like the owner's: what the scan finds in /Applications and /System/Applications (JJ's #79 test asked for "Chrome").
+const MAC: InstalledApp[] = [
+  'Google Chrome', 'Safari', 'Mail', 'Messages', 'Notes', 'Music', 'System Settings', 'Visual Studio Code', 'Microsoft Word',
+  'Microsoft Excel', 'Microsoft Outlook', 'Adobe Photoshop 2026', 'zoom.us', 'iTerm', 'Finder', 'Slack', 'Spotify', 'Calendar',
+].map((name, i) => ({ id: `a${i}`, name }))
+
+describe('open_app: the app a person means', () => {
+  it('“Chrome” opens Google Chrome (the #79 failure), on the real control path', async () => {
+    const { controls, calls } = harness()
+    expect(await controls.run({ kind: 'open_app', app: 'Chrome' })).toEqual({ done: 'Opened Google Chrome.' })
+    expect(calls).toEqual([{ file: 'open', args: ['-a', 'Google Chrome'] }])
+  })
+
+  it.each([
+    ['chrome', 'Google Chrome'], ['Google chrome', 'Google Chrome'], ['VS Code', 'Visual Studio Code'], ['vscode', 'Visual Studio Code'],
+    ['Code', 'Visual Studio Code'], ['mail', 'Mail'], ['Email', 'Mail'], ['Word', 'Microsoft Word'], ['excel', 'Microsoft Excel'],
+    ['settings', 'System Settings'], ['System Preferences', 'System Settings'], ['iTunes', 'Music'], ['zoom', 'zoom.us'],
+    ['photoshop', 'Adobe Photoshop 2026'], ['googlechrome', 'Google Chrome'], ['SLACK', 'Slack'], ['spot', 'Spotify'],
+  ])('“%s” is %s', (asked, app) => {
+    expect(resolveInstalled(asked, MAC)).toBe(app)
+  })
+
+  it('an alias only opens what is installed, preferring the usual one', () => {
+    const canaryOnly = [{ id: 'c', name: 'Google Chrome Canary' }, { id: 's', name: 'Safari' }]
+    expect(resolveInstalled('chrome', canaryOnly)).toBe('Google Chrome Canary')
+    expect(resolveInstalled('chrome', [...canaryOnly, { id: 'g', name: 'Google Chrome' }])).toBe('Google Chrome')
+    expect(() => resolveInstalled('vs code', [{ id: 's', name: 'Safari' }])).toThrow(/isn't installed/)
+  })
+
+  it('asks when several apps match equally, and never guesses', () => {
+    const e = (() => { try { resolveInstalled('microsoft', MAC) } catch (error) { return error } })() as ControlError
+    expect(e).toBeInstanceOf(ControlError)
+    expect(e.code).toBe('ambiguous')
+    expect(e.message).toMatch(/Which one do you mean: .*Microsoft Excel.*Microsoft Word/)
+  })
+
+  it('bundle and display names from Info.plist count too', () => {
+    const plist = '<?xml version="1.0"?><plist><dict><key>CFBundleDisplayName</key><string>Code</string><key>CFBundleName</key><string>Code</string></dict></plist>'
+    expect(plistNames(plist)).toEqual(['Code'])
+    expect(plistNames('bplist00…')).toEqual([])
+    expect(resolveInstalled('Teams for work', [{ id: 't', name: 'Microsoft Teams (work or school)', aliases: ['Teams for work'] }])).toBe('Microsoft Teams (work or school)')
+  })
+
+  it('a made-up name is still refused without running anything', () => {
+    expect(() => resolveInstalled('Evil"; do shell script "rm', MAC)).toThrow(/isn't installed/)
   })
 })

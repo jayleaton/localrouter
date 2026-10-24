@@ -5,10 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ComputerUse, ComputerUseRuns } from './computer/controller.ts'
 import type { Grant } from './computer/controller.ts'
 import type { Answers, Question } from './computer/decisions.ts'
-import type { Point } from './computer/types.ts'
+import type { Point, PointerReading } from './computer/types.ts'
 import { fakeMac } from './fake.ts'
 import { silentLogger } from './log.ts'
-import { ControlSocket, LocalStop, POLL_MS, STOPPED_IN_CORNER, TAKEN_OVER, notRunning, sendControl } from './stop.ts'
+import { ControlSocket, LocalStop, POLL_MS, STOPPED_IN_CORNER, TAKEN_OVER, TAKEOVER_POINTS, notRunning, sendControl } from './stop.ts'
 import type { ControlCommand, Schedule } from './stop.ts'
 
 /** A schedule the test ticks by hand. */
@@ -154,6 +154,96 @@ describe('LocalStop', () => {
   })
 })
 
+/** A pointer read on each poll, a clock, and a watch; `polls` runs the 250 ms polls the way the schedule does. */
+function polled(start: PointerReading = { x: 500, y: 400 }) {
+  let at: PointerReading = start
+  let t = 1_000_000
+  const timer = manual()
+  const aborted: string[] = []
+  const stop = new LocalStop({ pointer: async () => at, schedule: timer.schedule, now: () => t, log: silentLogger })
+  const watch = stop.watch((reason) => aborted.push(reason))
+  const poll = async (point: PointerReading) => {
+    at = point
+    t += POLL_MS
+    timer.tick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  return { watch, aborted, poll, now: () => t }
+}
+
+describe('LocalStop: only a deliberate move or a click is a takeover', () => {
+  it('a hand resting on the trackpad (±3 points of jitter) never stops it', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    for (let i = 0; i < 80; i++) await poll({ x: 500 + (i % 2 ? 3 : -3), y: 400 + (i % 3) - 1 })
+    expect(aborted).toEqual([])
+  })
+
+  it('slow drift (2 points a reading, 20 s) does not add up to a takeover', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    for (let i = 1; i <= 80; i++) await poll({ x: 500 + 2 * i, y: 400 })
+    expect(aborted).toEqual([])
+  })
+
+  it('one stray reading is not a move; the same distance held for two readings is', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    await poll({ x: 500 + TAKEOVER_POINTS + 10, y: 400 })
+    await poll({ x: 500, y: 400 })
+    expect(aborted).toEqual([])
+    await poll({ x: 560, y: 430 })
+    expect(aborted).toEqual([])
+    await poll({ x: 600, y: 450 })
+    expect(aborted).toEqual([TAKEN_OVER])
+  })
+
+  it('a move of under 24 points is not one', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    await poll({ x: 515, y: 410 })
+    await poll({ x: 518, y: 412 })
+    await poll({ x: 518, y: 412 })
+    expect(aborted).toEqual([])
+  })
+
+  it('the helper’s own moves and clicks never count: it reports where it left the pointer', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    // A click across the screen, as the Mac backend does it (move, down, up), then the pointer read there.
+    watch.moving()
+    await poll({ x: 1200, y: 90, sinceClickS: 0 })
+    watch.left({ x: 1200, y: 90 })
+    await poll({ x: 1200, y: 90, sinceClickS: 0.3 })
+    await poll({ x: 1201, y: 91, sinceClickS: 0.55 })
+    // Scrolling moves it to the window's middle; a Dock click leaves it somewhere unknown.
+    watch.moving()
+    watch.left({ x: 700, y: 500 })
+    await poll({ x: 700, y: 500, sinceClickS: 2 })
+    watch.moving()
+    watch.left(null)
+    await poll({ x: 640, y: 1050, sinceClickS: 0.1 })
+    await poll({ x: 641, y: 1050, sinceClickS: 0.35 })
+    expect(aborted).toEqual([])
+  })
+
+  it('a click after the helper last acted is the person taking over, wherever the pointer is', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.left({ x: 500, y: 400 })
+    await poll({ x: 500, y: 400, sinceClickS: 5 })
+    await poll({ x: 500, y: 400, sinceClickS: 5.25 })
+    await poll({ x: 502, y: 401, sinceClickS: 0.1 })
+    expect(aborted).toEqual([TAKEN_OVER])
+  })
+
+  it('the corner still stops at once, even while the helper moves the pointer', async () => {
+    const { watch, aborted, poll } = polled()
+    watch.moving()
+    await poll({ x: 1, y: 2 })
+    expect(aborted).toEqual([STOPPED_IN_CORNER])
+  })
+})
+
 describe('ControlSocket', () => {
   const dirs: string[] = []
   afterEach(async () => {
@@ -161,7 +251,7 @@ describe('ControlSocket', () => {
   })
 
   it('answers stop, disable, enable and status on a 0600 socket, and refuses anything else', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'lrd-'))
+    const dir = await mkdtemp(join(tmpdir().length > 40 ? '/tmp' : tmpdir(), 'lrd-')) // Unix socket paths are short
     dirs.push(dir)
     const path = join(dir, 'control.sock')
     const heard: ControlCommand[] = []

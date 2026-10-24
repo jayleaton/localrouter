@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { Grant } from '../../../desktop-helper/src/computer/controller.ts'
 import type { Card } from './broker.ts'
-import { DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
+import { Broker, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
+import type { Answers, Question } from '../../../desktop-helper/src/computer/decisions.ts'
+import type { Observation, ScreenAction } from '../../../desktop-helper/src/computer/types.ts'
+import { MemoryAudit } from './audit.ts'
+import { TestGate } from './testing.ts'
 import { fakeBroker } from './testing.ts'
 
 // The fake Mac (apps/desktop-helper/src/fake.ts) shows Notes: c0 Search, c1 New Note, c2 Delete, c3 Send, c4.. the notes.
@@ -195,5 +199,63 @@ describe('the executor broker: final authority on this computer', () => {
     if (!started.ok) throw new Error(started.error)
     expect((await started.finished).status).toBe('done')
     expect(JSON.stringify(audit.lines)).not.toContain('"trip"')
+  })
+})
+
+/**
+ * JJ's #79 failure: he talks to Jarvis in LocalRouter's own window, so LocalRouter is in front when a task starts,
+ * and "switch to Google Chrome" was refused as acting on LocalRouter's windows.
+ */
+function fromLocalRouter(pick: { surface: string; app?: string; next: string[] }) {
+  let front = 'LocalRouter'
+  const actions: ScreenAction[] = []
+  const brought: string[] = []
+  const screens: Record<string, Observation> = {
+    LocalRouter: { backend: 'desktop', app: 'LocalRouter', title: 'Jarvis', controls: [{ ref: 'mic', role: 'button', label: 'Start a call' }] },
+    'Google Chrome': { backend: 'desktop', app: 'Google Chrome', title: 'Inbox (3) - Gmail', url: 'https://mail.google.com/', controls: [{ ref: 'tab1', role: 'tab', label: 'Primary' }] },
+  }
+  const decider = {
+    async ask(_state: unknown, q: Record<string, Question>): Promise<Answers> {
+      const out: Answers = {}
+      if (q.surface) out.surface = { type: 'choice', choice: pick.surface, probability: 0.9 }
+      if (q.app && pick.app) {
+        const c = q.app.type === 'choice' ? Object.entries(q.app.criteria).find(([, name]) => name === pick.app)?.[0] : undefined
+        if (c) out.app = { type: 'choice', choice: c, probability: 0.9 }
+      }
+      if (q.next) out.next = { type: 'choice', choice: pick.next.shift() ?? 'stuck', probability: 0.9 }
+      return out
+    },
+  }
+  const desktop = { kind: 'desktop' as const, observe: async () => screens[front], act: async (a: ScreenAction) => void actions.push(a) }
+  const dock = { list: async () => ['LocalRouter', 'Google Chrome', 'Mail'], activate: async (name: string) => { brought.push(name); if (screens[name]) front = name } }
+  const broker = new Broker({ executorId: 'exec_t', name: 'JJ’s MacBook', machine: { desktop, tabs: null, dock, apps: null, controls: { run: async () => ({ done: 'ok' }) } }, decider, audit: new MemoryAudit(), gate: new TestGate(), minDwellMs: 0, settleMs: 1, refocusMs: 0, ownApps: ['LocalRouter', 'Electron'] })
+  return { broker, actions, brought }
+}
+
+describe('LocalRouter in front: leaving it is fine, acting on it is not', () => {
+  it('switching from LocalRouter to Google Chrome is allowed, and the task works there', async () => {
+    const { broker, actions, brought } = fromLocalRouter({ surface: 'app', app: 'Google Chrome', next: ['c0', 'done'] })
+    const started = broker.startUse(app, 'open my Gmail primary tab in Chrome', null)
+    if (!started.ok) throw new Error(started.error)
+    const outcome = await started.finished
+    expect(outcome).toMatchObject({ status: 'done' })
+    expect(brought).toEqual(['Google Chrome'])
+    expect(actions).toEqual([{ kind: 'click', ref: 'tab1' }])
+  })
+
+  it('acting on LocalRouter’s own window is still refused', async () => {
+    const { broker, actions } = fromLocalRouter({ surface: 'current', next: ['c0'] })
+    const started = broker.startUse(app, 'press the button', null)
+    if (!started.ok) throw new Error(started.error)
+    expect(await started.finished).toMatchObject({ status: 'blocked', reason: OWN_TARGET })
+    expect(actions).toEqual([])
+  })
+
+  it('bringing LocalRouter itself forward is refused', async () => {
+    const { broker, brought } = fromLocalRouter({ surface: 'app', app: 'LocalRouter', next: [] })
+    const started = broker.startUse(app, 'go to LocalRouter', null)
+    if (!started.ok) throw new Error(started.error)
+    expect(await started.finished).toMatchObject({ status: 'blocked', reason: OWN_TARGET })
+    expect(brought).toEqual([])
   })
 })

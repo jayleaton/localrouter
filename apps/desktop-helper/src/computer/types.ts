@@ -11,6 +11,9 @@
 /** A point in global, top-left-origin screen points (the space AX positions and CGEvent locations use). */
 export type Point = { x: number; y: number }
 
+/** The pointer as the local stop reads it: where it is, and how long ago the left button last went down, if known. */
+export type PointerReading = Point & { sinceClickS?: number }
+
 /** One control on screen that can be acted on. */
 export type ScreenControl = {
   /** The backend's handle for it, valid until the next observation. */
