@@ -1,5 +1,5 @@
 //! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
-//! /v1/chat/completions (`chat.zig`), /v1/systemone (`decide.zig`, typed decisions)
+//! /v1/chat/completions (`chat.zig`), /v1/responses (`responses.zig`, the Responses API over the chat path), /v1/systemone (`decide.zig`, typed decisions)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
 //! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
 //! `capabilities.zig`), and /mcp
@@ -18,6 +18,7 @@ const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
 const speech = @import("speech.zig");
 const chat = @import("chat.zig");
+const responses = @import("responses.zig");
 const decide = @import("decide.zig");
 const realtime = @import("realtime.zig");
 const pair = @import("pair.zig");
@@ -72,6 +73,8 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a, caller.owner());
     if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype, caller.owner());
     if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a, caller.owner());
+    if (m == .POST and eql(p, "/v1/responses")) return responses.create(app, req, a, caller.owner());
+    if (std.mem.startsWith(u8, p, "/v1/responses/")) return responses.stored(req, a);
     if (m == .POST and eql(p, "/v1/systemone")) return decide.systemOne(app, req, a, caller.owner());
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..], caller);
@@ -95,7 +98,7 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
     if (eql(p, "/mcp")) return .mcp;
     if (eql(p, "/v1/realtime")) return .realtime;
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/skills/model-manager"))) return .read;
-    if (eql(p, "/v1/chat/completions")) return .inference;
+    if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
     if (eql(p, "/v1/systemone")) return .decisions;
     if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or starts(u8, p, "/v1/audio/")) return .media;
     if (starts(u8, p, "/v1/videos/") or starts(u8, p, "/v1/jobs/") or starts(u8, p, "/v1/files/")) return .owned;
@@ -113,6 +116,7 @@ test "every route class needs its scope; only the open routes need none; an unna
         .{ .GET, "/v1/tools", .read },               .{ .GET, "/v1/skills/model-manager", .read },
         .{ .POST, "/v1/tools/release", .manage },    .{ .POST, "/v1/tools/x/load", .manage },
         .{ .POST, "/v1/tools/x/unload", .manage },   .{ .POST, "/v1/chat/completions", .inference },
+        .{ .POST, "/v1/responses", .inference },     .{ .GET, "/v1/responses/resp_1", .inference },
         .{ .POST, "/v1/systemone", .decisions },     .{ .POST, "/v1/images/generations", .media },
         .{ .POST, "/v1/images/edits", .media },      .{ .POST, "/v1/videos", .media },
         .{ .POST, "/v1/audio/speech", .media },      .{ .POST, "/v1/audio/transcriptions", .media },

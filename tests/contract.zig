@@ -77,8 +77,16 @@ test "capabilities: the contract version, and every surface it lists answers as 
         const status = g.object.get("status").?.string;
         try testing.expect(std.mem.eql(u8, status, "coming") or std.mem.eql(u8, status, "unsupported"));
     }
-    for ([_][]const u8{ "/v1/responses", "/v1/embeddings", "/v1/completions", "/v1/audio/translations" }) |p|
+    for ([_][]const u8{ "/v1/embeddings", "/v1/completions", "/v1/audio/translations" }) |p|
         try testing.expectEqual(std.http.Status.not_found, (try d.call(a, .POST, p, "{}")).status);
+
+    // Responses is served, stateless: a request without input is the route's own 400, not a 404.
+    try testing.expect(get(caps, &.{ "responses", "available" }).bool);
+    try testing.expect(!get(caps, &.{ "responses", "store" }).bool);
+    try testing.expectEqualStrings("/v1/responses", get(caps, &.{ "responses", "path" }).string);
+    const no_input = try d.call(a, .POST, "/v1/responses", "{}");
+    try testing.expectEqual(std.http.Status.bad_request, no_input.status);
+    try testing.expectEqualStrings("input", get(try std.json.parseFromSliceLeaky(Value, a, no_input.body, .{}), &.{ "error", "param" }).string);
 }
 
 test "capabilities with pairing required: readable without a token, and each guarded route refuses one without it" {
@@ -92,11 +100,14 @@ test "capabilities with pairing required: readable without a token, and each gua
     const caps = try std.json.parseFromSliceLeaky(Value, a, r.body, .{});
     try testing.expect(get(caps, &.{ "auth", "pairing_required" }).bool);
     var scope_of_chat: []const u8 = "";
-    for (get(caps, &.{ "auth", "guarded" }).array.items) |g| if (std.mem.eql(u8, g.object.get("route").?.string, "/v1/chat/completions")) {
-        scope_of_chat = g.object.get("scope").?.string;
-    };
+    var scope_of_responses: []const u8 = "";
+    for (get(caps, &.{ "auth", "guarded" }).array.items) |g| {
+        if (std.mem.eql(u8, g.object.get("route").?.string, "/v1/chat/completions")) scope_of_chat = g.object.get("scope").?.string;
+        if (std.mem.eql(u8, g.object.get("route").?.string, "/v1/responses")) scope_of_responses = g.object.get("scope").?.string;
+    }
     try testing.expectEqualStrings("inference", scope_of_chat);
-    for ([_]struct { std.http.Method, []const u8 }{ .{ .POST, "/v1/chat/completions" }, .{ .POST, "/v1/images/generations" }, .{ .POST, "/v1/systemone" }, .{ .GET, "/v1/models" }, .{ .POST, "/v1/tools/release" }, .{ .POST, "/mcp" } }) |c|
+    try testing.expectEqualStrings("inference", scope_of_responses);
+    for ([_]struct { std.http.Method, []const u8 }{ .{ .POST, "/v1/chat/completions" }, .{ .POST, "/v1/responses" }, .{ .POST, "/v1/images/generations" }, .{ .POST, "/v1/systemone" }, .{ .GET, "/v1/models" }, .{ .POST, "/v1/tools/release" }, .{ .POST, "/mcp" } }) |c|
         try testing.expectEqual(std.http.Status.unauthorized, (try d.call(a, c[0], c[1], if (c[0] == .POST) "{}" else null)).status);
     for (get(caps, &.{ "auth", "open" }).array.items) |p| if (!std.mem.eql(u8, p.string, "/v1/pair"))
         try testing.expect((try d.call(a, .GET, p.string, null)).status != .unauthorized);

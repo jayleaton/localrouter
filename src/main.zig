@@ -91,6 +91,7 @@ test {
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");
     _ = @import("api/chat.zig");
+    _ = @import("api/responses.zig");
     _ = @import("api/decide.zig");
     _ = @import("tool/systemone.zig");
     _ = @import("tool/upstream.zig");

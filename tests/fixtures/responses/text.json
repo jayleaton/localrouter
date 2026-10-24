@@ -1,0 +1,108 @@
+{
+  "about": "A full text conversation, replayed as a stateless Responses client does: each turn sends instructions, every earlier item (its own messages and the previous outputs, reasoning included, as returned) and the new message, with store false. Codex's shape: developer messages with several input_text parts, ids on input items, include reasoning.encrypted_content, reasoning summary auto. expect.input_tokens is the number of chat messages the turn became (the fake server counts messages as prompt tokens).",
+  "request": {
+    "instructions": "You are a terse assistant.",
+    "store": false,
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "reasoning": {
+      "effort": "low",
+      "summary": "auto"
+    },
+    "parallel_tool_calls": true,
+    "prompt_cache_key": "fixture",
+    "client_metadata": {
+      "session_id": "fixture"
+    }
+  },
+  "turns": [
+    {
+      "input": [
+        {
+          "type": "message",
+          "id": "msg_dev_1",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Answer briefly. "
+            },
+            {
+              "type": "input_text",
+              "text": "No markdown."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "id": "msg_user_1",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "message"
+        ],
+        "reasoning": "thinking about hello",
+        "text": "echo: hello",
+        "input_tokens": 3
+      }
+    },
+    {
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "and again"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "types": [
+          "reasoning",
+          "message"
+        ],
+        "reasoning": "thinking about and again",
+        "text": "echo: and again",
+        "input_tokens": 5
+      }
+    },
+    {
+      "input": [
+        {
+          "role": "user",
+          "content": "one two three four"
+        }
+      ],
+      "request": {
+        "max_output_tokens": 3,
+        "reasoning": {
+          "effort": "none"
+        }
+      },
+      "expect": {
+        "status": "incomplete",
+        "incomplete": "max_output_tokens",
+        "types": [
+          "message"
+        ],
+        "text": "echo: one two",
+        "input_tokens": 7
+      }
+    }
+  ]
+}

@@ -14,6 +14,7 @@ work.
 | Discovery | `GET /v1/capabilities` | LocalRouter | [Discovery](#discovery) |
 | Models | `GET /v1/models` | OpenAI, with extensions | [Models](#models-and-model-management) |
 | Chat | `POST /v1/chat/completions` | OpenAI Chat Completions | [Chat](#chat-completions) |
+| Responses | `POST /v1/responses` | OpenAI Responses, stateless | [Responses](#responses) |
 | Voice | `GET /v1/realtime` (WebSocket) | OpenAI Realtime, beta events | [Realtime](#realtime-profile-openai-realtime-beta) |
 | Tools for agents | `POST /mcp`, `localrouter mcp-stdio` | MCP, Streamable HTTP (stateless) | [MCP](#mcp) |
 | Decisions | `POST /v1/systemone` | TypeSafe System One | [Decisions](#decisions) |
@@ -56,6 +57,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `auth` | `scheme` (`bearer`), `pairing_required`, `scopes` (every scope a token can have), `service_scopes`, `legacy_scopes` (either grants every service scope), `harness_scopes` (what a harness is usually issued), `guarded` (route, scope, and `when`: `always` or `pairing_required`), `open` (routes that need no token even with pairing), `jobs_owned` |
 | `models` | `list` (`/v1/models`), the `kinds` and `capabilities` this box's models have |
 | `chat` | `available`, `api` (`chat_completions`), `path`, `models`, `stream`, `stream_usage`, `tools`, `tool_choice`, `response_format`, `reasoning` (the field reasoning arrives in, and how to switch it off), `input` (`text`), `n` (1), `cancel` |
+| `responses` | `available`, `api` (`responses`), `path`, `models`, `stream`, `store` (false), `previous_response_id` (false), `input` (`text`), `items`, `roles`, `tools` (`function`), `tool_choice`, `text_format`, `reasoning` (`effort`, the `summary` values taken, the `item` content type, `encrypted_content`: false), `cancel` |
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
@@ -88,7 +90,7 @@ lists each route's scope, computed from the same table the daemon enforces.
 
 | Scope | Grants |
 | --- | --- |
-| `inference` | `/v1/chat/completions`, `/v1/realtime`, MCP `chat` |
+| `inference` | `/v1/chat/completions`, `/v1/responses`, `/v1/realtime`, MCP `chat` |
 | `media` | images, videos, speech and transcription over HTTP and MCP, and a voice session's picture and video tools |
 | `decisions` | `/v1/systemone`, MCP `decide` |
 | `read` | `/v1/models`, `/v1/tools`, `list_models`, `list_voices` |
@@ -148,8 +150,41 @@ field through. What the model's server refuses comes back as a 400 with its mess
 | Unknown fields | passed to the model's server, which may ignore them: DeepSeek's `thinking: {"type": "disabled"}` is accepted and ignored (measured: the reply still reasons); use `reasoning_effort` |
 | Model names | must be one of `/v1/models` (or omitted for the default); another name, such as `deepseek-chat`, is a 404 listing the chat models |
 
-There is no `/v1/responses`, `/v1/completions` or `/v1/embeddings` (**coming**: Responses, H5 and H6). Harnesses that
-speak only the Responses API (Codex) cannot use the box until then.
+There is no `/v1/completions` or `/v1/embeddings`. Harnesses that speak only the Responses API use
+[`/v1/responses`](#responses).
+
+## Responses
+
+`POST /v1/responses` is OpenAI's Responses API, **stateless**: an adapter in front of the same chat model and server as
+[Chat](#chat-completions), not a second model. The request's items become one Chat Completions request, and the
+completion comes back as a response object. Nothing is stored, so a client sends `store: false` (or leaves it out; the
+response always says `false`) and replays the whole conversation in `input` every turn, the previous outputs included
+as they came back. That is how Codex works. Anything this box cannot do is a 400 with `param` and `code`
+(`unknown_parameter`, `unsupported_parameter`, `unsupported_value`, `unsupported_tool`...) before the model is asked;
+what the model's server refuses (a `reasoning.effort` it does not take, a context overflow) is a 400 with its message,
+as in Chat.
+
+| Feature | Contract |
+| --- | --- |
+| Input | a string (one user message), or items: `message` (`user`, `assistant`, `system`, `developer`; content a string or `input_text` / `output_text` parts), `function_call` `{call_id, name, arguments}`, `function_call_output` `{call_id, output}` (a string or `input_text` parts), and `reasoning` (its `reasoning_text` content, or its summary, goes back to the model). An item without `type` but with `role` is a message. Text only: `input_image`, `input_file`, `input_audio` are refused |
+| Roles | `instructions` is a first `system` message; `developer` and `system` keep their place as `system` messages; an assistant turn (its reasoning, message and calls) is one assistant message |
+| Tools | `function` tools `{name, description, parameters, strict}`, run by the caller; `tool_choice` `none`, `auto`, `required`, `{type: "function", name}`; `parallel_tool_calls`. Hosted tools (`web_search`, `file_search`, `code_interpreter`, `computer_use_preview`, `image_generation`, `mcp`, `local_shell`...), `custom` (freeform) and `namespace` tools are refused |
+| Output | items in the order the model wrote them: `reasoning` (`content: [{type: "reasoning_text"}]`, `summary: []`), `message` (`output_text`), then one `function_call` a call, with the model server's `call_id`. The caller runs each call and sends a `function_call_output` with that `call_id` |
+| Reasoning | `reasoning.effort` is the model server's `reasoning_effort` (Qwen on TensorFold: `none` switches thinking off; `minimal` to `max` think; other values are its 400). Never in output text. `reasoning.summary` `auto` or `none`: no summary is made; `concise` and `detailed` are refused. `include: ["reasoning.encrypted_content"]` is accepted: reasoning is never encrypted, so the item has no `encrypted_content` and replays from its `reasoning_text`. An item with another provider's `encrypted_content` is refused |
+| Structured output | `text.format` `text`, `json_object`, `json_schema` `{name, schema, strict, description}`; `text.verbosity` `medium` only |
+| Sampling, limits | `temperature`, `top_p`; `max_output_tokens` (reasoning included; default 4096) cuts the reply short with `status: "incomplete"`, `incomplete_details.reason: "max_output_tokens"` |
+| Usage | `usage` `{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens, total_tokens}` from the model's server |
+| Echoed | `instructions`, `tools`, `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`, `max_output_tokens`, `reasoning`, `text`, `metadata`; `store: false`, `background: false`, `truncation: "disabled"`, `previous_response_id: null` |
+| Accepted, unused | `user`, `safety_identifier`, `prompt_cache_key`, `prompt_cache_retention`, `client_metadata`, `service_tier` `auto` / `default`, `stream_options.include_obfuscation` |
+| Refused | `previous_response_id`, `conversation`, `prompt`, `store: true`, `background: true`, `truncation: "auto"`, `top_logprobs`, `max_tool_calls`, `item_reference` items, other `include` values, any field not listed here (`unknown_parameter`) |
+| Streaming | **coming** (H6): `stream: true` is refused for now |
+| Stored responses | none: `GET`, `DELETE` and `cancel` under `/v1/responses/{id}` are 404 |
+| Cancel | close the connection; the model stays loaded |
+| Model names | as in Chat: one of `/v1/models`, or omitted for the default; another is a 404 |
+
+`tests/fixtures/responses/` holds a whole text conversation and a whole function-call conversation (two parallel calls
+included) in Codex's request shape; `tests/responses.zig` replays them turn by turn, sending each turn's output items
+back as they came.
 
 ## Realtime profile `openai-realtime-beta`
 
@@ -282,7 +317,8 @@ approvals and the budgets on the controlled computer itself, and offers them to 
 
 | Feature | Status |
 | --- | --- |
-| Responses API (`/v1/responses`) | coming (H5, H6) |
+| Responses: stored state (`previous_response_id`, `conversation`, `store: true`, `/v1/responses/{id}`), background mode; streaming (coming: H6) | unsupported |
+| Responses: hosted, `custom` and `namespace` tools; reasoning summaries and encrypted reasoning; images, files and audio in input; log probabilities | unsupported |
 | Realtime GA schema, WebRTC, ephemeral keys, `semantic_vad`, audio formats other than pcm16 24 kHz | unsupported |
 | Images or audio in chat messages; `n` > 1; DeepSeek's `thinking` field (ignored) | unsupported |
 | The daemon's own https output URLs as inputs, behind a TLS proxy | unsupported |
