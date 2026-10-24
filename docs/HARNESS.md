@@ -55,7 +55,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `contract` | this document's version (a date). A change to a documented shape changes the date; an addition a client may ignore does not |
 | `server` | `name`, `version`, `machine` |
 | `auth` | `scheme` (`bearer`), `pairing_required`, `scopes` (every scope a token can have), `service_scopes`, `legacy_scopes` (either grants every service scope), `harness_scopes` (what a harness is usually issued), `guarded` (route, scope, and `when`: `always` or `pairing_required`), `open` (routes that need no token even with pairing), `jobs_owned` |
-| `models` | `list` (`/v1/models`), the `kinds` and `capabilities` this box's models have |
+| `models` | `list` (`/v1/models`), the `kinds` and `capabilities` this box's models have, `licenses` (`[{id, license}]`, `license` as `/v1/models` gives it, omitted when unknown) |
 | `chat` | `available`, `api` (`chat_completions`), `path`, `models`, `stream`, `stream_usage`, `tools`, `tool_choice`, `response_format`, `reasoning` (the field reasoning arrives in, and how to switch it off), `input` (`text`), `n` (1), `cancel` |
 | `responses` | `available`, `api` (`responses`), `path`, `models`, `stream`, `store` (false), `previous_response_id` (false), `input` (`text`), `items`, `roles`, `tools` (`function`), `tool_choice`, `text_format`, `reasoning` (`effort`, the `summary` values taken, the `item` content type, `encrypted_content`: false), `events` (what a stream sends), `cancel` |
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
@@ -114,7 +114,9 @@ With pairing off every route answers whoever reaches the daemon. Either way keep
 `GET /v1/models` is OpenAI's list with LocalRouter's fields: `kind` (`chat`, `image`, `video`, `speech`,
 `transcription`, `decision`), `capabilities`, `default_for`, `running`, `resident_bytes`, `qualified` (false: refused
 with a 503 until the operator qualifies it on this GPU), and, for speech models, `voices`, `default_voice`, `presets`,
-`speed`, `max_input_chars`, `stream`, `references`; for transcription, `max_audio_s`. Model ids are stable for a
+`speed`, `max_input_chars`, `stream`, `references`, `instructions`; for transcription, `max_audio_s`. `license`, when the config or
+the engine states one, is the weights' licence (`name`, `url`, `use`, `commercial`, `excluded_regions`, `notice`);
+LocalRouter informs and does not enforce it ([AGENTS.md](AGENTS.md#licences)). Model ids are stable for a
 deployment; a request without `model` goes to the model whose `default_for` lists the capability it needs.
 
 The scheduler decides what is loaded. A harness may ask, never insist:
@@ -141,6 +143,7 @@ field through. What the model's server refuses comes back as a 400 with its mess
 | Messages | `system`, `user`, `assistant` (with `tool_calls`), `tool` (`tool_call_id`). Text only: image or audio parts are a 400 |
 | Tools | OpenAI function tools; `tool_choice` `none`, `auto`, `required` or `{"type":"function","function":{"name"}}`; `parallel_tool_calls`. Calls come back as `message.tool_calls` (`delta.tool_calls` when streaming) with `finish_reason: "tool_calls"`; the caller runs them and sends `tool` messages |
 | Reasoning | arrives in `reasoning_content` (`delta.reasoning_content`), never in `content`. Off: `"reasoning_effort": "none"` or `"chat_template_kwargs": {"enable_thinking": false}` |
+| Thinking budget | a request whose `max_tokens` / `max_completion_tokens` is below the tool's `min_thinking_tokens` (default 1024; `0` never) and that does not choose reasoning (`reasoning_effort`, `reasoning`, `thinking`, `chat_template_kwargs.enable_thinking`) goes with thinking off (the tool's `thinking_off`, default `{"chat_template_kwargs": {"enable_thinking": false}}`, merged into the request). Extension `warnings: [{code, message}]`: `thinking_off_for_small_budget`, and `reasoning_used_budget` when a reply ends at its limit (`finish_reason: "length"`) with no content and no tool call. Streamed: a last chunk `{"choices": [], "warnings": [...]}` before `[DONE]`. No warnings: no member |
 | Structured output | `response_format` `json_object` or `json_schema` |
 | Sampling | `temperature` (0: greedy, the same request gives the same tokens), `top_p`, `top_k`, `min_p`, `seed`, `stop`, `max_tokens` / `max_completion_tokens` (default 4096) |
 | Streaming | `stream: true`: server-sent events `data: {chunk}` then `data: [DONE]`; `stream_options.include_usage` adds a last chunk with `usage` and `choices: []` |
@@ -173,6 +176,7 @@ as in Chat.
 | Reasoning | `reasoning.effort` is the model server's `reasoning_effort` (Qwen on TensorFold: `none` switches thinking off; `minimal` to `max` think; other values are its 400). Never in output text. `reasoning.summary` `auto` or `none`: no summary is made; `concise` and `detailed` are refused. `include: ["reasoning.encrypted_content"]` is accepted: reasoning is never encrypted, so the item has no `encrypted_content` and replays from its `reasoning_text`. An item with another provider's `encrypted_content` is refused |
 | Structured output | `text.format` `text`, `json_object`, `json_schema` `{name, schema, strict, description}`; `text.verbosity` `medium` only |
 | Sampling, limits | `temperature`, `top_p`; `max_output_tokens` (reasoning included; default 4096) cuts the reply short with `status: "incomplete"`, `incomplete_details.reason: "max_output_tokens"` |
+| Thinking budget | as in [Chat](#chat-completions), with `max_output_tokens` and `reasoning.effort`; the `warnings` are the response object's (whole, and in `response.completed` / `response.incomplete`) |
 | Usage | `usage` `{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens, total_tokens}` from the model's server |
 | Echoed | `instructions`, `tools`, `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`, `max_output_tokens`, `reasoning`, `text`, `metadata`; `store: false`, `background: false`, `truncation: "disabled"`, `previous_response_id: null` |
 | Accepted, unused | `user`, `safety_identifier`, `prompt_cache_key`, `prompt_cache_retention`, `client_metadata`, `service_tier` `auto` / `default`, `stream_options.include_obfuscation` |
@@ -301,6 +305,13 @@ request's `Host` and the scheme the client used: `https` when a TLS proxy in fro
 ([AGENTS.md](AGENTS.md#input-urls)); behind `tailscale serve` that includes the daemon's own https output URLs, so send
 an output back as an input in base64.
 
+Every PNG and MP4 output is labelled as machine-generated in its metadata (pixels and samples untouched): PNG tEXt
+`Software`/`Comment` plus an XMP packet with the IPTC `DigitalSourceType` `trainedAlgorithmicMedia`
+(`compositeWithTrainedAlgorithmicMedia` for an edit or a first-frame video); MP4 `comment` and `description` tags in
+`moov/udta/meta/ilst`. The compiled-in engines write it; files from any other tool (a `cmd` adapter) are labelled
+when the job completes, a PNG by inserting the chunks after IHDR, an MP4 by an ffmpeg `-c copy` remux. Details and
+how to read them: [AGENTS.md](AGENTS.md#images-openai-images-api). No C2PA manifest: it needs a signing certificate.
+
 ## Computer control (legacy placement)
 
 Today the box decides each step of a computer task, grants it by its policy and waits for the user's tap on
@@ -325,7 +336,7 @@ approvals and the budgets on the controlled computer itself, and offers them to 
 | Realtime GA schema, WebRTC, ephemeral keys, `semantic_vad`, audio formats other than pcm16 24 kHz | unsupported |
 | Images or audio in chat messages; `n` > 1; DeepSeek's `thinking` field (ignored) | unsupported |
 | The daemon's own https output URLs as inputs, behind a TLS proxy | unsupported |
-| `/v1/audio/translations`; streamed transcription; speech `instructions` and SSE | unsupported |
+| `/v1/audio/translations`; streamed transcription; speech SSE; speech `instructions` for a model whose `instructions` is false | unsupported |
 | `/v1/embeddings`, `/v1/completions`, file uploads to `/v1/files` | unsupported |
 | MCP OAuth, MCP sessions, resources and prompts | unsupported |
 
@@ -359,3 +370,9 @@ harness runs on. Our own reference harness is the desktop app, `apps/companion` 
 mode, its tools and computer control on the user's computer, the `/voice` page as its UI. Moving a user between
 harnesses is export and cancel: export the
 conversation from the old one, cancel its running work, then start the new one; no live session or approval moves.
+
+`tools/harness/nemo_check.sh --url http://<box>:8190` repeats the public "Nemo" review from any machine, as a plain
+HTTP client (bash, curl, jq; `LOCALROUTER_TOKEN` with pairing): models, chat with thinking off, speech, Whisper on that
+speech, one image, an edit (or its clear refusal), a video, then chat again. Models come from `/v1/models` (override
+with `CHAT`, `SPEECH`, `STT`, `IMAGE`, `VIDEO`); each check is timed into `results.jsonl` and `summary.json`, the
+outputs kept beside them, and it exits 0 only when no check failed.

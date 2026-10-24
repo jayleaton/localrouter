@@ -134,7 +134,7 @@ full machine says `insufficient_memory`.
 | `decide` | **`state`**, **`questions`** (choice, noul, score; [AGENTS.md](AGENTS.md#decisions-the-system-one-shape)), `model` | one line a question (`route: generate_image (0.912)`), then the model's reply, checked against the questions. Acts on nothing |
 | `generate_image` | **`prompt`**, `size` (1024x1024), `n`, `seed`, `steps`, `negative_prompt`, `images` (edit inputs), `inline_images`, `wait_s` | PNGs inline and as URLs, the seed; or the job id |
 | `generate_video` | **`prompt`**, `size` (omit: the model's own), `seconds`, `fps`, `seed`, `steps`, `audio`, `image`, `wait_s` | the MP4's URL; or the job id |
-| `synthesize_speech` | **`input`**, `voice`, `model`, `speed`, `preset`, `format` (wav), `seed`, `references`, `inline_audio` | the audio inline and as a URL |
+| `synthesize_speech` | **`input`**, `voice`, `model`, `speed`, `preset`, `instructions` (for a model whose `instructions` is true; Drama 3 speaks them as `[...]` before the text), `format` (wav), `seed`, `references`, `inline_audio` | the audio inline and as a URL |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside `local_files`), `language`, `prompt`, `timestamps`, `temperature`, `wait_s` | the text, then JSON (language, duration, segments, words) |
 | `get_job` | **`id`**, `wait_s` | status, progress, output URLs; a transcript's text |
 | `cancel_job` | **`id`** | the job, cancelled |

@@ -63,7 +63,15 @@ pub const Entry = struct {
     check: ?*const fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool = null,
     /// Fills what the request left to the model (a video's size, 0 x 0) with this model's own choice. See `fill`.
     defaults: ?*const fn (cfg: *const ToolConfig, req: *Request) void = null,
+    /// The licence of the weights this engine runs, for a tool whose config names none. Null: unknown.
+    license: ?config.License = null,
 };
+
+/// The tool's licence: its config's, else its engine's; null when neither states one.
+pub fn license(cfg: *const ToolConfig) ?config.License {
+    if (cfg.license) |l| return l;
+    return if (find(cfg.engine)) |e| e.license else null;
+}
 
 /// The size a video request without one gets when its engine has no `defaults`.
 pub const default_video_size = [2]u32{ 1344, 768 };
@@ -163,6 +171,7 @@ pub const AudioInfo = struct {
     max_input_chars: ?u64 = null,
     stream: ?bool = null,
     references: ?bool = null,
+    instructions: ?bool = null,
     max_audio_s: ?u64 = null,
 };
 
@@ -176,6 +185,7 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .max_input_chars = optionInt(cfg, "max_input_chars", 4096),
             .stream = optionBool(cfg, "stream", false),
             .references = optionBool(cfg, "references", false),
+            .instructions = optionString(cfg, "instructions", "").len > 0,
         },
         .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60) },
         else => .{},
@@ -186,6 +196,57 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
 pub fn speechDefaults(cfg: *const ToolConfig, v: request.Speech) request.Speech {
     var out = v;
     if (out.voice.len == 0) out.voice = optionString(cfg, "default_voice", "");
+    return out;
+}
+
+/// The longest `instructions` a speech request may carry, in characters.
+pub const max_instructions_chars = 500;
+
+/// `input` with a speech request's `instructions` (trimmed; blank: `input` as is) written in, in `a`, as the tool's
+/// `instructions` option says: a template whose one `{s}` is the instructions, such as Drama 3's `"[{s}] "` (a
+/// bracketed direction before the line). It goes after the input's leading white space and `<|...|>` tags (a speaker
+/// tag stays first). Null with `why` written when the tool takes none, the instructions are longer than
+/// `max_instructions_chars`, hold a control character, `<|` or a character of the template (which would end the
+/// direction early), or the text with them is longer than `max_input_chars`.
+pub fn speechInstructions(a: std.mem.Allocator, cfg: *const ToolConfig, input: []const u8, instructions: []const u8, why: *std.Io.Writer) ?[]const u8 {
+    const said = std.mem.trim(u8, instructions, " \t\r\n");
+    if (said.len == 0) return input;
+    const template = optionString(cfg, "instructions", "");
+    const hole = std.mem.indexOf(u8, template, "{s}") orelse {
+        why.print("model '{s}' does not take instructions; send the text to speak as input", .{cfg.id}) catch {};
+        return null;
+    };
+    if ((std.unicode.utf8CountCodepoints(said) catch said.len) > max_instructions_chars) {
+        why.print("instructions take at most {d} characters", .{max_instructions_chars}) catch {};
+        return null;
+    }
+    for (said) |c| if (c < 0x20 or c == 0x7f) {
+        why.writeAll("instructions may not hold a line break or control character") catch {};
+        return null;
+    };
+    if (std.mem.indexOf(u8, said, "<|") != null) {
+        why.writeAll("instructions may not hold '<|' (the model's tag syntax)") catch {};
+        return null;
+    }
+    const outside = [_][]const u8{ template[0..hole], template[hole + 3 ..] };
+    for (outside) |part| for (part) |c| if (c != ' ' and std.mem.indexOfScalar(u8, said, c) != null) {
+        why.print("instructions may not hold '{c}': model '{s}' writes them into the text as {s}", .{ c, cfg.id, template }) catch {};
+        return null;
+    };
+    var at = input.len - std.mem.trimStart(u8, input, " \t\r\n").len;
+    while (std.mem.startsWith(u8, input[at..], "<|")) {
+        const end = std.mem.indexOfPos(u8, input, at + 2, "|>") orelse break;
+        at = end + 2;
+    }
+    const out = std.mem.concat(a, u8, &.{ input[0..at], outside[0], said, outside[1], input[at..] }) catch {
+        why.writeAll("out of memory") catch {};
+        return null;
+    };
+    const max_chars = optionInt(cfg, "max_input_chars", 4096);
+    if ((std.unicode.utf8CountCodepoints(out) catch out.len) > max_chars) {
+        why.print("model '{s}' takes at most {d} characters of input, the instructions written in included", .{ cfg.id, max_chars }) catch {};
+        return null;
+    }
     return out;
 }
 
@@ -216,6 +277,11 @@ pub fn checkDefaults(c: *const config.Config, why: *std.Io.Writer) bool {
             why.print("tool '{s}': max_input_chars must be at most 4096 and min_speed at most max_speed", .{t.id}) catch {};
             return false;
         }
+        const given = if (t.options) |o| (if (o == .object) o.object.get("instructions") else null) else null;
+        if (given) |g| if (g != .string or std.mem.count(u8, g.string, "{s}") != 1) {
+            why.print("tool '{s}': instructions must be a template with one {{s}}, such as \"[{{s}}] \"", .{t.id}) catch {};
+            return false;
+        };
     }
     for (std.enums.values(Capability)) |cap| {
         const id = c.defaults.get(cap) orelse continue;
@@ -443,4 +509,63 @@ test "stream and references need the speech tool to offer them" {
     try std.testing.expectEqualStrings("model 'gated' takes no voice references", w.buffered());
     try std.testing.expectEqual(@as(?bool, true), audioInfo(gated).stream);
     try std.testing.expectEqual(@as(?bool, false), audioInfo(c.tool("plain").?).references);
+}
+
+test "instructions are written into the text by a tool's template, after a leading tag; refused without one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try config.parse(a,
+        \\{"tools": [{"id": "styled", "kind": "speech", "cmd": ["x"], "options": {"instructions": "[{s}] ", "max_input_chars": 26}},
+        \\           {"id": "plain", "kind": "speech", "cmd": ["y"]}]}
+    );
+    const styled = c.tool("styled").?;
+    const plain = c.tool("plain").?;
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try std.testing.expectEqualStrings("[calmly] Hello.", speechInstructions(a, styled, "Hello.", " calmly\n", &w).?);
+    try std.testing.expectEqualStrings(" <|speaker:1|>[calmly] Hi.", speechInstructions(a, styled, " <|speaker:1|>Hi.", "calmly", &w).?);
+    try std.testing.expectEqualStrings("Hi.", speechInstructions(a, plain, "Hi.", "  ", &w).?);
+    try std.testing.expectEqual(@as(?bool, true), audioInfo(styled).instructions);
+    try std.testing.expectEqual(@as(?bool, false), audioInfo(plain).instructions);
+    const long: [max_instructions_chars + 1]u8 = @splat('x');
+    const refusals = [_]struct { tool: *const ToolConfig, said: []const u8, msg: []const u8 }{
+        .{ .tool = plain, .said = "calmly", .msg = "model 'plain' does not take instructions; send the text to speak as input" },
+        .{ .tool = styled, .said = "calm] loud", .msg = "instructions may not hold ']': model 'styled' writes them into the text as [{s}] " },
+        .{ .tool = styled, .said = "calm\nloud", .msg = "instructions may not hold a line break or control character" },
+        .{ .tool = styled, .said = "a <|speaker:2|>", .msg = "instructions may not hold '<|' (the model's tag syntax)" },
+        .{ .tool = styled, .said = &long, .msg = "instructions take at most 500 characters" },
+        .{ .tool = styled, .said = "very very very slowly", .msg = "model 'styled' takes at most 26 characters of input, the instructions written in included" },
+    };
+    for (refusals) |r| {
+        w = .fixed(&buf);
+        try std.testing.expect(speechInstructions(a, r.tool, "Hello.", r.said, &w) == null);
+        try std.testing.expectEqualStrings(r.msg, w.buffered());
+    }
+    w = .fixed(&buf);
+    try std.testing.expect(checkDefaults(&c, &w));
+    const bad = try config.parse(a, "{\"tools\": [{\"id\": \"t\", \"kind\": \"speech\", \"cmd\": [\"x\"], \"options\": {\"instructions\": \"[style] \"}}]}");
+    try std.testing.expect(!checkDefaults(&bad, &w));
+    try std.testing.expectEqualStrings("tool 't': instructions must be a template with one {s}, such as \"[{s}] \"", w.buffered());
+}
+
+test "a tool's licence is its config's, else its engine's, else none" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "own", "kind": "video", "engine": "minimax_h3", "license": {"name": "Custom", "commercial": false}},
+        \\           {"id": "h3", "kind": "video", "engine": "minimax_h3"},
+        \\           {"id": "turbo", "kind": "image", "engine": "qwen_image_turbo"},
+        \\           {"id": "cmd", "kind": "speech", "cmd": ["x"]}]}
+    );
+    const own = license(c.tool("own").?).?;
+    try std.testing.expectEqualStrings("Custom", own.name);
+    try std.testing.expectEqual(@as(?bool, false), own.commercial);
+    try std.testing.expectEqual(@as(usize, 0), own.excluded_regions.len);
+    const h3 = license(c.tool("h3").?).?;
+    try std.testing.expectEqualStrings("MiniMax H3 Community License Agreement", h3.name);
+    try std.testing.expectEqual(@as(usize, 4), h3.excluded_regions.len);
+    try std.testing.expect(h3.notice.len > 0);
+    try std.testing.expectEqualStrings("Qwen Research License Agreement", license(c.tool("turbo").?).?.name);
+    try std.testing.expect(license(c.tool("cmd").?) == null);
 }

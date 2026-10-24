@@ -3,7 +3,9 @@
 //! synchronous jobs, like image generation. Uploads become the 16 kHz mono WAV every speech_to_text tool takes
 //! (`media/audio.zig`), one decode at a time, before the job is queued, so its length is known when it is priced.
 //! A speech tool whose options say `stream` streams: `stream: true` sends raw PCM as HTTP/1.1 chunks as the tool writes
-//! it (`streamSpeech`). Not offered, and refused with a reason: translation, SSE streams, and speech `instructions`.
+//! it (`streamSpeech`). A tool whose `instructions` option is a template (Drama 3: `"[{s}] "`) takes `instructions`,
+//! written into the text before the line; any other refuses them. Not offered, and refused with a reason: translation
+//! and SSE streams.
 //! The MCP tools (`mcp.zig`) share `startSpeech`, `startTranscription`, `readTranscript` and `encodeSpeech`.
 
 const std = @import("std");
@@ -43,21 +45,23 @@ pub const SpeechArgs = struct {
 };
 
 /// Validates and queues a text to speech job for `owner` (`routes.enqueue`); null with `why` set on refusal.
-/// `references` become the job's `references.json`, allocated in `a`.
+/// `instructions` are written into the input as the tool's `instructions` option says (`engine.speechInstructions`),
+/// and `references` become the job's `references.json`, both allocated in `a`.
 pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, owner: []const u8, why: *Refusal) ?*jobs.Job {
     const tool = routes.resolveSpeech(app, b.model, b.voice, why) orelse return null;
-    if (b.instructions.len > 0) {
-        why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' does not take instructions; send the text to speak as input", .{app.scheduler.slots[tool].tool.config().id}) catch "instructions are not supported";
-        return null;
-    }
     const cfg = app.scheduler.slots[tool].tool.config();
+    var said: Io.Writer = .fixed(why.buf[0..384]);
+    const input = engine.speechInstructions(a, cfg, b.input, b.instructions, &said) orelse {
+        why.message = said.buffered();
+        return null;
+    };
     var refs: [1]inputs.File = undefined;
     var n: usize = 0;
     if (b.references) |v| if (!(v == .null or (v == .array and v.array.items.len == 0))) {
         refs[0] = .{ .name = "references.json", .data = referencesFile(a, v, why) orelse return null };
         n = 1;
     };
-    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (n > 0) "references.json" else "" }) };
+    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (n > 0) "references.json" else "" }) };
     return routes.enqueue(app, tool, r, refs[0..n], owner, why);
 }
 

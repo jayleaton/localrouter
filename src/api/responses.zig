@@ -7,7 +7,8 @@
 //! by id) or that the box cannot supply (hosted tools, background mode, images and files, encrypted reasoning,
 //! summaries) is a 400 naming it, before any model loads. Function calls come back to the caller, which runs them and
 //! sends `function_call_output` items. Reasoning arrives as a `reasoning` item's `reasoning_text`, never as output
-//! text, and goes back to the model when the item is replayed.
+//! text, and goes back to the model when the item is replayed. The chat path's thinking budget applies (`budget.zig`):
+//! a small `max_output_tokens` switches thinking off, and its warnings come back as the response's `warnings`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,6 +17,7 @@ const h = @import("http.zig");
 const routes = @import("routes.zig");
 const chat = @import("chat.zig");
 const jobs = @import("../sched/jobs.zig");
+const budget = @import("budget.zig");
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -498,6 +500,7 @@ pub const Outcome = struct {
     incomplete: ?[]const u8 = null, // incomplete_details.reason
     failure: ?struct { code: []const u8, message: []const u8 } = null,
     usage: Value = .null,
+    warnings: Value = .null, // the thinking budget's (`budget.warnings`); null: none, and no `warnings` member
 };
 
 /// The response object, OpenAI's fields in OpenAI's order. `output` and `usage` are as made so far.
@@ -530,6 +533,7 @@ pub fn responseObject(a: Allocator, id: []const u8, created_at: i64, asked: *con
     try m.put(a, "truncation", string("disabled"));
     try m.put(a, "usage", o.usage);
     try m.put(a, "metadata", if (asked.metadata == .null) Value{ .object = .empty } else asked.metadata);
+    if (o.warnings != .null) try m.put(a, "warnings", o.warnings);
     return .{ .object = m };
 }
 
@@ -654,6 +658,8 @@ pub const Stream = struct {
     id: []const u8,
     created_at: i64,
     asked: *const Asked,
+    plan: budget.Plan = .{ .api = .responses },
+    seen: budget.Seen = .{}, // what the chat stream said, for the warnings
     seq: u64 = 0,
     output: std.ArrayList(Value) = .empty, // finished items, by output_index
     open: Open = .none,
@@ -723,6 +729,7 @@ pub const Stream = struct {
             s.failure = try s.a.dupe(u8, m orelse "the chat model failed mid-stream");
             return;
         };
+        try s.seen.take(s.a, v);
         const c = std.json.parseFromValueLeaky(Chunk, s.a, v, .{ .ignore_unknown_fields = true }) catch return;
         if (c.usage) |u| if (u != .null) {
             s.usage_v = try usage(s.a, u);
@@ -837,10 +844,14 @@ pub const Stream = struct {
         try s.closeCalls(w);
         if (s.failure) |f| {
             try s.event(w, "response.failed", .{ .response = try s.response(.{ .status = "failed", .failure = .{ .code = "server_error", .message = f }, .usage = s.usage_v }) });
-        } else if (incompleteReason(s.finish)) |r| {
-            try s.event(w, "response.incomplete", .{ .response = try s.response(.{ .status = "incomplete", .incomplete = r, .usage = s.usage_v }) });
         } else {
-            try s.event(w, "response.completed", .{ .response = try s.response(.{ .usage = s.usage_v }) });
+            const warned = try budget.warnings(s.a, s.plan, s.seen);
+            const ws = if (warned.len > 0) try budget.value(s.a, warned) else Value.null;
+            if (incompleteReason(s.finish)) |r| {
+                try s.event(w, "response.incomplete", .{ .response = try s.response(.{ .status = "incomplete", .incomplete = r, .usage = s.usage_v, .warnings = ws }) });
+            } else {
+                try s.event(w, "response.completed", .{ .response = try s.response(.{ .usage = s.usage_v, .warnings = ws }) });
+            }
         }
     }
 };
@@ -863,18 +874,21 @@ pub fn create(app: *App, req: *h.Request, a: Allocator, owner: []const u8) !void
         error.OutOfMemory => return error.OutOfMemory,
     };
     var why: routes.Refusal = .{};
-    const j = chat.startChat(app, a, t.chat, owner, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
+    var plan: budget.Plan = .{ .api = .responses };
+    const j = chat.startChat(app, a, t.chat, owner, &why, &plan) orelse return h.fail(req, a, why.status, why.typ, why.message);
     t.asked.model = app.scheduler.slots[j.tool].tool.config().id;
     const ids: Ids = .{ .io = app.io, .a = a };
     const id = try ids.make("resp");
-    if (t.asked.stream) return stream(app, req, a, j, ids, id, &t.asked);
+    if (t.asked.stream) return stream(app, req, a, j, ids, id, &t.asked, plan);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
     const completion = chat.readCompletion(app, a, j, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
-    const r = fromCompletion(a, ids, id, j.created_at, &t.asked, completion) catch |err| switch (err) {
+    var r = fromCompletion(a, ids, id, j.created_at, &t.asked, completion) catch |err| switch (err) {
         error.Refused => return h.fail(req, a, 502, "server_error", "the model's server sent a reply that is not a chat completion"),
         error.OutOfMemory => return error.OutOfMemory,
     };
+    const warned = try budget.ofCompletion(a, completion, plan);
+    if (warned.len > 0) try r.object.put(a, "warnings", try budget.value(a, warned));
     try h.jsonValue(req, a, .ok, r);
 }
 
@@ -890,7 +904,7 @@ const poll_ms = 20;
 /// Streams the job's `completion.sse` as Responses events while the scheduler writes it. A request the model refused
 /// before it streamed anything gets the ordinary JSON error; one that fails after it began ends with
 /// `response.failed`. Closing the connection cancels the request; the model stays loaded.
-fn stream(app: *App, req: *h.Request, a: Allocator, j: *jobs.Job, ids: Ids, id: []const u8, asked: *const Asked) !void {
+fn stream(app: *App, req: *h.Request, a: Allocator, j: *jobs.Job, ids: Ids, id: []const u8, asked: *const Asked, plan: budget.Plan) !void {
     const path = try std.fmt.allocPrintSentinel(a, "{s}/completion.sse", .{j.dir}, 0);
     var fd: posix.fd_t = -1;
     defer closeFd(fd);
@@ -909,7 +923,7 @@ fn stream(app: *App, req: *h.Request, a: Allocator, j: *jobs.Job, ids: Ids, id: 
         .{ .name = "content-type", .value = "text/event-stream" },
         .{ .name = "cache-control", .value = "no-cache" },
     } } }) catch return gone(app, j);
-    var s: Stream = .{ .a = a, .ids = ids, .id = id, .created_at = j.created_at, .asked = asked };
+    var s: Stream = .{ .a = a, .ids = ids, .id = id, .created_at = j.created_at, .asked = asked, .plan = plan };
     s.begin(&body.writer) catch return gone(app, j);
     var pending: std.ArrayList(u8) = .empty; // the chat stream's last line, until its newline arrives
     var chunk: [16 * 1024]u8 = undefined;

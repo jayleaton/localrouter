@@ -184,7 +184,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
         "{{\"id\": \"fishaudio/drama-3\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
         " \"resident_bytes\": 8388608, \"idle_ttl_s\": 3, \"load_timeout_s\": 60, \"generate_timeout_s\": 60, \"options\": {{" ++
         "\"voices\": [\"default\", \"narrator\"], \"default_voice\": \"default\", \"min_speed\": 1, \"max_speed\": 1, \"stream\": true," ++
-        " \"references\": true, \"port\": {d}, \"long_form\": true, \"long_form_chars\": 40, \"voices_dir\": \"{s}/voices\", \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
+        " \"references\": true, \"instructions\": \"[{{s}}] \", \"port\": {d}, \"long_form\": true, \"long_form_chars\": 40, \"voices_dir\": \"{s}/voices\", \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
         "{{\"id\": \"upstream-admission\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
         " \"resident_bytes\": 8388608, \"load_timeout_s\": 60, \"options\": {{\"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\", \"admission\": \"launcher\"}}}}," ++
         "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot });
@@ -196,7 +196,7 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
 
     // Listed, and refused before anything starts until this machine is qualified.
     const models = try d.call(a, .GET, "/v1/models", null);
-    try expectHas(models.body, &.{ "\"id\":\"fishaudio/drama-3\"", "\"stream\":true,\"references\":true", "\"qualified\":false" });
+    try expectHas(models.body, &.{ "\"id\":\"fishaudio/drama-3\"", "\"stream\":true,\"references\":true,\"instructions\":true", "\"qualified\":false" });
     try expectStatus(try speak(&d, a, say), 503, &.{ "model 'fishaudio/drama-3' is not GPU-qualified on this host", marker ++ " does not exist" });
     const load = try d.call(a, .POST, "/v1/tools/fishaudio/drama-3/load", "");
     try testing.expectEqual(std.http.Status.service_unavailable, load.status);
@@ -256,6 +256,11 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     // Voices and references reach the server; refusals come back as 400s, from the daemon or from the server.
     const voiced = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"voice\":\"narrator\",\"response_format\":\"pcm\"}");
     try expectLevel(voiced.body, 441 * 3, 2000);
+    // instructions reach the server as a bracketed direction before the line: "[softly] Hi.", 12 characters.
+    const directed = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"instructions\":\"softly\",\"response_format\":\"pcm\"}");
+    try expectLevel(directed.body, 441 * 12, 1000);
+    try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"instructions\":\"soft] [loud\"}"), 400, &.{"instructions may not hold '['"});
+    try expectStatus(try speak(&d, a, "{\"model\":\"tone\",\"input\":\"Hi.\",\"instructions\":\"softly\"}"), 400, &.{"model 'tone' does not take instructions"});
     const codes = "[[1,2],[1,2],[1,2],[1,2],[1,2],[1,2],[1,2],[1,2],[1,2],[1,2]]";
     const referenced = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"response_format\":\"pcm\",\"references\":[{\"text\":\"a clip\",\"vq_codes\":" ++ codes ++ "}]}");
     try expectLevel(referenced.body, 441 * 3, 1300);

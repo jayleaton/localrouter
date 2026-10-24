@@ -32,6 +32,7 @@ const Tool = tool_mod.Tool;
 const jobs = @import("jobs.zig");
 const memory = @import("memory.zig");
 const speech_gate = @import("speech_gate.zig");
+const marker = @import("../media/marker.zig");
 const config = @import("../config.zig");
 const Config = config.Config;
 
@@ -744,6 +745,8 @@ pub const Scheduler = struct {
             slot.unload_after = true;
             s.gate.unlock(s.io);
         }
+        // every image and video handed out carries the machine-generated label, whichever tool wrote it
+        if (heavy) marker.outputs(s.io, s.gpa, j.dir, out.files, marker.forRequest(slot.tool.config().id, j.request));
         s.finish(j, .completed, 200, "", "", out);
     }
 

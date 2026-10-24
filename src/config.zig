@@ -29,11 +29,27 @@ pub const ToolConfig = struct {
     capabilities: []const Capability = &.{}, // empty: the engine's (a `cmd` tool: its kind's plain one, e.g. speech_to_text)
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
+    // A chat request whose limit (max_tokens, max_completion_tokens, Responses' max_output_tokens) is below this, and
+    // that does not choose reasoning itself, goes to the model with thinking off (`thinking_off`) and a warning, so it
+    // answers rather than spending the limit on reasoning (`api/budget.zig`); 0: never.
+    min_thinking_tokens: u32 = 1024,
+    thinking_off: ?std.json.Value = null, // the members that switch the chat model's thinking off; null: {"chat_template_kwargs": {"enable_thinking": false}}
     options: ?std.json.Value = null, // engine-specific, passed through to the worker; a speech tool's `voices` are checked and listed
     // A file the model's qualify script writes on this machine. When set, the tool is listed but refused (503) until it
     // exists and holds `"qualified": true` (`engine.unqualified`); unset: no gate.
     qualification: []const u8 = "",
+    license: ?License = null, // the weights' licence, listed by /v1/models; null: the engine's (`engine.license`), if any
     lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech, listen for transcription, chat for chat, decide for decisions, else main
+};
+
+/// A model's licence as its publisher states it, for clients to read: LocalRouter lists it and enforces none of it.
+pub const License = struct {
+    name: []const u8,
+    url: []const u8 = "",
+    use: []const u8 = "", // what it allows, in short, e.g. "research and evaluation only"
+    commercial: ?bool = null, // whether it grants commercial use at all (its conditions in `use`); null: not stated
+    excluded_regions: []const []const u8 = &.{}, // where it grants nothing
+    notice: []const u8 = "", // what a product or its outputs must show, if the licence asks for it
 };
 
 /// The scheduler's executors: one job at a time on each. Speech runs beside a chat reply, a chat turn beside a video,

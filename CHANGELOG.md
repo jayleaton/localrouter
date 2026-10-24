@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Chat thinking budget (Chat Completions, `/v1/responses`, MCP `chat`): a request whose limit is below the chat
+  model's `min_thinking_tokens` (tool config, default 1024; `0` never) and that does not choose reasoning itself is
+  answered with thinking off (`thinking_off`, default `chat_template_kwargs.enable_thinking: false`). A reply still cut
+  while reasoning keeps `finish_reason: "length"`. Both cases add an extension `warnings: [{code, message}]`
+  (`thinking_off_for_small_budget`, `reasoning_used_budget`); a stream sends it in a last chunk with `choices: []` before
+  `[DONE]`. Before this, "17 x 19" with `max_tokens: 16` came back as an empty `content`: all 16 tokens went to reasoning.
+- Speech `instructions` (OpenAI's style field) on `/v1/audio/speech` and MCP `synthesize_speech`: a speech tool whose
+  `instructions` option is a template takes them, written into the line. Drama 3 has no style slot of its own (its
+  system prompt is fixed), so it takes them as its documented inline tag, `"[{s}] "`, at the start of the line. A tool
+  without the option still refuses them (400). `/v1/models` lists `instructions` for each speech model.
+- Model licences: tool config `license` (`name`, `url`, `use`, `commercial`, `excluded_regions`, `notice`), with engine
+  defaults for Qwen-Image and MiniMax H3, listed in `/v1/models`, `/v1/tools`, MCP `list_models` and
+  `/v1/capabilities` (`models.licenses`). One licence table in the README and docs/AGENTS.md. Informational:
+  LocalRouter enforces none of it, and no model choice changed.
+- Generated images and videos are labelled machine-generated in their metadata, whichever engine wrote them: PNG
+  `tEXt` (`Software`, `Comment`) and XMP with the IPTC digital source type `trainedAlgorithmicMedia`
+  (`compositeWithTrainedAlgorithmicMedia` for edits and image-to-video); MP4 `comment` and `description` tags. Pixels
+  and coded streams are byte-identical. Files from `cmd` tools are labelled after the job. No C2PA (it needs a signing
+  certificate).
+- `tools/harness/nemo_check.sh`: a public review's test order as a client-side check anyone can run against a box
+  (models, chat with thinking off, speech, Whisper on it, an image, an edit or its clear refusal, a video, chat again).
 - `spare_room_only` (tool config): an on-demand model nothing waits on loads only into spare room. It never unloads a
   `keep_loaded` tool (idle unkept tools may still go), leaves room for the kept tools' working bytes, and is otherwise
   refused with a 503 `insufficient_memory` before anything is unloaded. The Jarvis decision model (KnowLine, behind the

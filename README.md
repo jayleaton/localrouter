@@ -176,7 +176,8 @@ There is no authentication: it listens on localhost unless you choose otherwise;
 
 Zig 0.17.0; ffmpeg for video output. The GPU engines need nvcc and an NVIDIA GPU (sm_120 / sm_121); without `-Dnvcc` the
 binary builds without embedded CUDA kernels, and the GPU-free test engine runs the tests. The model engines
-remain registered but cannot generate without their kernels.
+remain registered but cannot generate without their kernels. To check a running box from any machine as a client:
+`tools/harness/nemo_check.sh --url http://<box>:8190` ([HARNESS.md](docs/HARNESS.md#harnesses)).
 
 ```bash
 zig build                                    # zig-out/bin/localrouter
@@ -213,17 +214,21 @@ LocalRouter stands on the work of these projects and teams:
   are SageAttention's, as shipped in NVIDIA's comfy-kitchen.
 
 The weights are downloaded from their publishers under their own licences. Check these terms before installing or
-using a model:
+using a model (a summary, not legal advice; the licence text is what binds):
 
-- **Qwen-Image 2.1** is restricted to non-commercial research or evaluation under its
-  [Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
-- **MiniMax H3**'s [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US,
-  EU, UK and South Korea, and imposes downstream use conditions.
-- **Fish Audio Drama 3**'s weights are under the
-  [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE).
-  It allows commercial use only under USD 500,000 annual revenue, and no Hosted Service (letting third parties
-  generate speech through an API) without a separate licence from Fish Audio. So keep LocalRouter on loopback or your
-  tailnet for it ([details](docs/dev/DRAMA3.md#licences)).
+| Model | Licence | Use | Restrictions / notice |
+| --- | --- | --- | --- |
+| Qwen3.8 27B (chat; TensorFold's MLX 4-bit checkpoint and z-lab's DFlash2 drafter) | [Apache 2.0](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) | any, commercial included | |
+| KnowLine-4B Gen5.5 (decisions) | [Apache 2.0](https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5) | any, commercial included | |
+| Whisper large-v3-turbo (speech to text) | [MIT](https://huggingface.co/openai/whisper-large-v3-turbo) | any, commercial included | |
+| Fish Audio Drama 3 (speech) | [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE) | research and non-commercial; commercial only under USD 500,000 annual revenue | no Hosted Service (third parties generating speech, e.g. through an API) without a separate licence from Fish Audio, so keep LocalRouter on loopback or your tailnet for it ([details](docs/dev/DRAMA3.md#licences)). "Built with Fish Audio" |
+| Kitten TTS 2 (optional speech tool) | [Stellon Labs Community License](https://huggingface.co/KittenML/kitten-tts-2/blob/f2eee74f4467855ad58fe16f1fb7b7df473263fd/LICENSE.md) | research, non-commercial; commercial after registering with Stellon Labs, until USD 1,000,000 annual revenue or total funding | outputs may not train another model. "Powered by Stellon Labs" ([details](docs/dev/KITTEN-TTS2.md#licences)) |
+| Qwen-Image 2.1 and 2.1 Turbo (images) | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
+| MiniMax H3 (video) | [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) | outside the excluded territories, under its Acceptable Use Policy; commercial included, over USD 20 million yearly revenue with MiniMax's written authorization | the model and its outputs are not licensed in the US, EU, UK or South Korea. Content published to the public must be disclosed as machine-generated; a commercial product shows "MiniMax H3" in its interface |
+
+`GET /v1/models` lists each model's licence as `license` (from the tool's config, else its engine's), and
+`GET /v1/capabilities` lists them all. LocalRouter informs; it does not enforce any of these terms, and installing
+locally does not waive them.
 
 The Apache-2.0 licence below covers the software. See [NOTICE](NOTICE).
 

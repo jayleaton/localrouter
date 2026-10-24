@@ -173,7 +173,7 @@ fn writeMp4(io: std.Io, gpa: std.mem.Allocator, path: []const u8, o: Opts, sh: p
     };
     try mp4.writeWav(io, wav_path, inter, pl.sample_rate, pl.audio_channels);
     defer std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
-    var w = try mp4.Writer.open(io, gpa, path, .{ .width = o.width, .height = o.height, .fps = fps, .wav = wav_path });
+    var w = try mp4.Writer.open(io, gpa, path, .{ .width = o.width, .height = o.height, .fps = fps, .wav = wav_path, .marker = .{ .model = "minimax-h3" } });
     errdefer w.abort();
     const fb: usize = @as(usize, o.width) * o.height * 3;
     for (0..sh.frames) |f| try w.frame(px[f * fb ..][0..fb]);

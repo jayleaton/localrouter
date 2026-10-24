@@ -88,6 +88,16 @@ def generate(body, text):
     kwargs = body.get("chat_template_kwargs")
     thinking = body.get("reasoning_effort") != "none" and not (isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False)
     out = {"reasoning": "thinking about " + text if thinking else None, "content": None, "calls": [], "finish": "stop", "tokens": 0}
+    limit = body.get("max_completion_tokens", body.get("max_tokens"))
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        limit = None
+    if text == "ponder" and thinking:  # a long think that counts against the limit, as a real reasoning model's does
+        thought = ["hmm"] * 40
+        if limit is not None and len(thought) >= limit:
+            out.update(reasoning=" ".join(thought[:limit]), content="", finish="length", tokens=limit, reasoning_tokens=limit)
+            return out
+        out.update(reasoning=" ".join(thought), reasoning_tokens=len(thought))
+        limit = None if limit is None else limit - len(thought)
     tools = body.get("tools")
     if isinstance(tools, list) and tools and body.get("tool_choice") != "none" and last_role(body.get("messages")) != "tool":
         name = tools[0]["function"]["name"]
@@ -107,9 +117,8 @@ def generate(body, text):
     cuts = [content.find(s) for s in stops if s and s in content]
     if cuts:
         content = content[: min(cuts)]
-    limit = body.get("max_completion_tokens", body.get("max_tokens"))
     tokens = content.split(" ")
-    if isinstance(limit, int) and not isinstance(limit, bool) and len(tokens) > limit:
+    if limit is not None and len(tokens) > limit:
         tokens = tokens[:limit]
         content = " ".join(tokens)
         out["finish"] = "length"
@@ -120,7 +129,10 @@ def generate(body, text):
 
 def usage(body, out):
     prompt = len(body.get("messages") or [])
-    return {"prompt_tokens": prompt, "completion_tokens": out["tokens"], "total_tokens": prompt + out["tokens"]}
+    u = {"prompt_tokens": prompt, "completion_tokens": out["tokens"], "total_tokens": prompt + out["tokens"]}
+    if "reasoning_tokens" in out:
+        u["completion_tokens_details"] = {"reasoning_tokens": out["reasoning_tokens"]}
+    return u
 
 
 def whole(body, out):

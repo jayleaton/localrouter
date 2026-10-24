@@ -12,6 +12,7 @@ const engine = @import("../engine/engine.zig");
 const png = @import("../media/png.zig");
 const mp4 = @import("../media/mp4.zig");
 const audio = @import("../media/audio.zig");
+const marker = @import("../media/marker.zig");
 const request = @import("../tool/request.zig");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
@@ -106,7 +107,8 @@ const TestPattern = struct {
             const path = try std.fs.path.join(arena, &.{ dir, name.* });
             var seed_buf: [24]u8 = undefined;
             const seed = try std.fmt.bufPrint(&seed_buf, "{d}", .{v.seed +% i});
-            try writePng(t.env.io, path, px, v.width, v.height, &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed } });
+            const label: marker.Marker = .{ .model = t.cfg.id, .edit = v.references.len > 0 };
+            try writePng(t.env.io, path, px, v.width, v.height, &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed } }, label);
         }
         return names;
     }
@@ -125,7 +127,8 @@ const TestPattern = struct {
             wav = try std.fs.path.join(arena, &.{ dir, "audio.wav" });
             try mp4.writeWav(t.env.io, wav.?, samples, rate, 1);
         }
-        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = v.width, .height = v.height, .fps = v.fps, .wav = wav });
+        const label: marker.Marker = .{ .model = t.cfg.id, .edit = v.first_frame != null };
+        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = v.width, .height = v.height, .fps = v.fps, .wav = wav, .marker = label });
         errdefer w.abort();
         const px = try t.env.gpa.alloc(u8, @as(usize, v.width) * v.height * 3);
         defer t.env.gpa.free(px);
@@ -233,12 +236,12 @@ fn paint(px: []u8, w: u32, h: u32, seed: u64, frame: u32) void {
     }
 }
 
-fn writePng(io: std.Io, path: []const u8, px: []const u8, w: u32, h: u32, text: []const png.Text) !void {
+fn writePng(io: std.Io, path: []const u8, px: []const u8, w: u32, h: u32, text: []const png.Text, label: marker.Marker) !void {
     var file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     var buf: [64 * 1024]u8 = undefined;
     var fw = file.writer(io, &buf);
-    try png.encode(&fw.interface, px, w, h, .rgb8, .{ .level = .fastest, .text = text });
+    try png.encode(&fw.interface, px, w, h, .rgb8, .{ .level = .fastest, .text = text, .marker = label });
     try fw.interface.flush();
 }
 

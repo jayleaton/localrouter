@@ -14,7 +14,17 @@ const h3 = @import("minimax_h3");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults }; // image_to_video: the first-frame path is not ported yet
+pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license }; // image_to_video: the first-frame path is not ported yet
+
+/// The weights' licence, unless a tool's config names its own.
+pub const license: @import("../config.zig").License = .{
+    .name = "MiniMax H3 Community License Agreement",
+    .url = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+    .use = "only outside the excluded territories, under its Acceptable Use Policy; over USD 20 million yearly revenue needs MiniMax's written authorization",
+    .commercial = true,
+    .excluded_regions = &.{ "United States", "European Union", "United Kingdom", "South Korea" },
+    .notice = "content published to the public must be disclosed as machine-generated; a commercial product shows \"MiniMax H3\" in its user interface",
+};
 
 const P = h3.pipeline;
 const fps = 24; // the model's frame rate: requests at another rate are refused
@@ -141,7 +151,7 @@ const MiniMaxH3 = struct {
             try mp4.writeWav(t.env.io, wav.?, inter, P.sample_rate, P.audio_channels);
         }
         const out = try std.fs.path.join(arena, &.{ job.dir, "video.mp4" });
-        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = v.width, .height = v.height, .fps = fps, .wav = wav });
+        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = v.width, .height = v.height, .fps = fps, .wav = wav, .marker = .{ .model = t.cfg.id } });
         errdefer w.abort();
         const fb = @as(usize, v.width) * v.height * 3;
         for (0..sh.frames) |f| {
