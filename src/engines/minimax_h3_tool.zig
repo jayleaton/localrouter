@@ -143,12 +143,11 @@ const MiniMaxH3 = struct {
         var rgb: ?[]f32 = null;
         defer if (rgb) |pixels| gpa.free(pixels);
         if (v.first_frame) |name| {
-            // as ComfyUI's LoadImage: RGB, the alpha dropped; then resized and cropped to the clip's canvas
+            // as ComfyUI's LoadImage: RGB, the alpha dropped; cropped to the clip's shape (centred), then resized to it
             const in = image_in.load(t.env.io, arena, job.dir, name) catch |err| return refuse("the first frame could not be read ({s}): send a PNG, JPEG or WebP", .{@errorName(err)});
-            const pix = try arena.alloc(u8, @as(usize, in.width) * in.height * 3);
-            for (0..@as(usize, in.width) * in.height) |i| @memcpy(pix[i * 3 ..][0..3], in.rgba[i * 4 ..][0..3]);
+            const pix = try coverCrop(arena, in, v.width, v.height);
             rgb = try gpa.alloc(f32, @as(usize, v.width) * v.height * 3);
-            h3.image.canvas(gpa, .{ .width = in.width, .height = in.height, .data = pix }, v.width, v.height, rgb.?) catch |err| return refuse("the first frame of {d}x{d} cannot be fitted to {d}x{d} ({s})", .{ in.width, in.height, v.width, v.height, @errorName(err) });
+            h3.image.canvas(gpa, pix, v.width, v.height, rgb.?) catch |err| return refuse("the first frame of {d}x{d} cannot be fitted to {d}x{d} ({s})", .{ in.width, in.height, v.width, v.height, @errorName(err) });
         }
         _ = p.generateImage(v.prompt, v.width, v.height, v.seconds * fps, steps, v.seed, rgb, frames, audio, bridge.progress()) catch |err| switch (err) {
             error.SizeNotMultipleOf32 => return refuse("size {d}x{d}: each side must be a multiple of 32", .{ v.width, v.height }),
@@ -191,6 +190,42 @@ const MiniMaxH3 = struct {
         t.env.gpa.destroy(t);
     }
 };
+
+/// The image's RGB (alpha dropped) cut to the clip's aspect ratio, centred, so the resize to the clip keeps its shape:
+/// ComfyUI's H3 node stretches a first frame of another shape (`crop="disabled"`); an API caller rarely means that.
+fn coverCrop(a: std.mem.Allocator, in: image_in.Image, w: u32, h: u32) !h3.image.Rgb {
+    // the largest window of the clip's aspect: width-limited or height-limited
+    var cw: u64 = in.width;
+    var ch: u64 = @as(u64, in.width) * h / w;
+    if (ch > in.height) {
+        ch = in.height;
+        cw = @as(u64, in.height) * w / h;
+    }
+    cw = @max(cw, 1);
+    ch = @max(ch, 1);
+    const x0 = (in.width - cw) / 2;
+    const y0 = (in.height - ch) / 2;
+    const out = try a.alloc(u8, cw * ch * 3);
+    for (0..ch) |y| for (0..cw) |x| {
+        @memcpy(out[(y * cw + x) * 3 ..][0..3], in.rgba[((y0 + y) * in.width + x0 + x) * 4 ..][0..3]);
+    };
+    return .{ .width = @intCast(cw), .height = @intCast(ch), .data = out };
+}
+
+test "a first frame of another shape is cut to the clip's, centred; one of the same shape is kept whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const px = try a.alloc(u8, 8 * 8 * 4);
+    for (px, 0..) |*p, i| p.* = @intCast(i / 4 % 256); // pixel index in every channel
+    const sq: image_in.Image = .{ .width = 8, .height = 8, .rgba = px };
+    const wide = try coverCrop(a, sq, 16, 8); // 2:1 from 8x8: 8x4, rows 2..5
+    try std.testing.expectEqual([2]u32{ 8, 4 }, [2]u32{ wide.width, wide.height });
+    try std.testing.expectEqual(@as(u8, 16), wide.data[0]);
+    const same = try coverCrop(a, sq, 32, 32);
+    try std.testing.expectEqual([2]u32{ 8, 8 }, [2]u32{ same.width, same.height });
+    try std.testing.expectEqual(@as(u8, 0), same.data[0]);
+}
 
 /// The pipeline's phase reports as the tool's progress.
 const Bridge = struct {

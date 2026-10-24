@@ -166,7 +166,7 @@ that size. `mask` (the same forms) is a PNG of the first image's size whose alph
 it is opaque the first image's pixels are kept (exactly, when `size` is the input's own). It needs a model whose
 `capabilities` in `list_models` include `image_edit`; an image model lists it only once its edit pack is installed
 ([dev/IMAGE-EDIT.md](dev/IMAGE-EDIT.md)). Without one the call is a tool error naming the models and what each can do.
-A warm 1024x1024 edit takes (GB10 timing: TBD).
+On a GB10 (Qwen-Image 2.1 Turbo, FP8) a warm 1024x1024 edit of one input takes 11 to 12.5 s, of two inputs about 16 s.
 
 ### Making room for a heavy job
 

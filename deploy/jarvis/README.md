@@ -7,8 +7,8 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
 | Text to speech | `fishaudio/drama-3` on the NVFP4 pruned weights (`DRAMA_VARIANT=nvfp4`, lossy, approved by JJ 2026-10-24; [measured against the full model](../../docs/dev/DRAMA3.md#the-nvfp4-pruned-weights)): 20.56 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
-| Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load |
-| Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model to run, and the image model comes back after it |
+| Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load. Text to image and edits (`edit_refs` 2: one or two input images, optionally a mask) once the edit pack is installed (`tools/spark/prepare.sh` adds it beside the packs) |
+| Video | `minimax-h3`, on demand (idle 30 s), priority 0: text and image to video with audio, up to 1280x704 and 8 s (768x448 without a size). It evicts the image model to run, and the image model comes back after it |
 | Decisions | `knowline-4b` (KnowLine-4B Gen5.5, bf16, [tools/decide/knowline](../../tools/decide/knowline/README.md)), **kept warm** since Drama 3's NVFP4 weights freed 18.7 GiB, priority 15 (above the image model's 10, so a video job evicts only the image model, as before), `spare_room_only` (coming back, it never unloads a kept-warm model: without spare room a decision is refused with a 503, and shadow decisions skip), `decide` lane. Shadow only: while it is loaded, each voice reply logs how it would have routed the turn (`voice shadow decision`); nothing acts on a decision |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
@@ -23,7 +23,8 @@ bookings in `config.json.in` are each peak plus 256 MiB:
 | Drama 3, NVFP4 (2026-10-24, qualify `nvfp4/run1`: upstream's bench, 144 replies, beside chat, Whisper and the image model) | 19.69 GiB GPU (19.05 GiB weights and codec, the guidance sequence, two prefix-cache entries) + 0.62 host | 20.56 GiB |
 | Drama 3, full (`DRAMA_VARIANT=full`) | 38.3 GiB GPU (the 36.9 GiB weights and the 1.7 GiB codec, nothing else) + 0.6 host | 39.25 GiB |
 | Whisper | 2.0 GiB GPU + 1.5 host | 3.75 GiB, + 0.5 working |
-| Image | 31.2 GiB at `max_pixels` 1048576 (39.0 GiB before, at `max_side` 1664 squared) | 31.5 GiB |
+| Image | 41.3 GiB with the edit pack at `edit_refs` 2 (2026-10-24: edits of one and two 1024x1024 inputs, 1344x768 and 1024x576; 38.2 GiB at `edit_refs` 1, 44.1 at 3); 31.2 GiB without it | 41.55 GiB |
+| Video (on demand) | 52.06 GiB GPU + host at the caps 1280x704 and 8 s (2026-10-24: image to video at 1280x704, 8 s, the largest job); the buffers are sized at load for the caps, so a smaller clip takes as much | 52.3 GiB |
 | Decisions | 10.6 GiB GPU + 1.5 host on the largest prompt (a 14 KB state read twice); 11.9 GiB while it loads | 12.4 GiB |
 
 - **The reserve is 3 GiB.** earlyoom sends SIGTERM below 2% `MemAvailable` (2.4 GiB on this box); the rest covers the
@@ -31,8 +32,8 @@ bookings in `config.json.in` are each peak plus 256 MiB:
 - **The image model's scratch** is sized by `max_pixels`, about 4.6 KiB a pixel: 1024x1024, 1360x768 and 768x1360 are
   served, a larger area is refused before it loads, and the PNG bytes are the same as with the larger scratch.
 - **A 1024x1024 image** on the warm model evicts nothing; the lowest `MemAvailable` was 11.8 GiB.
-- **A 1 s video** (40 GiB) evicts only the image model; the lowest was 11.7 GiB. The image model is back about 30 s
-  later.
+- **The largest video** (image to video, 1280x704, 8 s: 445 s through the API) evicts only the image model; the lowest
+  `MemAvailable` was 8.5 GiB, with chat, Drama 3, Whisper and KnowLine warm. The image model is back about 30 s later.
 - **Chat, Drama 3 and Whisper** are never unloaded for an image or a video.
 
 ## Install, start, stop

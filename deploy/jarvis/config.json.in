@@ -49,7 +49,7 @@
    "options": {"precision": "fp8s", "max_side": 1360, "max_pixels": 1048576, "edit_refs": 2, "resident_mb": 42550}},
   {"id": "minimax-h3", "kind": "video", "name": "MiniMax H3 (NVFP4, Turbo 8 steps, with audio)",
    "engine": "minimax_h3", "weights": "@J@/lr/weights/minimax-h3", "idle_ttl_s": 30, "priority": 0,
-   "options": {"max_width": 1280, "max_height": 704, "max_seconds": 8, "default_size": "768x448"}},
+   "options": {"max_width": 1280, "max_height": 704, "max_seconds": 8, "default_size": "768x448", "resident_mb": 53567}},
   {"id": "knowline-4b", "kind": "decision", "name": "KnowLine-4B Gen5.5 (typed decisions, System One shape; bf16, transformers)",
    "engine": "openai_server", "weights": "@J@/models/decide/knowline-4b-gen5.5",
    "resident_bytes": 13290209280, "working_bytes": 0, "keep_loaded": true, "spare_room_only": true, "priority": 15, "idle_ttl_s": 600,

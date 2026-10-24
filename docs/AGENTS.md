@@ -153,7 +153,16 @@ urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `comple
 `localrouter.job.created` and `localrouter.job.done` events carry the same id.
 
 Image to video: add `input_reference`, a file in a multipart body (`-F input_reference=@frame.png`, with the other
-fields as form fields) or a base64 string, data URL or URL in a JSON body. The model must list `image_to_video`.
+fields as form fields) or a base64 string, data URL or URL in a JSON body (PNG, JPEG or WebP). The model must list
+`image_to_video`. The image becomes the clip's first frame: it is cut to the clip's shape (centred) and resized to its
+size, so send one of that shape to keep all of it. Say what the image shows in the `prompt` too; a prompt about
+something else pulls the clip away from it.
+
+MiniMax H3 (`minimax-h3`) takes sizes up to its `max_width` x `max_height` and clips up to `max_seconds`, in multiples
+of 32 pixels (1280x720 is not one: send 1280x704); a request past them is refused with the limits named, before
+anything loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
+and 8 s, 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
+1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
 
 Every MP4 is labelled as machine-generated in `moov/udta/meta/ilst`, whichever model made it (the coded video and
 audio are untouched): `comment` (`©cmt`) `AI-generated (machine-generated) by model <id> with LocalRouter` (from a

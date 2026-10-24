@@ -10,8 +10,8 @@ interrupt it mid-sentence, and it can make a picture or a video while you talk. 
 - **Chat:** Qwen3.8 27B on TensorFold, with the DFlash2 drafter.
 - **Voice:** Fish Audio Drama 3, streamed as it speaks, with six fixed voices.
 - **Hearing:** Whisper large-v3-turbo with the Silero VAD.
-- **Images:** Qwen-Image 2.1 Turbo.
-- **Video with audio:** MiniMax H3.
+- **Images:** Qwen-Image 2.1 Turbo: text to image, and edits of one or two input images (an instruction, optionally a mask).
+- **Video with audio:** MiniMax H3: text to video, and image to video (the input image as the first frame), up to 1280x704 and 8 s.
 
 One small Zig daemon owns the machine. It keeps the voice loop and chat warm, loads the other models when asked,
 makes room for them, and hands every tool to your agents over MCP and an OpenAI-compatible API.
@@ -69,7 +69,9 @@ DGX-01, NVIDIA GB10, 2026-10-22. Only figures we measured are listed.
 | Chat: first content | 0.15 s for a short prompt, streamed |
 | "Generate a picture of a dog", spoken | picture done 8.1 to 10.2 s after the end of speech; spoken confirmation 8.8 to 11.4 s |
 | Image: Qwen-Image 2.1 Turbo, 1024x1024 | 6.3 s warm |
-| Video: MiniMax H3, 768x448 with audio | a 1 s clip in about 24 s; a 5 s clip in 54 s warm |
+| Image edit: Qwen-Image 2.1 Turbo, one input at 1024x1024 | 11 to 12.5 s (a 1024x576 edit 7.2 s; two inputs 15.9 s) |
+| Video: MiniMax H3 with audio, the engine alone | 864x480, 5.17 s: 83 s warm. 1280x704, 5.17 s: 244 s. 1280x704, 8 s: 397 s |
+| Video through the API (load included) | a 2.3 s clip at 768x448, text or image to video: 33 to 39 s |
 | Memory with chat, Drama 3, Whisper and the image model warm | 24 + 42 + 3.6 + 35.2 GiB resident; 13.7 GiB still available after a start, 11 to 12 GiB in use, of 121.7 GiB |
 
 A video job unloads only the image model while it runs, and the image model comes back after it. Chat, Drama 3 and
@@ -116,8 +118,9 @@ only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 | --- | --- |
 | `list_models`, `list_voices` | the models (what each can do, `default_for`, state, memory) and the speech voices |
 | `reserve_for`, `unload_model`, `load_model` | make room for a heavy job (what it unloads comes back after it), unload or load one model; never the chat model. The procedure is a skill: [skills/jarvis-model-manager](skills/jarvis-model-manager/SKILL.md) |
-| `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id; edit inputs are refused by the current engines |
-| `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
+| `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id |
+| `edit_image` | an edit of one or more input images by an instruction, optionally with a mask; the same reply as `generate_image` |
+| `generate_video` | text to video, or image to video with `image`. Waits up to `wait_s`, then returns the MP4's link or a job id |
 | `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
 | `synthesize_speech`, `transcribe_audio` | speech as WAV (inline and a link) in any listed voice; the transcript of a URL, base64 audio or a file on the box |
 | `get_job`, `cancel_job` | follow or stop a long job |
