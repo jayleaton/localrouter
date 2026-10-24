@@ -8,7 +8,8 @@ import { fakeBroker } from './testing.ts'
 
 const dirs: string[] = []
 const temp = () => {
-  const d = mkdtempSync(join(tmpdir(), 'lr-exec-'))
+  // Unix socket paths are short (104 bytes on macOS): a short temp folder, whatever TMPDIR is.
+  const d = mkdtempSync(join(tmpdir().length > 40 ? '/tmp' : tmpdir(), 'lr-exec-'))
   dirs.push(d)
   return d
 }

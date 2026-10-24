@@ -14,11 +14,15 @@ export type Schema = {
 export type ToolEvent =
   | { type: 'job.created'; call_id: string; job_id: string; kind: 'image' | 'video' }
   | { type: 'job.done'; call_id: string; job_id: string; kind: 'image' | 'video'; status: string; urls: string[]; error: string }
+  /** The person agreed on a call to end it and make a video in the text chat (see `videoHandoff`). */
+  | { type: 'handoff'; call_id: string; kind: 'video'; prompt: string; seconds: number | null }
 
 export type ToolContext = {
   callId: string
   /** The person's own words in this turn (computer control needs them). */
   utterance: string
+  /** When the person last said or typed something (ms since the epoch; 0 when never). */
+  utteranceAt?: number
   signal: AbortSignal
   /** Events for the UI (a generation's job), if one is listening. */
   emit?: (event: ToolEvent) => void

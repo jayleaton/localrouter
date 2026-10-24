@@ -26,6 +26,15 @@ contextBridge.exposeInMainWorld('companion', {
     send: (id: string, text: string) => ipcRenderer.send('rt:send', id, text),
     close: (id: string) => ipcRenderer.send('rt:close', id),
   },
+  // The page's host: this computer's tools for typed chat, the journal, and a video moved from a call.
+  host: {
+    tools: () => ipcRenderer.invoke('host:tools'),
+    run: (callId: string, name: string, args: string, utterance: string) => ipcRenderer.invoke('host:run', callId, name, args, utterance),
+    cancel: (callId: string) => ipcRenderer.invoke('host:cancel', callId),
+    save: (conversation: string, items: unknown[]) => ipcRenderer.invoke('host:save', conversation, items),
+    prepareVideo: () => ipcRenderer.invoke('host:prepareVideo'),
+    restoreVoice: () => ipcRenderer.invoke('host:restoreVoice'),
+  },
   setup: {
     state: () => ipcRenderer.invoke('setup:state'),
     pair: (base: string, code: string, name: string) => ipcRenderer.invoke('setup:pair', base, code, name),

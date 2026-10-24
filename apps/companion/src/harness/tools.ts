@@ -146,6 +146,37 @@ async function generation(spark: Spark, kind: 'image' | 'video', tool: string, a
   return { status: 'in_progress', job_id: job.id, note: `The ${kind === 'image' ? 'picture' : 'video'} is being made and appears for the user when it is done; tell them so.` }
 }
 
+/** The last picture a conversation made or edited: what `edit_image` changes when the call names none. */
+export type PictureState = { last: string }
+
+const remember = (state: PictureState) => (out: Record<string, unknown>) => {
+  const urls = out.urls
+  if (Array.isArray(urls) && typeof urls[0] === 'string') state.last = urls[0]
+  return out
+}
+
+/** Pictures on the Spark: make one, or change one ("make it night"), the last one unless the call names another. */
+export function pictureTools(spark: Spark, state: PictureState = { last: '' }, opts: { imageWaitS?: number } = {}): Tool[] {
+  return [
+    {
+      name: 'generate_image',
+      description: 'Make a picture on the user’s LocalRouter box from a detailed description. The user sees it when it is done.',
+      parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what to draw, in detail', maxLength: 4000 }, size: { type: 'string', description: 'WIDTHxHEIGHT in multiples of 16, e.g. 1024x1024 (default) or 1344x768' } }, required: ['prompt'], additionalProperties: false },
+      run: (args, ctx) => generation(spark, 'image', 'generate_image', { prompt: args.prompt, ...(args.size ? { size: args.size } : {}) }, ctx, opts.imageWaitS ?? 45).then(remember(state)),
+    },
+    {
+      name: 'edit_image',
+      description: 'Change a picture as the user says ("make it night", "put a red hat on the dog"): the last picture made here, unless `image` names another (a URL from an earlier result).',
+      parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'the change, in detail', maxLength: 4000 }, image: { type: 'string', description: 'the picture to change (a URL); omit for the last one' } }, required: ['prompt'], additionalProperties: false },
+      run: async (args, ctx) => {
+        const image = typeof args.image === 'string' && args.image ? args.image : state.last
+        if (!image) throw new Error('there is no picture to change yet: make one first, or name it')
+        return remember(state)(await generation(spark, 'image', 'edit_image', { prompt: args.prompt, image }, ctx, opts.imageWaitS ?? 45))
+      },
+    },
+  ]
+}
+
 export function mediaTools(spark: Spark, opts: { imageWaitS?: number } = {}): Tool[] {
   return [
     {
@@ -172,4 +203,69 @@ export function mediaTools(spark: Spark, opts: { imageWaitS?: number } = {}): To
       },
     },
   ]
+}
+
+// ------------------------------------------------------------------ a video asked for on a call: end the call first
+
+/**
+ * A video takes minutes and needs the box's voice models paused, so on a call it is never started. `generate_video`
+ * there only records the request and gives the assistant the question to ask; `end_call_and_make_video` hands it to
+ * the text chat, and only when the person answered yes after that question: the harness checks it, not the prompt.
+ * Saying no (or anything that is not a clear yes) leaves the call as it was and makes nothing.
+ */
+export const VIDEO_QUESTION = 'That will take a few minutes and needs the voice models paused. Want me to end the call and make it in the chat?'
+export const PROPOSAL_TTL_MS = 3 * 60_000
+
+const YES = /\b(yes|yeah|yep|yup|sure|ok|okay|please|do it|go ahead|go for it|sounds good|let'?s do it|end (the|it)|make it|absolutely|definitely|of course)\b/i
+const NO = /\b(no|nope|nah|don'?t|do not|not now|never ?mind|cancel|stop|wait|keep (the call|talking|going)|stay)\b/i
+
+/** A clear yes: a yes word and no no word ("yes, but not now" is not a yes). */
+export function saidYes(utterance: string): boolean {
+  const u = utterance.trim().replace(/\bno (problem|worries)\b/gi, 'fine')
+  return YES.test(u) && !NO.test(u)
+}
+
+export type VideoProposal = { prompt: string; seconds: number | null; at: number }
+
+export class VideoHandoff {
+  proposal: VideoProposal | null = null
+  private readonly now: () => number
+
+  constructor(now: () => number = Date.now) {
+    this.now = now
+  }
+
+  tools(): Tool[] {
+    return [
+      {
+        name: 'generate_video',
+        description: 'The user wants a video. On a voice call it is not made: this records it and gives you the question to ask. Then wait for their answer.',
+        parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what happens, in detail', maxLength: 4000 }, seconds: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['prompt'], additionalProperties: false },
+        run: async (args) => {
+          this.proposal = { prompt: String(args.prompt), seconds: typeof args.seconds === 'number' ? args.seconds : null, at: this.now() }
+          return { status: 'needs_confirmation', made: false, ask: VIDEO_QUESTION, then: 'Ask exactly that and stop. If they say yes, call end_call_and_make_video. If they say no, say you will not make it and carry on; do not call it.' }
+        },
+      },
+      {
+        name: 'end_call_and_make_video',
+        description: 'Only after the user answered yes to ending the call for the video: ends the call and makes the video in the text chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        run: async (_args, ctx) => {
+          const p = this.proposal
+          if (!p || this.now() - p.at > PROPOSAL_TTL_MS) {
+            this.proposal = null
+            return { status: 'refused', reason: 'There is no video waiting for an answer. Call generate_video first and ask the user.' }
+          }
+          if (!ctx.utteranceAt || ctx.utteranceAt <= p.at) return { status: 'refused', reason: 'The user has not answered the question yet. Ask it and wait.' }
+          if (!saidYes(ctx.utterance)) {
+            this.proposal = null
+            return { status: 'refused', reason: `The user did not say yes (they said: “${ctx.utterance.slice(0, 120)}”). Do not make the video; carry on with the call.` }
+          }
+          this.proposal = null
+          ctx.emit?.({ type: 'handoff', call_id: ctx.callId, kind: 'video', prompt: p.prompt, seconds: p.seconds })
+          return { status: 'ending_call', say: 'Say, in one short sentence, that you are ending the call and making the video in the chat.' }
+        },
+      },
+    ]
+  }
 }

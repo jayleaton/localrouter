@@ -577,6 +577,31 @@ const MODEL_TOOLS = [
 ];
 const MODEL_TOOL_NAMES = new Set(MODEL_TOOLS.map(t => t.function.name));
 let MM = { enabled: false, text: '' }; // /v1/skills/model-manager
+// A harness this page runs inside (the LocalRouter app: window.companion.host) offers its own tools to typed chat (its
+// computer, its files), runs them where it runs, keeps the conversation in its journal, and asks the page to move a
+// video from a call to the chat. In a browser there is no host and nothing below changes.
+const HOST = (window.companion && window.companion.host) || null;
+let HOST_TOOLS = [];
+const hostTool = name => HOST_TOOLS.some(t => t.function.name === name);
+async function loadHostTools() {
+  if (!HOST) return;
+  try { HOST_TOOLS = await HOST.tools(); } catch (e) { dbg('host.tools', { error: e.message }); }
+}
+// A finished message as the host's journal keeps it.
+function hostItem(m) {
+  if (m.partial || m.streaming || m.gone) return null;
+  if (m.role === 'user' || m.role === 'assistant') return { id: m.id, role: m.role, via: m.via === 'voice' ? 'voice' : 'text', text: m.role === 'assistant' ? splitThink(m.text || '').answer : (m.text || '') };
+  if (m.role === 'sys' && m.call && m.result != null) return { id: m.id, role: 'tool', via: m.via === 'voice' ? 'voice' : 'text', call: m.call, ok: !m.error, output: m.result };
+  if (m.role === 'tool' && m.media && m.media.length) return { id: m.id, role: 'tool', via: m.via === 'voice' ? 'voice' : 'text', call: { call_id: m.callId || m.id, name: m.kind === 'video' ? 'generate_video' : 'generate_image', arguments: JSON.stringify({ prompt: (m.args && m.args.prompt) || '' }) }, ok: true, output: JSON.stringify({ status: 'completed', urls: m.media.map(x => x.url) }) };
+  return null;
+}
+let hostSaveTimer = 0;
+function hostSave() {
+  if (!HOST || !cur) return;
+  clearTimeout(hostSaveTimer);
+  const c = cur;
+  hostSaveTimer = setTimeout(() => { HOST.save(c.id, c.msgs.map(hostItem).filter(Boolean)).catch(e => dbg('host.save', { error: e.message })); }, 300);
+}
 async function loadSkill() {
   try { const r = await api('/v1/skills/model-manager'); if (r.ok) MM = await r.json(); } catch {}
 }
@@ -655,6 +680,7 @@ function saveConv() {
   store.set('convs', convs);
   renderSide();
   renderTitle();
+  hostSave();
 }
 function ago(t) {
   const s = (Date.now() - t) / 1000;
@@ -1397,14 +1423,19 @@ async function copyLog() {
 // ---------------------------------------------------------------- chat over /v1/chat/completions
 
 let busy = null; // {ctl} while a chat reply streams
+let FORCE_TOOL = null; // {name, tool}: the next round must call it (a video moved from a call)
 function apiMessages() {
   const base = S.instructions.trim() || DEFAULT_SYSTEM;
   const msgs = [{ role: 'system', content: MM.enabled && S.tools ? `${base}\n\n${MM.text}` : base }];
-  const list = cur.msgs.filter(m => !m.partial && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool' || (m.role === 'sys' && m.callId)));
+  const list = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool' || (m.role === 'sys' && m.callId)));
   for (const m of list) {
     if (m.role === 'user' && m.text) msgs.push({ role: 'user', content: m.text });
     else if (m.role === 'sys') { // a model tool's answer
       if (msgs.some(x => x.tool_calls && x.tool_calls.some(c => c.id === m.callId))) msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result || '' });
+      else if (m.call && m.result != null) { // run on a call: its call, then its result
+        msgs.push({ role: 'assistant', content: null, tool_calls: [{ id: m.callId, type: 'function', function: { name: m.call.name, arguments: m.call.arguments || '{}' } }] });
+        msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result });
+      }
     }
     else if (m.role === 'assistant') {
       const content = splitThink(m.text || '').answer;
@@ -1434,7 +1465,9 @@ function chatBody() {
   else { b.chat_template_kwargs = { enable_thinking: false }; b.reasoning_effort = 'none'; }
   const offered = S.tools ? [has('image') && CHAT_TOOLS.image, has('video') && CHAT_TOOLS.video].filter(Boolean) : [];
   if (S.tools && MM.enabled) offered.push(...MODEL_TOOLS);
-  if (offered.length) { b.tools = offered; b.tool_choice = 'auto'; }
+  if (S.tools) offered.push(...HOST_TOOLS.filter(t => !offered.some(o => o.function.name === t.function.name)));
+  if (FORCE_TOOL && !offered.some(o => o.function.name === FORCE_TOOL.name)) offered.push(FORCE_TOOL.tool);
+  if (offered.length) { b.tools = offered; b.tool_choice = FORCE_TOOL ? { type: 'function', function: { name: FORCE_TOOL.name } } : 'auto'; }
   return b;
 }
 async function chatTurn() {
@@ -1445,6 +1478,7 @@ async function chatTurn() {
     for (let round = 0; round < (MM.enabled ? 8 : 4); round++) { // model management: check, reserve, make, confirm
       const am = addMsg({ role: 'assistant', text: '', reasoning: '', streaming: true, via: 'text' });
       const calls = await streamReply(am, ctl.signal);
+      FORCE_TOOL = null;
       am.streaming = false;
       draw(am);
       saveConv();
@@ -1522,6 +1556,18 @@ async function streamReply(am, signal) {
   renderStatus();
   return calls.filter(c => c && c.name).map((c, i) => ({ ...c, id: c.id || `call_${Date.now()}_${i}` }));
 }
+// One line for a host tool's result in the chat.
+function hostSummary(name, output, ok) {
+  let r = {};
+  try { r = JSON.parse(output || '{}'); } catch {}
+  if (!ok || r.error) return `${name.replace(/_/g, ' ')}: ${r.error || 'failed'}`;
+  if (name === 'computer_use') return `On this computer: ${r.status}${r.reason ? ' (' + r.reason + ')' : ''}${r.steps && r.steps.length ? ' — ' + r.steps.join(', ') : ''}`;
+  if (name === 'computer_control') return `On this computer: ${r.said || (r.ok ? 'done' : 'not done')}`;
+  if (name === 'list_files') return `Looked in ${r.folder}: ${(r.entries || []).length} items`;
+  if (name === 'read_file') return `Read ${r.path}${r.truncated ? ' (the first 64 KB)' : ''}`;
+  if (name === 'edit_image') return r.status === 'completed' ? 'Changed the picture' : `Changing the picture (${r.status})`;
+  return `${name.replace(/_/g, ' ')}: done`;
+}
 // A picture or a video over HTTP (the chat's own tool calls, and Retry): its URLs, or an Error with the server's reason.
 async function generate(kind, args, signal, progress) {
   const prompt = String(args.prompt || '');
@@ -1549,6 +1595,29 @@ async function runTool(call, signal) {
   const name = call.function.name;
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
+  if (HOST && hostTool(name)) {
+    const nm = note(`${name.replace(/_/g, ' ')}…`);
+    nm.callId = call.id;
+    nm.call = { call_id: call.id, name, arguments: call.function.arguments || '{}' };
+    dbg('tool.start', { name, args, host: true });
+    const said = [...cur.msgs].reverse().find(m => m.role === 'user' && m.text);
+    const stop = () => HOST.cancel(call.id);
+    if (signal) signal.addEventListener('abort', stop, { once: true });
+    try {
+      const r = await HOST.run(call.id, name, call.function.arguments || '{}', said ? said.text : '');
+      nm.result = r.output;
+      nm.error = !r.ok;
+      nm.text = hostSummary(name, r.output, r.ok);
+      let o = {};
+      try { o = JSON.parse(r.output || '{}'); } catch {}
+      // A picture the host made (an edit): in the reel like the page's own.
+      if (r.ok && /image/.test(name) && Array.isArray(o.urls) && o.urls.length) addMsg({ role: 'tool', kind: 'image', owner: PAGE_ID, args, text: `${name === 'edit_image' ? 'changed the picture' : 'made a picture'}: ${args.prompt || ''}`, media: o.urls.map(u => ({ kind: 'image', url: href(u), prompt: args.prompt || '' })) });
+    } catch (e) { nm.result = JSON.stringify({ error: e.message }); nm.error = true; nm.text = `${name}: ${e.message}`; }
+    finally { if (signal) signal.removeEventListener('abort', stop); }
+    draw(nm);
+    saveConv();
+    return;
+  }
   if (MODEL_TOOL_NAMES.has(name)) {
     const nm = note(`${name.replace('_', ' ')}${args.model ? ' ' + args.model : ''}${args.dry_run ? ' (checking)' : ''}…`);
     dbg('tool.start', { name, args });
@@ -1894,8 +1963,13 @@ function sessionUpdate() {
 // a cow", "here's your cow"), the model copied that and promised pictures without calling the tool.
 function seed() {
   const said = m => (m.role === 'user' || m.role === 'assistant') && splitThink(m.text || '').answer;
-  const recent = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'tool' || said(m))).slice(-40);
+  const recent = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'tool' || said(m) || (m.role === 'sys' && m.call && m.result != null))).slice(-40);
   for (const m of recent) {
+    if (m.role === 'sys') { // a host tool's call and result
+      vsend({ type: 'conversation.item.create', item: { type: 'function_call', call_id: m.callId, name: m.call.name, arguments: m.call.arguments || '{}' } });
+      vsend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: m.callId, output: m.result } });
+      continue;
+    }
     if (m.role === 'tool') {
       const video = m.kind === 'video' || !!(m.media && m.media[0] && m.media[0].kind === 'video');
       const call = m.callId || `call_${m.id}`;
@@ -1971,6 +2045,36 @@ async function voiceStart() {
   openMic(my).then(renderVoice);
   if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { V.lock = l; }).catch(() => {});
   renderVoice();
+}
+// A video asked for on a call (the host checked the person said yes): once the reply has been heard, the call ends and
+// the chat makes it. Making room for it (voice models paused) and bringing the voice back are the host's.
+function handoffWhenQuiet() {
+  if (!V.handoff) return;
+  if (V.live.length || V.held.length || V.resp) return void setTimeout(handoffWhenQuiet, 250);
+  const h = V.handoff;
+  V.handoff = null;
+  voiceStop();
+  void videoInChat(h);
+}
+async function videoInChat(h) {
+  note(`Call ended to make the video in the chat: “${h.prompt}”`);
+  saveConv();
+  if (HOST && HOST.prepareVideo) {
+    const p = await HOST.prepareVideo().catch(e => ({ ok: false, text: e.message }));
+    const n = note(p.ok ? `Made room for the video: ${p.text}` : `Could not make room first (${p.text}); the video makes its own room.`, !p.ok);
+    dbg('host.prepare_video', { ok: p.ok }); void n;
+  }
+  addMsg({ role: 'user', via: 'text', text: `Make this video now (from our call): ${h.prompt}${h.seconds ? ` (${h.seconds} seconds)` : ''}` });
+  saveConv();
+  FORCE_TOOL = { name: 'generate_video', tool: CHAT_TOOLS.video };
+  while (busy) await new Promise(r => setTimeout(r, 200));
+  await chatTurn();
+  FORCE_TOOL = null;
+  if (HOST && HOST.restoreVoice) {
+    const r = await HOST.restoreVoice().catch(e => ({ ok: false, text: e.message }));
+    note(r.ok ? `Voice models: ${r.text}` : `The voice models did not come back yet: ${r.text}`, !r.ok);
+    saveConv();
+  }
 }
 function voiceStop() {
   V.run++;
@@ -2604,6 +2708,16 @@ function handle(ev) {
         saveConv();
       }
       break;
+    case 'localrouter.client_tool.done': { // a tool the host ran on the call: into the conversation, like a typed one
+      if (ev.cancelled) break;
+      const m = addMsg({ role: 'sys', via: 'voice', callId: ev.call_id, call: { call_id: ev.call_id, name: ev.name, arguments: ev.arguments || '{}' }, result: ev.output, error: !ev.ok, text: hostSummary(ev.name, ev.output, ev.ok) });
+      saveConv();
+      dbg('host.tool', { name: ev.name, ok: ev.ok, id: m.id });
+      break;
+    }
+    case 'localrouter.companion.handoff': // the person said yes to ending the call for a video
+      if (ev.kind === 'video') V.handoff = { prompt: String(ev.prompt || ''), seconds: ev.seconds || null };
+      break;
     case 'localrouter.job.created': {
       let m = V.byCall.get(ev.call_id) || cur.msgs.find(x => x.role === 'tool' && x.jobId && x.jobId === ev.job_id);
       if (!m) { // a call whose function_call item this page missed: the card shows anyway
@@ -2633,6 +2747,7 @@ function handle(ev) {
       break;
     }
     case 'response.done': {
+      if (V.handoff && !(ev.response && (ev.response.output || []).some(o => o.type === 'function_call'))) setTimeout(handoffWhenQuiet, 300);
       V.thinking = false;
       V.resp = null;
       V.lead = Math.max(0.1, V.lead * 0.8);
@@ -2892,6 +3007,7 @@ openConv(store.get('current', null) || ((convs.find(c => c.msgs.length) || {}).i
 renderControls();
 renderVoice();
 loadSkill();
+loadHostTools();
 loadModels().then(pollTools);
 setInterval(pollTools, 4000);
 setInterval(watchJobs, 3000);

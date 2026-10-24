@@ -34,7 +34,7 @@ async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { url: { type: 'string' }, code: { type: 'string' }, name: { type: 'string' }, 'fake-mac': { type: 'boolean' }, share: { type: 'string' }, speak: { type: 'boolean' }, 'approve-after-ms': { type: 'string' }, deny: { type: 'boolean' }, 'expect-approval': { type: 'boolean' }, expect: { type: 'string' }, json: { type: 'string' }, dir: { type: 'string' }, timeout: { type: 'string' } },
+    options: { url: { type: 'string' }, code: { type: 'string' }, name: { type: 'string' }, 'fake-mac': { type: 'boolean' }, share: { type: 'string' }, speak: { type: 'boolean' }, 'approve-after-ms': { type: 'string' }, deny: { type: 'boolean' }, 'expect-approval': { type: 'boolean' }, 'expect-handoff': { type: 'boolean' }, 'expect-no-handoff': { type: 'boolean' }, expect: { type: 'string' }, json: { type: 'string' }, dir: { type: 'string' }, timeout: { type: 'string' } },
   })
   const [command, ...turns] = positionals
   const url = values.url ?? process.env.LOCALROUTER_URL ?? ''
@@ -126,6 +126,7 @@ async function main(argv: string[]): Promise<number> {
   await new Promise((r) => setTimeout(r, 2000))
   session.close()
   const jobs = events.filter((e) => e.type.startsWith('localrouter.job'))
+  const handoffs = events.filter((e) => e.type === 'localrouter.companion.handoff')
   const expected = (values.expect ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   const ran = session.calls.filter((c) => c.ok).map((c) => c.name)
   const checks = {
@@ -133,6 +134,7 @@ async function main(argv: string[]): Promise<number> {
     every_turn_spoken: results.every((r) => Number(r.audio_s) > 0),
     expected_tools_ran: expected.every((name) => ran.includes(name)),
     approval_raised_here: !values['expect-approval'] || approvals.length > 0,
+    handoff_as_expected: values['expect-handoff'] ? handoffs.length === 1 : values['expect-no-handoff'] ? handoffs.length === 0 : true,
     approvals_answered_here: approvals.every((a) => (a.result as { ok?: boolean }).ok === true || values.deny === true),
     no_box_tool_events: !events.some((e) => e.type === 'localrouter.job.created' && !session.calls.some((c) => c.call_id === e.call_id)),
   }
@@ -143,6 +145,7 @@ async function main(argv: string[]): Promise<number> {
     turns: results,
     approvals,
     jobs,
+    handoffs,
     audit: rt.executor.broker.audit(200),
     fake_mac: { actions: rt.executor.built.fake?.desktop.actions, sent: rt.executor.built.fake?.desktop.sent, controls: rt.executor.built.fake?.controls.calls },
     journal: rt.journal.export(conversation),

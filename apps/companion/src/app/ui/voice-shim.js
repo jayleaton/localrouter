@@ -20,7 +20,10 @@
           this.readyState = CompanionSocket.OPEN;
           if (this.onopen) this.onopen({ type: 'open' });
         },
-        onMessage: (data) => { if (this.readyState === CompanionSocket.OPEN && this.onmessage) this.onmessage({ type: 'message', data }); },
+        onMessage: (data) => {
+          hop(data);
+          if (this.readyState === CompanionSocket.OPEN && this.onmessage) this.onmessage({ type: 'message', data });
+        },
         onClose: (code, reason) => this.closed(code, reason),
       }).then((id) => {
         this.id = id;
@@ -42,6 +45,30 @@
       this.readyState = CompanionSocket.CLOSED;
       if (code !== 1000 && this.onerror) this.onerror({ type: 'error' });
       if (this.onclose) this.onclose({ type: 'close', code, reason: reason || '', wasClean: code === 1000 });
+    }
+  }
+  // The app's own hop for each piece of speech: from the app's process having it to this page having it, and the gaps
+  // between pieces as they reach the page. Logged per reply into the page's debug log (Settings › Copy debug log), so a
+  // slow box (gaps already there when the app got them) and a slow hop (lag here) can be told apart on the user's Mac.
+  const H = { lags: [], gaps: [], last: 0, worst: null };
+  window.__companionAudio = H;
+  const now = () => performance.timeOrigin + performance.now();
+  function hop(data) {
+    if (typeof data !== 'string') return;
+    if (data.indexOf('"lr_main_ms"') >= 0) {
+      try {
+        const ev = JSON.parse(data);
+        const t = now();
+        H.lags.push(t - ev.lr_main_ms);
+        if (H.last) H.gaps.push(t - H.last);
+        H.last = t;
+      } catch { /* not ours */ }
+    } else if (data.indexOf('"response.done"') >= 0 && H.lags.length) {
+      const q = (a, f) => { const b = [...a].sort((x, y) => x - y); return b.length ? Math.round(b[Math.min(b.length - 1, Math.floor(f * b.length))]) : null; };
+      const stats = { pieces: H.lags.length, hop_p50_ms: q(H.lags, 0.5), hop_p95_ms: q(H.lags, 0.95), hop_max_ms: q(H.lags, 1), gap_p95_ms: q(H.gaps, 0.95), gap_max_ms: q(H.gaps, 1) };
+      H.lags = []; H.gaps = []; H.last = 0;
+      if (!H.worst || stats.hop_max_ms > H.worst.hop_max_ms) H.worst = stats;
+      if (typeof dbg === 'function') dbg('app.audio_hop', stats); // eslint-disable-line no-undef
     }
   }
   CompanionSocket.CONNECTING = 0;

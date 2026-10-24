@@ -24,6 +24,18 @@ export type ExportedMessage =
   | { role: 'tool_call'; call_id: string; name: string; arguments: string; at: number }
   | { role: 'tool_result'; call_id: string; ok: boolean; output: string; at: number }
 
+/** One finished message of a UI's conversation, as the app's page reports it (`mirror`). */
+export type PageItem = {
+  id: string
+  role: 'user' | 'assistant' | 'tool'
+  via: 'voice' | 'text'
+  text?: string
+  /** A tool's call and result (role tool). */
+  call?: { call_id: string; name: string; arguments: string }
+  ok?: boolean
+  output?: string
+}
+
 export const EXPORT_FORMAT = 'localrouter-conversation/1'
 const MAX_OUTPUT = 8000
 
@@ -43,11 +55,48 @@ export class Journal {
     return id
   }
 
-  append(id: string, entry: Entry) {
+  /** `msg`: the UI message this records, when it mirrors one. */
+  append(id: string, entry: Entry, msg?: string) {
     if (!/^conv_[\w-]+$/.test(id)) throw new Error('not a conversation id')
     const e = entry.type === 'tool_result' && entry.output.length > MAX_OUTPUT ? { ...entry, output: `${entry.output.slice(0, MAX_OUTPUT)}…` } : entry
     mkdirSync(this.dir, { recursive: true, mode: 0o700 })
-    appendFileSync(join(this.dir, `${id}.jsonl`), `${JSON.stringify({ ts: this.now(), ...e })}\n`, { mode: 0o600 })
+    appendFileSync(join(this.dir, `${id}.jsonl`), `${JSON.stringify({ ts: this.now(), ...e, ...(msg ? { msg } : {}) })}\n`, { mode: 0o600 })
+  }
+
+  /** The journal id of a UI conversation (the page's own id, made safe). */
+  static pageConversation(pageId: string): string {
+    return `conv_page_${pageId.replace(/[^\w-]/g, '').slice(0, 80) || 'x'}`
+  }
+
+  private readonly mirrored = new Map<string, Set<string>>()
+
+  /**
+   * Records a UI conversation's finished messages that are not recorded yet (by message id), in order: voice and
+   * typed turns alike, tool calls with their results. Returns how many it added.
+   */
+  mirror(pageId: string, items: PageItem[]): number {
+    const id = Journal.pageConversation(pageId)
+    let seen = this.mirrored.get(id)
+    if (!seen) {
+      seen = new Set(this.read(id).map((l) => (l as Line & { msg?: string }).msg).filter((m): m is string => Boolean(m)))
+      this.mirrored.set(id, seen)
+    }
+    let added = 0
+    for (const it of items.slice(-500)) {
+      if (!it || typeof it.id !== 'string' || seen.has(it.id)) continue
+      const entries: Entry[] = []
+      if ((it.role === 'user' || it.role === 'assistant') && typeof it.text === 'string' && it.text.trim()) {
+        entries.push(it.role === 'user' ? { type: 'user', text: it.text, via: it.via === 'voice' ? 'voice' : 'text' } : { type: 'assistant', text: it.text })
+      } else if (it.role === 'tool' && it.call && typeof it.call.name === 'string') {
+        entries.push({ type: 'tool_call', call_id: String(it.call.call_id), name: it.call.name, arguments: String(it.call.arguments ?? '') })
+        if (typeof it.output === 'string') entries.push({ type: 'tool_result', call_id: String(it.call.call_id), ok: it.ok !== false, output: it.output, ms: 0 })
+      }
+      if (!entries.length) continue
+      for (const e of entries) this.append(id, e, it.id)
+      seen.add(it.id)
+      added += 1
+    }
+    return added
   }
 
   read(id: string): Line[] {
