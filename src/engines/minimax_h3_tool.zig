@@ -4,8 +4,10 @@
 //! LoRA merged and `tokenizer.json`), `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`,
 //! `vae/minimax_h3_audio_vae_fp32.safetensors` and `vae/minimax_h3_video_vae_fp16.safetensors`, all as published.
 //! Options: `pack` (default h3-turbo-nvfp4), `max_width` / `max_height` (pixels, multiples of 32, default 768 x 448),
-//! `max_seconds` (default 5), `steps` (default 8, the Turbo LoRA's), `unload_te` (1: free the 32B encoder after each
-//! encode), `resident_mb` (the scheduler's estimate).
+//! `max_seconds` (default 5), `default_size` (`WIDTHxHEIGHT`, what a request without a size gets; default the largest),
+//! `steps` (default 8, the Turbo LoRA's), `unload_te` (1: free the 32B encoder after each encode), `resident_mb` (the
+//! scheduler's estimate). The pipeline's buffers are sized at load for the largest clip, so the memory a job takes
+//! follows `max_*`, while its time follows the clip asked for.
 
 const std = @import("std");
 const engine = @import("../engine/engine.zig");
@@ -42,13 +44,21 @@ fn limits(cfg: *const ToolConfig) P.Limits {
     };
 }
 
-/// A video without a size gets the largest this model takes.
+/// The size a video without one gets: `default_size` when it is within the limits, else the largest this model takes.
+fn defaultSize(cfg: *const ToolConfig) [2]u32 {
+    const l = limits(cfg);
+    const d = @import("../tool/request.zig").parseSize(engine.optionString(cfg, "default_size", "")) orelse return .{ l.width, l.height };
+    if (d[0] > l.width or d[1] > l.height or d[0] % 32 != 0 or d[1] % 32 != 0) return .{ l.width, l.height };
+    return d;
+}
+
+/// A video without a size gets `defaultSize`.
 fn defaults(cfg: *const ToolConfig, req: *Request) void {
     switch (req.*) {
         .video => |*v| if (v.width == 0 and v.height == 0) {
-            const l = limits(cfg);
-            v.width = l.width;
-            v.height = l.height;
+            const d = defaultSize(cfg);
+            v.width = d[0];
+            v.height = d[1];
         },
         .image, .speech, .transcription, .chat, .decision => {},
     }
@@ -63,7 +73,8 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     };
     const l = limits(cfg);
     if (v.width > l.width or v.height > l.height or v.width % 32 != 0 or v.height % 32 != 0) {
-        why.print("model '{s}' takes sizes up to {d}x{d}, multiples of 32 (omit size for {d}x{d})", .{ cfg.id, l.width, l.height, l.width, l.height }) catch {};
+        const d = defaultSize(cfg);
+        why.print("model '{s}' takes sizes up to {d}x{d}, multiples of 32 (omit size for {d}x{d})", .{ cfg.id, l.width, l.height, d[0], d[1] }) catch {};
         return false;
     }
     if (v.seconds * fps > l.frames) {
@@ -221,6 +232,27 @@ test "a video without a size gets the model's own; one it cannot make is refused
     const long: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448, .seconds = 6 } };
     try std.testing.expect(!check(cfg, &long, &why));
     try std.testing.expectEqualStrings("model 'h3' takes clips up to 5 seconds", why.buffered());
+}
+
+test "default_size: a video without a size gets it, within the limits; refusals name the limits" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try @import("../config.zig").parse(arena.allocator(),
+        \\{"tools": [{"id": "h3", "kind": "video", "engine": "minimax_h3", "options": {"max_width": 1280, "max_height": 704, "max_seconds": 8, "default_size": "768x448"}},
+        \\           {"id": "bad", "kind": "video", "engine": "minimax_h3", "options": {"max_width": 768, "max_height": 448, "default_size": "1280x704"}}]}
+    );
+    var r: Request = .{ .video = .{ .prompt = "waves", .seconds = 8 } };
+    engine.fill(c.tool("h3").?, &r);
+    try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ r.video.width, r.video.height });
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    try std.testing.expect(check(c.tool("h3").?, &r, &why));
+    const big: Request = .{ .video = .{ .prompt = "waves", .width = 1280, .height = 720, .seconds = 8 } };
+    try std.testing.expect(!check(c.tool("h3").?, &big, &why));
+    try std.testing.expectEqualStrings("model 'h3' takes sizes up to 1280x704, multiples of 32 (omit size for 768x448)", why.buffered());
+    var b: Request = .{ .video = .{ .prompt = "waves" } };
+    engine.fill(c.tool("bad").?, &b);
+    try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ b.video.width, b.video.height }); // past the limits: the largest
 }
 
 /// Refuses the request (the API's 400) with a reason the caller can act on.
