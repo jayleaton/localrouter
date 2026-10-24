@@ -8,7 +8,15 @@ UNIT=${UNIT:-localrouter-jarvis}
 CHAT_ROOT=${CHAT_ROOT:-$J/qualify-chat/root}
 CHAT_MARKER=${CHAT_MARKER:-$J/qualify-chat/qwen38-27b-qualification.json}
 DRAMA_ROOT=${DRAMA_ROOT:-$J/qualify-drama3/root}
-DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-qualification.json}
+# Drama 3's weights: nvfp4 (plotarmordev/drama-3-NVFP4-Pruned, lossy, approved by JJ 2026-10-24) or full
+# (fishaudio/drama-3). Each has its own marker and booking (its measured peak plus 256 MiB); the full model's install
+# stays beside the quant's, so DRAMA_VARIANT=full and install.sh is the whole rollback.
+DRAMA_VARIANT=${DRAMA_VARIANT:-nvfp4}
+case $DRAMA_VARIANT in
+  full) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-42144366592} ;;
+  nvfp4) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-nvfp4-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-22075092992} ;;
+  *) echo "env.sh: DRAMA_VARIANT must be nvfp4 or full, not '$DRAMA_VARIANT'" >&2; exit 2 ;;
+esac
 DRAMA_PORT=${DRAMA_PORT:-$((PORT + 10603))}   # the Drama 3 server, on 127.0.0.1 (18793 beside the default PORT)
 KNOWLINE_REV=779944d2cc8ffa19cef386aee83c83bcb967ade2   # PelaAI/KnowLine-4B-Gen5.5, the decision model (tools/decide/knowline)
 URL=http://127.0.0.1:$PORT

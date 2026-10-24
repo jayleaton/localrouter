@@ -209,21 +209,24 @@ step's `done` test.
 
 ### tts: `fishaudio/drama-3`
 
-- **What it is.** Fish Audio Drama 3 on its TensorFold native engine: six fixed voices (Mae, Arlo, Ezra, Nora, Theo,
-  Wren), streamed 44.1 kHz audio. Kept warm.
+- **What it is.** Fish Audio Drama 3 on its TensorFold native engine, with the NVFP4 pruned weights
+  ([plotarmordev/drama-3-NVFP4-Pruned](https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned)): six fixed voices
+  (Mae, Arlo, Ezra, Nora, Theo, Wren), streamed 44.1 kHz audio. Kept warm.
 - **Licence.** FACL v1.0, which grants no licence for a hosted service, so keep the service on loopback or your
-  tailnet. Its acceptance covers the licence and the engine's numerics: the engine is not bit-exact with the
-  SGLang-Omni reference, and qualify records the accuracy checks either way.
-- **Size.** About 51 GB to download (41.5 GB of weights plus the reference runtime) and 53 GB on disk. 42 GiB in
-  memory.
+  tailnet. The quant is an unofficial community quant under the same licence. Its acceptance covers the licence, the
+  engine's numerics (not bit-exact with the SGLang-Omni reference) and lossy weights: routed experts in NVFP4, 7,369 of
+  10,240 kept ([measured against the full model](docs/dev/DRAMA3.md#the-nvfp4-pruned-weights)).
+- **Size.** About 22.6 GB to download and 25 GB on disk. 20.6 GiB in memory.
 - **Steps.**
-  - `tools/speech/drama3/fetch.sh`: every file against `pins.json`.
-  - `build.sh`: the patched engine, about 5 minutes.
-  - `reference.sh`: the reference runtime for qualify.
+  - `tools/speech/drama3/fetch.sh --variant nvfp4`: every file against `pins.json` and `pins-nvfp4.json`.
+  - `build.sh --variant nvfp4`: the engine for these weights, about 15 minutes.
   - A qualify config made from the deployed tool.
-  - `qualify.sh --accept-native-numerics`: about 20 minutes on the GPU. It needs 88 GiB free and writes
-    `$J/qualify-drama3/drama3-qualification.json`.
-- **Verify.** `jq .qualified $J/qualify-drama3/drama3-qualification.json` is `true`.
+  - `qualify.sh --accept-native-numerics --accept-lossy`: about 20 minutes on the GPU. It needs 32 GiB free and writes
+    `$J/qualify-drama3/drama3-nvfp4-qualification.json`.
+- **Verify.** `jq .qualified $J/qualify-drama3/drama3-nvfp4-qualification.json` is `true`.
+- **The full model instead.** `DRAMA_VARIANT=full` (`deploy/jarvis/env.sh`) serves fishaudio/drama-3 (41.5 GB, 39.25
+  GiB in memory), fetched, built and qualified without `--variant` (`reference.sh` and 88 GiB free for its accuracy
+  checks); both installs live side by side under `$J/qualify-drama3/root`.
 - **Skip it.** Leave `tts` out. The box then has no voice.
 
 ### stt: `whisper-large-v3-turbo`

@@ -30,7 +30,7 @@ nvidia-smi -L | grep -q GB10 || die "no GB10"
 for t in jq curl python3 sha256sum systemctl systemd-run zig; do command -v $t > /dev/null || die "needs $t (zig: under $J/bin)"; done
 nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
 [ -x "$nvcc" ] || die "no nvcc at $nvcc"
-all=$(sed 's/@DRAMA_PORT@/0/' "$here/config.json.in" | jq -r '[.tools[].id] | join(" ")')
+all=$(sed -e 's/@DRAMA_PORT@/0/' -e 's/@DRAMA_RESIDENT@/0/' "$here/config.json.in" | jq -r '[.tools[].id] | join(" ")')
 TOOLS=${TOOLS:-$all}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; config.json.in has: $all"; done
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
@@ -42,6 +42,15 @@ marker() {
   want=$(sha256sum "$2" | cut -d' ' -f1)
   got=$(jq -r '.pins_sha256 // ""' "$1")
   [ "$got" = "$want" ] || die "$3: $1 was qualified with pins $got, this tree has $want: re-qualify first"
+  if [ -n "${4:-}" ]; then # a variant's marker: its weights and their own pins (pins-VARIANT.json) as well
+    got=$(jq -r '.variant // "full"' "$1")
+    [ "$got" = "$4" ] || die "$3: $1 qualified the $got weights, DRAMA_VARIANT is $4"
+    if [ "$4" != full ]; then
+      want=$(sha256sum "$(dirname "$2")/pins-$4.json" | cut -d' ' -f1)
+      got=$(jq -r '.variant_pins_sha256 // ""' "$1")
+      [ "$got" = "$want" ] || die "$3: $1 was qualified with $4 pins $got, this tree has $want: re-qualify first"
+    fi
+  fi
   echo "  $3: qualified ($(basename "$1") sha256 $(sha256sum "$1" | cut -c1-12), pins match)"
 }
 whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1' || true)   # none yet: fine for BUILD_ONLY
@@ -53,7 +62,7 @@ if [ "${BUILD_ONLY:-0}" != 1 ]; then
     [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
   fi
   if wanted fishaudio/drama-3; then
-    marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3"
+    marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3" "$DRAMA_VARIANT"
     [ -d "$DRAMA_ROOT" ] || die "no Drama 3 install at $DRAMA_ROOT"
   fi
   if wanted whisper-large-v3-turbo; then
@@ -102,7 +111,8 @@ sha256sum "$src/zig-out/bin/localrouter"
 render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
-      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@WHISPER@|${whisper:-unused}|g" "$1"
+      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" \
+      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" "$1"
 }
 # pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
 pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')

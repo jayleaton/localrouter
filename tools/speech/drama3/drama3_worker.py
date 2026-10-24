@@ -13,8 +13,8 @@ Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on std
 The model is plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with the Drama 3 patch
 series), built from the pins in pins.json and started by that repository's own launcher, recipe/pilot.py, with
 LocalRouter's pinned admission patch (patches/pilot-external-admission.patch; fetch.sh writes ROOT/launcher/pilot.py).
-LocalRouter's scheduler is the only admission authority: it admits the load from the tool's resident_bytes (42 GiB:
-the measured peak and a small margin, docs/dev/DRAMA3.md) against its budget, so the worker passes --external-admission and the launcher skips its
+LocalRouter's scheduler is the only admission authority: it admits the load from the tool's resident_bytes (the
+measured peak and a small margin, docs/dev/DRAMA3.md) against its budget, so the worker passes --external-admission and the launcher skips its
 own 88 GiB MemAvailable admission and 34 GiB abort. The launcher still runs the server as a transient systemd user
 unit capped at 54 GiB on 127.0.0.1, takes the lock it is given (LOCALROUTER_GPU_LOCK: the private, uncontended
 per-tool lock file the daemon names; a lock under the runtime directory when run outside the daemon), and stops the
@@ -32,6 +32,10 @@ unit and releases the lock when it is told to stop. This worker is a client of t
   503 and the next request starts the model again.
 - exit: SIGTERM to the launcher, which stops the unit and then releases the lock. The launcher runs in its own
   session with a parent-death signal, so a worker killed by the daemon (a cancel, a deadline) still stops it.
+
+The option `variant` picks the weights: `full` (fishaudio/drama-3, pins.json; the default) or `nvfp4`
+(plotarmordev/drama-3-NVFP4-Pruned, pins-nvfp4.json: its own checkpoint directory, engine build and serve flags,
+and a marker of its own, which must name the variant and its pins).
 
 Drama 3 seeds each synthesis from its prompt, so `seed` is not sent and the reply's seed is 0. `speed`, `preset`
 and `instructions` are refused by the daemon before a request gets here (the tool's options declare none).
@@ -96,6 +100,22 @@ def load_pins():
         return json.load(f)
 
 
+VARIANTS = ("full", "nvfp4")
+
+
+def variant_pins_path(variant):
+    """pins-VARIANT.json beside pins.json: another checkpoint's pins (pins.json holds the full model's)."""
+    return os.path.join(os.path.dirname(PINS), f"pins-{variant}.json")
+
+
+def load_variant_pins(variant):
+    """The variant's own pins, None for the full model."""
+    if variant == "full":
+        return None
+    with open(variant_pins_path(variant), encoding="utf-8") as f:
+        return json.load(f)
+
+
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -131,7 +151,7 @@ class Options:
         known = {"voices", "default_voice", "max_input_chars", "min_speed", "max_speed", "presets", "stream",
                  "references", "port", "max_frames", "long_form", "long_form_chars", "long_form_history",
                  "voices_dir", "verify", "pilot", "native_bin", "checkpoint", "runtime_dir", "ready_timeout_s",
-                 "admission"}
+                 "admission", "variant", "guidance"}
         unknown = sorted(set(o) - known)
         if unknown:
             log(f"options not used by the worker: {unknown}")
@@ -145,9 +165,21 @@ class Options:
         self.admission = o.get("admission", "external")
         if self.admission not in ("external", "launcher"):
             raise ValueError("admission must be external or launcher")
-        self.native_bin = o.get("native_bin") or os.path.join(root, "build", "tensorfold", "zig-out", "native", "bin",
-                                                               "tensorfold-native")
-        self.checkpoint = o.get("checkpoint") or os.path.join(root, "drama-3")
+        # full: fishaudio/drama-3 (pins.json); nvfp4: plotarmordev/drama-3-NVFP4-Pruned with its own engine build and
+        # serve flags (pins-nvfp4.json), which fetch.sh and build.sh --variant nvfp4 put beside the full model's.
+        self.variant = o.get("variant", "full")
+        if self.variant not in VARIANTS:
+            raise ValueError(f"variant must be one of {', '.join(VARIANTS)}")
+        self.variant_pins = load_variant_pins(self.variant)
+        v = self.variant_pins
+        build = v["build"]["dir"] if v else os.path.join("build", "tensorfold")
+        self.native_bin = o.get("native_bin") or os.path.join(root, build, "zig-out", "native", "bin", "tensorfold-native")
+        self.checkpoint = o.get("checkpoint") or os.path.join(root, v["checkpoint"]["dir"] if v else "drama-3")
+        # The variant's serve flags (nvfp4: classifier-free guidance at γ 1.5, batched, as it was measured upstream);
+        # false serves it without them: a second backbone sequence less a frame, unguided.
+        self.guidance = o.get("guidance", True)
+        if not isinstance(self.guidance, bool):
+            raise ValueError("guidance must be true or false")
         self.runtime_dir = o.get("runtime_dir") or os.path.join(root, "runtime")
         self.port = int(o.get("port", 18793))
         if not 1 <= self.port <= 65535:
@@ -174,8 +206,9 @@ class Options:
             raise ValueError("Drama 3 has no presets: its style is written in the input ([sighs], [laughs])")
 
     def serve_args(self):
-        """The server flags after the launcher's `--`."""
-        args = []
+        """The server flags after the launcher's `--`: the variant's own first (nvfp4: the guidance it was measured
+        with)."""
+        args = list(self.variant_pins["serve"]) if self.variant_pins and self.guidance else []
         if self.max_frames is not None:
             args += ["--max-frames", str(int(self.max_frames))]
         if self.long_form:
@@ -380,6 +413,12 @@ class Worker:
             raise ValueError(f"not GPU-qualified on this host: {path} qualified {marker.get('host')!r}, this is {host!r}")
         if marker.get("pins_sha256") != sha256_file(PINS):
             raise ValueError(f"not GPU-qualified on this host: {path} qualified other pins; run qualify.sh again")
+        variant = self.opts.variant
+        if marker.get("variant", "full") != variant:
+            raise ValueError(f"not GPU-qualified on this host: {path} qualified the {marker.get('variant', 'full')} "
+                             f"weights, the tool serves the {variant} weights")
+        if variant != "full" and marker.get("variant_pins_sha256") != sha256_file(variant_pins_path(variant)):
+            raise ValueError(f"not GPU-qualified on this host: {path} qualified other {variant} pins; run qualify.sh again")
         if not os.path.isfile(self.opts.native_bin) or marker.get("native_sha256") != sha256_file(self.opts.native_bin):
             raise ValueError(f"not GPU-qualified on this host: {path} qualified another engine build; run qualify.sh again")
 
@@ -396,7 +435,8 @@ class Worker:
         launcher = pins["launcher"]["sha256"]
         if sha256_file(o.pilot) != launcher:
             raise ValueError(f"{o.pilot} is not the pinned launcher (sha256 {launcher}): run fetch.sh")
-        for name, (size, digest) in sorted(pins["checkpoint"]["files"].items()):
+        checkpoint = (o.variant_pins or pins)["checkpoint"]
+        for name, (size, digest) in sorted(checkpoint["files"].items()):
             path = os.path.join(o.checkpoint, name)
             if not os.path.isfile(path) or os.path.getsize(path) != size:
                 raise ValueError(f"{path} is missing or not {size} bytes: run fetch.sh")

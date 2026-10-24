@@ -1,0 +1,26 @@
+# compare.py's fixed texts: short spoken replies of the kind a voice assistant gives, one sentence a line, words only
+# (no digits or symbols, so a transcript is scored on what was said, not on how numbers are written).
+Good morning, the kettle is on and your first meeting starts in twenty minutes.
+The train to the city is running about ten minutes late this evening.
+I have added milk, eggs and a loaf of bread to the shopping list.
+It will rain this afternoon, so take an umbrella when you leave.
+Your package was delivered to the front porch an hour ago.
+The living room lights are off and the back door is locked.
+I set a timer for twelve minutes, and I will tell you when the pasta is ready.
+Here is a short summary of the article you asked me to read.
+The museum opens at nine and closes early on Sundays.
+Your sister called while you were out and asked you to ring her back.
+The oven is preheated, and the recipe says to bake the bread for forty minutes.
+Traffic on the bridge is heavy, so the coastal road will be quicker today.
+I could not find that song in your library, but I found a live recording of it.
+The quiet hours start at ten, so the speaker will lower its volume then.
+Please remember to water the tomatoes on the balcony before the weekend.
+The meeting has moved to the small room on the second floor.
+That word comes from an old French verb that meant to wander.
+The battery on your bicycle light is nearly empty and should be charged tonight.
+I have booked a table for two at the Italian place near the harbour.
+The library books are due back on Thursday, and one of them can be renewed.
+A gentle wind is coming in from the sea, and the evening should stay clear.
+The printer in the study is out of paper again.
+Your flight leaves on time, and the gate will be announced an hour before boarding.
+Sleep well, and I will wake you with soft music at half past six.

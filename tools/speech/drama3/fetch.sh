@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 # Fetches the pinned Fish Audio Drama 3 sources (tools/speech/drama3/pins.json) into ROOT and checks every sha256.
-#   tools/speech/drama3/fetch.sh ROOT [--no-weights] [--check]
+#   tools/speech/drama3/fetch.sh ROOT [--variant full|nvfp4] [--no-weights] [--check]
 # ROOT/drama-tensorfold is plotarmordev/drama-tensorfold at the pinned commit: the launcher (recipe/pilot.py), the
 # engine build script and the patch series. ROOT/drama-3 is the fishaudio/drama-3 checkpoint at the pinned revision
 # (41.5 GB). ROOT/launcher/pilot.py is upstream's launcher with LocalRouter's pinned admission patch
 # (patches/). ROOT/voices holds the named voices (voices/, by sha256), and LocalRouter's engine patches
 # (patches/engine/, applied by build.sh) are checked by sha256. Files already present with the pinned size and hash are kept. --no-weights stops after the upstream
 # checkout. --check fetches and changes nothing: it verifies what is there and fails on any difference (build.sh and
-# qualify.sh use it). Nothing is executed from the downloads, and nothing here accepts the weights' licence.
+# qualify.sh use it). --variant nvfp4 (pins-nvfp4.json) takes plotarmordev/drama-3-NVFP4-Pruned into
+# ROOT/drama-3-NVFP4-Pruned instead of the full checkpoint (22.3 GB), and checks its engine patches; a file the full
+# checkpoint already holds with the same size and sha256 (the codec, config and tokenizer) is hardlinked from it, not
+# downloaded again. Nothing is executed from the downloads, and nothing here accepts the weights' licence.
 set -euo pipefail
 export LC_ALL=C # glob and sort order is byte order, the order build-engine.sh applies the patches in
 here=$(cd "$(dirname "$0")" && pwd)
-root=${1:?usage: fetch.sh ROOT [--no-weights] [--check]}
+root=${1:?usage: fetch.sh ROOT [--variant full|nvfp4] [--no-weights] [--check]}
 shift
-weights=1 check=0
+weights=1 check=0 variant=full
 while [ $# -gt 0 ]; do
   case $1 in
+    --variant) variant=${2:-}; shift 2 ;;
     --no-weights) weights=0; shift ;;
     --check) check=1; shift ;;
     *) echo "fetch.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 die() { echo "fetch.sh: $*" >&2; exit 1; }
+case $variant in full | nvfp4) ;; *) die "--variant must be full or nvfp4, not '$variant'" ;; esac
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 [ "$check" = 1 ] || mkdir -p "$root"
 [ -d "$root" ] || die "$root is not a directory"
@@ -30,9 +35,10 @@ root=$(cd "$root" && pwd)
 # One line a pin: repo URL COMMIT DIR | file PATH SHA256 | patch NAME SHA256 | series COUNT SHA256 |
 # launcher PATCH PATCH_SHA256 BASE PATH SHA256 |
 # ckpt REPO REVISION DIR PATH SIZE SHA256.
-plan=$(python3 -I - "$here/pins.json" <<'EOF'
+plan=$(python3 -I - "$here/pins.json" "$variant" "$here/pins-$variant.json" <<'EOF'
 import json, sys
 pins = json.load(open(sys.argv[1]))
+full = pins["checkpoint"]
 u, p, c = pins["upstream"], pins["patches"], pins["checkpoint"]
 print("repo", u["repository"], u["commit"], u["dir"])
 for path, digest in sorted(u["files"].items()):
@@ -48,8 +54,16 @@ for name, digest in sorted(e["files"].items()):
 v = pins["voices"]
 for name, digest in sorted(v["files"].items()):
     print("voice", v["dir"], v["path"], name, digest)
+if sys.argv[2] != "full":
+    variant = json.load(open(sys.argv[3]))
+    c = variant["checkpoint"]
+    e = variant["engine_patches"]
+    for name, digest in sorted(e["files"].items()):
+        print("epatch", e["dir"] + "/" + name, digest)
 for path, (size, digest) in sorted(c["files"].items()):
     print("ckpt", c["repo"], c["revision"], c["dir"], path, size, digest)
+for path, (size, digest) in sorted(full["files"].items()):
+    print("have", full["dir"], path, size, digest)
 EOF
 )
 pinned() { # kind: the plan's lines of that kind, without the kind
@@ -150,9 +164,15 @@ fetch.sh: the fishaudio/drama-3 weights and codec are licensed under the Fish Au
   supply, for example through an API) without a separate written licence from Fish Audio: keep LocalRouter on
   loopback. Read the licence; downloading the files does not accept it on anyone's behalf.
 EOF
+  [ "$variant" = full ] || cat <<'EOF'
+  --variant nvfp4: plotarmordev/drama-3-NVFP4-Pruned is an unofficial community quant of Drama 3 (not made, reviewed
+  or endorsed by Fish Audio) under the same licence, whose LICENSE and NOTICE it ships:
+  https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/blob/494db08481db952f834b2241bce63fb3dfa72554/LICENSE
+EOF
 fi
 
-# The checkpoint, file by file: downloaded to .part, checked, then moved into place.
+# The checkpoint, file by file: a file the full checkpoint holds with the same pins is hardlinked from it (another
+# variant's), else downloaded to .part, checked, then moved into place.
 n=0
 while read -r repo rev dir path size digest; do
   dest=$root/$dir/$path
@@ -164,6 +184,15 @@ while read -r repo rev dir path size digest; do
     bad=1; continue
   fi
   mkdir -p "$(dirname "$dest")"
+  same=
+  while read -r hdir hpath hsize hdigest; do
+    [ -z "$same" ] && [ "$hdir" != "$dir" ] && [ "$hsize" = "$size" ] && [ "$hdigest" = "$digest" ] && same=$root/$hdir/$hpath
+  done <<< "$(pinned have)"
+  if [ -n "$same" ] && [ -f "$same" ] && [ "$(stat -c %s "$same")" = "$size" ] && [ "$(sha "$same")" = "$digest" ]; then
+    ln -f "$same" "$dest" 2>/dev/null || cp "$same" "$dest"
+    echo "fetch.sh: $dir/$path is ${same#"$root/"} (same sha256), linked"
+    n=$((n + 1)); continue
+  fi
   echo "fetch.sh: downloading $repo/$path ($size bytes)"
   # A partial .part resumes; a complete one goes straight to the hash check.
   if [ ! -f "$dest.part" ] || [ "$(stat -c %s "$dest.part")" -lt "$size" ]; then
@@ -179,7 +208,10 @@ while read -r repo rev dir path size digest; do
 done <<< "$(pinned ckpt)"
 [ "$bad" = 0 ] || die "$root does not match pins.json"
 read -r _ _ ckdir _ <<< "$(pinned ckpt)" # the first line's dir
-# Upstream's own check of the same files.
-(cd "$root/$ckdir" && sha256sum --check --quiet --strict "$up/recipe/checksums/checkpoint.sha256") ||
-  die "$ckdir fails $updir/recipe/checksums/checkpoint.sha256"
+# Upstream's own check of the same files (the pinned upstream commit predates its NVFP4 checksums; pins-nvfp4.json
+# holds the same digests as its recipe/checksums/nvfp4.sha256 at 844d0ea, plus LICENSE and NOTICE).
+if [ "$variant" = full ]; then
+  (cd "$root/$ckdir" && sha256sum --check --quiet --strict "$up/recipe/checksums/checkpoint.sha256") ||
+    die "$ckdir fails $updir/recipe/checksums/checkpoint.sha256"
+fi
 echo "fetch.sh: $n checkpoint files verified under $root/$ckdir"

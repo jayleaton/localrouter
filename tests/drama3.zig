@@ -187,7 +187,9 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
         " \"references\": true, \"instructions\": \"[{{s}}] \", \"port\": {d}, \"long_form\": true, \"long_form_chars\": 40, \"voices_dir\": \"{s}/voices\", \"verify\": \"none\", \"pilot\": \"{s}\"}}}}," ++
         "{{\"id\": \"upstream-admission\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
         " \"resident_bytes\": 8388608, \"load_timeout_s\": 60, \"options\": {{\"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\", \"admission\": \"launcher\"}}}}," ++
-        "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot });
+        "{{\"id\": \"nvfp4\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
+        " \"resident_bytes\": 8388608, \"load_timeout_s\": 60, \"options\": {{\"port\": {d}, \"verify\": \"none\", \"pilot\": \"{s}\", \"variant\": \"nvfp4\"}}}}," ++
+        "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, port, root, opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot, opts.drama3_worker, root, marker, try freePort(io), opts.drama3_pilot });
     var d = try Daemon.start(testing.allocator, io, "drama3", cfg);
     defer d.stop();
     // The tool's own lock, which the daemon names in LOCALROUTER_GPU_LOCK and the launcher takes (in this run's directory).
@@ -215,6 +217,8 @@ test "Drama 3: refused until qualified, whole and streamed speech, voices, refer
     try testing.expect(try lockFree(io, own_lock));
     try qualify(io, a);
     try expectHas((try d.call(a, .GET, "/v1/models", null)).body, &.{"\"qualified\":true"});
+    // The full weights' marker does not qualify a tool that serves another variant's (pins-nvfp4.json, its own marker).
+    try expectStatus(try speak(&d, a, "{\"model\":\"nvfp4\",\"input\":\"Hi.\"}"), 503, &.{ "load failed", "qualified the full weights, the tool serves the nvfp4 weights" });
 
     // LocalRouter admits the load. Under the launcher's own admission (88 GiB free; 83 here, as on DGX-01 with chat,
     // Whisper and Kitten warm) the same model would not start.
