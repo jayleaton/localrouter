@@ -44,7 +44,13 @@ pub const Registry = struct {
     pub fn notifier(r: *Registry, io: Io, gpa: std.mem.Allocator) @import("../sched/scheduler.zig").Notify {
         r.io = io;
         r.gpa = gpa;
-        return .{ .ctx = r, .paused = paused, .resumed = resumed };
+        return .{ .ctx = r, .paused = paused, .resumed = resumed, .sessions = openSessions };
+    }
+
+    fn openSessions(ctx: *anyopaque) usize {
+        const r: *Registry = @ptrCast(@alignCast(ctx));
+        const io = r.io orelse return 0;
+        return r.count(io);
     }
 
     fn paused(ctx: *anyopaque, model: []const u8, for_model: []const u8) void {

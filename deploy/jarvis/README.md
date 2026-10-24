@@ -36,6 +36,22 @@ bookings in `config.json.in` are each peak plus 256 MiB:
   `MemAvailable` was 8.5 GiB, with chat, Drama 3, Whisper and KnowLine warm. The image model is back about 30 s later.
 - **Chat, Drama 3 and Whisper** are never unloaded for an image or a video.
 
+## Test windows beside the live service
+
+Anything that takes GPU memory outside the live scheduler on this box (a bench, a test daemon in Docker, a
+qualification, a capture) runs through `tools/spark/window.sh`:
+
+```sh
+tools/spark/window.sh h3-bench --unload qwen-image-2.1-turbo -- bash -c 'docker run --rm --label "$WINDOW_LABEL" ...'
+```
+
+It takes `~/jarvis/.dgx01.lock`, waits until no voice session is open, unloads only the `--unload` tools (and loads
+them again at the end), and stops the window (its process group and its labelled Docker containers) within 2 s of a
+voice session opening, exit 75. Unload nothing else by hand: a kept model unloaded through the API stays down. On
+2026-10-24 a window unloaded the kept image model at 21:03 and held 34 GiB in Docker; a call opened at 21:41 inside
+it, its picture loaded the image model, and that unloaded Whisper and then Drama 3 (the scheduler now refuses that as
+busy instead). The window's container also slowed speech to 1.5 to 3.7 times real time before that.
+
 ## Install, start, stop
 
 From nothing, every model and then these scripts: `tools/install/bootstrap.sh --profile jarvis-gb10` ([INSTALL.md](../../INSTALL.md)).

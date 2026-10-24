@@ -173,3 +173,42 @@ test "model tools: the chat model is never unloaded; unload_model comes back aft
         }
     }
 }
+
+test "model tools: during a call a picture never unloads the voice models; it is refused as busy, and goes ahead after" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 90 MiB: chat, mouth and ears (56) warm; the kept image model (40) fits only by unloading a voice model, so it
+    // stays down by itself (a kept tool coming back takes only lower priorities). DGX-01, 2026-10-24: a picture asked
+    // for in a call loaded it and unloaded Whisper, then Drama 3.
+    var d = try Daemon.start(testing.allocator, testing.io, "models-call", try config(a, 90));
+    defer d.stop();
+    for ([_][]const u8{ "chat", "mouth", "ears" }) |id| try waitState(&d, a, id, "ready", 120);
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "img"));
+    const picture = "{\"model\":\"img\",\"prompt\":\"a dog\",\"size\":\"256x256\"}";
+
+    var w: voice.Ws = undefined;
+    try w.open(testing.io, a, d.port, "realtime");
+    var seen: std.ArrayList(Value) = .empty;
+    _ = try w.until(a, "session.created", &seen);
+    const busy = try d.call(a, .POST, "/v1/images/generations", picture);
+    try testing.expectEqual(std.http.Status.service_unavailable, busy.status);
+    try testing.expect(std.mem.indexOf(u8, busy.body, "insufficient_memory") != null);
+    try testing.expect(std.mem.indexOf(u8, busy.body, "a voice call is open") != null);
+    // A load through the API is held to the same rule.
+    const load = try d.call(a, .POST, "/v1/tools/img/load", "");
+    try testing.expectEqual(std.http.Status.service_unavailable, load.status);
+    try testing.expect(std.mem.indexOf(u8, load.body, "a voice call is open") != null);
+    for ([_][]const u8{ "chat", "mouth", "ears" }) |id| try testing.expectEqualStrings("ready", try d.toolState(a, id));
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "img"));
+    w.close();
+
+    // With no call open, priority only orders the victims again: the picture unloads the lowest voice model and is made.
+    for (0..40) |_| {
+        if (std.mem.indexOf(u8, (try d.call(a, .GET, "/v1/tools", null)).body, "\"voice_sessions\":0") != null) break;
+        harness.sleepMs(d.io, 250);
+    }
+    const made = try d.call(a, .POST, "/v1/images/generations", picture);
+    if (made.status != .ok) std.debug.print("after the call: {d} {s}\n", .{ @backingInt(made.status), made.body });
+    try testing.expectEqual(std.http.Status.ok, made.status);
+}

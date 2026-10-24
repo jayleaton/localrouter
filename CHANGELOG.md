@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A voice call keeps its voice: while a realtime session is open, a request or an API load for a tool outside the
+  voice loop (image, video, decision) never unloads a voice-loop model (chat, speech, transcription) of a higher
+  priority. It is refused with 503 `insufficient_memory`, "busy: a voice call is open ...", which the chat model says.
+  Before, a picture asked for in a call on DGX-01 loaded the cold image model and unloaded Whisper, then Drama 3 (two
+  minutes without speech). `reserve_for`'s announced voice pause is unchanged. Each voice response's stage times
+  (`localrouter.response.timing`) are also in the journal (`voice SESSION: timing {...}`).
+- `tools/spark/window.sh`: a GPU window beside a live service (bench, test daemon, qualification) takes the box lock,
+  waits for no voice session, unloads only the tools it names and loads them back, and is stopped (its process group
+  and its labelled Docker containers) within 2 s of a voice session opening.
 - Chat thinking budget (Chat Completions, `/v1/responses`, MCP `chat`): a request whose limit is below the chat
   model's `min_thinking_tokens` (tool config, default 1024; `0` never) and that does not choose reasoning itself is
   answered with thinking off (`thinking_off`, default `chat_template_kwargs.enable_thinking: false`). A reply still cut

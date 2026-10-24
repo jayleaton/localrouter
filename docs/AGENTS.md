@@ -424,6 +424,12 @@ voice loop's shadow decisions: it loads only into spare room, never unloading a 
 not kept may still go) and leaving room for the kept tools' working bytes. A request it cannot serve so is refused
 with a 503 `insufficient_memory` naming `spare_room_only`, before anything is unloaded; the shadow decisions then skip
 the turns. An operator can still make room for it on purpose with MCP `reserve_for`.
+While a realtime voice session is open (`voice_sessions` in `GET /v1/tools`), a request or a load for a tool outside
+the voice loop (an image, a video, a decision) never unloads a voice-loop model (chat, speech, transcription) of a
+higher priority: it is refused with a 503 `insufficient_memory` whose message starts "busy: a voice call is open",
+before anything is unloaded, and the call keeps its voice. The chat model sees that message as the tool's result and
+says the machine is busy. Without a call, priority only orders the victims, as above. MCP `reserve_for` (which tells
+the session first and brings the voice back after the job) is unchanged.
 `GET /v1/tools` shows `priority`, `keep_loaded`, `spare_room_only` and `capabilities`.
 
 ## Licences

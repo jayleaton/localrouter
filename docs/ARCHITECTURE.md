@@ -49,7 +49,9 @@ as the scheduler is idle, unloading idle tools of lower priority if they must, s
 model and a voice model warm side by side and still let a video job take the whole machine when it needs it. A
 `spare_room_only` tool is the one exception to "never refused while unloading would make room": an on-demand model
 nothing waits on (the decision model behind shadow decisions) never unloads a `keep_loaded` tool, loads only with room
-left for the kept tools' working bytes, and is otherwise refused with a 503 before anything is unloaded.
+left for the kept tools' working bytes, and is otherwise refused with a 503 before anything is unloaded. A voice call
+is the other: while a realtime session is open, a job or load outside the voice loop never unloads a voice-loop model
+(chat, speech, transcription) of a higher priority, and is refused as busy instead.
 
 **Lanes.** Each lane runs one job at a time. Speech and transcription tools run on the `realtime` lane (a tool's `lane`
 overrides it), so a sentence of TTS or a turn of STT never waits behind an image, a video or a chat reply. A tool is

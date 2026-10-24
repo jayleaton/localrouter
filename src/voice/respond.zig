@@ -634,7 +634,10 @@ fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *ba
         outputs.append(a, item) catch {};
         if (!r.client_tools and events.isBuiltin(it.name) and s.voice.tools) tool_calls.start(s, it);
     }
-    s.emit.send(a, "localrouter.response.timing", timing.event(r.id, r.marks));
+    const stages = timing.event(r.id, r.marks);
+    s.emit.send(a, "localrouter.response.timing", stages);
+    // the same stages in the journal: an audit of a call needs them, and the client's copy is not on this machine
+    if (std.json.Stringify.valueAlloc(a, stages, .{})) |line| std.log.info("voice {s}: timing {s}", .{ s.id, line }) else |_| {}
     s.emit.send(a, "response.done", .{ .response = responseValue(r, status, details, outputs.items) });
     if (std.mem.eql(u8, status, "completed")) shadow(s, a, r, calls);
     prime(s);
