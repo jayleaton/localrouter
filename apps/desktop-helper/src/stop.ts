@@ -2,19 +2,29 @@ import { chmod, rm } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import type { Server } from 'node:net'
 import type { TaskWatch } from './computer/controller.ts'
-import type { Point } from './computer/types.ts'
+import type { Point, PointerReading } from './computer/types.ts'
 import { silentLogger } from './log.ts'
 import type { Logger } from './log.ts'
 
 /**
  * The local stop: the person at the Mac can always end a task without the box. While a task runs the
  * pointer is read every 250 ms and before each action. Moving it into the top-left corner of the main
- * display stops the task; so does moving it away from where the helper last left it (the person took
- * over). Movement the helper makes itself, and movement while it waits for the box (the person may
- * tap Approve in a browser on this Mac), is not a takeover; the corner always is.
+ * display stops the task; so does a deliberate move away from where the helper last left it, or a click
+ * (the person took over). Movement the helper makes itself, and movement while it waits for the box (the
+ * person may tap Approve on this Mac), is not a takeover; the corner always is.
+ *
+ * Deliberate means: more than TAKEOVER_POINTS away, on two readings in a row (one stray reading is not a
+ * move), counting only steps larger than JITTER_POINTS between readings. A hand resting on a trackpad, or
+ * a mouse drifting a point or two, moves the baseline along with it instead of adding up to a takeover.
  */
 export const CORNER_POINTS = 4
 export const TAKEOVER_POINTS = 24
+/** Steps between two readings up to this are jitter or drift: the baseline follows them. */
+export const JITTER_POINTS = 6
+/** Readings in a row beyond TAKEOVER_POINTS before a poll stops the task (the check before an action needs one). */
+export const SUSTAINED_READINGS = 2
+/** A click this long after the helper last acted is the person's (the probe and the poll run late by up to this). */
+export const CLICK_MARGIN_MS = 400
 export const POLL_MS = 250
 
 export const STOPPED_IN_CORNER = 'You stopped it on the Mac.'
@@ -31,8 +41,9 @@ const every: Schedule = (tick, ms) => {
 
 export type LocalStopOptions = {
   /** Where the pointer is now, in global top-left-origin points. */
-  pointer: () => Promise<Point>
+  pointer: () => Promise<PointerReading>
   schedule?: Schedule
+  now?: () => number
   intervalMs?: number
   log?: Logger
 }
@@ -51,12 +62,19 @@ export class LocalStop {
 }
 
 class PointerTaskWatch implements TaskWatch {
-  private readonly pointer: () => Promise<Point>
+  private readonly pointer: () => Promise<PointerReading>
+  private readonly now: () => number
   private readonly abort: (reason: string) => void
   private readonly log: Logger
   private readonly cancel: () => void
-  /** Where the helper left the pointer; null until the next reading sets it. */
+  /** Where the helper left the pointer (moved along by jitter and drift); null until the next reading sets it. */
   private expected: Point | null = null
+  /** The previous reading, for the step since it. */
+  private last: Point | null = null
+  /** Readings in a row beyond TAKEOVER_POINTS. */
+  private beyond = 0
+  /** When the helper last finished touching the pointer: a click after this is the person's. */
+  private leftAt: number
   private helperMoving = false
   /** Changes whenever the helper moves the pointer, so a reading taken before that is not judged after it. */
   private generation = 0
@@ -66,6 +84,8 @@ class PointerTaskWatch implements TaskWatch {
 
   constructor(options: LocalStopOptions, abort: (reason: string) => void) {
     this.pointer = options.pointer
+    this.now = options.now ?? Date.now
+    this.leftAt = this.now()
     this.abort = abort
     this.log = options.log ?? silentLogger
     this.cancel = (options.schedule ?? every)(() => void this.poll(), options.intervalMs ?? POLL_MS)
@@ -75,19 +95,24 @@ class PointerTaskWatch implements TaskWatch {
     if (this.ended) return
     const generation = this.generation
     const point = await this.read()
-    if (point) this.judge(point, generation)
+    if (point) this.judge(point, generation, 1)
   }
 
   moving(): void {
+    // A move already under way when the helper is about to act or wait is the person's: it is not forgotten.
+    if (this.beyond > 0 && !this.ended && !this.helperMoving) return this.stop(TAKEN_OVER)
     this.helperMoving = true
     this.generation += 1
+    this.beyond = 0
   }
 
   left(point?: Point | null): void {
     this.helperMoving = false
     this.generation += 1
-    if (point === null) this.expected = null
-    else if (point) this.expected = { x: point.x, y: point.y }
+    this.beyond = 0
+    this.leftAt = this.now()
+    if (point === null) this.expected = this.last = null
+    else if (point) this.expected = this.last = { x: point.x, y: point.y }
   }
 
   end(): void {
@@ -100,13 +125,16 @@ class PointerTaskWatch implements TaskWatch {
     if (this.polling || this.ended) return
     this.polling = true
     try {
-      await this.check()
+      if (this.ended) return
+      const generation = this.generation
+      const point = await this.read()
+      if (point) this.judge(point, generation, SUSTAINED_READINGS)
     } finally {
       this.polling = false
     }
   }
 
-  private async read(): Promise<Point | null> {
+  private async read(): Promise<PointerReading | null> {
     try {
       return await this.pointer()
     } catch (error) {
@@ -116,15 +144,28 @@ class PointerTaskWatch implements TaskWatch {
     }
   }
 
-  private judge(point: Point, generation: number) {
+  /** `needed`: readings in a row beyond the takeover distance before it stops (polls 2, the check before an action 1). */
+  private judge(point: PointerReading, generation: number, needed: number) {
     if (this.ended) return
     if (Math.hypot(point.x, point.y) <= CORNER_POINTS) return this.stop(STOPPED_IN_CORNER)
     if (this.helperMoving || generation !== this.generation) return
-    if (!this.expected) {
-      this.expected = { x: point.x, y: point.y }
+    // A click since the helper last acted (its own clicks were before that) is the person taking over.
+    if (point.sinceClickS !== undefined && this.now() - point.sinceClickS * 1000 > this.leftAt + CLICK_MARGIN_MS) return this.stop(TAKEN_OVER)
+    const here = { x: point.x, y: point.y }
+    if (!this.expected || !this.last) {
+      this.expected = this.last = here
+      this.beyond = 0
       return
     }
-    if (Math.hypot(point.x - this.expected.x, point.y - this.expected.y) > TAKEOVER_POINTS) this.stop(TAKEN_OVER)
+    // Jitter and drift: the baseline follows small steps, so they never add up to a move.
+    if (Math.hypot(here.x - this.last.x, here.y - this.last.y) <= JITTER_POINTS) {
+      this.expected = { x: this.expected.x + here.x - this.last.x, y: this.expected.y + here.y - this.last.y }
+    }
+    this.last = here
+    if (Math.hypot(here.x - this.expected.x, here.y - this.expected.y) > TAKEOVER_POINTS) {
+      this.beyond += 1
+      if (this.beyond >= needed) this.stop(TAKEN_OVER)
+    } else this.beyond = 0
   }
 
   private stop(reason: string) {

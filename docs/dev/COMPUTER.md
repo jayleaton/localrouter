@@ -150,7 +150,11 @@ whichever provider answers, and the policy, approvals and budgets do not change.
 While a task runs, the helper checks the pointer every 250 ms and before each action:
 
 - the pointer in the top-left corner of the main display (within 4 points): the task stops ("You stopped it on the Mac");
-- the pointer more than 24 points from where the helper last left it: the person took over, the task stops;
+- a deliberate move: more than 24 points from where the helper last left it on two readings in a row (one stray
+  reading is not a move), counting only steps of more than 6 points between readings, so a hand resting on a
+  trackpad or a drifting mouse never adds up to one: the person took over, the task stops;
+- a click after the helper last acted (the probe reads how long ago the left button went down; the helper's own clicks
+  come before it reports where it left the pointer): the person took over, the task stops;
 - `localrouter-desktop stop` stops the task now; `localrouter-desktop disable` refuses every request until `enable`.
 
 A task start shows a macOS notification saying what Jarvis is doing and how to stop it.

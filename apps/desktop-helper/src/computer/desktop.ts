@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { array, boolean, json, nullable, number, object, oneOf, optional, string } from '../validate.ts'
 import type { CommandRunner } from './macControls.ts'
 import { CONTROL_ROLES } from './types.ts'
-import type { ActResult, Observation, Point, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
+import type { ActResult, Observation, Point, PointerReading, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -400,11 +400,15 @@ export async function macAccess(runner: CommandRunner = jxaRunner): Promise<MacA
   return { accessibility: boolean(access.accessibility, 'accessibility'), screenRecording: boolean(access.screenRecording, 'screenRecording'), host: string(access.host, 'host') }
 }
 
-/** Where the pointer is now (global, top-left-origin points), without moving it or needing any permission. */
+/**
+ * Where the pointer is now (global, top-left-origin points) and how long ago the left button last went down, without
+ * moving it or needing any permission.
+ */
 const POINTER_SCRIPT = `ObjC.import('CoreGraphics');
 function run() {
   var point = $.CGEventGetLocation($.CGEventCreate($()));
-  return JSON.stringify({ x: point.x, y: point.y });
+  var click = $.CGEventSourceSecondsSinceLastEventType($.kCGEventSourceStateHIDSystemState, $.kCGEventLeftMouseDown);
+  return JSON.stringify({ x: point.x, y: point.y, since_click_s: click });
 }`
 
 /** A point printed by a script (`{"x":1,"y":2}`). */
@@ -483,8 +487,11 @@ export class DesktopBackend implements ScreenBackend {
     }
   }
 
-  async pointer(): Promise<Point> {
-    return pointShape(json((await this.call(POINTER_SCRIPT, [])).trim(), 'pointer'), 'pointer')
+  async pointer(): Promise<PointerReading> {
+    const value = json((await this.call(POINTER_SCRIPT, [])).trim(), 'pointer')
+    const point = pointShape(value, 'pointer')
+    const since = (value as { since_click_s?: unknown }).since_click_s
+    return typeof since === 'number' && Number.isFinite(since) && since >= 0 ? { ...point, sinceClickS: since } : point
   }
 
   private async call(script: string, argv: string[]): Promise<string> {

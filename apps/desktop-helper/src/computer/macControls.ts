@@ -1,13 +1,14 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/macControls.ts), reused in LocalRouter with the owner's permission.
 import { execFile } from 'node:child_process'
-import { readdir } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { jxa } from './desktop.ts'
 import { integerIn, isObject, oneOf, string } from '../validate.ts'
 
-export type InstalledApp = { id: string; name: string }
+/** `name`: the bundle's file name (what `open -a` takes); `aliases`: its bundle and display names, when they differ. */
+export type InstalledApp = { id: string; name: string; aliases?: string[] }
 
 export const PLAYERS = ['Spotify', 'Music'] as const
 export type Player = (typeof PLAYERS)[number]
@@ -26,7 +27,7 @@ export type ComputerControl =
 
 /** A control that could not run, with a code the box can sort on and a message for the user. */
 export class ControlError extends Error {
-  readonly code: 'unavailable' | 'not_found' | 'forbidden' | 'invalid'
+  readonly code: 'unavailable' | 'not_found' | 'forbidden' | 'invalid' | 'ambiguous'
 
   constructor(code: ControlError['code'], message: string) {
     super(message)
@@ -83,6 +84,8 @@ export type MacControlsOptions = {
   platform?: NodeJS.Platform
   appDirectories?: string[]
   readDir?: (path: string) => Promise<string[]>
+  /** An app's Info.plist as text (its bundle and display names, when it is XML). */
+  readText?: (path: string) => Promise<string>
   now?: () => number
 }
 
@@ -134,6 +137,7 @@ export class MacControls {
   private readonly platform: NodeJS.Platform
   private readonly appDirectories: string[]
   private readonly readDir: (path: string) => Promise<string[]>
+  private readonly readText: (path: string) => Promise<string>
   private readonly now: () => number
   private cache: { at: number; apps: InstalledApp[] } | null = null
 
@@ -144,9 +148,12 @@ export class MacControls {
       '/Applications',
       '/System/Applications',
       '/System/Applications/Utilities',
+      // Finder lives here; the folder is read one level deep like the others.
+      '/System/Library/CoreServices',
       join(homedir(), 'Applications'),
     ]
     this.readDir = options.readDir ?? ((path) => readdir(path))
+    this.readText = options.readText ?? ((path) => readFile(path, 'utf8'))
     this.now = options.now ?? Date.now
   }
 
@@ -158,18 +165,28 @@ export class MacControls {
   async apps(): Promise<InstalledApp[]> {
     if (this.cache && this.now() - this.cache.at < APP_CACHE_MS) return this.cache.apps
     const names = new Map<string, string>()
-    const add = (entry: string) => {
+    const paths = new Map<string, string>()
+    const add = (directory: string) => (entry: string) => {
       const name = entry.slice(0, -'.app'.length)
       // A leading dash could be read as an osascript/open flag when passed as argv.
-      if (name && !name.startsWith('-') && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name)
+      if (name && !name.startsWith('-') && !names.has(name.toLowerCase())) {
+        names.set(name.toLowerCase(), name)
+        paths.set(name, join(directory, entry))
+      }
     }
     const list = (path: string) => this.readDir(path).catch((): string[] => [])
     for (const directory of this.appDirectories) {
       for (const entry of await list(directory)) {
-        if (entry.endsWith('.app')) add(entry)
-        else if (!entry.startsWith('.')) (await list(join(directory, entry))).filter((inner) => inner.endsWith('.app')).forEach(add)
+        if (entry.endsWith('.app')) add(directory)(entry)
+        else if (!entry.startsWith('.')) (await list(join(directory, entry))).filter((inner) => inner.endsWith('.app')).forEach(add(join(directory, entry)))
       }
     }
+    const aliases = new Map<string, string[]>()
+    await Promise.all([...paths].map(async ([name, path]) => {
+      const plist = await this.readText(join(path, 'Contents', 'Info.plist')).catch(() => '')
+      const found = plistNames(plist).filter((alias) => alias.toLowerCase() !== name.toLowerCase())
+      if (found.length) aliases.set(name, found)
+    }))
     const used = new Set<string>()
     const apps = [...names.values()]
       .sort((a, b) => a.localeCompare(b))
@@ -178,7 +195,8 @@ export class MacControls {
         let id = base
         for (let n = 2; used.has(id); n += 1) id = `${base}_${n}`
         used.add(id)
-        return { id, name }
+        const also = aliases.get(name)
+        return also ? { id, name, aliases: also } : { id, name }
       })
     this.cache = { at: this.now(), apps }
     return apps
@@ -339,10 +357,7 @@ export class MacControls {
   }
 
   private async resolveApp(requested: string): Promise<string> {
-    const wanted = requested.trim().toLowerCase()
-    const match = (await this.apps()).find((app) => app.name.toLowerCase() === wanted)
-    if (!match) throw new ControlError('not_found', `${requested} isn't installed on this computer`)
-    return match.name
+    return resolveInstalled(requested, await this.apps())
   }
 
   // `is running` checks without launching, unlike a `tell` block.
@@ -353,4 +368,96 @@ export class MacControls {
   private osascript(lines: string[], args: string[] = []): Promise<string> {
     return this.runner.run('osascript', script(lines, args))
   }
+}
+
+/** CFBundleDisplayName and CFBundleName from an XML Info.plist (a binary one gives none: the file name is used). */
+export function plistNames(plist: string): string[] {
+  if (!plist.trimStart().startsWith('<?xml') && !plist.includes('<plist')) return []
+  const out: string[] = []
+  for (const key of ['CFBundleDisplayName', 'CFBundleName']) {
+    const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]{1,80})</string>`).exec(plist)
+    const v = m?.[1]?.trim()
+    if (v && !v.startsWith('-') && !v.includes('$(') && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
+/**
+ * What people call apps, mapped to the bundles that answer to it, in order of preference: the first one installed
+ * wins ("Chrome" is Google Chrome even with Chrome Canary there too).
+ */
+export const APP_ALIASES: Record<string, string[]> = {
+  chrome: ['Google Chrome', 'Google Chrome Beta', 'Google Chrome Canary', 'Chromium'],
+  'google chrome': ['Google Chrome'],
+  'vs code': ['Visual Studio Code', 'Visual Studio Code - Insiders'],
+  vscode: ['Visual Studio Code', 'Visual Studio Code - Insiders'],
+  code: ['Visual Studio Code', 'Visual Studio Code - Insiders'],
+  'visual studio': ['Visual Studio Code'],
+  word: ['Microsoft Word'],
+  excel: ['Microsoft Excel'],
+  powerpoint: ['Microsoft PowerPoint'],
+  outlook: ['Microsoft Outlook'],
+  teams: ['Microsoft Teams', 'Microsoft Teams (work or school)', 'Microsoft Teams classic'],
+  edge: ['Microsoft Edge'],
+  onenote: ['Microsoft OneNote'],
+  settings: ['System Settings', 'System Preferences'],
+  'system preferences': ['System Settings', 'System Preferences'],
+  preferences: ['System Settings', 'System Preferences'],
+  mail: ['Mail'],
+  'apple mail': ['Mail'],
+  email: ['Mail'],
+  itunes: ['Music'],
+  'apple music': ['Music'],
+  imessage: ['Messages'],
+  texts: ['Messages'],
+  ical: ['Calendar'],
+  iterm: ['iTerm', 'iTerm2'],
+  zoom: ['zoom.us'],
+  firefox: ['Firefox', 'Firefox Developer Edition', 'Firefox Nightly'],
+  brave: ['Brave Browser'],
+  arc: ['Arc'],
+  photos: ['Photos'],
+  'app store': ['App Store'],
+  files: ['Finder'],
+  whatsapp: ['WhatsApp'],
+}
+
+const fold = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+const squash = (s: string) => fold(s).replace(/[^a-z0-9]/g, '')
+const words = (s: string) => fold(s).split(/[^a-z0-9]+/).filter(Boolean)
+
+/**
+ * The installed app a spoken or typed name means: its exact name (or bundle/display name), a common alias, the same
+ * letters without spaces or punctuation ("googlechrome", "zoom us"), then a case-insensitive word-prefix match
+ * ("photoshop" is "Adobe Photoshop 2026"). Several equally good matches are a question, never a guess.
+ */
+export function resolveInstalled(requested: string, apps: InstalledApp[]): string {
+  const asked = requested.trim()
+  const names = (app: InstalledApp) => [app.name, ...(app.aliases ?? [])]
+  const unique = (found: InstalledApp[]) => [...new Map(found.map((app) => [app.name, app])).values()]
+  const pick = (found: InstalledApp[]): string | null => {
+    const u = unique(found)
+    if (u.length === 1) return u[0].name
+    if (u.length > 1) throw new ControlError('ambiguous', `Which one do you mean: ${u.map((app) => app.name).sort((a, b) => a.localeCompare(b)).slice(0, 5).join(', ')}?`)
+    return null
+  }
+  const exact = pick(apps.filter((app) => names(app).some((n) => fold(n) === fold(asked))))
+  if (exact) return exact
+  for (const preferred of APP_ALIASES[fold(asked).replace(/\s+/g, ' ')] ?? []) {
+    const hit = apps.find((app) => names(app).some((n) => fold(n) === fold(preferred)))
+    if (hit) return hit.name
+  }
+  const flat = squash(asked)
+  if (flat) {
+    const same = pick(apps.filter((app) => names(app).some((n) => squash(n) === flat)))
+    if (same) return same
+    const want = words(asked)
+    const prefixed = apps.filter((app) => names(app).some((n) => {
+      const have = words(n)
+      return squash(n).startsWith(flat) || want.every((w) => have.some((h) => h.startsWith(w)))
+    }))
+    const found = pick(prefixed)
+    if (found) return found
+  }
+  throw new ControlError('not_found', `${requested} isn't installed on this computer`)
 }
