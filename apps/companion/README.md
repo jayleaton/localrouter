@@ -35,7 +35,7 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
 
 1. Download the `LocalRouter-macos-arm64` artifact from the latest green **Companion (macOS)** run in GitHub Actions,
    unzip it, open `LocalRouter-<version>-arm64.dmg` and drag LocalRouter to Applications.
-2. The build is ad-hoc signed (no Apple Developer ID yet), so macOS refuses a double-click the first time. Either
+2. The build is signed with LocalRouter's own certificate, not an Apple Developer ID, so macOS refuses a double-click the first time. Either
    right-click LocalRouter in Applications › **Open** › **Open**, or in Terminal:
    `xattr -dr com.apple.quarantine /Applications/LocalRouter.app`. If macOS still says it is damaged, System Settings
    › Privacy & Security › **Open Anyway**.
@@ -70,6 +70,18 @@ and the voice models are asked back when it is done. A no keeps the call and mak
 to hand each piece of speech to the page (`hop_*`) and the gaps between pieces as they arrived (`gap_*`). Large gaps
 with a small hop mean the box sent speech slower than real time (GPU contention, a model reloading); a large hop means
 the app. During a call the app keeps macOS from napping it.
+
+**Permissions across updates.** macOS ties Accessibility and Screen Recording to the app's signature. Every build is
+signed with the same self-signed certificate (`scripts/make-signing-identity.sh`, once, into the repo's
+`MACOS_SIGNING_P12` and `MACOS_SIGNING_PASSWORD` secrets), so its designated requirement (`identifier
+"com.localrouter.companion" and certificate leaf = H"<the certificate's SHA-1>"`) is the same in every build and
+the grants carry over. The first signed build still needs one more grant after an ad-hoc one. Without the secrets,
+CI signs with a throwaway certificate and says so in the job summary: such builds lose the grants on update.
+
+If macOS kept a grant from an older build (System Settings shows LocalRouter on, but computer control says it needs
+Accessibility), Settings shows *macOS kept a permission from an older LocalRouter* with buttons that open the right
+pane, reset LocalRouter's entry (`tccutil reset Accessibility com.localrouter.companion`, as you, no admin), and quit
+and reopen. By hand: in the list select LocalRouter, remove it with −, add it with +, reopen the app.
 
 Settings (⌘,) also shares folders Jarvis may read, adds other harnesses (MCP, below), lets the phone app and the
 Spark's own web page keep using this Mac through the same local rules (pair a second code with

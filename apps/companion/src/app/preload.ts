@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('companion', {
     pair: (base: string, code: string, name: string) => ipcRenderer.invoke('setup:pair', base, code, name),
     unpair: () => ipcRenderer.invoke('setup:unpair'),
     permission: (kind: string) => ipcRenderer.invoke('setup:permission', kind),
+    resetGrant: (kind: string) => ipcRenderer.invoke('setup:resetGrant', kind),
+    relaunch: () => ipcRenderer.invoke('setup:relaunch'),
     addFolder: () => ipcRenderer.invoke('setup:addFolder'),
     removeFolder: (path: string) => ipcRenderer.invoke('setup:removeFolder', path),
     enroll: (name: string) => ipcRenderer.invoke('setup:enroll', name),
