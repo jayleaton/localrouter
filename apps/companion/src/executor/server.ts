@@ -137,6 +137,7 @@ export class ExecutorServer {
   }
 
   async listen(): Promise<void> {
+    if (Buffer.byteLength(this.path) > 103) throw new Error(`the executor's socket path is longer than a Unix socket allows (${this.path}): set LOCALROUTER_COMPANION_HOME to a shorter folder`)
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
     rmSync(this.path, { force: true })
     const server = createServer((socket) => this.connection(socket))

@@ -47,7 +47,8 @@ export type SessionOptions = {
   now?: () => number
 }
 
-const GENERATION_TOOLS = new Set(['generate_image', 'generate_video'])
+// Made during a call, shown as the page's own job card. A video on a call is a proposal (`videoHandoff`), never a job.
+const GENERATION_TOOLS = new Set(['generate_image', 'edit_image'])
 
 export class ClientToolsSession {
   readonly calls: CallRecord[] = []
@@ -56,6 +57,7 @@ export class ClientToolsSession {
   private readonly pending = new Map<string, Call>()
   private readonly running = new Set<Promise<void>>()
   private utterance = ''
+  private utteranceAt = 0
   private lastOutputAt: number | null = null
   private awaitingAudio: CallRecord[] = []
   private assistantText = new Map<string, string>()
@@ -176,6 +178,7 @@ export class ClientToolsSession {
     const text = ((item.content as Array<Record<string, unknown>>) ?? []).map((c) => (typeof c.text === 'string' ? c.text : '')).join(' ').trim()
     if (!text) return
     this.utterance = text
+    this.utteranceAt = this.now()
     if (this.o.journal && this.o.conversation) this.o.journal.append(this.o.conversation, { type: 'user', text, via: 'text' })
   }
 
@@ -193,6 +196,7 @@ export class ClientToolsSession {
         const text = String(ev.transcript ?? '').trim()
         if (text) {
           this.utterance = text
+          this.utteranceAt = this.now()
           if (this.o.journal && this.o.conversation) this.o.journal.append(this.o.conversation, { type: 'user', text, via: 'voice' })
         }
         break
@@ -258,11 +262,13 @@ export class ClientToolsSession {
       const results = await Promise.all(
         calls.map(async (call) => {
           this.inFlight.add(call)
-          const ctx = { callId: call.call_id, utterance: this.utterance, signal: call.abort.signal, emit: (e: ToolEvent) => this.toolEvent(e) }
+          const ctx = { callId: call.call_id, utterance: this.utterance, utteranceAt: this.utteranceAt, signal: call.abort.signal, emit: (e: ToolEvent) => this.toolEvent(e) }
           const ran = await this.o.registry.run(call.name, call.arguments, ctx)
           this.inFlight.delete(call)
           const rec = this.calls.find((c) => c.call_id === call.call_id)
           if (rec) Object.assign(rec, { ok: ran.ok, output: ran.output, run_ms: ran.ms })
+          // A UI's record of the call (its chat history), for the tools it does not show as a card of its own.
+          if (!GENERATION_TOOLS.has(call.name)) this.emit({ type: 'localrouter.client_tool.done', call_id: call.call_id, name: call.name, arguments: call.arguments, ok: ran.ok, output: ran.output, cancelled: call.cancelled })
           if (this.o.journal && this.o.conversation) this.o.journal.append(this.o.conversation, { type: 'tool_result', call_id: call.call_id, ok: ran.ok, output: ran.output, ms: ran.ms })
           return { call, ran, rec }
         }),
@@ -282,7 +288,8 @@ export class ClientToolsSession {
   /** A generation tool's job, as the box's own `localrouter.job.*` events, so a UI's reel shows it unchanged. */
   private toolEvent(e: ToolEvent) {
     if (e.type === 'job.created') this.emit({ type: 'localrouter.job.created', call_id: e.call_id, job_id: e.job_id, kind: e.kind })
-    else this.emit({ type: 'localrouter.job.done', call_id: e.call_id, job_id: e.job_id, kind: e.kind, status: e.status, urls: e.urls, error: e.error })
+    else if (e.type === 'job.done') this.emit({ type: 'localrouter.job.done', call_id: e.call_id, job_id: e.job_id, kind: e.kind, status: e.status, urls: e.urls, error: e.error })
+    else this.emit({ type: 'localrouter.companion.handoff', call_id: e.call_id, kind: e.kind, prompt: e.prompt, seconds: e.seconds })
   }
 }
 

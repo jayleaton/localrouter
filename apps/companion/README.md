@@ -53,6 +53,24 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
    card in the page and Touch ID confirms it. **Stop**: the card's Stop button, ⌘⇧⎋, the menu bar's **LR** menu, or
    the pointer in the top-left corner of the screen.
 
+**One conversation, typed and spoken.** A call's turns, and every tool it ran with its result, go into the same chat
+as typed turns, so typed chat knows what was said on the call; a call started after typing gets the chat (with its
+tool calls) as context. Typed chat has the same tools as a call: `computer_control`, `computer_use`, `list_files`,
+`read_file`, pictures and video, under the same executor rules and approvals. The app keeps the conversation in its
+journal too (`~/Library/Application Support/LocalRouter/conversations/conv_page_*.jsonl`).
+
+**Pictures on a call, videos in the chat.** A call makes pictures (they appear in the reel). A video is never started
+on a call: it takes minutes and pauses the voice models, so Jarvis asks whether to end the call and make it. This is
+the harness's rule, not the prompt's: on a call `generate_video` only records the request, and
+`end_call_and_make_video` works only after the person answered with a clear yes. Then the call ends (its transcript
+already in the chat), the app makes room on the box (`reserve_for`), the chat makes the video with its progress card,
+and the voice models are asked back when it is done. A no keeps the call and makes nothing.
+
+**If a call stutters**, Settings › Copy debug log on the page includes `app.audio_hop` per reply: how long the app took
+to hand each piece of speech to the page (`hop_*`) and the gaps between pieces as they arrived (`gap_*`). Large gaps
+with a small hop mean the box sent speech slower than real time (GPU contention, a model reloading); a large hop means
+the app. During a call the app keeps macOS from napping it.
+
 Settings (⌘,) also shares folders Jarvis may read, adds other harnesses (MCP, below), lets the phone app and the
 Spark's own web page keep using this Mac through the same local rules (pair a second code with
 `--scopes desktop_helper`), and exports conversations for switching harness.

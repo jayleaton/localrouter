@@ -2,13 +2,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { readFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { extname, join, normalize, sep } from 'node:path'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
 import { dataDir, executorSocket } from '../executor/paths.ts'
 import { ExecutorClient } from '../executor/server.ts'
+import type { PageItem } from '../harness/journal.ts'
+import { prepareVideo, restoreVoice } from '../harness/models.ts'
 import { pageView } from '../harness/realtime.ts'
 import type { ClientToolsSession } from '../harness/realtime.ts'
 import { startRuntime } from '../harness/runtime.ts'
@@ -246,22 +248,27 @@ function registerIpc() {
     if (process.platform === 'darwin') await systemPreferences.askForMediaAccess('microphone').catch(() => false)
     const id = `rt${++seq}`
     const owner = e.sender
-    const conversation = runtime.journal.create()
+    // The page keeps the one conversation (typed and spoken) and mirrors it into the journal (`host:save`).
     const s = runtime.session({
-      conversation,
       onEvent: (ev) => {
-        if (!owner.isDestroyed() && pageView(ev)) owner.send('rt:event', id, JSON.stringify(ev))
+        if (owner.isDestroyed() || !pageView(ev)) return
+        // When this process had each piece of speech, so the page can tell a slow box from a slow hop to it.
+        if (ev.type === 'response.audio.delta') ev.lr_main_ms = performance.timeOrigin + performance.now()
+        owner.send('rt:event', id, JSON.stringify(ev))
       },
       onClose: (reason) => {
         sessions.delete(id)
+        callEnded()
         if (!owner.isDestroyed()) owner.send('rt:close', id, 1006, reason)
       },
     })
     sessions.set(id, { session: s, owner })
+    callStarted()
     s.connect().then(
       () => !owner.isDestroyed() && owner.send('rt:open', id),
       (error: unknown) => {
         sessions.delete(id)
+        callEnded()
         if (!owner.isDestroyed()) owner.send('rt:close', id, 1000, error instanceof Error ? error.message : String(error))
       },
     )
@@ -280,8 +287,40 @@ function registerIpc() {
     const s = typeof id === 'string' ? sessions.get(id) : undefined
     if (!s || s.owner !== e.sender) return
     sessions.delete(id as string)
+    callEnded()
     s.session.close()
   })
+
+  // Typed chat on the page: this computer's tools, run here like a call's, under the same executor.
+  const host = (channel: string, fn: (...args: unknown[]) => unknown) =>
+    ipcMain.handle(channel, async (e, ...args: unknown[]) => {
+      if (!fromPage(e, 'voice.html')) throw new Error('not allowed')
+      return fn(...args)
+    })
+  const running = new Map<string, AbortController>()
+  host('host:tools', () => runtime?.chat.chat() ?? [])
+  host('host:run', async (callId, name, args, utterance) => {
+    if (!runtime) return { ok: false, output: JSON.stringify({ error: 'LocalRouter is not paired with a Spark yet' }) }
+    const id = String(callId)
+    const abort = new AbortController()
+    running.set(id, abort)
+    try {
+      const r = await runtime.chat.run(String(name), String(args ?? '{}'), { callId: id, utterance: String(utterance ?? ''), utteranceAt: Date.now(), signal: abort.signal })
+      return { ok: r.ok, output: r.output }
+    } finally {
+      running.delete(id)
+    }
+  })
+  host('host:cancel', (callId) => {
+    running.get(String(callId))?.abort('stopped in the chat')
+    return true
+  })
+  host('host:save', (conversation, items) => {
+    if (!runtime || typeof conversation !== 'string' || !Array.isArray(items)) return 0
+    return runtime.journal.mirror(conversation, items as PageItem[])
+  })
+  host('host:prepareVideo', () => (runtime ? prepareVideo(runtime.spark) : { ok: false, text: 'not paired' }))
+  host('host:restoreVoice', () => (runtime ? restoreVoice(runtime.spark) : { ok: false, text: 'not paired' }))
 
   // Setup and settings.
   const setup = (channel: string, fn: (...args: unknown[]) => unknown) =>
@@ -371,6 +410,18 @@ function registerIpc() {
     showMain()
     setupWindow?.close()
   })
+}
+
+// While a call is on, macOS must not nap the app (App Nap delays timers and the hop that brings the speech to the page).
+let napBlock: number | null = null
+function callStarted() {
+  if (napBlock === null) napBlock = powerSaveBlocker.start('prevent-app-suspension')
+}
+function callEnded() {
+  if (sessions.size === 0 && napBlock !== null) {
+    powerSaveBlocker.stop(napBlock)
+    napBlock = null
+  }
 }
 
 function permissions() {

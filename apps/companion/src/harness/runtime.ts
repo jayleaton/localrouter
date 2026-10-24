@@ -8,8 +8,9 @@ import { Journal } from './journal.ts'
 import { ClientToolsSession } from './realtime.ts'
 import type { SessionOptions } from './realtime.ts'
 import { Registry } from './registry.ts'
+import type { Tool } from './registry.ts'
 import { Spark } from './spark.ts'
-import { computerTools, fileTools, mediaTools } from './tools.ts'
+import { computerTools, fileTools, pictureTools, VideoHandoff } from './tools.ts'
 
 /**
  * The reference harness put together, the same for the app and the headless runner: the Spark client, this computer's
@@ -19,7 +20,8 @@ import { computerTools, fileTools, mediaTools } from './tools.ts'
 export const HARNESS_INSTRUCTIONS = [
   'You run inside the LocalRouter app on the user’s own computer, and its tools run there.',
   'computer_control and computer_use act on this computer; anything that could send, buy, delete or post waits for the user to approve it on screen, so say that you are asking them.',
-  'list_files and read_file see only the folders the user shared. generate_image and generate_video make media on their LocalRouter box; the user sees it when it is done.',
+  'list_files and read_file see only the folders the user shared. generate_image makes a picture on their LocalRouter box and edit_image changes one; the user sees it when it is done.',
+  'A video is never made during a call: generate_video gives you a question to ask first; follow what it returns.',
 ].join(' ')
 
 /** Thinking off for decisions and voice, as the box's own voice settings (`voice.chat_extra`). */
@@ -42,10 +44,18 @@ export type RuntimeOptions = {
 export type Runtime = {
   spark: Spark
   executor: Executor
+  /** A call's tools (computer, files, pictures; a video only through the handoff). */
   registry: Registry
+  /** Typed chat's local tools. */
+  chat: Registry
   journal: Journal
   session(o?: Partial<SessionOptions>): ClientToolsSession
   close(): Promise<void>
+}
+
+/** The tools a voice call offers. */
+export function voiceRegistry(local: Tool[], picture: Tool[], handoff: VideoHandoff): Registry {
+  return new Registry().add(...local, ...picture, ...handoff.tools())
 }
 
 export const VOICE_CALLER: Caller = { id: 'voice', name: 'Jarvis (voice)', kind: 'voice' }
@@ -62,14 +72,18 @@ export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
     ...(o.ownApps ? { ownApps: o.ownApps } : {}),
     ...(o.log ? { log: o.log } : {}),
   })
-  const registry = new Registry().add(...computerTools(executor.broker, VOICE_CALLER), ...fileTools(o.shared), ...mediaTools(spark))
+  const local = () => [...computerTools(executor.broker, VOICE_CALLER), ...fileTools(o.shared)]
+  // Typed chat: this computer's tools and picture edits (the page makes its own pictures and videos, with their cards).
+  const chat = new Registry().add(...local(), ...pictureTools(spark).filter((t) => t.name === 'edit_image'))
   const journal = new Journal(join(o.dir, 'conversations'))
   return {
     spark,
     executor,
-    registry,
+    registry: voiceRegistry(local(), pictureTools(spark), new VideoHandoff()),
+    chat,
     journal,
-    session: (s = {}) => new ClientToolsSession({ spark, registry, journal, instructions: HARNESS_INSTRUCTIONS, ...s }),
+    // Each call gets its own registry, so a video proposal belongs to that call only.
+    session: (s = {}) => new ClientToolsSession({ spark, registry: voiceRegistry(local(), pictureTools(spark), new VideoHandoff()), journal, instructions: HARNESS_INSTRUCTIONS, ...s }),
     close: () => executor.close(),
   }
 }
