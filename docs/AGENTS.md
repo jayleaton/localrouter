@@ -239,7 +239,8 @@ It is stateless: send `store: false` and the whole conversation in `input` each 
 included as they came back; `previous_response_id` is refused. Function tools only (hosted tools are refused): a
 `function_call` output item is yours to run, then send `{"type": "function_call_output", "call_id": ..., "output":
 ...}`. Reasoning comes back as a `reasoning` item (`reasoning_text`), never as message text; `"reasoning": {"effort":
-"none"}` switches it off. Streaming (`stream: true`) is coming. What is and is not taken, field by field:
+"none"}` switches it off. `stream: true` sends the Responses events (`response.output_text.delta`...,
+`response.completed`); closing the connection cancels. What is and is not taken, field by field:
 [HARNESS.md](HARNESS.md#responses).
 
 ## Decisions (the System One shape)

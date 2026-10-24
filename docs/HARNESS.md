@@ -57,7 +57,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `auth` | `scheme` (`bearer`), `pairing_required`, `scopes` (every scope a token can have), `service_scopes`, `legacy_scopes` (either grants every service scope), `harness_scopes` (what a harness is usually issued), `guarded` (route, scope, and `when`: `always` or `pairing_required`), `open` (routes that need no token even with pairing), `jobs_owned` |
 | `models` | `list` (`/v1/models`), the `kinds` and `capabilities` this box's models have |
 | `chat` | `available`, `api` (`chat_completions`), `path`, `models`, `stream`, `stream_usage`, `tools`, `tool_choice`, `response_format`, `reasoning` (the field reasoning arrives in, and how to switch it off), `input` (`text`), `n` (1), `cancel` |
-| `responses` | `available`, `api` (`responses`), `path`, `models`, `stream`, `store` (false), `previous_response_id` (false), `input` (`text`), `items`, `roles`, `tools` (`function`), `tool_choice`, `text_format`, `reasoning` (`effort`, the `summary` values taken, the `item` content type, `encrypted_content`: false), `cancel` |
+| `responses` | `available`, `api` (`responses`), `path`, `models`, `stream`, `store` (false), `previous_response_id` (false), `input` (`text`), `items`, `roles`, `tools` (`function`), `tool_choice`, `text_format`, `reasoning` (`effort`, the `summary` values taken, the `item` content type, `encrypted_content`: false), `events` (what a stream sends), `cancel` |
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
@@ -166,9 +166,9 @@ as in Chat.
 
 | Feature | Contract |
 | --- | --- |
-| Input | a string (one user message), or items: `message` (`user`, `assistant`, `system`, `developer`; content a string or `input_text` / `output_text` parts), `function_call` `{call_id, name, arguments}`, `function_call_output` `{call_id, output}` (a string or `input_text` parts), and `reasoning` (its `reasoning_text` content, or its summary, goes back to the model). An item without `type` but with `role` is a message. Text only: `input_image`, `input_file`, `input_audio` are refused |
+| Input | a string (one user message), or items: `message` (`user`, `assistant`, `system`, `developer`; content a string or `input_text` / `output_text` parts), `function_call` `{call_id, name, namespace?, arguments}`, `function_call_output` `{call_id, output}` (a string or `input_text` parts), and `reasoning` (its `reasoning_text` content, or its summary, goes back to the model). An item without `type` but with `role` is a message. Text only: `input_image`, `input_file`, `input_audio` are refused |
 | Roles | `instructions` is a first `system` message; `developer` and `system` keep their place as `system` messages; an assistant turn (its reasoning, message and calls) is one assistant message |
-| Tools | `function` tools `{name, description, parameters, strict}`, run by the caller; `tool_choice` `none`, `auto`, `required`, `{type: "function", name}`; `parallel_tool_calls`. Hosted tools (`web_search`, `file_search`, `code_interpreter`, `computer_use_preview`, `image_generation`, `mcp`, `local_shell`...), `custom` (freeform) and `namespace` tools are refused |
+| Tools | `function` tools `{name, description, parameters, strict}`, run by the caller; `namespace` tools `{name, description, tools}` (a group of the caller's functions: Codex sends each MCP server's tools as one), whose functions reach the model as `<namespace>__<name>` (the namespace's description leads its first function's) and whose calls come back as `{name, namespace}`; `tool_choice` `none`, `auto`, `required`, `{type: "function", name, namespace?}`; `parallel_tool_calls`. Hosted tools (`web_search`, `file_search`, `code_interpreter`, `computer_use_preview`, `image_generation`, `mcp`, `local_shell`...) and `custom` (freeform) tools are refused; so are two tools that would reach the model under one name |
 | Output | items in the order the model wrote them: `reasoning` (`content: [{type: "reasoning_text"}]`, `summary: []`), `message` (`output_text`), then one `function_call` a call, with the model server's `call_id`. The caller runs each call and sends a `function_call_output` with that `call_id` |
 | Reasoning | `reasoning.effort` is the model server's `reasoning_effort` (Qwen on TensorFold: `none` switches thinking off; `minimal` to `max` think; other values are its 400). Never in output text. `reasoning.summary` `auto` or `none`: no summary is made; `concise` and `detailed` are refused. `include: ["reasoning.encrypted_content"]` is accepted: reasoning is never encrypted, so the item has no `encrypted_content` and replays from its `reasoning_text`. An item with another provider's `encrypted_content` is refused |
 | Structured output | `text.format` `text`, `json_object`, `json_schema` `{name, schema, strict, description}`; `text.verbosity` `medium` only |
@@ -177,14 +177,17 @@ as in Chat.
 | Echoed | `instructions`, `tools`, `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`, `max_output_tokens`, `reasoning`, `text`, `metadata`; `store: false`, `background: false`, `truncation: "disabled"`, `previous_response_id: null` |
 | Accepted, unused | `user`, `safety_identifier`, `prompt_cache_key`, `prompt_cache_retention`, `client_metadata`, `service_tier` `auto` / `default`, `stream_options.include_obfuscation` |
 | Refused | `previous_response_id`, `conversation`, `prompt`, `store: true`, `background: true`, `truncation: "auto"`, `top_logprobs`, `max_tool_calls`, `item_reference` items, other `include` values, any field not listed here (`unknown_parameter`) |
-| Streaming | **coming** (H6): `stream: true` is refused for now |
+| Streaming | `stream: true`: server-sent events, each `event: <type>` and `data: {..., "type", "sequence_number"}` (0, 1, 2...). `response.created`, `response.in_progress`; then per output item, in order: `response.output_item.added`, for reasoning and text `response.content_part.added`, `response.reasoning_text.delta` / `response.output_text.delta` ... `.done`, `response.content_part.done`, for a call `response.function_call_arguments.delta` ... `.done` (with `name` and the whole `arguments`), and `response.output_item.done` (the finished item); last `response.completed` (the whole response, `usage` included), `response.incomplete` (cut at `max_output_tokens`) or `response.failed` (the model failed mid-stream: `error.message`). One item is open at a time; `output_index` is its place in `output`. No `[DONE]` line |
+| Stream errors | a request refused before the model streamed anything gets the ordinary JSON error, not a stream; one that breaks after it began closes the open item and ends with `response.failed` |
 | Stored responses | none: `GET`, `DELETE` and `cancel` under `/v1/responses/{id}` are 404 |
-| Cancel | close the connection; the model stays loaded |
+| Cancel | close the connection (a stream stops at once); the model stays loaded |
 | Model names | as in Chat: one of `/v1/models`, or omitted for the default; another is a 404 |
 
 `tests/fixtures/responses/` holds a whole text conversation and a whole function-call conversation (two parallel calls
-included) in Codex's request shape; `tests/responses.zig` replays them turn by turn, sending each turn's output items
-back as they came.
+included) in Codex's request shape; `tests/responses.zig` replays them turn by turn, whole and streamed, sending each
+turn's output items back as they came, and checks each stream as a client reads it. What Codex itself sent is in
+`tests/fixtures/harness/codex.jsonl` ([Fixtures](#fixtures)), and its recipe is
+[harnesses/CODEX.md](harnesses/CODEX.md).
 
 ## Realtime profile `openai-realtime-beta`
 
@@ -317,8 +320,8 @@ approvals and the budgets on the controlled computer itself, and offers them to 
 
 | Feature | Status |
 | --- | --- |
-| Responses: stored state (`previous_response_id`, `conversation`, `store: true`, `/v1/responses/{id}`), background mode; streaming (coming: H6) | unsupported |
-| Responses: hosted, `custom` and `namespace` tools; reasoning summaries and encrypted reasoning; images, files and audio in input; log probabilities | unsupported |
+| Responses: stored state (`previous_response_id`, `conversation`, `store: true`, `/v1/responses/{id}`), background mode | unsupported |
+| Responses: hosted and `custom` tools; reasoning summaries and encrypted reasoning; images, files and audio in input; log probabilities | unsupported |
 | Realtime GA schema, WebRTC, ephemeral keys, `semantic_vad`, audio formats other than pcm16 24 kHz | unsupported |
 | Images or audio in chat messages; `n` > 1; DeepSeek's `thinking` field (ignored) | unsupported |
 | The daemon's own https output URLs as inputs, behind a TLS proxy | unsupported |
@@ -329,8 +332,10 @@ approvals and the budgets on the controlled computer itself, and offers them to 
 ## Fixtures
 
 `tests/fixtures/harness/{web,mobile,helper}.jsonl` are the requests our own three clients actually sent to the Jarvis
-box, recorded by `tools/harness/record_proxy.py` (a transparent proxy that redacts tokens, codes and media payloads)
-while each ran its own end-to-end check: the web page under `tools/spark/jarvis/client_check.py`, the mobile app's
+box, and `codex.jsonl` what Codex CLI 0.164.0 sent during its qualification ([CODEX.md](harnesses/CODEX.md)), recorded
+by `tools/harness/record_proxy.py` (a transparent proxy that redacts tokens, codes and media payloads; then
+`compact_fixture.py`, whose `--replace`, `--anonymize-uuids` and `--zero` take out paths, ids and timestamps) while each
+ran its own end-to-end check: the web page under `tools/spark/jarvis/client_check.py`, the mobile app's
 protocol layer under `apps/mobile` `pnpm e2e`, and the desktop helper (`LOCALROUTER_DESKTOP_FAKE=1`) driven by the MCP
 computer tools. `tests/contract.zig` replays their client side against a test daemon: every event type and HTTP route
 they use must still be accepted. A change that breaks one breaks a deployed client; change the contract date and the
@@ -347,8 +352,10 @@ python3 -I tools/harness/record_proxy.py --listen 127.0.0.1:18191 --upstream 127
 ## Harnesses
 
 Qualified recipes for outside harnesses, each with its pinned version and what was run:
-[harnesses/OPENCODE.md](harnesses/OPENCODE.md) (OpenCode 1.19.4) and [harnesses/DEEPSEEK.md](harnesses/DEEPSEEK.md)
-(DeepSeek Harness 0.2.1-rc.2, and what DeepSeek-API clients need to change). `tools/harness/qualify.sh` repeats the
-qualification from the machine a harness runs on. Our own reference harness is the desktop app, `apps/companion` (macOS first): realtime in client tool mode, its tools
-and computer control on the user's computer, the `/voice` page as its UI. Moving a user between harnesses is export and cancel: export the
+[harnesses/OPENCODE.md](harnesses/OPENCODE.md) (OpenCode 1.19.4), [harnesses/CODEX.md](harnesses/CODEX.md) (Codex CLI
+0.164.0, over the Responses API) and [harnesses/DEEPSEEK.md](harnesses/DEEPSEEK.md) (DeepSeek Harness 0.2.1-rc.2, and
+what DeepSeek-API clients need to change). `tools/harness/qualify.sh` repeats the qualification from the machine a
+harness runs on. Our own reference harness is the desktop app, `apps/companion` (macOS first): realtime in client tool
+mode, its tools and computer control on the user's computer, the `/voice` page as its UI. Moving a user between
+harnesses is export and cancel: export the
 conversation from the old one, cancel its running work, then start the new one; no live session or approval moves.

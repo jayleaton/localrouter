@@ -9,7 +9,12 @@
   `incomplete` status. Reasoning returns as a `reasoning` item, never as output text. Stored state
   (`previous_response_id`, `store: true`), hosted, custom and namespace tools, background mode, summaries, images and
   any unknown field are 400s naming the field, listed in `/v1/capabilities` (`responses`, `unsupported`). Needs the
-  `inference` scope. Streaming comes next.
+  `inference` scope.
+- Responses streaming and Codex: `stream: true` sends the Responses event sequence (`response.created`, per item
+  `output_item.added`, text and reasoning deltas, `function_call_arguments.delta` / `.done`, `output_item.done`, then
+  `response.completed`, `.incomplete` or `.failed`), with sequence numbers and the model server's call ids; closing
+  the connection cancels. Codex CLI is qualified against the box ([docs/harnesses/CODEX.md](docs/harnesses/CODEX.md)),
+  and what it sent is a contract fixture (`tests/fixtures/harness/codex.jsonl`).
 - Voice picture turns: a reply cancelled by barge-in while it wrote a tool call no longer leaves the session's own
   "Making that now." in the history (the call is dropped, so the line promised a picture that never came, and the model
   copied it). `voice.temperature` sets a session's starting chat temperature; the Jarvis config runs Qwen with thinking off

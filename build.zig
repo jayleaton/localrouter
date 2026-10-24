@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
     it_opts.addOptionPath("drama3_pins", b.path("tools/speech/drama3/pins.json"));
     it_opts.addOptionPath("drama3_pilot", b.path("tests/fixtures/drama3_pilot.py"));
     it_opts.addOptionPath("voice_chat_server", b.path("tests/fixtures/voice_chat_server.py"));
-    for ([_][]const u8{ "web", "mobile", "helper" }) |client|
+    for ([_][]const u8{ "web", "mobile", "helper", "codex" }) |client|
         it_opts.addOptionPath(b.fmt("harness_{s}", .{client}), b.path(b.fmt("tests/fixtures/harness/{s}.jsonl", .{client})));
     const it_mod = b.createModule(.{
         .root_source_file = b.path("tests/integration.zig"),

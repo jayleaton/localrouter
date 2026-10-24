@@ -82,7 +82,7 @@ below) so the version stays the one qualified.
 
 | Setting | Why |
 | --- | --- |
-| `@ai-sdk/openai-compatible` | the box speaks Chat Completions; `@ai-sdk/openai` would use the Responses API, which the box does not serve |
+| `@ai-sdk/openai-compatible` | Chat Completions, what was qualified; `@ai-sdk/openai` would use the Responses API, which the box serves too but this recipe has not qualified |
 | `reasoning`, `interleaved.field` | the model's thinking arrives in `reasoning_content`; this keeps it out of the answer and sends it back with tool calls |
 | `limit` | the deployed model's context is 32768 tokens; OpenCode's own prompt with every Spark tool is about 11k of it (measured) |
 | `mcp.spark` | the box's tools appear as `spark_generate_image`, `spark_synthesize_speech`, `spark_transcribe_audio`, `spark_generate_video`, `spark_decide`, `spark_get_job`... `oauth: false`: the box takes a bearer token, not OAuth |
@@ -108,7 +108,7 @@ from DGX-01:
   voice session on the same box queue behind each other.
 - **Context.** 32k tokens. Long sessions compact sooner than with hosted models. Every Spark tool's schema is in the
   prompt (about 11k tokens with OpenCode's own); if space runs short, connect fewer MCP servers.
-- **No Responses API, no images in chat.** Text in, text and tool calls out ([HARNESS.md](../HARNESS.md#chat-completions)).
+- **Chat Completions, no images in chat.** Text in, text and tool calls out ([HARNESS.md](../HARNESS.md#chat-completions)). The box also serves the Responses API now; this recipe stays on Chat Completions, which is what was qualified.
 - **Media URLs** are https behind `tailscale serve`. Passing one back as an input (an image to edit or animate) is
   refused; the model should send the file as base64 or start from the prompt.
 - **No voice.** OpenCode has no client for the box's realtime voice; it is a text and tools harness here.

@@ -95,8 +95,8 @@ from DGX-01, with `DSH_TELEMETRY_DISABLED=1` and dsh's default permission mode (
   stops writes; `danger-full-access` removes the sandbox. The box never sees or relaxes these.
 - **Telemetry.** dsh uploads session logs only for requests to DeepSeek's own API; `DSH_TELEMETRY_DISABLED=1` turns
   its telemetry off entirely.
-- The [OpenCode recipe's limits](OPENCODE.md#limits) apply as they are: one request at a time, 32k context, no
-  Responses API, https media URLs not accepted back as inputs, no voice, no computer scope.
+- The [OpenCode recipe's limits](OPENCODE.md#limits) apply as they are: one request at a time, 32k context, Chat
+  Completions only in this recipe, https media URLs not accepted back as inputs, no voice, no computer scope.
 
 ## Harnesses configured for DeepSeek's API
 
