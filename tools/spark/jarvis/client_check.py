@@ -22,6 +22,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -262,7 +263,66 @@ def main():
         checks.append({"check": name, "ok": bool(ok), "detail": detail})
         log(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  ({detail})"))
 
+    # a profile made here is this run's alone: removed at the end whatever happens (a failure, `timeout`'s SIGTERM),
+    # once every Chrome process is gone; a kept one (--profile) stays
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGHUP, _exit_on_signal)
     profile = a.profile or tempfile.mkdtemp(prefix="jarvis-client-")
+    try:
+        return run(a, profile, results, checks, check, _set_chrome)
+    finally:
+        if chrome_box:
+            stop_chrome(chrome_box.pop(), profile if a.profile else None)
+        if not a.profile:
+            remove_profile(profile)
+
+
+chrome_box = []  # the running Chrome, for main's cleanup
+
+
+def _set_chrome(proc):
+    chrome_box.append(proc)
+    return proc
+
+
+def _exit_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+def stop_chrome(chrome, kept_profile_port=None):
+    """Ends Chrome and every process it started (renderers, the crash handler): they share its session, so the group is
+    signalled, not just the browser; SIGKILL after 10 s."""
+    try:
+        os.killpg(chrome.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        chrome.wait(10)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(chrome.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        chrome.wait(5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def remove_profile(profile):
+    """Removes a profile this run made; a straggler writing into it can make one pass fail, so it tries a few times and
+    says so if the directory is still there."""
+    for _ in range(5):
+        shutil.rmtree(profile, ignore_errors=True)
+        if not os.path.lexists(profile):
+            return True
+        time.sleep(0.5)
+    log("could not remove the Chrome profile", profile)
+    return False
+
+
+def run(a, profile, results, checks, check, started):
     os.makedirs(profile, exist_ok=True)
     for f in ("DevToolsActivePort", "SingletonLock"):  # a kept profile's leftovers from its last browser
         if os.path.lexists(os.path.join(profile, f)):
@@ -274,12 +334,16 @@ def main():
         padded = os.path.join(profile, "mic.wav")
         padded_wav(a.wav, padded, lead_s=3)
         flags.append(f"--use-file-for-fake-audio-capture={padded}%noloop")
-    chrome = subprocess.Popen([a.chrome, *flags, "about:blank"], stdout=subprocess.DEVNULL, stderr=open(os.path.join(a.out, "chrome.log"), "w"))
+    chrome = started(subprocess.Popen([a.chrome, *flags, "about:blank"], stdout=subprocess.DEVNULL,
+                                      stderr=open(os.path.join(a.out, "chrome.log"), "w"), start_new_session=True))
+    port = None
     try:
         port_file = os.path.join(profile, "DevToolsActivePort")
         for _ in range(200):
             if os.path.exists(port_file) and open(port_file).read().strip():
                 break
+            if chrome.poll() is not None:
+                raise RuntimeError(f"Chrome exited ({chrome.returncode}) before it opened its debugging port; see chrome.log")
             time.sleep(0.1)
         port = int(open(port_file).read().split()[0])
         targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list"))
@@ -630,20 +694,15 @@ def main():
         except Exception:
             pass
     finally:
-        if a.profile:  # a kept profile: let Chrome commit its storage (a SIGTERM can drop the last seconds of localStorage)
+        if a.profile and port:  # a kept profile: let Chrome commit its storage (a SIGTERM can drop the last seconds of localStorage)
             try:
                 time.sleep(3)
                 Cdp(json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version"))["webSocketDebuggerUrl"]).call("Browser.close")
                 chrome.wait(15)
             except Exception:
                 pass
-        chrome.terminate()
-        try:
-            chrome.wait(10)
-        except subprocess.TimeoutExpired:
-            chrome.kill()
-        if not a.profile:
-            shutil.rmtree(profile, ignore_errors=True)
+        chrome_box.clear()
+        stop_chrome(chrome)
     results["checks"] = checks
     results["passed"] = bool(checks) and all(c["ok"] for c in checks)
     with open(os.path.join(a.out, "results.json"), "w") as f:

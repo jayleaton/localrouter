@@ -158,7 +158,7 @@ The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an age
 | `data_dir` | `/data` | job inputs and outputs (`jobs/`) and worker logs (`logs/<tool>.log`) |
 | `reserve_bytes` | 8 GiB | memory always left free for the OS and other services |
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
-| `keep_outputs_s` | 86400 | how long outputs stay |
+| `keep_outputs_s` | 86400 | how long outputs stay (in `data_dir`/jobs; on start the daemon also removes older ones left from before a restart) |
 | `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
 | `gpu_lock` | none | the host's GPU lock file, the one GPU jobs outside LocalRouter take exclusively. LocalRouter holds it once, shared and without waiting, while any of its models is loaded, and releases it when none is; while someone else holds it nothing loads (503). LocalRouter's own models never take it: they are admitted by memory alone, so chat, speech and transcription stay loaded side by side |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
