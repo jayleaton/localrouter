@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `spare_room_only` (tool config): an on-demand model nothing waits on loads only into spare room. It never unloads a
+  `keep_loaded` tool (idle unkept tools may still go), leaves room for the kept tools' working bytes, and is otherwise
+  refused with a 503 `insufficient_memory` before anything is unloaded. The Jarvis decision model (KnowLine, behind the
+  voice loop's shadow decisions) has it: a decision no longer evicts the warm image model (DGX-01 full smoke,
+  2026-10-24), and without spare room shadow decisions skip the turns.
+- Jarvis `wait_warm` (start.sh, deploy windows) waits until the box answers at warm speed, not only until every kept
+  tool reports ready: primed rounds of a short chat turn, a sentence of speech and its transcription, three in a row
+  within 1.0, 3.0 and 0.8 s. Right after a restart every tool was ready while a transcription took 1.7 s against 0.4 s
+  warm, and the first full smoke's voice turns missed their budget.
 - Responses API: `POST /v1/responses` serves OpenAI's Responses shape over the chat model, for harnesses that speak
   only that (Codex). Stateless (`store: false`, the conversation replayed each turn): message, `function_call`,
   `function_call_output` and `reasoning` items; `instructions` and `developer` messages as system messages in place;

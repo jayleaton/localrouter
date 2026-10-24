@@ -323,6 +323,44 @@ test "priority and keep_loaded: loaded at start, kept past the TTL, evicted last
     try testing.expectEqualStrings("unloaded", try d.toolState(a, "keep"));
 }
 
+test "spare_room_only: an on-demand model never unloads a kept one; it takes idle unkept tools or is refused first" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Budget 150 MiB. `kept` (40, priority 10, keep_loaded), `idle` (40, not kept), `spare` (80) and `wide` (120), both
+    // priority 5 and spare_room_only: the decision model behind shadow decisions, as Jarvis configures it.
+    var d = try Daemon.start(testing.allocator, io, "spare", "{" ++ reserve ++ ", \"budget_bytes\": 157286400, \"tools\": [" ++
+        "{\"id\": \"kept\", \"kind\": \"image\", \"engine\": \"testpattern\", \"priority\": 10, \"keep_loaded\": true, \"options\": {\"resident_mb\": 40}}," ++
+        "{\"id\": \"idle\", \"kind\": \"image\", \"engine\": \"testpattern\", \"idle_ttl_s\": 600, \"options\": {\"resident_mb\": 40}}," ++
+        "{\"id\": \"spare\", \"kind\": \"image\", \"engine\": \"testpattern\", \"priority\": 5, \"spare_room_only\": true, \"idle_ttl_s\": 600, \"options\": {\"resident_mb\": 80}}," ++
+        "{\"id\": \"wide\", \"kind\": \"image\", \"engine\": \"testpattern\", \"priority\": 5, \"spare_room_only\": true, \"idle_ttl_s\": 1, \"options\": {\"resident_mb\": 120}}]}");
+    defer d.stop();
+    try waitState(&d, a, "kept", "ready", 40);
+    const T = struct { data: []const struct { id: []const u8, spare_room_only: bool } };
+    const listed = try std.json.parseFromSliceLeaky(T, a, (try d.call(a, .GET, "/v1/tools", null)).body, .{ .ignore_unknown_fields = true });
+    try testing.expect(!listed.data[0].spare_room_only and listed.data[2].spare_room_only);
+
+    // `wide` fits only if `kept` goes: refused (503 insufficient_memory naming the rule), and nothing was unloaded.
+    try testing.expectEqual(std.http.Status.ok, (try harness.image(&d, a, "idle", "")).status);
+    const refused = try harness.image(&d, a, "wide", "");
+    try testing.expectEqual(std.http.Status.service_unavailable, refused.status);
+    try testing.expect(std.mem.indexOf(u8, refused.body, "insufficient_memory") != null and std.mem.indexOf(u8, refused.body, "spare_room_only") != null);
+    try testing.expectEqualStrings("ready", try d.toolState(a, "kept"));
+    try testing.expectEqualStrings("ready", try d.toolState(a, "idle"));
+
+    // `spare` fits once the idle, unkept tool goes: it takes that room, and `kept` stays loaded.
+    try testing.expectEqual(std.http.Status.ok, (try harness.image(&d, a, "spare", "")).status);
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "idle"));
+    try testing.expectEqualStrings("ready", try d.toolState(a, "kept"));
+    try testing.expectEqualStrings("ready", try d.toolState(a, "spare"));
+
+    // An ordinary request still may: `idle` (priority 0, not spare_room_only) unloads `spare` and keeps `kept`.
+    try testing.expectEqual(std.http.Status.ok, (try harness.image(&d, a, "idle", "")).status);
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "spare"));
+    try testing.expectEqualStrings("ready", try d.toolState(a, "kept"));
+}
+
 test "mcp-stdio: lines in, lines out, notifications silent, an unreachable daemon answers with an error" {
     const io = testing.io;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

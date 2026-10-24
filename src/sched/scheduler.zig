@@ -15,6 +15,8 @@
 //! tools are loaded at start when they fit, skip the idle TTL, and come back by themselves once their lane has been
 //! idle for a moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one
 //! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
+//! A `spare_room_only` tool (an on-demand model nothing waits on) is the exception to "never refused while unloading
+//! would make room": it never unloads a kept tool, and loads only with room left for the kept tools' working bytes.
 //! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load, and comes back
 //! only with room to spare for the working bytes of the kept tools above it (else their next job evicts it again).
 //!
@@ -493,12 +495,14 @@ pub const Scheduler = struct {
     /// The working bytes of the loaded `keep_loaded` tools of a higher priority than slot `i`: a kept tool comes back only
     /// with that much to spare, or their next job unloads it again (DGX-01: every voice turn's transcription evicted the
     /// kept image model, which reloaded as soon as the turn ended).
+    /// A `spare_room_only` tool leaves room for every loaded kept tool's working bytes, whatever their priority.
     fn keptHeadroom(s: *Scheduler, i: usize) u64 {
         const p = s.slots[i].tool.config().priority;
+        const every = s.slots[i].tool.config().spare_room_only;
         var bytes: u64 = 0;
         for (s.slots, 0..) |*slot, j| {
             const c = slot.tool.config();
-            if (j == i or !c.keep_loaded or c.priority <= p or slot.tool.state() == .unloaded) continue;
+            if (j == i or !c.keep_loaded or (c.priority <= p and !every) or slot.tool.state() == .unloaded) continue;
             bytes +|= slot.tool.needs(&placeholder(c.kind)).working;
         }
         return bytes;
@@ -699,10 +703,16 @@ pub const Scheduler = struct {
         s.gate.lockUncancelable(s.io);
         const cold = slot.tool.state() != .ready;
         const extra = n.working + if (cold) n.resident else 0;
-        if (!s.admit(j.tool, extra, null)) {
+        const spare = slot.tool.config().spare_room_only;
+        // A spare-room tool's load must also leave the kept tools room for their jobs (else their next job evicts it).
+        const room = extra +| if (spare and cold) s.keptHeadroom(j.tool) else 0;
+        if (!s.admit(j.tool, room, null)) {
             s.gate.unlock(s.io);
-            var buf: [160]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is free within the budget", .{extra >> 20}) catch "insufficient memory";
+            var buf: [256]u8 = undefined;
+            const msg = (if (spare)
+                std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is spare beside the models kept loaded, and {s} never unloads them (spare_room_only)", .{ room >> 20, slot.tool.config().id })
+            else
+                std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is free within the budget", .{extra >> 20})) catch "insufficient memory";
             return s.finish(j, .failed, 503, "insufficient_memory", msg, null);
         }
         s.reserve(slot, extra);
@@ -746,13 +756,16 @@ pub const Scheduler = struct {
 
     /// Under `gate`: true when `extra` more bytes fit; unloads idle tools, lowest priority then least recently used
     /// first, until they do. A tool in use by any lane is never a victim. With `below`, only tools of a lower priority
-    /// than it are victims (a `keep_loaded` tool coming back), and nothing is unloaded unless unloading all of them
-    /// would make room: a reload that cannot happen costs no one their model.
+    /// than it are victims (a `keep_loaded` tool coming back); a `spare_room_only` target never unloads a kept tool
+    /// (`mayEvict`). Either way nothing is unloaded unless unloading all of those would make room: a load that cannot
+    /// happen costs no one their model.
     fn admit(s: *Scheduler, target: usize, extra: u64, below: ?i32) bool {
-        if (below) |p| {
+        const want = s.slots[target].tool.config();
+        if (below != null or want.spare_room_only) {
             var freeable: u64 = 0;
             for (s.slots, 0..) |slot, i| {
-                if (i != target and !slot.in_use and !slot.held and slot.tool.state() == .ready and slot.tool.config().priority < p) freeable += slot.resident;
+                if (i != target and !slot.in_use and slot.tool.state() == .ready and (below == null or !slot.held) and
+                    mayEvict(want, slot.tool.config(), below)) freeable += slot.resident;
             }
             if (!s.fits(extra -| freeable)) return false;
         }
@@ -761,7 +774,8 @@ pub const Scheduler = struct {
             var victim: ?*Slot = null;
             for (s.slots, 0..) |*slot, i| {
                 if (i == target or slot.in_use or slot.tool.state() != .ready) continue;
-                if (below) |p| if (slot.tool.config().priority >= p or slot.held) continue; // a reservation's target waits for its job
+                if (below != null and slot.held) continue; // a reservation's target waits for its job
+                if (!mayEvict(want, slot.tool.config(), below)) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
             const v = victim orelse return false;
@@ -777,6 +791,15 @@ pub const Scheduler = struct {
             });
             s.unloadSlot(v);
         }
+    }
+
+    /// Whether an idle tool (`victim`) may be unloaded to make room for `target`: with `below` (a kept tool coming back)
+    /// only one of a lower priority; for a `spare_room_only` target never a `keep_loaded` one. Otherwise any: priority
+    /// only orders the victims.
+    fn mayEvict(target: *const config.ToolConfig, victim: *const config.ToolConfig, below: ?i32) bool {
+        if (below) |p| if (victim.priority >= p) return false;
+        if (target.spare_room_only and victim.keep_loaded) return false;
+        return true;
     }
 
     fn evictsBefore(a: *const Slot, b: *const Slot) bool {
@@ -907,4 +930,23 @@ pub fn nowNs(io: Io) i96 {
 
 pub fn nowUnix(io: Io) i64 {
     return @intCast(@divTrunc(Io.Clock.real.now(io).toNanoseconds(), std.time.ns_per_s));
+}
+
+test "victims: priority orders them, a kept tool coming back takes only lower ones, a spare-room tool never a kept one" {
+    const T = config.ToolConfig;
+    const kept: T = .{ .id = "image", .kind = .image, .priority = 10, .keep_loaded = true };
+    const video: T = .{ .id = "video", .kind = .video, .priority = 0 };
+    const idle: T = .{ .id = "old", .kind = .image, .priority = 0 };
+    const decision: T = .{ .id = "decide", .kind = .decision, .priority = 5, .spare_room_only = true };
+    const t = std.testing;
+    const may = Scheduler.mayEvict;
+    // A request (a video) may unload anything idle, the kept image model included: priority only orders the victims.
+    try t.expect(may(&video, &kept, null));
+    // A spare-room model never unloads a kept one, of any priority, but may take an idle tool that is not kept...
+    try t.expect(!may(&decision, &kept, null));
+    try t.expect(!may(&decision, &.{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true }, null));
+    try t.expect(may(&decision, &idle, null));
+    // A kept tool coming back (below its priority) takes only lower priorities, the spare-room model among them.
+    try t.expect(may(&kept, &decision, kept.priority));
+    try t.expect(!may(&kept, &.{ .id = "voice", .kind = .speech, .priority = 95, .keep_loaded = true }, kept.priority));
 }

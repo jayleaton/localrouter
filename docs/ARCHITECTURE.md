@@ -46,7 +46,10 @@ memory minus `reserve_bytes`, or `budget_bytes`). If it does not fit, idle tools
 then least recently used. Priority only orders the victims: a request is never refused while unloading idle tools would
 make room. `keep_loaded` tools are loaded at start, are exempt from their idle TTL, and come back on their own as soon
 as the scheduler is idle, unloading idle tools of lower priority if they must, so an operator can keep, say, an image
-model and a voice model warm side by side and still let a video job take the whole machine when it needs it.
+model and a voice model warm side by side and still let a video job take the whole machine when it needs it. A
+`spare_room_only` tool is the one exception to "never refused while unloading would make room": an on-demand model
+nothing waits on (the decision model behind shadow decisions) never unloads a `keep_loaded` tool, loads only with room
+left for the kept tools' working bytes, and is otherwise refused with a 503 before anything is unloaded.
 
 **Lanes.** Each lane runs one job at a time. Speech and transcription tools run on the `realtime` lane (a tool's `lane`
 overrides it), so a sentence of TTS or a turn of STT never waits behind an image, a video or a chat reply. A tool is

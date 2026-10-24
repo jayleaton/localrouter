@@ -21,6 +21,11 @@ pub const ToolConfig = struct {
     idle_ttl_s: u32 = 120, // 0: unload right after each job
     priority: i32 = 0, // higher is kept longer: memory pressure unloads lower priorities first (then least recently used)
     keep_loaded: bool = false, // load at start if it fits, skip the idle TTL, reload when memory frees; still evictable
+    // An on-demand model that may only use spare room: it never unloads a `keep_loaded` tool to load (idle tools that are
+    // not kept may still go) and loads only with room left for the kept tools' working bytes; a request it cannot serve
+    // so is refused (503 insufficient_memory) before anything is unloaded. For models nothing waits on, such as the
+    // decision model behind the voice loop's shadow decisions.
+    spare_room_only: bool = false,
     capabilities: []const Capability = &.{}, // empty: the engine's (a `cmd` tool: its kind's plain one, e.g. speech_to_text)
     load_timeout_s: u32 = 900,
     generate_timeout_s: u32 = 3600,
