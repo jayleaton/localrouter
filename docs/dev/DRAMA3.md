@@ -413,7 +413,45 @@ whole-reply passes, and the same text, the same audio to the sample, took 0.68 i
 text's fastest whole pass was 0.68 to 0.70, and the streamed passes after it, on the same server, held 0.70 to 0.72
 for every long and medium text and 0.75 to 0.83 for the short ones.
 
-@@AB@@
+**Against the full model** (`tools/speech/drama3/compare.py` through a LocalRouter daemon on DGX-01, 2026-10-24,
+beside warm chat and Whisper; `~/jarvis/qualify-drama3/nvfp4/compare3`): the 24 sentences of
+`compare-texts.txt` in each of the six voices (144 takes a model), then 6 of them in each voice (36 takes) while chat
+streams a 600-token reply back to back; every take streamed. Interleaved (`--interleave`): both models loaded, each
+text spoken by one and then the other, because another project's GPU job ran through every window (2.4 to 5.8 GiB of
+`mm31_kl_gate`, which pauses and resumes itself) and slowed whichever model happened to be speaking. Whisper
+large-v3-turbo transcribed every take; word error rate after NFKC, lowercase, punctuation dropped, digits spelled out
+and UK/US spellings folded (Whisper writes "twenty" as "20" and "harbour" as "harbor", the same for both models).
+
+| | Full model | NVFP4, γ 1.5 (served) | NVFP4 unguided (`guidance: false`)² |
+| --- | ---: | ---: | ---: |
+| First audio p50 (p90), alone | 0.264 s (0.567) | 0.324 s (0.710) | 0.243 s (0.246) |
+| Real-time factor p50, alone | 0.713 | 0.741 | 0.692 |
+| First audio p50 (p90), while chat writes | 0.594 s (2.109) | 0.728 s (1.880) | 0.546 s (1.710) |
+| Real-time factor p50, while chat writes | 1.696 | 1.780 | 1.640 |
+| Chat decode while speaking | 15.2 tok/s | 15.2 tok/s | 16.1 tok/s |
+| Word error rate, pooled (144 takes, 1,938 words) | 0.05 % (1 word) | 0.05 % (1 word) | 0.05 % (1 word) |
+| Failed takes, finish reasons | 0; stop 180 | 0; stop 180 | 0; stop 180 |
+| Load through the daemon (page cache warm) | 8.1 s | 25.1 s | 24.3 s |
+| GPU memory of the server, nvidia-smi | 38.5 GiB | 19.7 GiB | 19.6 GiB |
+
+Per voice (first audio p50, RTF p50, WER), NVFP4 γ 1.5 against the full model: Mae 0.326 s 0.762 0.0 % (0.266 s
+0.730 0.0 %), Arlo 0.324 0.754 0.0 % (0.264 0.722 0.0 %), Ezra 0.324 0.754 0.0 % (0.263 0.725 0.0 %), Nora 0.324
+0.733 0.0 % (0.265 0.710 0.0 %), Theo 0.324 0.730 0.3 % (0.263 0.707 0.0 %), Wren 0.324 0.726 0.0 % (0.263 0.701
+0.2 %). No voice degrades by compare.py's flags (WER mean 3 points worse with at least 2 takes worse, a failed take,
+or RTF p50 above 1.0). The misheard words: the full model's "pasta" heard as "pastor" (Wren, in both runs), the
+quant's "ring" as "wring" (Theo), and unguided "lights are off" as "lights her off" (Theo). Nobody has listened to
+the samples yet. Every take of both models, side by side
+per voice and text, with a page to play them: `compare3/wav/` and `compare3/listen.html` on DGX-01.
+
+What it costs: guidance's second backbone sequence, decoded in one batch with the first every frame and prefilled
+with the plain prompt first, adds 60 ms to first audio (0.264 to 0.324 s, every voice alike) and 4 % to the
+real-time factor; while chat writes, both models fall below real time alike (the GPU is shared; the voice loop's
+cushion covers it, [VOICE.md](VOICE.md)). Without guidance the quant is faster than the full model on every measure,
+at the same word error rate here; upstream measured it only guided, and speaker similarity was not measured here.
+
+² `compare2`: sequential passes (each model's 180 takes in turn) beside chat, Whisper and the image model, against
+the full model in the same run (whose figures there were 0.282 s, 0.732, 0.587 s and 1.662, near the interleaved
+ones); the foreign job was present then too.
 
 **Back to the full model.** Its install, engine and marker are untouched by all of this (`pins.json` did not change):
 set the tool's `variant` to `full` with its own marker and `resident_bytes` (on the Jarvis box: `DRAMA_VARIANT=full`
@@ -437,8 +475,11 @@ this repository):
 Through the daemon on the GPU: the qualify run drives the worker in-process, as the daemon's worker process does, so
 the daemon's HTTP re-chunking of a stream (a 20 ms poll of `speech.wav`) is covered by CI only. Also not run on the GPU:
 the silence guard and long form on the real model, voice files in `voices_dir` (only inline references were), and
-eviction of the real model by an image or video job (CI covers the order with stand-ins). Audio quality was not judged
-by ear or by a speech recognizer here.
+eviction of the real model by an image or video job (CI covers the order with stand-ins). Since 2026-10-24
+compare.py streams through the daemon on the GPU (both weights, every voice) and scores every take with Whisper
+([The NVFP4 pruned weights](#the-nvfp4-pruned-weights)); audio quality has still not been judged by ear, nor speaker
+similarity measured. For the NVFP4 weights also: long form, the silence guard and the engine's own host tests
+(`zig build test-cuda-host test-server-cpu` in the engine tree) were not run.
 
 ## What upstream lacks that LocalRouter needs
 

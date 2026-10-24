@@ -195,8 +195,31 @@ def transcribe(args, path):
         return None, f"not JSON: {e}"
 
 
+ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+        "seventeen eighteen nineteen").split()
+TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+# British and American spellings a recognizer may give either way (it writes one of them, whatever was spoken).
+SPELLINGS = {"harbour": "harbor", "colour": "color", "favourite": "favorite", "neighbour": "neighbor",
+             "honour": "honor", "flavour": "flavor", "centre": "center", "theatre": "theater", "metre": "meter",
+             "grey": "gray", "organise": "organize", "realise": "realize", "travelling": "traveling",
+             "cancelled": "canceled", "programme": "program"}
+
+
+def spelled(n):
+    """A whole number under a million in words, as it is said ("forty two"), so "42" and "forty-two" score alike."""
+    if n < 20:
+        return ONES[n]
+    if n < 100:
+        return TENS[n // 10] + ("" if n % 10 == 0 else " " + ONES[n % 10])
+    if n < 1000:
+        return ONES[n // 100] + " hundred" + ("" if n % 100 == 0 else " " + spelled(n % 100))
+    return spelled(n // 1000) + " thousand" + ("" if n % 1000 == 0 else " " + spelled(n % 1000))
+
+
 def words(text):
-    """Lowercased NFKC words: bracketed tags like [sighs] and punctuation dropped, intra-word apostrophes kept."""
+    """Lowercased NFKC words: bracketed tags like [sighs] and punctuation dropped, intra-word apostrophes kept,
+    whole numbers written in digits spelled out and SPELLINGS folded (a transcript's "20 minutes" and "harbor" are
+    what "twenty minutes" and "harbour" sound like)."""
     text = unicodedata.normalize("NFKC", re.sub(r"\[[^\]]*\]", " ", text)).lower()
     text = text.replace("’", "'").replace("‘", "'")
     out = []
@@ -205,7 +228,13 @@ def words(text):
             out.append(c)
         else:
             out.append(" " if unicodedata.category(c)[0] in "PS" else c)
-    return "".join(out).split()
+    said = []
+    for w in "".join(out).split():
+        if w.isascii() and w.isdigit() and len(w) <= 6:
+            said += spelled(int(w)).split()
+        else:
+            said.append(SPELLINGS.get(w, w))
+    return said
 
 
 def edits(ref, hyp):
@@ -601,7 +630,9 @@ def score(args, models, voices, texts, takes, loads, chats, memory, unloads):
     for t in takes:
         if t["pass"] != "alone" or not t["wav"]:
             continue
-        hyp, err = transcribe(args, os.path.join(args.out, t["wav"]))
+        # a rescore keeps a transcript it already has and scores it again; it transcribes the ones that failed
+        hyp, err = ((t["hypothesis"], None) if t.get("hypothesis") is not None
+                    else transcribe(args, os.path.join(args.out, t["wav"])))
         ref = words(t["input"])
         t.update(hypothesis=hyp, stt_error=err, ref_words=len(ref))
         if hyp is not None and ref:
@@ -619,7 +650,8 @@ def score(args, models, voices, texts, takes, loads, chats, memory, unloads):
            "texts": texts, "load_texts": min(args.load_texts, texts) if args.chat else 0, "stt": args.stt,
            "chat": args.chat, "server_match": args.server_match, "unload_failures": unloads,
            "percentiles": "nearest-rank over the good takes", "wer": "word Levenshtein; NFKC, lowercase, "
-           "punctuation and [tags] dropped, intra-word apostrophes kept; pooled = edits / reference words",
+           "punctuation and [tags] dropped, intra-word apostrophes kept, digits spelled out, UK/US spellings folded; "
+           "pooled = edits / reference words",
            "memory_method": "per matching PID: nvidia-smi used_memory + RssAnon + RssShmem, every 0.5 s; peaks",
            "thresholds": THRESHOLDS, "models": per}
     rep["flags"] = flags(models, takes, per)
