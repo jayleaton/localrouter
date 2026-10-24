@@ -23,6 +23,15 @@
   certificate).
 - `tools/harness/nemo_check.sh`: a public review's test order as a client-side check anyone can run against a box
   (models, chat with thinking off, speech, Whisper on it, an image, an edit or its clear refusal, a video, chat again).
+- Drama 3 on the NVFP4 pruned weights (plotarmordev/drama-3-NVFP4-Pruned: routed experts in NVFP4, 7,369 of 10,240
+  kept; lossy, approved by JJ): the Drama 3 tool's `variant` option (`full`, the default, or `nvfp4`) with its own
+  pins (`pins-nvfp4.json`, beside `pins.json`, whose marker it leaves valid), checkpoint, engine build
+  (plotarmordev/TensorFold `drama-nvfp4` with LocalRouter's voice prefix cache ported) and marker
+  (`qualify.sh --accept-lossy`). `fetch.sh --variant nvfp4` links files the full checkpoint already holds. On the
+  Jarvis box (`DRAMA_VARIANT`, default `nvfp4`) it books 20.56 GiB against 39.25, and the KnowLine decision model is
+  now kept warm (priority 15, above the image model). qualify's bench measures the server's own peak (nvidia-smi
+  `used_memory` + RssAnon + RssShmem); `tools/speech/drama3/compare.py` compares speech models through a daemon
+  (first audio, real-time factor alone and while chat writes, Whisper round-trip WER, WAVs side by side).
 - `spare_room_only` (tool config): an on-demand model nothing waits on loads only into spare room. It never unloads a
   `keep_loaded` tool (idle unkept tools may still go), leaves room for the kept tools' working bytes, and is otherwise
   refused with a 503 `insufficient_memory` before anything is unloaded. The Jarvis decision model (KnowLine, behind the

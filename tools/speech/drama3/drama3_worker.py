@@ -13,8 +13,8 @@ Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on std
 The model is plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with the Drama 3 patch
 series), built from the pins in pins.json and started by that repository's own launcher, recipe/pilot.py, with
 LocalRouter's pinned admission patch (patches/pilot-external-admission.patch; fetch.sh writes ROOT/launcher/pilot.py).
-LocalRouter's scheduler is the only admission authority: it admits the load from the tool's resident_bytes (42 GiB:
-the measured peak and a small margin, docs/dev/DRAMA3.md) against its budget, so the worker passes --external-admission and the launcher skips its
+LocalRouter's scheduler is the only admission authority: it admits the load from the tool's resident_bytes (the
+measured peak and a small margin, docs/dev/DRAMA3.md) against its budget, so the worker passes --external-admission and the launcher skips its
 own 88 GiB MemAvailable admission and 34 GiB abort. The launcher still runs the server as a transient systemd user
 unit capped at 54 GiB on 127.0.0.1, takes the lock it is given (LOCALROUTER_GPU_LOCK: the private, uncontended
 per-tool lock file the daemon names; a lock under the runtime directory when run outside the daemon), and stops the
@@ -32,6 +32,10 @@ unit and releases the lock when it is told to stop. This worker is a client of t
   503 and the next request starts the model again.
 - exit: SIGTERM to the launcher, which stops the unit and then releases the lock. The launcher runs in its own
   session with a parent-death signal, so a worker killed by the daemon (a cancel, a deadline) still stops it.
+
+The option `variant` picks the weights: `full` (fishaudio/drama-3, pins.json; the default) or `nvfp4`
+(plotarmordev/drama-3-NVFP4-Pruned, pins-nvfp4.json: its own checkpoint directory, engine build and serve flags,
+and a marker of its own, which must name the variant and its pins).
 
 Drama 3 seeds each synthesis from its prompt, so `seed` is not sent and the reply's seed is 0. `speed`, `preset`
 and `instructions` are refused by the daemon before a request gets here (the tool's options declare none).

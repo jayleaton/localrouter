@@ -419,7 +419,9 @@ def write_md(path, models, rep, voices):
              ("chat tok/s under load", lambda r: fmt((r["chat_under_load"] or {}).get("tok_s"), nd=1)),
              ("memory peak GiB", lambda r: fmt(max([p.get("total_bytes", 0) for p in r["memory"].values()] or [None]),
                                                 1 / (1 << 30), 2))]
-    lines = ["# Speech model comparison", "", f"Baseline: `{models[0]}`. Percentiles are nearest-rank.", "",
+    lines = ["# Speech model comparison", "", f"Baseline: `{models[0]}`. Percentiles are nearest-rank. "
+             + ("Interleaved: each text spoken by every model in turn." if rep.get("interleave") else
+                "Sequential: each model's passes in turn."), "",
              "| | " + " | ".join(f"`{m}`" for m in models) + " |", "|---" * (len(models) + 1) + "|"]
     lines += [f"| {name} | " + " | ".join(f(rep["models"][m]) for m in models) + " |" for name, f in rows]
     lines += ["", "Per voice: first audio p50 s / RTF p50 / WER mean", "",
@@ -437,8 +439,10 @@ def write_md(path, models, rep, voices):
         fh.write("\n".join(lines) + "\n")
 
 
-def write_html(path, models, voices, texts, takes):
+def write_html(path, models, voices, takes):
     wav = {(t["model"], t["voice"], t["text_index"]): t["wav"] for t in takes if t["pass"] == "alone"}
+    said = {t["text_index"]: t["input"] for t in takes if t["pass"] == "alone"}
+    texts = [said[i] for i in sorted(said)]
     e = html.escape
     out = ["<!doctype html><meta charset=utf-8><title>Speech comparison</title>",
            "<style>body{font-family:sans-serif;margin:1em}td,th{border:1px solid #ccc;padding:4px;vertical-align:top}"
@@ -456,9 +460,9 @@ def write_html(path, models, voices, texts, takes):
 def main():
     ap = argparse.ArgumentParser(description="Compare speech models a running LocalRouter daemon serves.")
     ap.add_argument("--url", required=True, help="the daemon, e.g. http://127.0.0.1:8190")
-    ap.add_argument("--models", nargs="+", required=True, help="speech models; the first is the baseline")
+    ap.add_argument("--models", nargs="+", help="speech models; the first is the baseline")
     ap.add_argument("--voices", nargs="+", help="default: the voices every model lists")
-    ap.add_argument("--texts", required=True, help="one sentence a line; # comments and blank lines ignored")
+    ap.add_argument("--texts", help="one sentence a line; # comments and blank lines ignored")
     ap.add_argument("--out", required=True)
     ap.add_argument("--stt", default="whisper-large-v3-turbo")
     ap.add_argument("--language", default="en", help="the transcription language ('' to detect)")
@@ -468,13 +472,23 @@ def main():
     ap.add_argument("--server-match", nargs="+", help="substrings every server process's cmdline holds")
     ap.add_argument("--key")
     ap.add_argument("--timeout", type=float, default=300, help="seconds a request may take")
+    ap.add_argument("--interleave", action="store_true",
+                    help="every model loaded at once, each text spoken by each in turn: a slowdown from anything "
+                         "else on the machine falls on all of them alike (memory is then not sampled per model)")
+    ap.add_argument("--rescore", action="store_true",
+                    help="score OUT's finished run again: transcribe its saved WAVs and rewrite its reports (its "
+                         "speech, load, chat and memory figures are kept as measured)")
     args = ap.parse_args()
+    if not args.rescore and not (args.models and args.texts):
+        ap.error("--models and --texts are required (unless --rescore)")
     args.base = urllib.parse.urlsplit(args.url)
     if args.base.scheme != "http":
         raise SystemExit("compare.py: --url must be http:// (the daemon on this host)")
     args.prefix = re.sub(r"/v1$", "", args.base.path.rstrip("/"))
     args.out = os.path.abspath(args.out)
     os.makedirs(args.out, exist_ok=True)
+    if args.rescore:
+        return rescore(args)
     with open(args.texts) as f:
         texts = [s.strip() for s in f if s.strip() and not s.strip().startswith("#")]
     status, body = call(args, "GET", "/v1/models")
@@ -502,6 +516,9 @@ def main():
         print(f"{rec['model']} {rec['pass']} {rec['voice']} #{rec['text_index']}: ok={rec['ok']} "
               f"first={fmt(rec['first_audio_s'])} rtf={fmt(rec['rtf'])} {rec['error'] or ''}", flush=True)
 
+    if args.interleave:
+        interleaved(args, entries, voices, texts, keep, loads, chats)
+        return score(args, args.models, voices, len(texts), takes, loads, chats, {}, unloads)
     for model in args.models:
         rate = int(entries[model].get("sample_rate") or DEFAULT_RATE)
         for other in args.models:
@@ -532,7 +549,55 @@ def main():
         if sampler:
             sampler.phase = None
     memory = sampler.finish() if sampler else {}
+    log.close()
+    return score(args, args.models, voices, len(texts), takes, loads, chats, memory, unloads)
 
+
+def interleaved(args, entries, voices, texts, keep, loads, chats):
+    """The passes with every model warm, each text spoken by each model in turn (then the same under chat load)."""
+    rates = {m: int(entries[m].get("sample_rate") or DEFAULT_RATE) for m in args.models}
+    for m in args.models:
+        loads[m] = speak(args, m, voices[0], WARM_TEXT, rates[m])
+        keep(loads[m], **{"pass": "warm", "text_index": 0, "under_chat": False})
+    for v in voices:
+        for i, text in enumerate(texts, 1):
+            for m in args.models:
+                path = os.path.join(args.out, "wav", slug(v), f"{i:02d}-{slug(m)}.wav")
+                keep(speak(args, m, v, text, rates[m], path), **{"pass": "alone", "text_index": i, "under_chat": False})
+    load = None
+    if args.chat:
+        load = ChatLoad(args)
+        load.thread.start()
+        time.sleep(2)  # let the chat stream reach decoding first
+        for v in voices:
+            for i, text in enumerate(texts[:args.load_texts], 1):
+                for m in args.models:
+                    path = os.path.join(args.out, "wav", slug(v), f"{i:02d}-{slug(m)}-chat.wav")
+                    keep(speak(args, m, v, text, rates[m], path), **{"pass": "chat", "text_index": i, "under_chat": True})
+        load = load.finish()
+    for m in args.models:
+        chats[m] = load
+
+
+def rescore(args):
+    """A finished run again: its takes and the figures its report kept, scored with a fresh transcription."""
+    with open(os.path.join(args.out, "report.json")) as f:
+        old = json.load(f)
+    with open(os.path.join(args.out, "takes.jsonl")) as f:
+        takes = [json.loads(line) for line in f if line.strip()]
+    models = old["models_order"]
+    args.chat, args.load_texts, args.server_match = old.get("chat"), old.get("load_texts", 0), old.get("server_match")
+    args.interleave = old.get("interleave", False)
+    loads = {m: next((t for t in takes if t["model"] == m and t["pass"] == "warm"), {}) for m in models}
+    chats = {m: old["models"][m].get("chat_under_load") for m in models}
+    memory = {}
+    for m in models:
+        memory.update(old["models"][m].get("memory") or {})
+    return score(args, models, old["voices"], old["texts"], takes, loads, chats, memory, old.get("unload_failures", []))
+
+
+def score(args, models, voices, texts, takes, loads, chats, memory, unloads):
+    """Every alone take transcribed and scored, then report.json, report.md and listen.html."""
     for t in takes:
         if t["pass"] != "alone" or not t["wav"]:
             continue
@@ -544,24 +609,24 @@ def main():
             t["wer"] = t["edits"] / len(ref)
         print(f"WER {t['model']} {t['voice']} #{t['text_index']}: {fmt(t.get('wer'), 100, 1, '%')} {err or ''}",
               flush=True)
-    log.close()
     with open(os.path.join(args.out, "takes.jsonl"), "w") as f:
         f.writelines(json.dumps(t) + "\n" for t in takes)
 
     per = {m: summarize(m, takes, loads[m], chats[m],
-                        {k: v for k, v in memory.items() if k in (m, f"{m} under chat")}) for m in args.models}
-    rep = {"url": args.url, "baseline": args.models[0], "models_order": args.models, "voices": voices,
-           "texts": len(texts), "load_texts": min(args.load_texts, len(texts)) if args.chat else 0, "stt": args.stt,
+                        {k: v for k, v in memory.items() if k in (m, f"{m} under chat")}) for m in models}
+    rep = {"url": args.url, "baseline": models[0], "models_order": models, "voices": voices,
+           "interleave": bool(args.interleave), "rescored": bool(args.rescore),
+           "texts": texts, "load_texts": min(args.load_texts, texts) if args.chat else 0, "stt": args.stt,
            "chat": args.chat, "server_match": args.server_match, "unload_failures": unloads,
            "percentiles": "nearest-rank over the good takes", "wer": "word Levenshtein; NFKC, lowercase, "
            "punctuation and [tags] dropped, intra-word apostrophes kept; pooled = edits / reference words",
            "memory_method": "per matching PID: nvidia-smi used_memory + RssAnon + RssShmem, every 0.5 s; peaks",
            "thresholds": THRESHOLDS, "models": per}
-    rep["flags"] = flags(args.models, takes, per)
+    rep["flags"] = flags(models, takes, per)
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(rep, f, indent=2)
-    write_md(os.path.join(args.out, "report.md"), args.models, rep, voices)
-    write_html(os.path.join(args.out, "listen.html"), args.models, voices, texts, takes)
+    write_md(os.path.join(args.out, "report.md"), models, rep, voices)
+    write_html(os.path.join(args.out, "listen.html"), models, voices, takes)
     print(f"report: {os.path.join(args.out, 'report.md')}; flags: {len(rep['flags'])}")
     return 0
 

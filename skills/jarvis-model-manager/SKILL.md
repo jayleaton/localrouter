@@ -47,9 +47,10 @@ asks for; prefer `reserve_for` to a run of `unload_model` calls, since it unload
 | Model | Resident | Priority | Kept warm |
 | --- | --- | --- | --- |
 | `qwen3.8-27b` (chat) | 24 GiB | 100 | yes, never unloaded by these tools |
-| `fishaudio/drama-3` (voice) | 42 GiB | 95 | yes |
+| `fishaudio/drama-3` (voice, NVFP4 weights) | 20.6 GiB | 95 | yes |
 | `whisper-large-v3-turbo` (ears) | 3.6 GiB, plus 2 GiB a job | 90 | yes |
 | `qwen-image-2.1-turbo` (image) | 35.2 GiB | 10 | yes |
+| `knowline-4b` (decisions) | 12.4 GiB | 15 | yes, into spare room only |
 | `minimax-h3` (video) | about 39 GiB, plus its frames | 0 | no (unloads 30 s after a clip) |
 
 With everything warm about 14 GiB is free (6 GiB more is the reserve). A video then needs the image model's memory;
