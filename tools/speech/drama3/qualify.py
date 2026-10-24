@@ -5,7 +5,8 @@
     python3 -I tools/speech/drama3/qualify.py e2e    ROOT CONFIG OUT [--tool ID]
     python3 -I tools/speech/drama3/qualify.py bench  ROOT CONFIG OUT [--tool ID] [--coresident]
     python3 -I tools/speech/drama3/qualify.py accuracy ROOT CONFIG OUT --reference RUNTIME [--tool ID]
-    python3 -I tools/speech/drama3/qualify.py marker ROOT CONFIG OUT [--tool ID] [--write --accept-native-numerics]
+    python3 -I tools/speech/drama3/qualify.py marker ROOT CONFIG OUT [--tool ID] [--write --accept-native-numerics
+                                                                     [--accept-lossy]]
 
 ROOT is the asset root fetch.sh and build.sh filled. CONFIG is the LocalRouter config: its drama3 tool (the speech
 tool whose cmd ends in drama3_worker.py; --tool picks one by id) and its top-level "gpu_lock". qualify.sh runs the
@@ -50,6 +51,16 @@ verdicts are recorded, and do not decide acceptance.
 marker writes the tool's "qualification" file (--write, only with --accept-native-numerics, passing assets, e2e and
 bench reports and an accuracy report with valid evidence, whose results it records with bench's measurements);
 without --write it writes nothing and warns if a marker that says qualified is already there.
+
+A tool with the option "variant" (nvfp4: plotarmordev/drama-3-NVFP4-Pruned, pins-nvfp4.json) is checked against its
+own pins, checkpoint, engine build and ROOT/engine-nvfp4.json. Upstream's accuracy checks do not apply to it (the
+SGLang-Omni reference does not load the quant, and its engine builds no oracle tools): accuracy records that, and
+the marker needs --accept-lossy, the operator's recorded acceptance of a lossy checkpoint (pins-nvfp4.json's "lossy"
+names who approved it), and binds both pins files. Its quality is measured against the full model by compare.py.
+
+bench's peak is also measured per process, the GB10 way: the server's nvidia-smi used_memory (its device
+allocations, which show in no RSS) plus its RssAnon and RssShmem, sampled with the rest; when that was measured it is
+the peak the gate and the marker use (MemAvailable's drop moves with every co-resident model), else the drop.
 """
 
 import argparse
@@ -121,17 +132,32 @@ def load_tool(config_path, tool_id):
     return cfg, chosen[0]
 
 
-def layout(root):
+def tool_variant(tool):
+    """The tool's weights variant and its pins (None for the full model, pins.json's)."""
+    variant = (tool.get("options") or {}).get("variant", "full")
+    return variant, worker_module().load_variant_pins(variant)
+
+
+def build_dir(root, vpins):
+    return os.path.join(root, vpins["build"]["dir"] if vpins else os.path.join("build", "tensorfold"))
+
+
+def layout(root, vpins=None):
     """The paths the worker derives from its weights (ROOT) when no option overrides them."""
     return {"pilot": os.path.join(root, "launcher", "pilot.py"),
-            "native_bin": os.path.join(root, "build", "tensorfold", "zig-out", "native", "bin", "tensorfold-native"),
-            "checkpoint": os.path.join(root, "drama-3"),
+            "native_bin": os.path.join(build_dir(root, vpins), "zig-out", "native", "bin", "tensorfold-native"),
+            "checkpoint": os.path.join(root, vpins["checkpoint"]["dir"] if vpins else "drama-3"),
             "runtime_dir": os.path.join(root, "runtime")}
 
 
 def tool_paths(tool):
     opts = tool.get("options") or {}
-    return {k: opts.get(k) or v for k, v in layout(tool.get("weights", "")).items()}
+    return {k: opts.get(k) or v for k, v in layout(tool.get("weights", ""), tool_variant(tool)[1]).items()}
+
+
+def engine_record(root, vpins):
+    """build.sh's record of the engine: ROOT/engine.json, or the variant's."""
+    return os.path.join(root, vpins["build"]["record"] if vpins else "engine.json")
 
 
 def read_json(path):
@@ -279,11 +305,12 @@ def assets(args):
     pins = kw.load_pins()
     rep = Report()
     cfg, tool = load_tool(args.config, args.tool)
+    variant, vpins = tool_variant(tool)
     root = os.path.realpath(args.root)
     rep.add("weights_is_root", os.path.realpath(tool.get("weights") or "/nonexistent") == root,
             weights=tool.get("weights"), root=root)
     # The worker must run what is verified here: overrides of the pilot, the binary or the checkpoint are refused.
-    paths, expected = tool_paths(tool), layout(root)
+    paths, expected = tool_paths(tool), layout(root, vpins)
     for key in ("pilot", "native_bin", "checkpoint"):
         rep.add(f"{key}_in_root", os.path.realpath(paths[key]) == os.path.realpath(expected[key]),
                 path=paths[key], expected=expected[key])
@@ -292,21 +319,25 @@ def assets(args):
     rep.add("qualification_path", bool(tool.get("qualification")), qualification=tool.get("qualification"))
     with open(os.path.join(args.out, "fetch-check.log"), "w") as log:
         t = time.monotonic()
-        r = subprocess.run([os.path.join(HERE, "fetch.sh"), root, "--check"], stdout=log, stderr=subprocess.STDOUT,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run([os.path.join(HERE, "fetch.sh"), root, "--variant", variant, "--check"], stdout=log,
+                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     rep.add("pinned_files_sha256", r.returncode == 0, exit=r.returncode, seconds=time.monotonic() - t,
-            log="fetch-check.log", files=len(pins["checkpoint"]["files"]))
-    engine_path = os.path.join(root, "engine.json")
+            log="fetch-check.log", variant=variant, files=len((vpins or pins)["checkpoint"]["files"]))
+    engine_path = engine_record(root, vpins)
     try:
         engine = read_json(engine_path)
     except (OSError, ValueError) as e:
         rep.add("engine_json", False, error=f"{engine_path}: {e}")
         return rep.write(args.out, pins_sha256=kw.sha256_file(kw.PINS))
-    want = pins["engine_patches"]["head"]  # upstream's series, then LocalRouter's engine patches (build.sh)
+    want = (vpins or pins)["engine_patches"]["head"]  # the engine's commit, then LocalRouter's engine patches (build.sh)
     rep.add("engine_patched_head", engine.get("patched_head") == want, engine=engine.get("patched_head"), pinned=want)
-    rep.add("engine_upstream_commit", engine.get("upstream_commit") == pins["upstream"]["commit"],
-            engine=engine.get("upstream_commit"), pinned=pins["upstream"]["commit"])
-    head = git_head(os.path.join(root, "build", "tensorfold"))
+    if vpins:
+        rep.add("engine_tensorfold_commit", engine.get("tensorfold_commit") == vpins["tensorfold"]["commit"],
+                engine=engine.get("tensorfold_commit"), pinned=vpins["tensorfold"]["commit"])
+    else:
+        rep.add("engine_upstream_commit", engine.get("upstream_commit") == pins["upstream"]["commit"],
+                engine=engine.get("upstream_commit"), pinned=pins["upstream"]["commit"])
+    head = git_head(build_dir(root, vpins))
     rep.add("build_checkout_head", head == want, head=head, pinned=want)
     native = paths["native_bin"]
     rep.add("engine_native_bin", os.path.realpath(engine.get("native_bin") or "/nonexistent") ==
@@ -314,7 +345,7 @@ def assets(args):
     digest = kw.sha256_file(native) if os.path.isfile(native) else None
     rep.add("native_sha256", digest is not None and digest == engine.get("native_sha256"), sha256=digest,
             engine=engine.get("native_sha256"))
-    return rep.write(args.out, pins_sha256=kw.sha256_file(kw.PINS), engine=engine)
+    return rep.write(args.out, pins_sha256=kw.sha256_file(kw.PINS), variant=variant, engine=engine)
 
 
 # ── e2e ────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -501,7 +532,8 @@ def e2e(args):
         if held is not None:
             held.close()  # the host lock, held shared since before the load
         rc = rep.write(args.out, model=MODEL, fixtures=FIXTURES, env=env,
-                       upstream_commit=pins["upstream"]["commit"], checkpoint_revision=pins["checkpoint"]["revision"])
+                       upstream_commit=pins["upstream"]["commit"],
+                       checkpoint_revision=(tool_variant(tool)[1] or pins)["checkpoint"]["revision"])
         if rc:
             sys.exit(rc)
 
@@ -532,14 +564,45 @@ def gpu_used_mib():
     return int(first) if r.returncode == 0 and first.isdigit() else None
 
 
-class MemorySampler:
-    """Every 0.5 s, into a JSON-lines log: the unit's cgroup memory.current and memory.peak, MemAvailable and
-    nvidia-smi's memory.used. The highest of each is kept, and MemAvailable's lowest and highest."""
+def process_used_mib(pid):
+    """nvidia-smi's used_memory of one process (its device allocations), MiB; None when it lists none for it."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in r.stdout.splitlines() if r.returncode == 0 else []:
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) == 2 and fields[0] == str(pid) and fields[1].isdigit():
+            return int(fields[1])
+    return None
 
-    def __init__(self, cgroup, path):
-        self.cgroup, self.path = cgroup, path
+
+def process_rss(pid):
+    """RssAnon and RssShmem of one process, bytes ({} once it is gone)."""
+    out = {}
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key in ("RssAnon", "RssShmem"):
+                    out[key] = int(value.split()[0]) * 1024
+    except OSError:
+        return {}
+    return out
+
+
+class MemorySampler:
+    """Every 0.5 s, into a JSON-lines log: the unit's cgroup memory.current and memory.peak, MemAvailable,
+    nvidia-smi's memory.used, and the server process's own footprint (`pid`: its nvidia-smi used_memory plus RssAnon
+    and RssShmem, the GB10 measure). The highest of each is kept, and MemAvailable's lowest and highest."""
+
+    def __init__(self, cgroup, path, pid=0):
+        self.cgroup, self.path, self.pid = cgroup, path, pid
         self.stop = threading.Event()
-        self.high = {"cgroup_current_bytes": None, "cgroup_peak_bytes": None, "gpu_used_mib": None}
+        self.high = {"cgroup_current_bytes": None, "cgroup_peak_bytes": None, "gpu_used_mib": None,
+                     "process_bytes": None, "process_gpu_bytes": None, "process_rss_anon_bytes": None,
+                     "process_rss_shmem_bytes": None}
         self.available = []
         self.samples = 0
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -548,7 +611,15 @@ class MemorySampler:
         s = {"t": time.time(), "cgroup_current_bytes": read_int(os.path.join(self.cgroup, "memory.current")),
              "cgroup_peak_bytes": read_int(os.path.join(self.cgroup, "memory.peak")),
              "mem_available_bytes": mem_available(), "gpu_used_mib": gpu_used_mib()}
+        if self.pid:
+            used, rss = process_used_mib(self.pid), process_rss(self.pid)
+            s["process_gpu_bytes"] = used << 20 if used is not None else None
+            s["process_rss_anon_bytes"], s["process_rss_shmem_bytes"] = rss.get("RssAnon"), rss.get("RssShmem")
+            parts = (s["process_gpu_bytes"], s["process_rss_anon_bytes"], s["process_rss_shmem_bytes"])
+            s["process_bytes"] = sum(parts) if all(v is not None for v in parts) else None
         for k, v in self.high.items():
+            if k not in s:
+                continue
             if s[k] is not None:
                 self.high[k] = s[k] if v is None else max(v, s[k])
         a = s["mem_available_bytes"]
@@ -579,7 +650,10 @@ class MemorySampler:
                 "cgroup_peak_max_bytes": self.high["cgroup_peak_bytes"], "peak_bytes": max(peaks) if peaks else None,
                 "mem_available_min_bytes": self.available[0] if self.available else None,
                 "mem_available_max_bytes": self.available[1] if self.available else None,
-                "gpu_used_max_mib": self.high["gpu_used_mib"]}
+                "gpu_used_max_mib": self.high["gpu_used_mib"], "pid": self.pid,
+                "process_peak_bytes": self.high["process_bytes"],
+                "process_peaks": {k: self.high[k] for k in ("process_gpu_bytes", "process_rss_anon_bytes",
+                                                             "process_rss_shmem_bytes")}}
 
 
 def pilot_evidence(w):
@@ -643,16 +717,19 @@ def number(v):
 
 
 def with_drop(memory, before):
-    """`memory` with the drop in MemAvailable from `before` (the level before the load) to its lowest, and `peak_bytes`
-    the larger of that drop and the cgroup's peak. On GB10 the GPU's memory is system memory and CUDA allocations do
-    not show in the cgroup or RSS, so the drop is the measure of what the server took (as in docs/dev/JARVIS-BRINGUP.md);
-    co-resident models that change meanwhile make it an upper bound."""
+    """`memory` with the drop in MemAvailable from `before` (the level before the load) to its lowest, and `peak_bytes`:
+    the server process's own peak (nvidia-smi used_memory + RssAnon + RssShmem) when it was measured, else the larger
+    of that drop and the cgroup's peak. On GB10 the GPU's memory is system memory and CUDA allocations do not show in
+    the cgroup or RSS, which is why the process's nvidia-smi figure is added; co-resident models that change meanwhile
+    move the drop, so it is recorded as an upper bound."""
     low = memory.get("mem_available_min_bytes")
     drop = before - low if number(before) and number(low) else None
+    process = memory.get("process_peak_bytes")
     peaks = [v for v in (memory.get("cgroup_peak_max_bytes"), memory.get("cgroup_current_max_bytes"), drop)
              if number(v)]
+    peak = process if number(process) else max(peaks) if peaks else None
     return {**memory, "mem_available_before_bytes": before, "mem_available_drop_bytes": drop,
-            "peak_bytes": max(peaks) if peaks else None}
+            "peak_method": "process" if number(process) else "drop", "peak_bytes": peak}
 
 
 def bench_result(runs, memory, resident, cold_ready_s):
@@ -742,14 +819,22 @@ def bench(args):
         if not rep.add("cgroup", bool(group) and read_int(os.path.join(cgroup, "memory.current")) is not None,
                        cgroup=cgroup, **memory_max):
             return 1
-        sampler = MemorySampler(cgroup, os.path.join(args.out, "memory.jsonl"))
+        sampler = MemorySampler(cgroup, os.path.join(args.out, "memory.jsonl"), pid)
         sampler.start()
 
+        _, vpins = tool_variant(tool)
+        if vpins:
+            # The pinned upstream commit has no checksums for a variant: its pins go to the client in their format.
+            checkpoint_pins = os.path.join(args.out, "checkpoint.sha256")
+            with open(checkpoint_pins, "w") as f:
+                f.writelines(f"{digest}  {name}\n" for name, (_, digest) in sorted(vpins["checkpoint"]["files"].items()))
+            precision = f"native TensorFold {vpins['tensorfold']['commit'][:8]}, {vpins['variant']} weights"
+        else:
+            checkpoint_pins = os.path.join(up, "recipe", "checksums", "checkpoint.sha256")
+            precision = f"native TensorFold (drama-tensorfold {pins['upstream']['commit'][:7]})"
         common = ["--endpoint", f"http://127.0.0.1:{w.opts.port}", "--model", MODEL, "--corpus", corpus,
-                  "--precision", f"native TensorFold (drama-tensorfold {pins['upstream']['commit'][:7]})",
-                  "--server-pid", str(pid), "--server-source", os.path.join(root, "build", "tensorfold"),
-                  "--checkpoint", paths["checkpoint"],
-                  "--checkpoint-pins", os.path.join(up, "recipe", "checksums", "checkpoint.sha256"),
+                  "--precision", precision, "--server-pid", str(pid), "--server-source", build_dir(root, vpins),
+                  "--checkpoint", paths["checkpoint"], "--checkpoint-pins", checkpoint_pins,
                   "--pilot-evidence", evidence]
         # The client's frame limit is the server's: a tool that raises max_frames raises both.
         if opts.get("max_frames") is not None and int(opts["max_frames"]) != 1024:
@@ -812,7 +897,8 @@ def bench(args):
             held.close()  # the host lock, held shared since before the load
         rc = rep.write(args.out, model=MODEL, thresholds=THRESHOLDS, upstream_claims=UPSTREAM_CLAIMS,
                        result=bench_result(runs, memory, resident, cold_ready_s), runs=runs, memory=memory, env=env,
-                       upstream_commit=pins["upstream"]["commit"], checkpoint_revision=pins["checkpoint"]["revision"])
+                       upstream_commit=pins["upstream"]["commit"],
+                       checkpoint_revision=(tool_variant(tool)[1] or pins)["checkpoint"]["revision"])
         if rc:
             sys.exit(rc)
 
@@ -849,6 +935,16 @@ def accuracy(args):
     could not produce valid evidence.
     """
     _, tool = load_tool(args.config, args.tool)
+    variant, vpins = tool_variant(tool)
+    if vpins:
+        report = {"run": False, "variant": variant, "applicable": False, "evidence_valid": False, "passed": False,
+                  "reason": "upstream's accuracy checks compare the full checkpoint with the SGLang-Omni reference, "
+                            "which does not load this lossy variant, and its engine builds no oracle tools; its "
+                            "acceptance is --accept-lossy (pins: lossy), its quality compare.py's against the full model"}
+        with open(os.path.join(args.out, "report.json"), "w") as f:
+            json.dump(report, f, indent=1)
+        print(json.dumps({"run": False, "applicable": False, "variant": variant}))
+        return 0
     root = os.path.realpath(args.root)
     up = os.path.join(root, "drama-tensorfold")
     q = os.path.join(up, "qualification")
@@ -977,6 +1073,11 @@ def marker(args):
     if not args.accept_native_numerics:
         print("qualify.py: --write needs --accept-native-numerics", file=sys.stderr)
         return 1
+    variant, vpins = tool_variant(tool)
+    if vpins and not args.accept_lossy:
+        print(f"qualify.py: the {variant} weights are lossy ({vpins['lossy']['what']}): --write needs --accept-lossy",
+              file=sys.stderr)
+        return 1
     reports = {}
     for step in ("assets", "e2e", "bench"):
         try:
@@ -991,15 +1092,15 @@ def marker(args):
         acc = read_json(os.path.join(args.out, "accuracy", "report.json"))
     except (OSError, ValueError):
         acc = {}
-    if not (acc.get("run") and acc.get("evidence_valid")):
+    if not vpins and not (acc.get("run") and acc.get("evidence_valid")):
         # Their verdict does not decide acceptance, but a qualification records it: no valid run, no marker.
         print(f"qualify.py: upstream's accuracy checks did not run with valid evidence ({acc.get('error')}); no marker",
               file=sys.stderr)
         return 1
-    engine = read_json(os.path.join(os.path.realpath(args.root), "engine.json"))
+    engine = read_json(engine_record(os.path.realpath(args.root), vpins))
     native = tool_paths(tool)["native_bin"]
     digest = kw.sha256_file(native)
-    if digest != engine.get("native_sha256") or engine.get("patched_head") != pins["engine_patches"]["head"]:
+    if digest != engine.get("native_sha256") or engine.get("patched_head") != (vpins or pins)["engine_patches"]["head"]:
         print(f"qualify.py: {native} sha256 {digest} is not engine.json's {engine.get('native_sha256')}; no marker",
               file=sys.stderr)
         return 1
@@ -1009,8 +1110,8 @@ def marker(args):
         return 1
     record = {"qualified": True, "model": MODEL, "host": os.uname().nodename, "gpu": gpu,
               "pins_sha256": kw.sha256_file(kw.PINS), "native_sha256": digest,
-              "upstream_commit": pins["upstream"]["commit"], "checkpoint_revision": pins["checkpoint"]["revision"],
-              "numerics": NUMERICS,
+              "upstream_commit": pins["upstream"]["commit"],
+              "checkpoint_revision": (vpins or pins)["checkpoint"]["revision"], "numerics": NUMERICS,
               "upstream_accuracy": {k: acc.get(k) for k in ("reference_revision", "passed", "upstream_reports_qualified",
                                                              "checks")},
               "bench": {**{k: measured_bench.get(k) for k in ("first_audio_p50_s", "rtf_p50", "peak_memory_bytes",
@@ -1018,6 +1119,9 @@ def marker(args):
                         "coresident": (reports["bench"].get("env") or {}).get("coresident"),
                         "upstream_claims": reports["bench"].get("upstream_claims")},
               "report": args.out,
+              **({"variant": variant, "variant_pins_sha256": kw.sha256_file(kw.variant_pins_path(variant)),
+                  "checkpoint": vpins["checkpoint"]["repo"], "tensorfold_commit": vpins["tensorfold"]["commit"],
+                  "lossy": {**vpins["lossy"], "accepted": "--accept-lossy"}} if vpins else {}),
               "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     text = json.dumps(record, indent=1) + "\n"
     with open(path + ".tmp", "w") as f:
@@ -1040,6 +1144,8 @@ def main():
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--revoke", action="store_true")
     ap.add_argument("--accept-native-numerics", action="store_true")
+    ap.add_argument("--accept-lossy", action="store_true",
+                    help="marker: the operator accepts a lossy variant's weights (pins-VARIANT.json's lossy)")
     ap.add_argument("--reference", help="accuracy: the SGLang-Omni reference runtime (venv/ and sglang-omni/)")
     ap.add_argument("--coresident", action="store_true",
                     help="bench: chat and speech-to-text are loaded by a running LocalRouter daemon (recorded)")

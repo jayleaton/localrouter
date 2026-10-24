@@ -12,6 +12,11 @@ hash-checked sources; it does not reimplement the model.
 Service without a separate licence, so this tool stays on loopback.
 
 > [!NOTE]
+> **The Jarvis box serves the NVFP4 pruned weights since 2026-10-24** ([The NVFP4 pruned weights](#the-nvfp4-pruned-weights)):
+> plotarmordev/drama-3-NVFP4-Pruned, a lossy community quant approved by JJ, on its own engine build with LocalRouter's
+> voice prefix cache ported to it. 20.56 GiB booked against 39.25. The full model below stays installed beside it and
+> qualified (`variant: "full"`, the default of the tool option).
+>
 > **Qualified on DGX-01 (GB10), 2026-10-21** ([measured results](#measured-on-dgx-01)): first audio p50 0.142 s
 > streamed, warm RTF p50 0.663, peak 40.4 GiB, beside the warm chat model as well. The marker is bound to that host,
 > these pins and that engine binary: on any other machine the model is listed with `"qualified": false` and every
@@ -205,6 +210,7 @@ that voice: keep them out of source control. The six shipped files hold only voi
 | Voices | `voices/*.json`, the six named voices, each by sha256; `fetch.sh` installs exactly these into `ROOT/voices` |
 | Checkpoint | fishaudio/drama-3 @ `e0a9218aa48888270f06ef1ed9ea67622c0e17d2`: `codec.pth`, eight weight shards (41,474,674,072 bytes together, matching upstream's `sources.json` and `checkpoint.sha256`), tokenizer, config, chat template and licence, each by size and sha256 |
 | Toolchain | Zig 0.17.0, CUDA 13 |
+| NVFP4 variant | `pins-nvfp4.json`: plotarmordev/drama-3-NVFP4-Pruned @ `494db08481db952f834b2241bce63fb3dfa72554` (17 files, 22,294,649,076 bytes of weights and codec, each by size and sha256: the same digests as drama-tensorfold's `recipe/checksums/nvfp4.sha256` at `844d0ea`, plus LICENSE and NOTICE); plotarmordev/TensorFold @ `b1f4b9b4830c9bd43bf7c432cffe7dea21313537` (`drama-nvfp4`, as drama-tensorfold's `engine/nvfp4/UPSTREAM`) plus `patches/engine-nvfp4/` (the prefix cache, ported): HEAD `f4a0eff0892bf02a2772f3b82ef53bbfe49d7f9d`; serve flags `--cfg-gamma 1.5 --cfg-batched` |
 
 ## Qualification
 
@@ -348,6 +354,70 @@ with it up, had 52 GiB free and could not run it). Deployed to the Jarvis box: `
 last chunk (curl exit 18), the worker logs the cancel, and the next request is served by the same worker and unit (no
 reload) in 1.72 s, byte-identical to the first reply. Before the busy retry, that next request was refused 503 "the
 engine is busy" 3.7 ms in, while the server was still dropping the cancelled synthesis.
+
+## The NVFP4 pruned weights
+
+[plotarmordev/drama-3-NVFP4-Pruned](https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned) is an unofficial
+community quant of fishaudio/drama-3 (at `e0a9218`, the revision the full model is pinned at), not made, reviewed or
+endorsed by Fish Audio. It is lossy, and JJ approved it for the Jarvis box on 2026-10-24.
+
+| | |
+| --- | --- |
+| Licence | Fish Audio Community License v1.0: its `LICENSE` is byte-identical to Drama 3's (the same sha256), with a `NOTICE`; [Licences](#licences) applies unchanged |
+| Format | safetensors, BF16 and U8. The routed experts that were block FP8 are NVFP4 (GPTQ, calibrated on 120 English requests); every other weight, the codec included, is unchanged (`codec.pth`, the config, tokenizer and chat template have the full model's sha256, so fetch.sh links them rather than downloading them again) |
+| Pruning | 7,369 of the 10,240 routed experts kept (40 layers of 256; 145 to 256 a layer): each layer keeps the experts that cover 90 % of router weight on English calibration requests and private voice-cloning requests. The kept list is `metadata.drama_experts` in `model.safetensors.index.json` |
+| Size | 22,294,649,076 bytes of weights and codec (20.76 GiB; the full model's 41.5 GB), 22.3 GB downloaded |
+| Engine | only TensorFold native loads it (not Transformers, not SGLang-Omni): plotarmordev/TensorFold `drama-nvfp4` @ `b1f4b9b4`, one squashed commit (`v1.0.11-193-g70dec469`, the build upstream measured) on `c7137bb3`, the TensorFold commit the full engine's 59 patches apply to. It carries their features (voice files, `--max-frames`, the silence guard, long form, stream trailers) and adds NVFP4 experts, compact checkpoints and guidance |
+| Served with | `--cfg-gamma 1.5 --cfg-batched`, as upstream measured it: classifier-free guidance from a second backbone sequence holding the plain prompt (no references), decoded in one batch with the first every frame. It acts only on a prompt with audio rows, a voice's references: every Jarvis request has one (`Mae` by default) |
+
+**Upstream's claims** (drama-tensorfold `results/full-vs-quant-01`: one GB10, 24 English texts, 4 seed salts, 96
+takes an arm, Whisper large-v3 word error rate; "not proof of equal quality"): with a reference voice, WER 1.31 %
+[0.04, 3.32] against the full model's 1.42 % [0.00, 3.48] (paired difference -0.11 pp [-0.35, +0.08], 0 failed takes
+of 96 on either) and speaker cosine to the full model's takes 0.900 against the full model's own 0.901; in the
+built-in voice 2.92 % against 6.23 %. Peak device memory 19.35 GiB against 36.95; cold start 26.3 s against 5.9;
+first streamed audio p50 1.955 s against 2.428 (its 1,335-row reference prompt, prefilled whole: no prefix cache).
+
+**How LocalRouter serves it.** The tool option `"variant": "nvfp4"` (default `"full"`) selects `pins-nvfp4.json` beside
+`pins.json`: the checkpoint in `ROOT/drama-3-NVFP4-Pruned`, the engine in `ROOT/build/tensorfold-nvfp4` (recorded in
+`ROOT/engine-nvfp4.json`), and the serve flags. `fetch.sh --variant nvfp4` and `build.sh --variant nvfp4` fill them;
+the upstream checkout, the launcher and the voices are the full model's, unchanged. `"guidance": false` serves it
+without the flags (unguided; not what upstream measured). A marker for it carries `"variant"` and
+`variant_pins_sha256` beside `pins_sha256`, and the worker refuses one for the other weights, so the two installs
+qualify independently and switching between them is the tool entry alone (`DRAMA_VARIANT` on the Jarvis box).
+
+**The prefix cache, ported** (`patches/engine-nvfp4/`). LocalRouter's engine patch for the full build does not apply
+to this engine: its backbone keeps a request's DeltaNet states, KV cache and position in a `Sequence` (the guidance
+sequence is a second one), and the host's prompt pass is a function shared with its probe tool. The port takes the
+same snapshot and restore from the Model's own sequence, and the prompt pass gains a resumer hook
+(`prefillResuming`); `prefill`, which the probe calls, runs as before. The guidance sequence prefills the plain
+prompt (28 rows for a short sentence) and is not cached. Without the port a sentence in a voice would prefill its
+360 to 730 reference rows every time. On DGX-01 it resumes as before: `prefix cache: resumed after 385 prompt rows
+(168 MiB)`.
+
+**Qualified on DGX-01, 2026-10-24** (`~/jarvis/qualify-drama3/nvfp4/run1`, `--coresident`: chat, Whisper and the
+image model warm in a LocalRouter daemon; `--accept-native-numerics --accept-lossy`; engine sha256 `31cf24d3…`, the
+same binary from the manual build and from `build.sh`). assets, e2e (every voice, refusals, unload) and bench
+passed; upstream's accuracy checks were recorded as not applicable. Marker `drama3-nvfp4-qualification.json`.
+
+| Upstream's client and corpus, 3 warm passes, the `Mae` voice | NVFP4, beside the warm models | Full model (`run6`, alone) |
+| --- | ---: | ---: |
+| First playable audio, streamed, warm p50 (p95) | 0.198 s (0.263) | 0.137 s |
+| Real-time factor, streamed, warm p50 (p95) | 0.714 (0.780) | 0.696 |
+| Real-time factor, whole, warm p50 (p95) | 0.909 (1.649)¹ | 0.675 |
+| Launcher start to ready (warm page cache) | 10.1 s | 6.45 s |
+| Peak, per process: nvidia-smi `used_memory` + RssAnon + RssShmem | **20.31 GiB** (19.69 + 0.57 + 0.05) | 38.9 GiB (38.3 + 0.6) |
+| `resident_bytes`: the peak plus 256 MiB | **22,075,092,992 (20.56 GiB)** | 42,144,366,592 (39.25 GiB) |
+
+¹ Not the engine's speed: another project's GPU job (`mm31_kl_gate`, which pauses and resumes itself) ran through the
+whole-reply passes, and the same text, the same audio to the sample, took 0.68 in one pass and 1.40 in the next. Each
+text's fastest whole pass was 0.68 to 0.70, and the streamed passes after it, on the same server, held 0.70 to 0.72
+for every long and medium text and 0.75 to 0.83 for the short ones.
+
+@@AB@@
+
+**Back to the full model.** Its install, engine and marker are untouched by all of this (`pins.json` did not change):
+set the tool's `variant` to `full` with its own marker and `resident_bytes` (on the Jarvis box: `DRAMA_VARIANT=full`
+and `deploy/jarvis/install.sh`).
 
 ## What was taken from upstream
 

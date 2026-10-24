@@ -6,10 +6,10 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
-| Text to speech | `fishaudio/drama-3`: 42 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
+| Text to speech | `fishaudio/drama-3` on the NVFP4 pruned weights (`DRAMA_VARIANT=nvfp4`, lossy, approved by JJ 2026-10-24; [measured against the full model](../../docs/dev/DRAMA3.md#the-nvfp4-pruned-weights)): 20.56 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
 | Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load |
 | Video | `minimax-h3`, on demand (idle 30 s), priority 0: it evicts the image model to run, and the image model comes back after it |
-| Decisions | `knowline-4b` (KnowLine-4B Gen5.5, bf16, [tools/decide/knowline](../../tools/decide/knowline/README.md)), on demand (idle 600 s), priority 5 (the first to make room), `spare_room_only` (it never unloads a kept-warm model: without spare room a decision is refused with a 503, and shadow decisions skip), `decide` lane. Not kept warm: its 12.4 GiB would leave under 5 GiB for jobs beside the warm set. Shadow only: while it is loaded (an MCP `decide` call or `load_model` brings it in), each voice reply logs how it would have routed the turn (`voice shadow decision`); turns while it is not loaded are skipped, and nothing acts on a decision |
+| Decisions | `knowline-4b` (KnowLine-4B Gen5.5, bf16, [tools/decide/knowline](../../tools/decide/knowline/README.md)), **kept warm** since Drama 3's NVFP4 weights freed 18.7 GiB, priority 15 (above the image model's 10, so a video job evicts only the image model, as before), `spare_room_only` (coming back, it never unloads a kept-warm model: without spare room a decision is refused with a 503, and shadow decisions skip), `decide` lane. Shadow only: while it is loaded, each voice reply logs how it would have routed the turn (`voice shadow decision`); nothing acts on a decision |
 | Voice | `/voice` and `/v1/realtime` with PR #19's settings: draft after 100 ms, sentence end after 300 ms, greedy transcripts, primed chat, thinking off |
 
 Memory, measured on DGX-01 (2026-10-23), per process: GPU `used_memory` (nvidia-smi) plus host anonymous and shared
@@ -20,10 +20,11 @@ bookings in `config.json.in` are each peak plus 256 MiB:
 | Model | Measured peak | Booked |
 | --- | --- | --- |
 | Chat | 18.25 GiB GPU + 0.6 host + its prompt cache in host shared memory (76 KiB a token; capped at 3 GiB, one full 32k context) | 22.1 GiB |
-| Drama 3 | 38.3 GiB GPU (the 36.9 GiB weights and the 1.7 GiB codec, nothing else) + 0.6 host | 39.25 GiB |
+| Drama 3, NVFP4 (2026-10-24, qualify `nvfp4/run1`: upstream's bench, 144 replies, beside chat, Whisper and the image model) | 19.69 GiB GPU (19.05 GiB weights and codec, the guidance sequence, two prefix-cache entries) + 0.62 host | 20.56 GiB |
+| Drama 3, full (`DRAMA_VARIANT=full`) | 38.3 GiB GPU (the 36.9 GiB weights and the 1.7 GiB codec, nothing else) + 0.6 host | 39.25 GiB |
 | Whisper | 2.0 GiB GPU + 1.5 host | 3.75 GiB, + 0.5 working |
 | Image | 31.2 GiB at `max_pixels` 1048576 (39.0 GiB before, at `max_side` 1664 squared) | 31.5 GiB |
-| Decisions (on demand) | 10.6 GiB GPU + 1.5 host on the largest prompt (a 14 KB state read twice); 11.9 GiB while it loads | 12.4 GiB |
+| Decisions | 10.6 GiB GPU + 1.5 host on the largest prompt (a 14 KB state read twice); 11.9 GiB while it loads | 12.4 GiB |
 
 - **The reserve is 3 GiB.** earlyoom sends SIGTERM below 2% `MemAvailable` (2.4 GiB on this box); the rest covers the
   measured drift of what is not booked (under 0.6 GiB).
@@ -56,7 +57,11 @@ new commit builds it and restarts the running service onto it, once no voice cal
 unit restarts on failure, and lingering keeps it running without a login. `TOOLS` (tool ids) serves a subset;
 `BUILD_ONLY=1` only builds.
 
-Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) and `HTTPS_PORT` (10443).
+Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) and `HTTPS_PORT` (10443), and
+`DRAMA_VARIANT`, Drama 3's weights: `nvfp4` (the default) or `full`. Each has its own install under
+`qualify-drama3/root` (`drama-3-NVFP4-Pruned`, `build/tensorfold-nvfp4`, and `drama-3`, `build/tensorfold`), its own
+marker and its own booking, so going back to the full model is `DRAMA_VARIANT=full deploy/jarvis/install.sh` (its
+marker must still match `pins.json`, which the NVFP4 pins leave alone).
 
 ## Reaching it
 

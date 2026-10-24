@@ -54,7 +54,11 @@ file() {
 stamp() { local n=$1; shift; mkdir -p "$J/install/state"; sum_of "$@" > "$J/install/state/$n"; }
 stamped() { local n=$1; shift; [ -f "$J/install/state/$n" ] && [ "$(cat "$J/install/state/$n")" = "$(sum_of "$@")" ]; }
 
-qualified() { [ -f "$1" ] && jq -e --arg p "$(sha256sum "$2" | cut -c1-64)" '.qualified == true and .pins_sha256 == $p' "$1" > /dev/null; }
+# qualified MARKER PINS [VARIANT_PINS]: the marker says qualified for these pins (and a variant's, pins-VARIANT.json)
+qualified() {
+  [ -f "$1" ] && jq -e --arg p "$(sha256sum "$2" | cut -c1-64)" '.qualified == true and .pins_sha256 == $p' "$1" > /dev/null || return 1
+  [ -z "${3:-}" ] || jq -e --arg v "$(sha256sum "$3" | cut -c1-64)" '.variant_pins_sha256 == $v' "$1" > /dev/null
+}
 
 free() {
   local have
@@ -84,7 +88,8 @@ reuse() {
 drama3_config() {
   local out=$J/qualify-drama3/config.json
   mkdir -p "$J/qualify-drama3"
-  sed -e "s|@SRC@|$REPO|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@[A-Z_]*@|unused|g" \
+  sed -e "s|@SRC@|$REPO|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" \
+      -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@[A-Z_]*@|unused|g" \
       "$REPO/deploy/jarvis/config.json.in" |
     jq --arg lock "$J/qualify-drama3/gpu.lock" '{host: "127.0.0.1", gpu_lock: $lock, defaults: {text_to_speech: "fishaudio/drama-3"},
         tools: [.tools[] | select(.id == "fishaudio/drama-3")]}' > "$out.tmp"

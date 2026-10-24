@@ -2,7 +2,7 @@
 # The Fish Audio Drama 3 qualification run on a target machine (GB10: sm_121, CUDA 13). Bounded: every step has a
 # time limit (then SIGTERM, and SIGKILL 30 s later), and everything it writes goes to OUT, except the marker.
 #   tools/speech/drama3/qualify.sh ROOT CONFIG OUT --reference RUNTIME [--tool ID] [--accept-native-numerics]
-#     [--coresident]
+#     [--accept-lossy] [--coresident]
 # ROOT: the asset root (fetch.sh, build.sh), verified here by sha256. CONFIG: the LocalRouter config holding the
 # drama3 tool (--tool, default fishaudio/drama-3) and the host's "gpu_lock"; its weights must be ROOT.
 # Steps: assets (the upstream checkout, ROOT/engine.json and its binary, every checkpoint file), e2e (the real worker
@@ -27,19 +27,24 @@
 # in status.json either way. Without a qualification, no marker is written and an existing one is left as it is.
 # Worst case: environment 160 + assets 2430 + e2e 3630 + bench 3030 + accuracy 2430 + marker 150 + manifest 130
 # = 11960 s.
+# A tool with "variant" (nvfp4: pins-nvfp4.json) is checked against its own pins, checkpoint and engine record;
+# upstream's accuracy checks do not apply to its lossy weights (accuracy records why and exits 0, no --reference
+# needed), and its marker needs --accept-lossy too, the operator's recorded acceptance of them. Such a run also
+# qualifies with --coresident, since no exclusive guard runs: that is how it is measured beside the warm models.
 # A run cut short (any limit, or an outer timeout) leaves no "qualified": true: status.json is written only at the end.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-root=${1:?usage: qualify.sh ROOT CONFIG OUT --reference RUNTIME [--tool ID] [--accept-native-numerics] [--coresident]}
+root=${1:?usage: qualify.sh ROOT CONFIG OUT --reference RUNTIME [--tool ID] [--accept-native-numerics] [--accept-lossy] [--coresident]}
 config=${2:?}
 out=${3:?}
 shift 3
-tool=fishaudio/drama-3 accept=false reference= coresident=false
+tool=fishaudio/drama-3 accept=false lossy=false reference= coresident=false
 while [ $# -gt 0 ]; do
   case $1 in
     --tool) tool=$2; shift 2 ;;
     --reference) reference=$2; shift 2 ;;
     --accept-native-numerics) accept=true; shift ;;
+    --accept-lossy) lossy=true; shift ;;
     --coresident) coresident=true; shift ;;
     *) echo "qualify.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -58,13 +63,13 @@ step() { # name seconds command...
 {
   git -C "$here" rev-parse HEAD 2>/dev/null || cat "$here/../../../COMMIT" # a kit carries the commit in COMMIT
   uname -a
-  sha256sum "$here/pins.json"
+  sha256sum "$here"/pins*.json
   timeout 20 python3 -I -c 'import platform; print("python", platform.python_version())'
   timeout 20 nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv 2>&1 || true
   timeout 20 systemd-run --version 2>&1 | head -1
   cat "$root/engine.json" 2>&1
   grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
-  echo "tool $tool, accept-native-numerics $accept, reference ${reference:-none}, coresident $coresident"
+  echo "tool $tool, accept-native-numerics $accept, accept-lossy $lossy, reference ${reference:-none}, coresident $coresident"
   [ -n "$reference" ] && git -C "$reference/sglang-omni" rev-parse HEAD
   # What a running LocalRouter daemon has loaded (chat, speech-to-text), if one answers on its default port.
   echo "localrouter /v1/tools: $(timeout 10 curl -s --max-time 5 http://127.0.0.1:8190/v1/tools || echo none)"
@@ -113,12 +118,13 @@ trap - EXIT
 qualified=false write=()
 [ "${rc[assets]}" = 0 ] && [ "${rc[e2e]}" = 0 ] && [ "${rc[bench]}" = 0 ] && [ "${rc[accuracy]}" = 0 ] &&
   [ "$accept" = true ] && write=(--write --accept-native-numerics)
+[ ${#write[@]} = 2 ] && [ "$lossy" = true ] && write+=(--accept-lossy)
 # With --write the marker is written; without, an existing marker is only reported.
 step marker 120 python3 -I "$here/qualify.py" marker "$root" "$config" "$out" --tool "$tool" "${write[@]}"
 cat "$out/marker.log"
-[ ${#write[@]} = 2 ] && [ "${rc[marker]}" = 0 ] && qualified=true
-printf '{"assets": %s, "e2e": %s, "bench": %s, "accuracy": %s, "marker": %s, "tool": "%s", "accept_native_numerics": %s, "coresident": %s, "qualified": %s}\n' \
-  "${rc[assets]}" "${rc[e2e]}" "${rc[bench]}" "${rc[accuracy]}" "${rc[marker]}" "$tool" "$accept" "$coresident" \
+[ ${#write[@]} -ge 2 ] && [ "${rc[marker]}" = 0 ] && qualified=true
+printf '{"assets": %s, "e2e": %s, "bench": %s, "accuracy": %s, "marker": %s, "tool": "%s", "accept_native_numerics": %s, "accept_lossy": %s, "coresident": %s, "qualified": %s}\n' \
+  "${rc[assets]}" "${rc[e2e]}" "${rc[bench]}" "${rc[accuracy]}" "${rc[marker]}" "$tool" "$accept" "$lossy" "$coresident" \
   "$qualified" > "$out/status.json"
 timeout --kill-after=10 120 bash -c 'cd "$1" && find . -type f ! -name SHA256SUMS -print0 | sort -z |
   xargs -0 sha256sum > SHA256SUMS' _ "$out" || {
