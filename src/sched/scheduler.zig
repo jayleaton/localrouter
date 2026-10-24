@@ -17,6 +17,11 @@
 //! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
 //! A `spare_room_only` tool (an on-demand model nothing waits on) is the exception to "never refused while unloading
 //! would make room": it never unloads a kept tool, and loads only with room left for the kept tools' working bytes.
+//! So is a call: while a realtime voice session is open, a request (or an API load) for a tool outside the voice loop
+//! never unloads a voice-loop model (chat, speech, transcription) of a higher priority. It is refused instead, with a
+//! message the chat model can say, rather than cut the call's speech mid-sentence (DGX-01, 2026-10-24: a picture asked
+//! for in a call loaded the cold image model and unloaded Whisper, then Drama 3; the call went silent for two minutes).
+//! The cooperative `reserve_for`, which tells the session first and brings the voice back after the job, is unchanged.
 //! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load, and comes back
 //! only with room to spare for the working bytes of the kept tools above it (else their next job evicts it again).
 //!
@@ -64,6 +69,8 @@ pub const Notify = struct {
     ctx: *anyopaque,
     paused: *const fn (ctx: *anyopaque, model: []const u8, for_model: []const u8) void,
     resumed: *const fn (ctx: *anyopaque) void,
+    /// How many realtime voice sessions are open: while any is, requests do not unload the voice loop's models.
+    sessions: *const fn (ctx: *anyopaque) usize,
 };
 
 /// The most models one reservation unloads (a box has a handful).
@@ -161,6 +168,12 @@ pub const Scheduler = struct {
     fn isVoice(slot: *const Slot) bool {
         const k = slot.tool.config().kind;
         return k == .speech or k == .transcription;
+    }
+
+    /// Whether a realtime voice session is open (the voice loop's models are then guarded from requests).
+    fn inCall(s: *const Scheduler) bool {
+        const n = s.notify orelse return false;
+        return n.sessions(n.ctx) > 0;
     }
 
     /// Under `gate`: once no voice model that paused voice is down, sessions are told voice is back.
@@ -581,9 +594,10 @@ pub const Scheduler = struct {
                 const n = slot.tool.needs(&placeholder(slot.tool.config().kind));
                 s.gate.lockUncancelable(s.io);
                 if (!s.admit(c.tool, n.resident, null)) {
+                    const call = s.guardsCall(slot.tool.config());
                     s.gate.unlock(s.io);
                     c.failed = true;
-                    c.message = "insufficient memory to load this tool";
+                    c.message = if (call) "busy: a voice call is open, and loading this tool would unload the voice models the call is using; load it when the call ends" else "insufficient memory to load this tool";
                     return;
                 }
                 s.reserve(slot, n.resident);
@@ -708,9 +722,12 @@ pub const Scheduler = struct {
         // A spare-room tool's load must also leave the kept tools room for their jobs (else their next job evicts it).
         const room = extra +| if (spare and cold) s.keptHeadroom(j.tool) else 0;
         if (!s.admit(j.tool, room, null)) {
+            const call = s.guardsCall(slot.tool.config());
             s.gate.unlock(s.io);
-            var buf: [256]u8 = undefined;
-            const msg = (if (spare)
+            var buf: [320]u8 = undefined;
+            const msg = (if (call)
+                std.fmt.bufPrint(&buf, "busy: a voice call is open, and {s} needs {d} MiB more than is free without unloading the voice models the call is using; it was not started, so the call keeps its voice. Try again when the call ends", .{ slot.tool.config().id, room >> 20 })
+            else if (spare)
                 std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is spare beside the models kept loaded, and {s} never unloads them (spare_room_only)", .{ room >> 20, slot.tool.config().id })
             else
                 std.fmt.bufPrint(&buf, "insufficient memory: this request needs {d} MiB more than is free within the budget", .{extra >> 20})) catch "insufficient memory";
@@ -764,11 +781,12 @@ pub const Scheduler = struct {
     /// happen costs no one their model.
     fn admit(s: *Scheduler, target: usize, extra: u64, below: ?i32) bool {
         const want = s.slots[target].tool.config();
-        if (below != null or want.spare_room_only) {
+        const call = s.guardsCall(want);
+        if (below != null or want.spare_room_only or call) {
             var freeable: u64 = 0;
             for (s.slots, 0..) |slot, i| {
                 if (i != target and !slot.in_use and slot.tool.state() == .ready and (below == null or !slot.held) and
-                    mayEvict(want, slot.tool.config(), below)) freeable += slot.resident;
+                    mayEvict(want, slot.tool.config(), below, call)) freeable += slot.resident;
             }
             if (!s.fits(extra -| freeable)) return false;
         }
@@ -778,7 +796,7 @@ pub const Scheduler = struct {
             for (s.slots, 0..) |*slot, i| {
                 if (i == target or slot.in_use or slot.tool.state() != .ready) continue;
                 if (below != null and slot.held) continue; // a reservation's target waits for its job
-                if (!mayEvict(want, slot.tool.config(), below)) continue;
+                if (!mayEvict(want, slot.tool.config(), below, call)) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
             const v = victim orelse return false;
@@ -796,12 +814,24 @@ pub const Scheduler = struct {
         }
     }
 
+    /// Under `gate`: whether a load or job of `target` must leave the voice loop's models alone, a call being open.
+    fn guardsCall(s: *const Scheduler, target: *const config.ToolConfig) bool {
+        return !voiceLoop(target.kind) and s.inCall();
+    }
+
+    /// The models a voice call runs on: the chat model, speech and transcription.
+    fn voiceLoop(kind: @import("../tool/request.zig").Kind) bool {
+        return kind == .chat or kind == .speech or kind == .transcription;
+    }
+
     /// Whether an idle tool (`victim`) may be unloaded to make room for `target`: with `below` (a kept tool coming back)
-    /// only one of a lower priority; for a `spare_room_only` target never a `keep_loaded` one. Otherwise any: priority
-    /// only orders the victims.
-    fn mayEvict(target: *const config.ToolConfig, victim: *const config.ToolConfig, below: ?i32) bool {
+    /// only one of a lower priority; for a `spare_room_only` target never a `keep_loaded` one; with `call` (a voice
+    /// session open, `target` outside the voice loop) never a voice-loop model of a higher priority than `target`.
+    /// Otherwise any: priority only orders the victims.
+    fn mayEvict(target: *const config.ToolConfig, victim: *const config.ToolConfig, below: ?i32, call: bool) bool {
         if (below) |p| if (victim.priority >= p) return false;
         if (target.spare_room_only and victim.keep_loaded) return false;
+        if (call and voiceLoop(victim.kind) and victim.priority > target.priority) return false;
         return true;
     }
 
@@ -944,12 +974,33 @@ test "victims: priority orders them, a kept tool coming back takes only lower on
     const t = std.testing;
     const may = Scheduler.mayEvict;
     // A request (a video) may unload anything idle, the kept image model included: priority only orders the victims.
-    try t.expect(may(&video, &kept, null));
+    try t.expect(may(&video, &kept, null, false));
     // A spare-room model never unloads a kept one, of any priority, but may take an idle tool that is not kept...
-    try t.expect(!may(&decision, &kept, null));
-    try t.expect(!may(&decision, &.{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true }, null));
-    try t.expect(may(&decision, &idle, null));
+    try t.expect(!may(&decision, &kept, null, false));
+    try t.expect(!may(&decision, &.{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true }, null, false));
+    try t.expect(may(&decision, &idle, null, false));
     // A kept tool coming back (below its priority) takes only lower priorities, the spare-room model among them.
-    try t.expect(may(&kept, &decision, kept.priority));
-    try t.expect(!may(&kept, &.{ .id = "voice", .kind = .speech, .priority = 95, .keep_loaded = true }, kept.priority));
+    try t.expect(may(&kept, &decision, kept.priority, false));
+    try t.expect(!may(&kept, &.{ .id = "voice", .kind = .speech, .priority = 95, .keep_loaded = true }, kept.priority, false));
+}
+
+test "victims during a call: a request outside the voice loop never takes a voice-loop model of a higher priority" {
+    const T = config.ToolConfig;
+    const image: T = .{ .id = "image", .kind = .image, .priority = 10, .keep_loaded = true };
+    const video: T = .{ .id = "video", .kind = .video, .priority = 0 };
+    const tts: T = .{ .id = "tts", .kind = .speech, .priority = 95, .keep_loaded = true };
+    const stt: T = .{ .id = "stt", .kind = .transcription, .priority = 90, .keep_loaded = true };
+    const chat: T = .{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true };
+    const t = std.testing;
+    const may = Scheduler.mayEvict;
+    // DGX-01, 2026-10-24: the image model loading for a picture asked for in a call unloaded Whisper, then Drama 3.
+    for ([_]*const T{ &tts, &stt, &chat }) |voice| {
+        try t.expect(may(&image, voice, null, false)); // no call: priority only orders the victims
+        try t.expect(!may(&image, voice, null, true));
+        try t.expect(!may(&video, voice, null, true));
+    }
+    // What is not the voice loop's still makes room during a call: a video unloads the image model.
+    try t.expect(may(&video, &image, null, true));
+    // A voice-loop model making room for another (speech for transcription) is not guarded against itself.
+    try t.expect(may(&stt, &tts, null, false));
 }
