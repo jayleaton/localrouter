@@ -252,15 +252,6 @@ class H3Dit:
         self.text_tags = None if text_tags is None else np.asarray(text_tags, dtype=np.int32)
         if self.text_tags is not None and (self.text_tags.shape != (text.shape[1],) or not np.isin(self.text_tags, [0, 1]).all()):
             raise ValueError("text_tags must have one video/text tag per expanded text row")
-        if first_frame is not None:
-            from ..qwen_image import noise
-            z = first_frame.to(self.dev, torch.float32).contiguous()
-            if z.ndim != 5 or tuple(z.shape[:3]) != (1, 24, 1) or z.shape[3]%2 or z.shape[4]%2:
-                raise ValueError("first_frame must be normalized [1,24,1,H,W] with even latent sides")
-            n = torch.from_numpy(noise(seed, z.numel())).to(self.dev).contiguous()
-            with REC.op("cond_rows", "condition_rows", {"seed": seed, "aug": VISUAL_COND_TIMESTEP}, z=z, noise=n) as o:
-                self.cond_rows = H.mod().k_cond_rows(z, n, VISUAL_COND_TIMESTEP)
-                o.out(y=self.cond_rows)
         x = text[0].to(self.dev, torch.bfloat16).contiguous()
         with REC.op("refiner.condition_proj", "linear", {"kind": "bf16"}, x=x) as o:
             x = tops.gemm_bf16(x, r["condition_proj.weight"], r["condition_proj.bias"])
@@ -286,6 +277,16 @@ class H3Dit:
             m = self._gemm(f"refiner.{i}.fc2", m, r[p + "mlp.fc2.weight"])
             x = self._add(f"refiner.{i}.mlp_residual", m, x)
         self.context = self._rms("refiner.final_norm", x, r["token_refiner.final_norm.weight"])
+        # the first frame's rows after the text, in the engine's order (they depend on the latent and the noise only)
+        if first_frame is not None:
+            from ..qwen_image import noise
+            z = first_frame.to(self.dev, torch.float32).contiguous()
+            if z.ndim != 5 or tuple(z.shape[:3]) != (1, 24, 1) or z.shape[3]%2 or z.shape[4]%2:
+                raise ValueError("first_frame must be normalized [1,24,1,H,W] with even latent sides")
+            n = torch.from_numpy(noise(seed, z.numel())).to(self.dev).contiguous()
+            with REC.op("cond_rows", "condition_rows", {"seed": seed, "aug": VISUAL_COND_TIMESTEP}, z=z, noise=n) as o:
+                self.cond_rows = H.mod().k_cond_rows(z, n, VISUAL_COND_TIMESTEP)
+                o.out(y=self.cond_rows)
         return self.context
 
     def _rms(self, name, x, w):

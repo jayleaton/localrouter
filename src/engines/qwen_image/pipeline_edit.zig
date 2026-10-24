@@ -93,7 +93,7 @@ pub const State = struct {
         const refs = try a.alloc(dit.Reference, images.len);
         var nb: [64]u8 = undefined;
         for (images, grids, visuals, 0..) |image, *grid, *visual, j| {
-            if (image.height / 16 > p.max_h or image.width / 16 > p.max_w or (image.height / 16) * (image.width / 16) > p.ref_area) return error.ImageTooLarge;
+            if (@max(image.height, image.width) > pipeline.edit_ref_side or (image.height / 16) * (image.width / 16) > p.ref_area) return error.ReferenceTooLarge;
             grid.* = .{ .h = image.grid[1], .w = image.grid[2] };
             const ptr = try mem.alloc(image.patches.len * 4);
             try t.host(pr, try std.fmt.bufPrint(&nb, "edit.ref{d}.patches", .{j}), ptr, std.mem.sliceAsBytes(image.patches));

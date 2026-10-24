@@ -50,6 +50,8 @@ pub const LoadTimes = struct {
 
 pub const max_tokens = 1024; // the template's tokens a prompt may take
 pub const edit_ref_pixels: u64 = 1024 * 1024; // each reference is resized to about this many pixels (the reference pipeline's calculate_dimensions)
+/// A reference's longest side after that resize, at most (4:1 at one megapixel); independent of the output's max_side.
+pub const edit_ref_side: u32 = 2048;
 
 /// Milliseconds between `create`'s phases (H3's `create` reports with it too).
 pub const LoadClock = struct {
@@ -97,7 +99,7 @@ pub const Pipeline = struct {
     max_h: u32,
     max_w: u32,
     max_area: u32, // h * w at most, in 16x16 patches: what the scratch is sized for
-    ref_area: u32 = 0, // the largest reference image, in 16x16 patches (0 without the edit weights)
+    ref_area: u32 = 0, // the largest reference image, in 16x16 patches (0 without the edit weights); sides up to edit_ref_side
     bufs: [4]cuda.DeviceBuffer, // latents, the next latents, velocity, pixels
     times: Times = .{},
     load: LoadTimes = .{},
@@ -134,7 +136,8 @@ pub const Pipeline = struct {
         p.max_h = max_side / 16;
         p.max_w = max_side / 16;
         p.max_area = @intCast(@min(max_pixels / 256, @as(u64, p.max_h) * p.max_w));
-        p.ref_area = if (refs > 0) @import("edit_prepare.zig").maxArea(edit_ref_pixels, max_side / 16 * 16) else 0;
+        p.ref_area = if (refs > 0) @import("edit_prepare.zig").maxArea(edit_ref_pixels, edit_ref_side) else 0;
+        const ref_side: u32 = if (refs > 0) edit_ref_side / 16 else 0; // the VAE encodes references up to this side
         p.times = .{};
         p.load = .{};
         var clock = LoadClock.start(io);
@@ -207,7 +210,7 @@ pub const Pipeline = struct {
         const kk: @import("dit.zig").Kernels = .{ .ops = &p.ops, .nv = &p.nv, .tri = &p.tri, .major = p.major, .minor = p.minor };
         p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_area, max_tokens + refs * p.ref_area);
         errdefer p.dit.deinit();
-        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, p.max_h, p.max_w, @max(p.max_area, p.ref_area));
+        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, @max(p.max_h, ref_side), @max(p.max_w, ref_side), @max(p.max_area, p.ref_area));
         errdefer p.vae.deinit();
         const n: usize = 64 * @as(usize, p.max_area);
         var made: usize = 0;

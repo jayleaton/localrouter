@@ -47,6 +47,8 @@ pub fn maxArea(area: u64, max_side: u32) u32 {
 }
 
 test "maxArea bounds every reference dimensions() returns within the side limit" {
+    // the references' own limit (edit_ref_side 2048): a one-megapixel resize of 4:1 at most
+    try std.testing.expect(maxArea(1 << 20, 2048) >= maxArea(1 << 20, 1360));
     const cap = maxArea(1 << 20, 1360);
     try std.testing.expect(cap >= 4096);
     var width: u32 = 16;

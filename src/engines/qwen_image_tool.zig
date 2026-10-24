@@ -286,6 +286,7 @@ const QwenImage = struct {
         for (v.references, inputs, refs) |name, *in, *ref| {
             in.* = image_in.load(t.env.io, arena, job.dir, name) catch |err| return refuse("an input image could not be read ({s}): send a PNG, JPEG or WebP", .{@errorName(err)});
             ref.* = qi.edit_prepare.prepare(arena, in.rgba, in.width, in.height, qi.pipeline.edit_ref_pixels) catch return refuse("an input image of {d}x{d} cannot be edited: send one with sides of at least 32 pixels", .{ in.width, in.height });
+            if (@max(ref.width, ref.height) > qi.pipeline.edit_ref_side) return refuse("an input image of {d}x{d} is too long and thin to edit: at most 4:1", .{ in.width, in.height });
         }
         var width = v.width;
         var height = v.height;
@@ -309,6 +310,7 @@ const QwenImage = struct {
                 error.SizeNotMultipleOf16 => return refuse("size {d}x{d}: each side must be a multiple of 16", .{ width, height }),
                 error.PromptTooLong => return refuse("the prompt (with the input images' tokens) is longer than the text encoder takes: shorten it", .{}),
                 error.BadReferences => return refuse("this model edits with up to {d} input images", .{editRefs(t.cfg)}),
+                error.ReferenceTooLarge => return refuse("an input image is too long and thin to edit: at most 4:1", .{}),
                 else => return err,
             };
             if (keep) |k| k.apply(pixels, p.vae.out_channels);
