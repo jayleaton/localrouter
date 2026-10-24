@@ -271,6 +271,11 @@ consequential ones; the desktop helper on the Mac connects out to `/v1/desktop` 
 permissions live on the controlled computer: the executor there becomes the final authority and the box's approvals
 become, at most, one more input to it. Harnesses should not build on `/v1/computer/*`.
 
+**On the device** (the new placement): the companion app's executor (`apps/companion`) enforces the policy, the
+approvals and the budgets on the controlled computer itself, and offers them to any harness there over MCP stdio
+(`localrouter-executor-mcp`). A harness then needs no computer scope on the box at all
+([dev/COMPUTER.md](dev/COMPUTER.md#on-the-device-the-companions-executor-the-new-placement)).
+
 ## Not supported
 
 `/v1/capabilities` lists each with what to use instead (`unsupported`):

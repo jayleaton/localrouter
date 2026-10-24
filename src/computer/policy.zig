@@ -222,3 +222,36 @@ test "an over-long label is refused rather than clipped past its consequential w
     @memcpy(long[600..], "Send");
     try t.expectEqual(Verdict.refused, screen(.{ .kind = "click", .role = "button", .label = &long }).verdict);
 }
+
+test "the golden cases shared with the device executor (apps/companion) all hold" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a, @embedFile("policy_golden.json"), .{});
+    for (root.object.get("control").?.array.items) |c| {
+        const want = std.meta.stringToEnum(Verdict, c.object.get("verdict").?.string).?;
+        try t.expectEqual(want, control(c.object.get("kind").?.string).verdict);
+    }
+    for (root.object.get("screen").?.array.items) |c| {
+        const o = c.object.get("action").?.object;
+        var act: Action = .{ .kind = o.get("kind").?.string };
+        inline for (@typeInfo(Action).@"struct".field_names) |f| {
+            if (o.get(f)) |v| @field(act, f) = v.string;
+        }
+        const want = std.meta.stringToEnum(Verdict, c.object.get("verdict").?.string).?;
+        t.expectEqual(want, screen(act).verdict) catch |err| {
+            std.debug.print("golden case {s} {s} {s}\n", .{ act.kind, act.role, act.label });
+            return err;
+        };
+    }
+    for (root.object.get("after_judge").?.array.items) |c| {
+        const p: ?f64 = switch (c.object.get("p").?) {
+            .null => null,
+            .integer => |i| @floatFromInt(i),
+            .float => |f| f,
+            else => unreachable,
+        };
+        const want = std.meta.stringToEnum(Verdict, c.object.get("verdict").?.string).?;
+        try t.expectEqual(want, afterJudge(p).verdict);
+    }
+}
