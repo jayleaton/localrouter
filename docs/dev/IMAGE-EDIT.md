@@ -199,3 +199,20 @@ Encoder metadata is separate from the existing decoder maps. The decoder loader 
 merging encoder entries into those maps would load unused edit weights on text-only requests and reject the encoder
 conv_in's K=36 (the twin pads that to 40). `vae_enc.zig` reads the `encoder` member and reuses decoder operations with
 the same weight padding as the twin.
+
+## Status (2026-10-24, DGX-01, GB10 sm_121)
+
+Qwen-Image 2.1 Turbo, FP8 DiT pack, one 1024x1024 reference, 8 steps, seed 7, the edit pack of section 6:
+
+| Gate | Result |
+| --- | --- |
+| L1 vision tower and kernels (`test_vision --gpu`) | pass; the merger GELU against `F.gelu` max abs 2.4e-7 |
+| L3 `localrouter check qwen-edit` | 2164 ops equal alone and chained, sigmas equal, final pixels and the saved PNG equal |
+| L2/L4 the twin against diffusers' `QwenImage21Pipeline` (`edit_gate`) | 38.64 dB |
+| Through the API (a daemon with the pack) | edits of one input 11 to 12.5 s, 1024x576 7.2 s, two inputs 15.9 s; a mask keeps every opaque pixel exactly |
+
+The merger GELU uses `kernels/cuda/common/erf.cuh` (correctly rounded operations only) instead of libdevice's `erff`,
+which differs between CUDA 13.0 (the box's nvcc, which builds the engine) and 13.3 (the twin's container): with `erff`
+four GELU ops differed by a few bytes in 66,709 and the chained replay diverged from there. The same header serves the
+H3 vision tower. References are resized to about one megapixel with sides up to 2048 (4:1), independent of the
+output's `max_side`; the worker's memory is 38.2 / 41.3 / 44.1 GiB at `edit_refs` 1 / 2 / 3 (31.2 GiB without the pack).

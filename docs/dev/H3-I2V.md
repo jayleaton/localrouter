@@ -142,3 +142,18 @@ encoder kernel/tiling correctness and ComfyUI latent agreement; vision preproces
 image-conditioned layer-50 states; conditioned DiT structure/velocities against ComfyUI with shared conditioning noise; exact twin/Zig
 replay in both modes; and full frame/waveform hash equality including a warm repeat. Inspect the produced clip for coherent first-frame
 identity and an audible, valid stereo track, and measure peak memory and encode latency. Baseline text-only checks must still pass.
+
+## Status (2026-10-24, DGX-01, GB10 sm_121)
+
+768x448, 56 frames, 8 steps, seed 7, the fox PNG and a prompt describing it:
+
+| Gate | Result |
+| --- | --- |
+| `test_vision_position` (CPU, ComfyUI's function) | equal at eight canvases |
+| `localrouter check h3-e2e` (image to video) | ids equal, every light op equal, frames and waveform equal to the twin, warm repeat equal |
+| `localrouter check h3-i2v` replay | 2914 ops equal alone and chained, velocities equal; the twin now records `cond_rows` after the refiner, in the engine's order (it named one op unmatched before) |
+| `test_te_vision` against ComfyUI | merged rows rel. L2 0.0073 (gate 0.005), deepstack 0.0024 / 0.0049 / 0.0067, the same as 2026-10-11 and unchanged by the erf header; ComfyUI runs the patch embedding as a cuDNN Conv3d with `allow_tf32=True` (`comfy/ops.py`), a likely source, not proven |
+| `gate --attn bf16` (2026-10-11) | the twin's velocities within 1.6x of the floor between two ComfyUI backends (gate 1.5x) |
+
+The first frame is cut to the clip's shape (centred) before the node's resize, in the tool, so an input of another shape
+is not stretched (ComfyUI's node stretches it); the engine's canvas and every gate are unchanged by it.
