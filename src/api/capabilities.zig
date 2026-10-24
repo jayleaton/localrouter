@@ -8,6 +8,7 @@ const std = @import("std");
 const h = @import("http.zig");
 const routes = @import("routes.zig");
 const mcp = @import("mcp.zig");
+const responses = @import("responses.zig");
 const engine = @import("../engine/engine.zig");
 const request = @import("../tool/request.zig");
 const pair = @import("../pair.zig");
@@ -96,8 +97,8 @@ const Gap = struct { feature: []const u8, status: []const u8, note: []const u8 }
 
 const gaps = [_]Gap{
     .{ .feature = "responses_stored_state", .status = "unsupported", .note = "nothing is stored: previous_response_id, conversation, store true, item_reference and /v1/responses/{id} are refused; replay the whole conversation in input with store false" },
-    .{ .feature = "responses_hosted_tools", .status = "unsupported", .note = "web_search, file_search, code_interpreter, computer_use, image_generation, mcp and other hosted tools are refused: function tools only, run by the caller (Codex: web_search = \"disabled\")" },
-    .{ .feature = "responses_custom_tools", .status = "unsupported", .note = "custom (freeform) and namespace tools are refused: function tools only (Codex: features.multi_agent = false)" },
+    .{ .feature = "responses_hosted_tools", .status = "unsupported", .note = "web_search, file_search, code_interpreter, computer_use, image_generation, mcp and other hosted tools are refused: function tools (and namespaces of them) only, run by the caller (Codex: web_search = \"disabled\")" },
+    .{ .feature = "responses_custom_tools", .status = "unsupported", .note = "custom (freeform) tools are refused: function tools only" },
     .{ .feature = "responses_background", .status = "unsupported", .note = "background true is refused: stream the response and close the connection to cancel it" },
     .{ .feature = "responses_reasoning_summaries", .status = "unsupported", .note = "reasoning.summary concise or detailed is refused (auto and none make no summary); reasoning comes back as reasoning_text, never encrypted" },
     .{ .feature = "responses_multimodal_input", .status = "unsupported", .note = "input_image, input_file and input_audio are refused: the chat model takes text only" },
@@ -177,16 +178,17 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .api = "responses",
             .path = "/v1/responses",
             .models = chat_models.items,
-            .stream = false, // coming: H6
+            .stream = true,
             .store = false,
             .previous_response_id = false,
             .input = [_][]const u8{"text"},
             .items = [_][]const u8{ "message", "function_call", "function_call_output", "reasoning" },
             .roles = [_][]const u8{ "user", "assistant", "system", "developer" },
-            .tools = [_][]const u8{"function"},
+            .tools = [_][]const u8{ "function", "namespace" },
             .tool_choice = [_][]const u8{ "none", "auto", "required", "function" },
             .text_format = [_][]const u8{ "text", "json_object", "json_schema" },
             .reasoning = .{ .effort = "reasoning_effort on the model's server: none switches thinking off", .summary = [_][]const u8{ "auto", "none" }, .item = "reasoning_text", .encrypted_content = false },
+            .events = responses.stream_events,
             .cancel = "close the connection",
         },
         .realtime = .{

@@ -1,0 +1,27 @@
+# Codex CLI 0.164.0 against a LocalRouter box (docs/harnesses/CODEX.md). Copy it to $CODEX_HOME/config.toml
+# (~/.codex/config.toml) and put your box's tailscale serve address in both URLs. The token comes from
+# $LOCALROUTER_TOKEN, never from this file.
+model = "qwen3.8-27b"
+model_provider = "spark"
+model_context_window = 32768
+# The box serves function tools only: hosted web search and Codex's sub-agent namespace tools are refused there.
+web_search = "disabled"
+check_for_update_on_startup = false
+
+[features]
+multi_agent = false
+
+[model_providers.spark]
+name = "LocalRouter (Spark)"
+base_url = "https://BOX.TAILNET.ts.net:10443/v1"
+env_key = "LOCALROUTER_TOKEN"
+wire_api = "responses"
+# One request at a time on the box: a turn may wait behind a voice reply or another harness.
+stream_idle_timeout_ms = 600000
+request_max_retries = 1
+stream_max_retries = 1
+
+[mcp_servers.spark]
+url = "https://BOX.TAILNET.ts.net:10443/mcp"
+bearer_token_env_var = "LOCALROUTER_TOKEN"
+tool_timeout_sec = 600

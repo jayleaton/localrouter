@@ -2,7 +2,9 @@
 //! fake TensorFold server (tests/fixtures/chat_server.py). The fixtures in tests/fixtures/responses/ are whole
 //! conversations replayed as a stateless client (Codex) replays them: every turn sends the conversation so far, the
 //! previous turn's output items exactly as they came back, and the new items; `$call_N` in an input stands for the
-//! N-th call id the previous turn returned. Then the refusals (400 with `param` and `code`, before the model is asked),
+//! N-th call id the previous turn returned. Each is played whole and streamed; a stream is checked as a client reads
+//! it (`streamed`): the event order, sequence numbers, deltas that join to each item's final text and arguments, and
+//! the `.done` items equal to the final response's output. Then the refusals (400 with `param` and `code`, before the model is asked),
 //! the model's own errors, and the routes that would need stored responses.
 
 const std = @import("std");
@@ -37,13 +39,86 @@ fn post(d: *Daemon, a: std.mem.Allocator, body: []const u8) !Daemon.Resp {
 fn response(a: std.mem.Allocator, r: Daemon.Resp) !Value {
     if (r.status != .ok) std.debug.print("expected 200, got {d}: {s}\n", .{ @backingInt(r.status), r.body });
     try testing.expectEqual(std.http.Status.ok, r.status);
-    const v = try std.json.parseFromSliceLeaky(Value, a, r.body, .{});
+    return checked(try std.json.parseFromSliceLeaky(Value, a, r.body, .{}));
+}
+
+fn checked(v: Value) !Value {
     try testing.expectEqualStrings("response", str(get(v, &.{"object"})));
     try testing.expect(std.mem.startsWith(u8, str(get(v, &.{"id"})), "resp_"));
     try testing.expectEqualStrings("chat", str(get(v, &.{"model"})));
     try testing.expectEqual(false, get(v, &.{"store"}).bool);
     try testing.expect(get(v, &.{"previous_response_id"}) == .null);
     return v;
+}
+
+/// The events of a 200 SSE body: `event: T` then `data: {...}` with the same `type`, `sequence_number` 0, 1, 2...
+fn events(a: std.mem.Allocator, r: Daemon.Resp) ![]const Value {
+    if (r.status != .ok) std.debug.print("expected 200, got {d}: {s}\n", .{ @backingInt(r.status), r.body });
+    try testing.expectEqual(std.http.Status.ok, r.status);
+    var out: std.ArrayList(Value) = .empty;
+    var blocks = std.mem.splitSequence(u8, r.body, "\n\n");
+    while (blocks.next()) |b| {
+        if (b.len == 0) continue;
+        if (!std.mem.startsWith(u8, b, "event: ")) {
+            std.debug.print("not an event: '{s}'\n", .{b});
+            return error.TestExpectedEqual;
+        }
+        const nl = std.mem.indexOfScalar(u8, b, '\n') orelse return error.TestExpectedEqual;
+        try testing.expect(std.mem.startsWith(u8, b[nl + 1 ..], "data: "));
+        const v = try std.json.parseFromSliceLeaky(Value, a, b[nl + 1 + "data: ".len ..], .{});
+        try testing.expectEqualStrings(b["event: ".len..nl], str(get(v, &.{"type"})));
+        try testing.expectEqual(@as(i64, @intCast(out.items.len)), get(v, &.{"sequence_number"}).integer);
+        try out.append(a, v);
+    }
+    return out.items;
+}
+
+fn isType(e: Value, t: []const u8) bool {
+    return std.mem.eql(u8, str(get(e, &.{"type"})), t);
+}
+
+/// A streamed response read as a client reads it, checked, and its final response object (`response.completed`,
+/// `.incomplete` or `.failed`).
+fn streamed(a: std.mem.Allocator, r: Daemon.Resp) !Value {
+    const evs = try events(a, r);
+    try testing.expect(evs.len >= 3);
+    try testing.expect(isType(evs[0], "response.created") and isType(evs[1], "response.in_progress"));
+    try testing.expectEqualStrings("in_progress", str(get(evs[0], &.{ "response", "status" })));
+    const last = evs[evs.len - 1];
+    try testing.expect(isType(last, "response.completed") or isType(last, "response.incomplete") or isType(last, "response.failed"));
+    const final = get(last, &.{"response"});
+    try testing.expectEqualStrings(str(get(evs[0], &.{ "response", "id" })), str(get(final, &.{"id"})));
+    const output = get(final, &.{"output"}).array.items;
+    // Per output_index: added, then its deltas (joined), then its done events; done items are the final output.
+    var done_items: usize = 0;
+    var text: std.ArrayList(u8) = .empty;
+    var open: ?usize = null;
+    for (evs[2 .. evs.len - 1]) |e| {
+        const index: usize = @intCast(get(e, &.{"output_index"}).integer);
+        if (isType(e, "response.output_item.added")) {
+            try testing.expect(open == null); // one item at a time, in order
+            try testing.expectEqual(done_items, index);
+            open = index;
+            text.clearRetainingCapacity();
+            continue;
+        }
+        try testing.expectEqual(open, index);
+        if (isType(e, "response.output_text.delta") or isType(e, "response.reasoning_text.delta") or isType(e, "response.function_call_arguments.delta")) {
+            try text.appendSlice(a, str(get(e, &.{"delta"})));
+        } else if (isType(e, "response.output_text.done") or isType(e, "response.reasoning_text.done")) {
+            try testing.expectEqualStrings(text.items, str(get(e, &.{"text"})));
+        } else if (isType(e, "response.function_call_arguments.done")) {
+            try testing.expectEqualStrings(text.items, str(get(e, &.{"arguments"})));
+        } else if (isType(e, "response.output_item.done")) {
+            const want = try std.json.Stringify.valueAlloc(a, output[index], .{});
+            try testing.expectEqualStrings(want, try std.json.Stringify.valueAlloc(a, get(e, &.{"item"}), .{}));
+            done_items += 1;
+            open = null;
+        } else try testing.expect(isType(e, "response.content_part.added") or isType(e, "response.content_part.done"));
+    }
+    try testing.expectEqual(output.len, done_items);
+    if (isType(last, "response.failed")) return final;
+    return checked(final);
 }
 
 /// A refusal: `status`, OpenAI's envelope with `code` and `param`, and `needle` in its message.
@@ -82,7 +157,7 @@ fn bind(a: std.mem.Allocator, v: Value, calls: []const []const u8) !Value {
 }
 
 /// Plays a fixture's turns against the daemon and checks each response against the turn's `expect`.
-fn replay(d: *Daemon, a: std.mem.Allocator, fixture: []const u8) !void {
+fn replay(d: *Daemon, a: std.mem.Allocator, fixture: []const u8, stream: bool) !void {
     const f = try std.json.parseFromSliceLeaky(Value, a, fixture, .{});
     var history = std.json.Array.init(a);
     var calls: std.ArrayList([]const u8) = .empty;
@@ -97,8 +172,9 @@ fn replay(d: *Daemon, a: std.mem.Allocator, fixture: []const u8) !void {
             while (more.next()) |e| try body.put(a, e.key_ptr.*, e.value_ptr.*);
         }
         try body.put(a, "input", .{ .array = history });
+        if (stream) try body.put(a, "stream", .{ .bool = true });
         const text = try std.json.Stringify.valueAlloc(a, Value{ .object = body }, .{});
-        const r = try response(a, try post(d, a, text));
+        const r = if (stream) try streamed(a, try post(d, a, text)) else try response(a, try post(d, a, text));
         const want = get(turn, &.{"expect"});
         errdefer std.debug.print("turn {d}: {s}\n", .{ t, std.json.Stringify.valueAlloc(a, r, .{}) catch "" });
 
@@ -135,14 +211,74 @@ fn replay(d: *Daemon, a: std.mem.Allocator, fixture: []const u8) !void {
     }
 }
 
-test "responses replay: a whole text conversation and a whole function-call conversation, stateless" {
+test "responses replay: a whole text conversation and a whole function-call conversation, stateless, whole and streamed" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var d = try start(a, "responses-replay");
     defer d.stop();
-    try replay(&d, a, @embedFile("fixtures/responses/text.json"));
-    try replay(&d, a, @embedFile("fixtures/responses/function_call.json"));
+    for ([_]bool{ false, true }) |stream| {
+        try replay(&d, a, @embedFile("fixtures/responses/text.json"), stream);
+        try replay(&d, a, @embedFile("fixtures/responses/function_call.json"), stream);
+    }
+}
+
+test "responses streaming: refused before it began is plain JSON; broken mid-stream is response.failed; a hang-up cancels" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try start(a, "responses-stream");
+    defer d.stop();
+
+    // The model refused before streaming anything: the ordinary JSON error, not a stream.
+    const busy = try post(&d, a, "{\"input\":\"overload\",\"stream\":true}");
+    try refused(busy, .service_unavailable, null, null, "busy");
+    try testing.expect(busy.body[0] == '{');
+
+    // The server dies after two words: what came is closed off, and the response failed with the reason.
+    const broke = try streamed(a, try post(&d, a, "{\"input\":\"midfail\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"}}"));
+    try testing.expectEqualStrings("failed", str(get(broke, &.{"status"})));
+    try testing.expect(str(get(broke, &.{ "error", "message" })).len > 0);
+    try testing.expectEqualStrings("w0 w1", str(get(get(broke, &.{"output"}).array.items[0].object.get("content").?.array.items[0], &.{"text"})));
+
+    // A client that hangs up mid-stream cancels the request; the model stays loaded with the same worker.
+    for (0..80) |_| {
+        if (std.mem.eql(u8, try d.toolState(a, "chat"), "ready")) break;
+        harness.sleepMs(d.io, 250);
+    }
+    const pids = try d.workers(a);
+    {
+        // "slow" streams 40 words 0.25 s apart (about 11 s); read two text deltas, then close the connection.
+        const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/v1/responses", .{d.port});
+        var req = try d.client.request(.POST, try std.Uri.parse(url), .{ .keep_alive = false, .headers = .{ .content_type = .{ .override = "application/json" } } });
+        defer req.deinit();
+        const body = "{\"input\":\"slow\",\"stream\":true,\"reasoning\":{\"effort\":\"none\"}}";
+        req.transfer_encoding = .{ .content_length = body.len };
+        try req.sendBodyComplete(@constCast(body));
+        var redirect: [0]u8 = undefined;
+        var res = try req.receiveHead(&redirect);
+        try testing.expectEqual(std.http.Status.ok, res.head.status);
+        var buf: [4096]u8 = undefined;
+        const r = res.reader(&buf);
+        var seen: usize = 0;
+        while (seen < 2) {
+            const line = try r.takeDelimiterInclusive('\n');
+            if (std.mem.startsWith(u8, line, "event: response.output_text.delta")) seen += 1;
+        }
+    }
+    var ready = false;
+    for (0..20) |_| { // back to ready well before the stream would have ended
+        if (std.mem.eql(u8, try d.toolState(a, "chat"), "ready")) {
+            ready = true;
+            break;
+        }
+        harness.sleepMs(d.io, 250);
+    }
+    try testing.expect(ready);
+    const after = try d.workers(a);
+    try testing.expectEqual(pids.len, after.len);
+    try testing.expectEqual(pids[0], after[0]);
+    _ = try response(a, try post(&d, a, "{\"input\":\"hi\"}"));
 }
 
 test "responses refusals: stored state, hosted tools, other items and parameters are 400s naming them; model errors map" {
@@ -155,7 +291,8 @@ test "responses refusals: stored state, hosted tools, other items and parameters
     try refused(try post(&d, a, "{\"input\":\"hi\",\"previous_response_id\":\"resp_1\"}"), .bad_request, "unsupported_parameter", "previous_response_id", "not stored");
     try refused(try post(&d, a, "{\"input\":\"hi\",\"store\":true}"), .bad_request, "unsupported_value", "store", "store false");
     try refused(try post(&d, a, "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\",\"external_web_access\":false}]}"), .bad_request, "unsupported_tool", "tools", "hosted tools");
-    try refused(try post(&d, a, "{\"input\":\"hi\",\"tools\":[{\"type\":\"namespace\",\"name\":\"multi_agent_v1\",\"tools\":[]}]}"), .bad_request, "unsupported_tool", "tools", "namespace");
+    try refused(try post(&d, a, "{\"input\":\"hi\",\"tools\":[{\"type\":\"custom\",\"name\":\"apply_patch\"}]}"), .bad_request, "unsupported_tool", "tools", "custom");
+    try refused(try post(&d, a, "{\"input\":\"hi\",\"tools\":[{\"type\":\"namespace\",\"name\":\"ns\",\"tools\":[{\"type\":\"file_search\"}]}]}"), .bad_request, "unsupported_tool", "tools", "function tools only");
     try refused(try post(&d, a, "{\"input\":\"hi\",\"background\":true}"), .bad_request, "unsupported_value", "background", "background");
     try refused(try post(&d, a, "{\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_image\",\"image_url\":\"https://x/y.png\"}]}]}"), .bad_request, "unsupported_value", "input", "text only");
     try refused(try post(&d, a, "{\"input\":\"hi\",\"logit_bias\":{}}"), .bad_request, "unknown_parameter", "logit_bias", "logit_bias");

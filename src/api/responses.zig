@@ -1,18 +1,21 @@
-//! The Responses route, OpenAI's Responses API: POST /v1/responses, for harnesses that speak nothing else (Codex). It
-//! is a protocol adapter over the chat path, not a second model path: a request's items become one Chat Completions
-//! body for the chat model's own server (`chat.startChat`), and its completion (`completion.json`) becomes a response
-//! object. Streaming is not offered yet (`stream: true` is refused; coming: H6). Nothing is stored: `store` is false,
-//! a conversation is replayed whole each turn, and anything that needs stored state (`previous_response_id`,
-//! `conversation`, item references, GET by id) or that the box cannot supply (hosted tools, background mode, images
-//! and files, encrypted reasoning, summaries) is a 400 naming it, before any model loads. Function calls come back to
-//! the caller, which runs them and sends `function_call_output` items. Reasoning arrives as a `reasoning` item's
-//! `reasoning_text`, never as output text, and goes back to the model when the item is replayed.
+//! The Responses route, OpenAI's Responses API: POST /v1/responses, whole or streamed (server-sent events), for
+//! harnesses that speak nothing else (Codex). It is a protocol adapter over the chat path, not a second model path: a
+//! request's items become one Chat Completions body for the chat model's own server (`chat.startChat`), and its
+//! completion (`completion.json`) or event stream (`completion.sse`, as the scheduler writes it) becomes a response
+//! object or the Responses event sequence (`Stream`). Nothing is stored: `store` is false, a conversation is replayed
+//! whole each turn, and anything that needs stored state (`previous_response_id`, `conversation`, item references, GET
+//! by id) or that the box cannot supply (hosted tools, background mode, images and files, encrypted reasoning,
+//! summaries) is a 400 naming it, before any model loads. Function calls come back to the caller, which runs them and
+//! sends `function_call_output` items. Reasoning arrives as a `reasoning` item's `reasoning_text`, never as output
+//! text, and goes back to the model when the item is replayed.
 
 const std = @import("std");
 const Io = std.Io;
+const posix = std.posix;
 const h = @import("http.zig");
 const routes = @import("routes.zig");
 const chat = @import("chat.zig");
+const jobs = @import("../sched/jobs.zig");
 
 const App = routes.App;
 const Value = std.json.Value;
@@ -61,9 +64,24 @@ pub const Asked = struct {
     effort: Value = .null,
     summary: Value = .null,
     format: Value = .null,
+    aliases: []const Alias = &.{}, // the chat names of namespaced functions
     metadata: Value = .null,
     stream: bool = false,
+
+    /// The function a chat tool name stands for: a namespaced one's own name and namespace, else the name itself.
+    pub fn function(asked: *const Asked, chat_name: []const u8) Function {
+        for (asked.aliases) |al| if (eql(al.chat_name, chat_name)) return .{ .name = al.name, .namespace = al.namespace };
+        return .{ .name = chat_name };
+    }
 };
+
+/// A function inside a `namespace` tool, as the chat model sees it: `<namespace>__<name>`.
+pub const Alias = struct { chat_name: []const u8, namespace: []const u8, name: []const u8 };
+pub const Function = struct { name: []const u8, namespace: ?[]const u8 = null };
+
+fn chatName(a: Allocator, namespace: []const u8, name: []const u8) Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(a, "{s}__{s}", .{ namespace, name });
+}
 
 /// A Responses request turned into a Chat Completions body (`model` as asked; `startChat` points it at the tool).
 pub const Translated = struct { chat: Value, asked: Asked };
@@ -122,10 +140,7 @@ pub fn translate(a: Allocator, body: Value, bad: *Bad) Error!Translated {
         else => return refuse(bad, "invalid_type", "model", "model must be a string", .{}),
     };
     if (o.get("stream")) |s| switch (s) {
-        .bool => |b| {
-            if (b) return refuse(bad, "unsupported_value", "stream", "streamed responses are not offered yet (coming: H6): send stream false", .{});
-            asked.stream = b;
-        },
+        .bool => |b| asked.stream = b,
         .null => {},
         else => return refuse(bad, "invalid_type", "stream", "stream must be true or false", .{}),
     };
@@ -151,7 +166,9 @@ pub fn translate(a: Allocator, body: Value, bad: *Bad) Error!Translated {
     if (o.get("tools")) |t| if (t != .null) {
         if (t != .array) return refuse(bad, "invalid_type", "tools", "tools must be an array", .{});
         asked.tools = t;
-        if (t.array.items.len > 0) try out.put(a, "tools", try functionTools(a, t.array.items, bad));
+        var aliases: std.ArrayList(Alias) = .empty;
+        if (t.array.items.len > 0) try out.put(a, "tools", try functionTools(a, t.array.items, &aliases, bad));
+        asked.aliases = aliases.items;
     };
     if (o.get("tool_choice")) |c| if (c != .null) {
         asked.tool_choice = c;
@@ -212,7 +229,7 @@ fn unsupported(o: ObjectMap, bad: *Bad) Refused!void {
     if (o.get("store")) |s| if (s == .bool and s.bool)
         return refuse(bad, "unsupported_value", "store", "responses are not stored here: send store false and replay the conversation each turn", .{});
     if (o.get("background")) |b| if (b == .bool and b.bool)
-        return refuse(bad, "unsupported_value", "background", "background responses are not offered: wait for the response, and close the connection to cancel it", .{});
+        return refuse(bad, "unsupported_value", "background", "background responses are not offered: stream the response (stream true) and close the connection to cancel it", .{});
     if (str(o.get("truncation"))) |t| if (!eql(t, "disabled"))
         return refuse(bad, "unsupported_value", "truncation", "truncation {s} is not offered: only disabled (an input over the model's context is refused)", .{t});
     if (o.get("top_logprobs")) |t| if (!(t == .null or (t == .integer and t.integer == 0)))
@@ -259,7 +276,8 @@ fn conversation(a: Allocator, items: []const Value, messages: *std.json.Array, b
             try messages.append(try object(a, .{ .role = string(chat_role), .content = content }));
         } else if (eql(typ, "function_call")) {
             const call_id = str(o.get("call_id")) orelse return refuse(bad, "missing_required_parameter", "input", "input[{d}] is a function_call without a call_id", .{i});
-            const name = str(o.get("name")) orelse return refuse(bad, "missing_required_parameter", "input", "input[{d}] is a function_call without a name", .{i});
+            const given = str(o.get("name")) orelse return refuse(bad, "missing_required_parameter", "input", "input[{d}] is a function_call without a name", .{i});
+            const name = if (str(o.get("namespace"))) |ns| try chatName(a, ns, given) else given;
             const args = str(o.get("arguments")) orelse return refuse(bad, "missing_required_parameter", "input", "input[{d}] is a function_call without arguments (a JSON string)", .{i});
             if (turn == null) turn = .empty;
             const calls = turn.?.getPtr("tool_calls") orelse blk: {
@@ -353,27 +371,57 @@ fn reasoningText(a: Allocator, o: ObjectMap, i: usize, bad: *Bad) Error![]const 
     return text.items;
 }
 
-/// Function tools as chat tools. Every other tool type is refused: hosted tools need OpenAI's services, and custom
-/// (freeform) and namespace tools have no chat equivalent here.
-fn functionTools(a: Allocator, tools: []const Value, bad: *Bad) Error!Value {
+/// Function tools as chat tools, and the functions of `namespace` tools (a group of the caller's functions, as Codex
+/// sends its MCP servers' tools) as chat tools named `<namespace>__<name>`; the namespace's description leads its
+/// first function's. A call of one comes back as `{name, namespace}` (`Asked.function`). Every other tool type is
+/// refused: hosted tools need OpenAI's services, and custom (freeform) tools have no chat equivalent.
+fn functionTools(a: Allocator, tools: []const Value, aliases: *std.ArrayList(Alias), bad: *Bad) Error!Value {
     var out = std.json.Array.init(a);
     for (tools, 0..) |t, i| {
         const typ = if (t == .object) str(t.object.get("type")) orelse "" else "";
+        if (eql(typ, "namespace")) {
+            const ns = str(t.object.get("name")) orelse return refuse(bad, "missing_required_parameter", "tools", "tools[{d}] is a namespace without a name", .{i});
+            const inner = t.object.get("tools") orelse return refuse(bad, "missing_required_parameter", "tools", "tools[{d}] is a namespace without tools", .{i});
+            if (inner != .array) return refuse(bad, "invalid_type", "tools", "tools[{d}].tools must be an array", .{i});
+            for (inner.array.items, 0..) |f, j| {
+                const ftyp = if (f == .object) str(f.object.get("type")) orelse "" else "";
+                if (!eql(ftyp, "function")) return refuse(bad, "unsupported_tool", "tools", "tools[{d}].tools[{d}] is a {s} tool: a namespace here holds function tools only", .{ i, j, if (ftyp.len > 0) ftyp else "(no type)" });
+                const name = str(f.object.get("name")) orelse return refuse(bad, "missing_required_parameter", "tools", "tools[{d}].tools[{d}] is a function without a name", .{ i, j });
+                const lead = if (j == 0) str(t.object.get("description")) else null;
+                const chat_name = try chatName(a, ns, name);
+                try aliases.append(a, .{ .chat_name = chat_name, .namespace = ns, .name = name });
+                try out.append(try chatFunction(a, f.object, chat_name, lead));
+            }
+            continue;
+        }
         if (!eql(typ, "function")) {
-            if (eql(typ, "custom") or eql(typ, "namespace"))
-                return refuse(bad, "unsupported_tool", "tools", "tools[{d}] is a {s} tool: only function tools are offered (in Codex, turn off the feature that adds it)", .{ i, typ });
+            if (eql(typ, "custom"))
+                return refuse(bad, "unsupported_tool", "tools", "tools[{d}] is a custom (freeform) tool: only function tools are offered", .{i});
             if (typ.len == 0) return refuse(bad, "invalid_value", "tools", "tools[{d}] has no type", .{i});
             return refuse(bad, "unsupported_tool", "tools", "tools[{d}] is a {s} tool: hosted tools are not offered here, only function tools the caller runs", .{ i, typ });
         }
         const name = str(t.object.get("name")) orelse return refuse(bad, "missing_required_parameter", "tools", "tools[{d}] is a function without a name", .{i});
-        var f: ObjectMap = .empty;
-        try f.put(a, "name", string(name));
-        if (t.object.get("description")) |d| if (d != .null) try f.put(a, "description", d);
-        try f.put(a, "parameters", t.object.get("parameters") orelse try object(a, .{ .type = string("object"), .properties = Value{ .object = .empty } }));
-        if (t.object.get("strict")) |s| if (s == .bool) try f.put(a, "strict", s);
-        try out.append(try object(a, .{ .type = string("function"), .function = Value{ .object = f } }));
+        try out.append(try chatFunction(a, t.object, name, null));
     }
+    // Two tools may not reach the model under one name (a function named like a namespaced one).
+    for (out.items, 0..) |x, i| for (out.items[0..i]) |y| {
+        const n = x.object.get("function").?.object.get("name").?.string;
+        if (eql(n, y.object.get("function").?.object.get("name").?.string))
+            return refuse(bad, "invalid_value", "tools", "two tools are named {s} (a namespace's functions are named <namespace>__<name>)", .{n});
+    };
     return .{ .array = out };
+}
+
+fn chatFunction(a: Allocator, t: ObjectMap, name: []const u8, lead: ?[]const u8) Error!Value {
+    var f: ObjectMap = .empty;
+    try f.put(a, "name", string(name));
+    const desc = str(t.get("description"));
+    if (lead) |l| {
+        try f.put(a, "description", string(if (desc) |d| try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ l, d }) else l));
+    } else if (desc) |d| try f.put(a, "description", string(d));
+    try f.put(a, "parameters", t.get("parameters") orelse try object(a, .{ .type = string("object"), .properties = Value{ .object = .empty } }));
+    if (t.get("strict")) |s| if (s == .bool) try f.put(a, "strict", s);
+    return object(a, .{ .type = string("function"), .function = Value{ .object = f } });
 }
 
 fn toolChoice(a: Allocator, c: Value, bad: *Bad) Error!Value {
@@ -383,7 +431,8 @@ fn toolChoice(a: Allocator, c: Value, bad: *Bad) Error!Value {
     }
     const typ = if (c == .object) str(c.object.get("type")) orelse "" else "";
     if (eql(typ, "function")) {
-        const name = str(c.object.get("name")) orelse return refuse(bad, "missing_required_parameter", "tool_choice", "tool_choice names no function", .{});
+        const given = str(c.object.get("name")) orelse return refuse(bad, "missing_required_parameter", "tool_choice", "tool_choice names no function", .{});
+        const name = if (str(c.object.get("namespace"))) |ns| try chatName(a, ns, given) else given;
         return object(a, .{ .type = string("function"), .function = try object(a, .{ .name = string(name) }) });
     }
     return refuse(bad, "unsupported_value", "tool_choice", "tool_choice {s} is not offered: use none, auto, required or {{type: function, name}}", .{if (typ.len > 0) typ else "(no type)"});
@@ -541,8 +590,13 @@ fn messageItem(a: Allocator, id: []const u8, status: []const u8, text: ?[]const 
     return object(a, .{ .id = string(id), .type = string("message"), .status = string(status), .role = string("assistant"), .content = Value{ .array = parts } });
 }
 
-fn callItem(a: Allocator, id: []const u8, status: []const u8, call_id: []const u8, name: []const u8, arguments: []const u8) Allocator.Error!Value {
-    return object(a, .{ .id = string(id), .type = string("function_call"), .status = string(status), .call_id = string(call_id), .name = string(name), .arguments = string(arguments) });
+/// A function call item; a namespaced function's carries its `namespace` beside its own `name`.
+fn callItem(a: Allocator, asked: *const Asked, id: []const u8, status: []const u8, call_id: []const u8, chat_name: []const u8, arguments: []const u8) Allocator.Error!Value {
+    const f = asked.function(chat_name);
+    var v = try object(a, .{ .id = string(id), .type = string("function_call"), .status = string(status), .call_id = string(call_id), .name = string(f.name) });
+    if (f.namespace) |ns| try v.object.put(a, "namespace", string(ns));
+    try v.object.put(a, "arguments", string(arguments));
+    return v;
 }
 
 /// A whole chat completion as a response object: its reasoning, its text and its tool calls, in that order, each an
@@ -565,7 +619,7 @@ pub fn fromCompletion(a: Allocator, ids: Ids, id: []const u8, created_at: i64, a
         const f = c.object.get("function") orelse continue;
         if (f != .object) continue;
         const call_id = str(c.object.get("id")) orelse try ids.make("call");
-        try output.append(a, try callItem(a, try ids.make("fc"), "completed", call_id, str(f.object.get("name")) orelse "", str(f.object.get("arguments")) orelse "{}"));
+        try output.append(a, try callItem(a, asked, try ids.make("fc"), "completed", call_id, str(f.object.get("name")) orelse "", str(f.object.get("arguments")) orelse "{}"));
     };
     return responseObject(a, id, created_at, asked, output.items, .{
         .status = if (incomplete != null) "incomplete" else "completed",
@@ -573,6 +627,223 @@ pub fn fromCompletion(a: Allocator, ids: Ids, id: []const u8, created_at: i64, a
         .usage = try usage(a, v.object.get("usage")),
     });
 }
+
+// ---------------------------------------------------------------- the event stream
+
+/// Turns a chat completion's server-sent events, line by line, into the Responses event sequence:
+/// `response.created`, `response.in_progress`, then per output item `response.output_item.added`, its parts and
+/// deltas (`response.reasoning_text.delta`, `response.output_text.delta`, `response.function_call_arguments.delta`),
+/// their `.done` events and `response.output_item.done`, and last `response.completed` (`response.incomplete` when
+/// the limit cut it short, `response.failed` when the model failed mid-stream). Every event has its
+/// `sequence_number`; items are numbered by `output_index` in the order they began.
+/// The events a stream sends (`Stream`), in the order a reply with every kind of item sends them.
+pub const stream_events = [_][]const u8{
+    "response.created",                      "response.in_progress",
+    "response.output_item.added",            "response.content_part.added",
+    "response.reasoning_text.delta",         "response.reasoning_text.done",
+    "response.output_text.delta",            "response.output_text.done",
+    "response.content_part.done",            "response.function_call_arguments.delta",
+    "response.function_call_arguments.done", "response.output_item.done",
+    "response.completed",                    "response.incomplete",
+    "response.failed",
+};
+
+pub const Stream = struct {
+    a: Allocator,
+    ids: Ids,
+    id: []const u8,
+    created_at: i64,
+    asked: *const Asked,
+    seq: u64 = 0,
+    output: std.ArrayList(Value) = .empty, // finished items, by output_index
+    open: Open = .none,
+    item_id: []const u8 = "",
+    text: std.ArrayList(u8) = .empty, // the open reasoning or message item's text
+    calls: std.ArrayList(Call) = .empty, // by the chat stream's tool call index
+    finish: []const u8 = "",
+    usage_v: Value = .null,
+    failure: ?[]const u8 = null,
+
+    const Open = enum { none, reasoning, message, call };
+    const Call = struct { output_index: usize, item_id: []const u8, call_id: []const u8, name: std.ArrayList(u8) = .empty, args: std.ArrayList(u8) = .empty, open: bool = true };
+
+    const Chunk = struct {
+        choices: []const struct {
+            delta: struct {
+                content: ?[]const u8 = null,
+                reasoning_content: ?[]const u8 = null,
+                tool_calls: ?[]const struct {
+                    index: usize = 0,
+                    id: ?[]const u8 = null,
+                    function: ?struct { name: ?[]const u8 = null, arguments: ?[]const u8 = null } = null,
+                } = null,
+            } = .{},
+            finish_reason: ?[]const u8 = null,
+        } = &.{},
+        usage: ?Value = null,
+    };
+
+    fn event(s: *Stream, w: *Io.Writer, typ: []const u8, fields: anytype) !void {
+        var m: ObjectMap = .empty;
+        try m.put(s.a, "type", string(typ));
+        try m.put(s.a, "sequence_number", .{ .integer = @intCast(s.seq) });
+        inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |f| {
+            const x = @field(fields, f);
+            try m.put(s.a, f, switch (@TypeOf(x)) {
+                Value => x,
+                usize => Value{ .integer = @intCast(x) },
+                else => string(x),
+            });
+        }
+        s.seq += 1;
+        const text = try std.json.Stringify.valueAlloc(s.a, Value{ .object = m }, .{});
+        try w.print("event: {s}\ndata: {s}\n\n", .{ typ, text });
+    }
+
+    fn response(s: *Stream, o: Outcome) !Value {
+        return responseObject(s.a, s.id, s.created_at, s.asked, s.output.items, o);
+    }
+
+    /// `response.created` and `response.in_progress`.
+    pub fn begin(s: *Stream, w: *Io.Writer) !void {
+        const r = try s.response(.{ .status = "in_progress" });
+        try s.event(w, "response.created", .{ .response = r });
+        try s.event(w, "response.in_progress", .{ .response = r });
+    }
+
+    /// One line of the chat stream (`data: {...}`; anything else is skipped).
+    pub fn line(s: *Stream, w: *Io.Writer, raw: []const u8) !void {
+        const l = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.mem.startsWith(u8, l, "data:")) return;
+        const data = std.mem.trim(u8, l["data:".len..], " ");
+        if (eql(data, "[DONE]")) return;
+        const v = std.json.parseFromSliceLeaky(Value, s.a, data, .{}) catch return;
+        if (v == .object) if (v.object.get("error")) |e| {
+            const m = if (e == .object) str(e.object.get("message")) else null;
+            s.failure = try s.a.dupe(u8, m orelse "the chat model failed mid-stream");
+            return;
+        };
+        const c = std.json.parseFromValueLeaky(Chunk, s.a, v, .{ .ignore_unknown_fields = true }) catch return;
+        if (c.usage) |u| if (u != .null) {
+            s.usage_v = try usage(s.a, u);
+        };
+        if (c.choices.len == 0) return;
+        const ch = c.choices[0];
+        if (ch.delta.reasoning_content) |t| if (t.len > 0) try s.textDelta(w, .reasoning, t);
+        if (ch.delta.content) |t| if (t.len > 0) try s.textDelta(w, .message, t);
+        for (ch.delta.tool_calls orelse &.{}) |tc| {
+            if (tc.index > 64) continue;
+            if (tc.index > s.calls.items.len) continue; // a call that skips an index: the stream is out of order
+            if (tc.index == s.calls.items.len) { // a new call: what came before it is complete
+                try s.close(w);
+                try s.closeCalls(w);
+                const given = tc.id orelse "";
+                const call_id = if (given.len > 0) try s.a.dupe(u8, given) else try s.ids.make("call");
+                try s.calls.append(s.a, .{ .output_index = s.output.items.len, .item_id = try s.ids.make("fc"), .call_id = call_id });
+                const call = &s.calls.items[tc.index];
+                if (tc.function) |f| if (f.name) |n| try call.name.appendSlice(s.a, n);
+                s.open = .call;
+                try s.event(w, "response.output_item.added", .{ .output_index = call.output_index, .item = try callItem(s.a, s.asked, call.item_id, "in_progress", call.call_id, call.name.items, "") });
+                if (tc.function) |f| if (f.arguments) |x| if (x.len > 0) try s.argsDelta(w, call, x);
+                continue;
+            }
+            const call = &s.calls.items[tc.index];
+            if (!call.open) continue; // a late fragment of a call already closed: the stream is out of order
+            if (tc.function) |f| {
+                if (f.name) |n| try call.name.appendSlice(s.a, n);
+                if (f.arguments) |x| if (x.len > 0) try s.argsDelta(w, call, x);
+            }
+        }
+        if (ch.finish_reason) |f| s.finish = try s.a.dupe(u8, f);
+    }
+
+    fn argsDelta(s: *Stream, w: *Io.Writer, call: *Call, x: []const u8) !void {
+        try call.args.appendSlice(s.a, x);
+        try s.event(w, "response.function_call_arguments.delta", .{ .item_id = call.item_id, .output_index = call.output_index, .delta = x });
+    }
+
+    fn textDelta(s: *Stream, w: *Io.Writer, kind: Open, t: []const u8) !void {
+        if (s.open != kind) {
+            try s.close(w);
+            try s.closeCalls(w);
+            s.open = kind;
+            s.item_id = try s.ids.make(if (kind == .reasoning) "rs" else "msg");
+            s.text = .empty;
+            const index = s.output.items.len;
+            if (kind == .reasoning) {
+                try s.event(w, "response.output_item.added", .{ .output_index = index, .item = try object(s.a, .{ .id = string(s.item_id), .type = string("reasoning"), .summary = Value{ .array = std.json.Array.init(s.a) }, .content = Value{ .array = std.json.Array.init(s.a) } }) });
+                try s.event(w, "response.content_part.added", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .part = try object(s.a, .{ .type = string("reasoning_text"), .text = string("") }) });
+            } else {
+                try s.event(w, "response.output_item.added", .{ .output_index = index, .item = try messageItem(s.a, s.item_id, "in_progress", null) });
+                try s.event(w, "response.content_part.added", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .part = try textPart(s.a, "") });
+            }
+        }
+        try s.text.appendSlice(s.a, t);
+        const index = s.output.items.len;
+        if (kind == .reasoning) {
+            try s.event(w, "response.reasoning_text.delta", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .delta = t });
+        } else {
+            try s.event(w, "response.output_text.delta", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .delta = t, .logprobs = Value{ .array = std.json.Array.init(s.a) } });
+        }
+    }
+
+    /// Ends the open reasoning or message item.
+    fn close(s: *Stream, w: *Io.Writer) !void {
+        const index = s.output.items.len;
+        const text = s.text.items;
+        switch (s.open) {
+            .reasoning => {
+                try s.event(w, "response.reasoning_text.done", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .text = text });
+                try s.event(w, "response.content_part.done", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .part = try object(s.a, .{ .type = string("reasoning_text"), .text = string(text) }) });
+                const item = try reasoningItem(s.a, s.item_id, text);
+                try s.event(w, "response.output_item.done", .{ .output_index = index, .item = item });
+                try s.output.append(s.a, item);
+            },
+            .message => {
+                const status = if (incompleteReason(s.finish) != null) "incomplete" else "completed";
+                try s.event(w, "response.output_text.done", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .text = text, .logprobs = Value{ .array = std.json.Array.init(s.a) } });
+                try s.event(w, "response.content_part.done", .{ .item_id = s.item_id, .output_index = index, .content_index = @as(usize, 0), .part = try textPart(s.a, text) });
+                const item = try messageItem(s.a, s.item_id, status, text);
+                try s.event(w, "response.output_item.done", .{ .output_index = index, .item = item });
+                try s.output.append(s.a, item);
+            },
+            .none, .call => {},
+        }
+        if (s.open != .call) s.open = .none;
+    }
+
+    fn closeCall(s: *Stream, w: *Io.Writer, call: *Call) !void {
+        if (!call.open) return;
+        call.open = false;
+        const args = if (call.args.items.len > 0) call.args.items else "{}";
+        try s.event(w, "response.function_call_arguments.done", .{ .item_id = call.item_id, .output_index = call.output_index, .name = s.asked.function(call.name.items).name, .arguments = args });
+        const item = try callItem(s.a, s.asked, call.item_id, "completed", call.call_id, call.name.items, args);
+        try s.event(w, "response.output_item.done", .{ .output_index = call.output_index, .item = item });
+        try s.output.append(s.a, item);
+        s.open = .none;
+    }
+
+    fn closeCalls(s: *Stream, w: *Io.Writer) !void {
+        for (s.calls.items) |*c| try s.closeCall(w, c);
+    }
+
+    /// Ends every open item and the response: `response.completed`, `.incomplete`, or `.failed` when the model failed
+    /// (`failure`, or a failed job's message).
+    pub fn end(s: *Stream, w: *Io.Writer, failed: ?[]const u8) !void {
+        if (failed) |f| if (s.failure == null) {
+            s.failure = f;
+        };
+        try s.close(w);
+        try s.closeCalls(w);
+        if (s.failure) |f| {
+            try s.event(w, "response.failed", .{ .response = try s.response(.{ .status = "failed", .failure = .{ .code = "server_error", .message = f }, .usage = s.usage_v }) });
+        } else if (incompleteReason(s.finish)) |r| {
+            try s.event(w, "response.incomplete", .{ .response = try s.response(.{ .status = "incomplete", .incomplete = r, .usage = s.usage_v }) });
+        } else {
+            try s.event(w, "response.completed", .{ .response = try s.response(.{ .usage = s.usage_v }) });
+        }
+    }
+};
 
 // ---------------------------------------------------------------- the route
 
@@ -596,6 +867,7 @@ pub fn create(app: *App, req: *h.Request, a: Allocator, owner: []const u8) !void
     t.asked.model = app.scheduler.slots[j.tool].tool.config().id;
     const ids: Ids = .{ .io = app.io, .a = a };
     const id = try ids.make("resp");
+    if (t.asked.stream) return stream(app, req, a, j, ids, id, &t.asked);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
     const completion = chat.readCompletion(app, a, j, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
@@ -611,6 +883,75 @@ pub fn stored(req: *h.Request, a: Allocator) !void {
     var bad: Bad = .{ .status = 404 };
     bad.set("not_found", "response_id", "responses are not stored here (store is always false): replay the conversation in input, and cancel a response by closing its connection", .{});
     return failBad(req, a, &bad);
+}
+
+const poll_ms = 20;
+
+/// Streams the job's `completion.sse` as Responses events while the scheduler writes it. A request the model refused
+/// before it streamed anything gets the ordinary JSON error; one that fails after it began ends with
+/// `response.failed`. Closing the connection cancels the request; the model stays loaded.
+fn stream(app: *App, req: *h.Request, a: Allocator, j: *jobs.Job, ids: Ids, id: []const u8, asked: *const Asked) !void {
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/completion.sse", .{j.dir}, 0);
+    var fd: posix.fd_t = -1;
+    defer closeFd(fd);
+    while (true) { // the server accepted the request (the file exists), or the job ended first
+        const done = j.done.isSet();
+        fd = posix.openatZ(posix.AT.FDCWD, path, .{}, 0) catch -1;
+        if (fd >= 0 or done) break;
+        Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
+    }
+    if (fd < 0) {
+        if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+        return h.fail(req, a, 500, "server_error", "the model's server sent no event stream");
+    }
+    var send: [16 * 1024]u8 = undefined;
+    var body = req.respondStreaming(&send, .{ .respond_options = .{ .extra_headers = &.{
+        .{ .name = "content-type", .value = "text/event-stream" },
+        .{ .name = "cache-control", .value = "no-cache" },
+    } } }) catch return gone(app, j);
+    var s: Stream = .{ .a = a, .ids = ids, .id = id, .created_at = j.created_at, .asked = asked };
+    s.begin(&body.writer) catch return gone(app, j);
+    var pending: std.ArrayList(u8) = .empty; // the chat stream's last line, until its newline arrives
+    var chunk: [16 * 1024]u8 = undefined;
+    var at: u64 = 0;
+    while (true) {
+        const done = j.done.isSet();
+        var sent = false;
+        while (true) {
+            const rc = posix.system.pread(fd, &chunk, chunk.len, @intCast(at));
+            if (posix.errno(rc) != .SUCCESS or rc == 0) break;
+            const got: usize = @intCast(rc);
+            at += got;
+            try pending.appendSlice(a, chunk[0..got]);
+            var start: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, pending.items, start, '\n')) |nl| {
+                s.line(&body.writer, pending.items[start..nl]) catch return gone(app, j);
+                start = nl + 1;
+            }
+            const rest = pending.items.len - start;
+            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
+            pending.shrinkRetainingCapacity(rest);
+            sent = true;
+        }
+        if (sent) {
+            body.writer.flush() catch return gone(app, j);
+            body.flush() catch return gone(app, j);
+        }
+        if (done) break;
+        Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
+    }
+    if (pending.items.len > 0) s.line(&body.writer, pending.items) catch return gone(app, j);
+    s.end(&body.writer, if (j.status != .completed) j.error_message else null) catch return gone(app, j);
+    body.end() catch return gone(app, j);
+}
+
+fn closeFd(fd: posix.fd_t) void {
+    if (fd >= 0) _ = posix.system.close(fd);
+}
+
+/// The client left: cancel its request (the proxied call ends; the model stays loaded).
+fn gone(app: *App, j: *jobs.Job) void {
+    if (!j.done.isSet()) app.scheduler.cancel(j);
 }
 
 // ---------------------------------------------------------------- tests
@@ -647,7 +988,7 @@ test "a Codex-shaped turn translates to one chat body: developer as system in pl
     const a = arena.allocator();
     var bad: Bad = .{};
     const t = try translate(a, try parse(a,
-        \\{"model":"m","instructions":"be brief","store":false,"include":["reasoning.encrypted_content"],
+        \\{"model":"m","instructions":"be brief","stream":true,"store":false,"include":["reasoning.encrypted_content"],
         \\ "reasoning":{"effort":"low","summary":"auto"},"prompt_cache_key":"k","client_metadata":{"x":"y"},
         \\ "tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":64,
         \\ "tools":[{"type":"function","name":"exec_command","description":"run","strict":false,"parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}],
@@ -664,8 +1005,9 @@ test "a Codex-shaped turn translates to one chat body: developer as system in pl
         \\ ]}
     ), &bad);
     try testing.expectEqualStrings(
-        \\{"model":"m","messages":[{"role":"system","content":"be brief"},{"role":"system","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},{"role":"user","content":[{"type":"text","text":"make hi.txt"}]},{"reasoning_content":"I should write it","content":[{"type":"text","text":"Writing it."}],"tool_calls":[{"id":"call_a","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"echo hi > hi.txt\"}"}},{"id":"call_b","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"cat hi.txt\"}"}}],"role":"assistant"},{"role":"tool","tool_call_id":"call_a","content":"ok"},{"role":"tool","tool_call_id":"call_b","content":"hi"},{"role":"user","content":"thanks"}],"tools":[{"type":"function","function":{"name":"exec_command","description":"run","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}},"strict":false}}],"tool_choice":"auto","parallel_tool_calls":true,"max_tokens":64,"reasoning_effort":"low"}
+        \\{"model":"m","messages":[{"role":"system","content":"be brief"},{"role":"system","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},{"role":"user","content":[{"type":"text","text":"make hi.txt"}]},{"reasoning_content":"I should write it","content":[{"type":"text","text":"Writing it."}],"tool_calls":[{"id":"call_a","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"echo hi > hi.txt\"}"}},{"id":"call_b","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"cat hi.txt\"}"}}],"role":"assistant"},{"role":"tool","tool_call_id":"call_a","content":"ok"},{"role":"tool","tool_call_id":"call_b","content":"hi"},{"role":"user","content":"thanks"}],"tools":[{"type":"function","function":{"name":"exec_command","description":"run","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}},"strict":false}}],"tool_choice":"auto","parallel_tool_calls":true,"max_tokens":64,"reasoning_effort":"low","stream":true,"stream_options":{"include_usage":true}}
     , try json(a, t.chat));
+    try testing.expect(t.asked.stream);
     try testing.expectEqualStrings("auto", t.asked.summary.string);
 }
 
@@ -690,10 +1032,10 @@ test "what the box cannot do is a 400 naming it, before anything runs" {
     try refusedWith(a, "{\"input\":\"x\",\"previous_response_id\":\"resp_1\"}", "unsupported_parameter", "not stored");
     try refusedWith(a, "{\"input\":\"x\",\"store\":true}", "unsupported_value", "store false");
     try refusedWith(a, "{\"input\":\"x\",\"background\":true}", "unsupported_value", "background");
-    try refusedWith(a, "{\"input\":\"x\",\"stream\":true}", "unsupported_value", "stream false");
     try refusedWith(a, "{\"input\":\"x\",\"conversation\":\"conv_1\"}", "unsupported_parameter", "conversations");
     try refusedWith(a, "{\"input\":\"x\",\"tools\":[{\"type\":\"web_search\"}]}", "unsupported_tool", "hosted tools");
-    try refusedWith(a, "{\"input\":\"x\",\"tools\":[{\"type\":\"namespace\",\"name\":\"multi_agent_v1\",\"tools\":[]}]}", "unsupported_tool", "namespace");
+    try refusedWith(a, "{\"input\":\"x\",\"tools\":[{\"type\":\"namespace\",\"name\":\"ns\",\"tools\":[{\"type\":\"web_search\"}]}]}", "unsupported_tool", "function tools only");
+    try refusedWith(a, "{\"input\":\"x\",\"tools\":[{\"type\":\"function\",\"name\":\"ns__f\"},{\"type\":\"namespace\",\"name\":\"ns\",\"tools\":[{\"type\":\"function\",\"name\":\"f\"}]}]}", "invalid_value", "two tools");
     try refusedWith(a, "{\"input\":\"x\",\"tools\":[{\"type\":\"custom\",\"name\":\"apply_patch\"}]}", "unsupported_tool", "custom");
     try refusedWith(a, "{\"input\":\"x\",\"tool_choice\":{\"type\":\"web_search\"}}", "unsupported_value", "web_search");
     try refusedWith(a, "{\"input\":\"x\",\"reasoning\":{\"summary\":\"detailed\"}}", "unsupported_value", "summaries");
@@ -736,4 +1078,147 @@ test "a whole completion becomes reasoning, message and function_call items with
     const cut = try fromCompletion(a, .{ .io = testing.io, .a = a }, "resp_2", 7, &asked, "{\"choices\":[{\"message\":{\"content\":\"a b\"},\"finish_reason\":\"length\"}]}");
     try testing.expectEqualStrings("incomplete", cut.object.get("status").?.string);
     try testing.expectEqualStrings("max_output_tokens", cut.object.get("incomplete_details").?.object.get("reason").?.string);
+}
+
+/// The event types of a translated stream, in order, and its parsed events.
+fn events(a: Allocator, lines: []const []const u8, failed: ?[]const u8) ![]const Value {
+    var w: Io.Writer.Allocating = .init(a);
+    const asked: Asked = .{ .model = "qwen" };
+    var s: Stream = .{ .a = a, .ids = .{ .io = testing.io, .a = a }, .id = "resp_1", .created_at = 7, .asked = &asked };
+    try s.begin(&w.writer);
+    for (lines) |l| try s.line(&w.writer, l);
+    try s.end(&w.writer, failed);
+    var out: std.ArrayList(Value) = .empty;
+    var blocks = std.mem.splitSequence(u8, w.written(), "\n\n");
+    var seq: i64 = 0;
+    while (blocks.next()) |b| {
+        if (b.len == 0) continue;
+        const nl = std.mem.indexOfScalar(u8, b, '\n').?;
+        const v = try parse(a, b[nl + "\ndata: ".len ..]);
+        try testing.expectEqualStrings(b["event: ".len..nl], v.object.get("type").?.string);
+        try testing.expectEqual(seq, v.object.get("sequence_number").?.integer);
+        seq += 1;
+        try out.append(a, v);
+    }
+    return out.items;
+}
+
+fn types(a: Allocator, evs: []const Value) ![]const u8 {
+    var w: Io.Writer.Allocating = .init(a);
+    for (evs) |e| try w.writer.print("{s}\n", .{e.object.get("type").?.string});
+    return w.written();
+}
+
+test "a streamed reply with reasoning, text and two calls: the Responses events in order" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const evs = try events(a, &.{
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm\"}}]}",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"m\"}}]}",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Sure\"}}]}",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"\"}}]}}]}",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":\"}}]}}]}",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"g\",\"arguments\":\"{}\"}}]}}]}",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}",
+        "data: [DONE]",
+    }, null);
+    try testing.expectEqualStrings(
+        \\response.created
+        \\response.in_progress
+        \\response.output_item.added
+        \\response.content_part.added
+        \\response.reasoning_text.delta
+        \\response.reasoning_text.delta
+        \\response.reasoning_text.done
+        \\response.content_part.done
+        \\response.output_item.done
+        \\response.output_item.added
+        \\response.content_part.added
+        \\response.output_text.delta
+        \\response.output_text.done
+        \\response.content_part.done
+        \\response.output_item.done
+        \\response.output_item.added
+        \\response.function_call_arguments.delta
+        \\response.function_call_arguments.delta
+        \\response.function_call_arguments.done
+        \\response.output_item.done
+        \\response.output_item.added
+        \\response.function_call_arguments.delta
+        \\response.function_call_arguments.done
+        \\response.output_item.done
+        \\response.completed
+        \\
+    , try types(a, evs));
+    const done = evs[evs.len - 1].object.get("response").?.object;
+    try testing.expectEqualStrings("completed", done.get("status").?.string);
+    try testing.expectEqual(@as(i64, 7), done.get("usage").?.object.get("total_tokens").?.integer);
+    const out = done.get("output").?.array.items;
+    try testing.expectEqual(@as(usize, 4), out.len);
+    for (out, [_][]const u8{ "reasoning", "message", "function_call", "function_call" }) |item, typ| try testing.expectEqualStrings(typ, item.object.get("type").?.string);
+    try testing.expectEqualStrings("hmm", out[0].object.get("content").?.array.items[0].object.get("text").?.string);
+    try testing.expectEqualStrings("{\"a\":1}", out[2].object.get("arguments").?.string);
+    try testing.expectEqualStrings("call_1", out[2].object.get("call_id").?.string);
+    try testing.expectEqualStrings("call_2", out[3].object.get("call_id").?.string);
+    // Every item event names the output_index it began with.
+    try testing.expectEqual(@as(i64, 2), evs[15].object.get("output_index").?.integer);
+    try testing.expectEqual(@as(i64, 3), evs[20].object.get("output_index").?.integer);
+    try testing.expectEqualStrings("{\"a\":1}", evs[18].object.get("arguments").?.string);
+}
+
+test "a stream cut at the limit is incomplete; one that breaks is failed, with what it had" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cut = try events(a, &.{ "data: {\"choices\":[{\"delta\":{\"content\":\"a b\"}}]}", "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}" }, null);
+    const last = cut[cut.len - 1].object;
+    try testing.expectEqualStrings("response.incomplete", last.get("type").?.string);
+    try testing.expectEqualStrings("incomplete", last.get("response").?.object.get("output").?.array.items[0].object.get("status").?.string);
+    const broke = try events(a, &.{"data: {\"choices\":[{\"delta\":{\"content\":\"w0\"}}]}"}, "the chat model's server exited");
+    const f = broke[broke.len - 1].object;
+    try testing.expectEqualStrings("response.failed", f.get("type").?.string);
+    try testing.expectEqualStrings("the chat model's server exited", f.get("response").?.object.get("error").?.object.get("message").?.string);
+    try testing.expectEqualStrings("response.output_item.done", broke[broke.len - 2].object.get("type").?.string);
+}
+
+test "a namespace's functions reach the model as <namespace>__<name> and their calls come back with namespace and name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bad: Bad = .{};
+    const t = try translate(a, try parse(a,
+        \\{"input":[{"role":"user","content":"draw"},
+        \\  {"type":"function_call","call_id":"c0","namespace":"mcp__spark","name":"list_models","arguments":"{}"},
+        \\  {"type":"function_call_output","call_id":"c0","output":"[]"}],
+        \\ "tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}},
+        \\  {"type":"namespace","name":"mcp__spark","description":"Models on one GPU.","tools":[
+        \\   {"type":"function","name":"list_models","description":"List them.","parameters":{"type":"object"}},
+        \\   {"type":"function","name":"generate_image","parameters":{"type":"object"}}]}],
+        \\ "tool_choice":{"type":"function","namespace":"mcp__spark","name":"generate_image"}}
+    ), &bad);
+    try testing.expectEqualStrings(
+        \\[{"type":"function","function":{"name":"exec_command","parameters":{"type":"object"}}},{"type":"function","function":{"name":"mcp__spark__list_models","description":"Models on one GPU.\n\nList them.","parameters":{"type":"object"}}},{"type":"function","function":{"name":"mcp__spark__generate_image","parameters":{"type":"object"}}}]
+    , try json(a, t.chat.object.get("tools").?));
+    try testing.expectEqualStrings("mcp__spark__generate_image", t.chat.object.get("tool_choice").?.object.get("function").?.object.get("name").?.string);
+    try testing.expectEqualStrings("mcp__spark__list_models", t.chat.object.get("messages").?.array.items[1].object.get("tool_calls").?.array.items[0].object.get("function").?.object.get("name").?.string);
+
+    const r = try fromCompletion(a, .{ .io = testing.io, .a = a }, "resp_1", 7, &t.asked,
+        \\{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"mcp__spark__generate_image","arguments":"{}"}},{"id":"c2","function":{"name":"exec_command","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
+    );
+    const out = r.object.get("output").?.array.items;
+    try testing.expectEqualStrings("generate_image", out[0].object.get("name").?.string);
+    try testing.expectEqualStrings("mcp__spark", out[0].object.get("namespace").?.string);
+    try testing.expectEqualStrings("exec_command", out[1].object.get("name").?.string);
+    try testing.expect(out[1].object.get("namespace") == null);
+
+    var w: Io.Writer.Allocating = .init(a);
+    var st: Stream = .{ .a = a, .ids = .{ .io = testing.io, .a = a }, .id = "resp_1", .created_at = 7, .asked = &t.asked };
+    try st.line(&w.writer, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"mcp__spark__generate_image\",\"arguments\":\"{}\"}}]}}]}");
+    try st.end(&w.writer, null);
+    try testing.expect(std.mem.indexOf(u8, w.written(), "\"name\":\"generate_image\",\"namespace\":\"mcp__spark\"") != null);
+    try testing.expect(std.mem.indexOf(u8, w.written(), "mcp__spark__") == null);
 }

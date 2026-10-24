@@ -268,7 +268,7 @@ fn mint(d: *Daemon, a: std.mem.Allocator, name: []const u8, scopes: []const u8) 
     return std.mem.trim(u8, r.stdout, " \r\n");
 }
 
-test "fixtures: what the web page, the mobile app and the desktop helper sent the box is still accepted" {
+test "fixtures: what the web page, the mobile app, the desktop helper and Codex sent the box is still accepted" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -282,9 +282,23 @@ test "fixtures: what the web page, the mobile app and the desktop helper sent th
     const web = try load(a, opts.harness_web);
     const mobile = try load(a, opts.harness_mobile);
     const helper = try load(a, opts.harness_helper);
+    const codex = try load(a, opts.harness_codex);
     try testing.expect(try replayHttp(&d, a, web, "") >= 5);
     try testing.expect(try replayWs(&d, a, web, "/v1/realtime", "", "") >= 5);
     try testing.expect(try replayHttp(&d, a, mobile, "") >= 2);
+    // Codex CLI 0.164.0 (docs/harnesses/CODEX.md): two turns of streamed /v1/responses, each replaying the whole
+    // conversation (reasoning, function calls and their outputs), its MCP tools in a namespace, and its MCP handshake.
+    try testing.expect(try replayHttp(&d, a, codex, "") >= 8);
+    var streams: usize = 0;
+    for (codex) |l| if (l.body != null and l.path != null and std.mem.eql(u8, l.path.?, "/v1/responses")) {
+        const r = try d.call(a, .POST, "/v1/responses", try std.json.Stringify.valueAlloc(a, try dropNames(a, l.body.?), .{}));
+        if (std.mem.indexOf(u8, r.body, "event: response.completed\n") == null) {
+            std.debug.print("a Codex request did not complete: {s}\n", .{r.body[@max(r.body.len, 400) - 400 ..]});
+            return error.TestUnexpectedResult;
+        }
+        streams += 1;
+    };
+    try testing.expectEqual(@as(usize, 5), streams);
     try testing.expect(try replayWs(&d, a, mobile, "/v1/realtime", "", "") >= 3);
 
     // What the clients send on barge-in and push to talk, which the recorded runs did not do: the documented shapes,
