@@ -1,4 +1,5 @@
 // Vision arithmetic shared with the engine. Fixed reductions, bf16 boundaries, 256 threads.
+#include "../common/erf.cuh"
 #include <cuda_bf16.h>
 #include <math.h>
 #define VIS_BLOCK 256
@@ -72,7 +73,7 @@ extern "C" __global__ void stk_vis_gelu(const __nv_bfloat16* x, __nv_bfloat16* y
     long long i = (long long)blockIdx.x * VIS_BLOCK + threadIdx.x;
     if (i < n) {
         float z = vis_ld(x,i);
-        y[i] = vis_st(__fmul_rn(__fmul_rn(0.5f,z), __fadd_rn(1.0f,erff(__fmul_rn(z,0.7071067811865475f)))));
+        y[i] = vis_st(__fmul_rn(__fmul_rn(0.5f,z), __fadd_rn(1.0f,stk_erf_rn(__fmul_rn(z,0.7071067811865475f)))));
     }
 }
 

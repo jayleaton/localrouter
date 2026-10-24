@@ -28,7 +28,7 @@ at::Tensor attention(at::Tensor q,at::Tensor k,at::Tensor v,double scale){ck(q);
 def mod():
     from torch.utils.cpp_extension import load_inline
     major, minor = torch.cuda.get_device_capability()
-    digest = hashlib.sha256((KDIR / "te_vision.cu").read_bytes()+SOURCE.encode()).hexdigest()
+    digest = hashlib.sha256((KDIR / "te_vision.cu").read_bytes()+(KDIR.parent / "common" / "erf.cuh").read_bytes()+SOURCE.encode()).hexdigest()
     return load_inline("stk_h3_vision_"+digest[:12], cpp_sources=DECLS, cuda_sources=SOURCE,
                        functions=["norm", "gelu", "rope_", "position", "attention"],
                        extra_cuda_cflags=["-O3", f"-gencode=arch=compute_{major}{minor}a,code=sm_{major}{minor}a"],

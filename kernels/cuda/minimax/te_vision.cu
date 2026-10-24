@@ -1,6 +1,7 @@
 // Qwen3-VL fp32 vision operations. Raw launch ABI shared with the engine; no fast math.
 #include <stdint.h>
 #include <math.h>
+#include "../common/erf.cuh"
 extern "C" __global__ void h3v_norm(const float* x,const float* w,const float* b,float* y,int D) {
     __shared__ float r[256]; int t=threadIdx.x; long long base=(long long)blockIdx.x*D;
     float s=0; for(int j=t;j<D;j+=256)s=__fadd_rn(s,x[base+j]); r[t]=s; __syncthreads();
@@ -13,7 +14,7 @@ extern "C" __global__ void h3v_norm(const float* x,const float* w,const float* b
 }
 extern "C" __global__ void h3v_gelu(const float* x,float* y,long long n,int approximate) {
     long long i=(long long)blockIdx.x*256+threadIdx.x;if(i>=n)return;float v=x[i];
-    float a=approximate?tanhf(__fmul_rn(0.7978845608028654f,__fadd_rn(v,__fmul_rn(0.044715f,__fmul_rn(__fmul_rn(v,v),v))))):erff(__fmul_rn(v,0.7071067811865475f));
+    float a=approximate?tanhf(__fmul_rn(0.7978845608028654f,__fadd_rn(v,__fmul_rn(0.044715f,__fmul_rn(__fmul_rn(v,v),v))))):stk_erf_rn(__fmul_rn(v,0.7071067811865475f));
     y[i]=__fmul_rn(__fmul_rn(v,0.5f),__fadd_rn(1.f,a));
 }
 extern "C" __global__ void h3v_rope(float* x,const float* cs,const float* sn,int H,int D) {

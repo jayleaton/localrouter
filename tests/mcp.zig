@@ -1,6 +1,7 @@
 //! Integration tests of the MCP tool surface on a real daemon (testpattern engines): the tool list and its strict
-//! schemas, list_models' state and memory, list_voices, generate_image's wait_s and job id, transcribe_audio by path
-//! (only inside the config's local_files), and errors that tell the caller what to do.
+//! schemas, list_models' state and memory, list_voices, generate_image's wait_s and job id, edit_image (and its refusal
+//! without an edit model), transcribe_audio by path (only inside the config's local_files), and errors that tell the
+//! caller what to do.
 
 const std = @import("std");
 const Io = std.Io;
@@ -64,7 +65,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     // Every tool: a name, a description, an object schema that refuses unknown arguments.
     const listed = try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).body, .{});
     const list = listed.object.get("result").?.object.get("tools").?.array.items;
-    try testing.expectEqual(@as(usize, 18), list.len);
+    try testing.expectEqual(@as(usize, 19), list.len);
     var names: std.ArrayList(u8) = .empty;
     for (list) |t| {
         const schema = t.object.get("inputSchema").?.object;
@@ -74,8 +75,17 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
         try names.appendSlice(a, t.object.get("name").?.string);
         try names.append(a, ' ');
     }
-    for ([_][]const u8{ "list_models", "list_voices", "reserve_for", "unload_model", "load_model", "generate_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models", "computer_control", "computer_use", "computer_status", "computer_stop" }) |n|
+    for ([_][]const u8{ "list_models", "list_voices", "reserve_for", "unload_model", "load_model", "generate_image", "edit_image", "generate_video", "transcribe_audio", "synthesize_speech", "chat", "get_job", "cancel_job", "release_models", "computer_control", "computer_use", "computer_status", "computer_stop" }) |n|
         try testing.expect(std.mem.indexOf(u8, names.items, n) != null);
+
+    // edit_image: the picture to edit, a mask and an omitted size (the input's shape) are in its schema.
+    for (list) |t| if (std.mem.eql(u8, t.object.get("name").?.string, "edit_image")) {
+        const schema = t.object.get("inputSchema").?.object;
+        try testing.expectEqualStrings("prompt", schema.get("required").?.array.items[0].string);
+        const props = schema.get("properties").?.object;
+        for ([_][]const u8{ "image", "images", "mask", "size", "n", "seed", "model", "inline_images", "wait_s" }) |k| try testing.expect(props.get(k) != null);
+        try testing.expect(props.get("size").?.object.get("default") == null);
+    };
 
     // list_models: each model's state, resident bytes and lane, and the machine's memory.
     const models = (try mcpText(a, try mcpCall(&d, a, "list_models", "{}"))).object;
@@ -101,7 +111,16 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     try testing.expectEqualStrings("completed", done.object.get("status").?.string);
     try testing.expectEqual(@as(usize, 1), done.object.get("files").?.array.items.len);
 
+    // edit_image of that PNG, by its own /v1/files URL (testpattern draws edits at the size asked).
+    const png_url = done.object.get("files").?.array.items[0].string;
+    const edited = try mcpCall(&d, a, "edit_image", try std.fmt.allocPrint(a, "{{\"prompt\":\"make it night\",\"image\":\"{s}\",\"size\":\"256x256\",\"inline_images\":false}}", .{png_url}));
+    try testing.expect(!edited.object.get("isError").?.bool);
+    try testing.expectEqualStrings("completed", (try std.json.parseFromSliceLeaky(Value, a, firstText(edited), .{})).object.get("status").?.string);
+
     // Errors say what to do.
+    try expectError(try mcpCall(&d, a, "edit_image", "{\"prompt\":\"make it night\"}"), "edit_image needs the picture to edit");
+    try expectError(try mcpCall(&d, a, "edit_image", try std.fmt.allocPrint(a, "{{\"prompt\":\"x\",\"image\":\"{s}\",\"images\":[\"{s}\"]}}", .{ png_url, png_url })), "send image or images, not both");
+    try expectError(try mcpCall(&d, a, "generate_image", "{\"prompt\":\"bars\",\"mask\":\"aGk=\"}"), "call edit_image");
     try expectError(try mcpCall(&d, a, "generate_image", "{\"size\":\"256x256\"}"), "invalid arguments for generate_image: a required argument is missing");
     try expectError(try mcpCall(&d, a, "generate_image", "{\"prompt\":\"bars\",\"n\":\"two\"}"), "an argument has the wrong type");
     try expectError(try mcpCall(&d, a, "synthesize_speech", "{\"input\":\"hi\",\"voice\":\"Zed\"}"), "model 'tone' has no voice 'Zed'; its voices: Mae, Arlo");
@@ -159,4 +178,17 @@ test "computer control without a paired device: the tools, the helper's socket a
     }
     const approve = try d.call(a, .POST, "/v1/computer/approvals/appr_x", "{\"decision\":\"approve\"}");
     try testing.expectEqual(std.http.Status.unauthorized, approve.status);
+}
+
+test "mcp edit_image without an edit-capable model: refused, naming the models and what they can do" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain =
+        \\{"id": "plain", "kind": "image", "engine": "testpattern", "capabilities": ["text_to_image"]}
+    ;
+    var d = try Daemon.start(testing.allocator, io, "mcp-no-edit", "{" ++ harness.reserve ++ ", \"tools\": [" ++ plain ++ "]}");
+    defer d.stop();
+    try expectError(try mcpCall(&d, a, "edit_image", "{\"prompt\":\"make it night\",\"image\":\"aGk=\"}"), "no model on this machine can do image_edit: its models are plain (text_to_image)");
 }

@@ -1,6 +1,7 @@
 //! The voice session's state machine against in-process fakes of speech to text, the chat model, text to speech and
 //! jobs: spoken turns found by VAD, the history the model sees, sentence-chunked speech, barge-in cancelling both the
-//! chat stream and the speech, a tool call that becomes an image job, and the error paths.
+//! chat stream and the speech, a tool call that becomes an image job, an edit of the session's last picture, and the
+//! error paths.
 
 const std = @import("std");
 const Io = std.Io;
@@ -24,6 +25,7 @@ const Fake = struct {
     specs: std.ArrayList(backend.JobSpec) = .empty,
     chat_cancelled: std.atomic.Value(bool) = .init(false),
     no_inference: bool = false, // the session's device lacks the inference scope
+    edit: std.atomic.Value(bool) = .init(false), // a model can edit pictures (image_edit)
     speech_cancelled: std.atomic.Value(bool) = .init(false),
 
     fn b(f: *Fake) backend.Backend {
@@ -108,6 +110,7 @@ const Fake = struct {
             why.set("the fake model failed", .{});
             return error.Failed;
         }
+        if (std.mem.indexOf(u8, said, "edit that") != null) return f.call(a, sink, "call_e", "edit_image", "{\"prompt\": \"make it night\"}");
         if (std.mem.indexOf(u8, said, "picture") != null) return f.call(a, sink, "call_7", "generate_image", "{\"prompt\": \"a red fox\"}");
         if (std.mem.indexOf(u8, said, "slow") != null) {
             var parts: [40][]const u8 = undefined;
@@ -145,18 +148,18 @@ const Fake = struct {
         f.mutex.lockUncancelable(f.io);
         defer f.mutex.unlock(f.io);
         const fa = f.arena.allocator();
-        f.specs.append(fa, .{ .kind = spec.kind, .prompt = try fa.dupe(u8, spec.prompt) }) catch {};
+        f.specs.append(fa, .{ .kind = spec.kind, .prompt = try fa.dupe(u8, spec.prompt), .input_file = try fa.dupe(u8, spec.input_file), .input_url = try fa.dupe(u8, spec.input_url) }) catch {};
         return .{ .id = try a.dupe(u8, "img_1"), .kind = spec.kind, .handle = f };
     }
 
     fn waitJob(_: *anyopaque, a: std.mem.Allocator, _: backend.Job, _: u32, _: *Stop) backend.Outcome {
         const urls = a.alloc([]const u8, 1) catch return .{ .status = "failed" };
         urls[0] = "http://127.0.0.1:8190/v1/files/img_1/0.png";
-        return .{ .status = "completed", .urls = urls };
+        return .{ .status = "completed", .urls = urls, .files = &.{"/jobs/img_1/0.png"} };
     }
 
-    fn offer(_: *anyopaque) backend.Offer {
-        return .{ .image = true };
+    fn offer(p: *anyopaque) backend.Offer {
+        return .{ .image = true, .image_edit = self(p).edit.load(.acquire) };
     }
 
     fn clientTools(p: *anyopaque, why: *backend.Why) bool {
@@ -469,6 +472,75 @@ test "a tool call becomes an image job; its URL comes back as an event and the a
     try testing.expect(done.object.get("tool_calls").?.bool);
     _ = try rig.rec.wait("localrouter.response.speech_done", 0);
     try testing.expect(contains(follow, "\"content\":\"Making that now.\""));
+}
+
+test "edit_image is offered only while a model can edit pictures" {
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 0);
+    try testing.expect(!contains(rig.fake.requests.items[0], "\"name\":\"edit_image\""));
+    rig.fake.edit.store(true, .release);
+    rig.heard("and once more");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 1);
+    try testing.expect(contains(rig.fake.requests.items[1], "\"name\":\"edit_image\""));
+    try testing.expect(contains(rig.fake.requests.items[1], "\"name\":\"generate_image\""));
+}
+
+test "edit_image before any picture: no job, and the model reads that there is no picture yet" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    rig.fake.edit.store(true, .release);
+    rig.heard("edit that picture to make it night");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    const job = try rig.rec.get(a, try rig.rec.wait("localrouter.job.done", 0));
+    try testing.expectEqualStrings("failed", job.object.get("status").?.string);
+    _ = try rig.rec.wait("response.done", 1);
+    try testing.expectEqual(@as(usize, 0), rig.fake.specs.items.len);
+    try testing.expect(contains(rig.fake.requests.items[1], "there is no picture in this conversation yet to edit"));
+}
+
+test "the session remembers its last picture once the job completes, and edit_image edits it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    defer rig.stop();
+    rig.fake.edit.store(true, .release);
+    rig.heard("make me a picture of a fox");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("localrouter.job.done", 0);
+    _ = try rig.rec.wait("response.done", 1);
+    {
+        rig.s.mutex.lockUncancelable(rig.s.io);
+        defer rig.s.mutex.unlock(rig.s.io);
+        try testing.expectEqualStrings("/jobs/img_1/0.png", rig.s.last_image.?);
+    }
+    rig.heard("now edit that picture to make it night");
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    const created = try rig.rec.get(a, try rig.rec.wait("localrouter.job.created", 1));
+    try testing.expectEqualStrings("image", created.object.get("kind").?.string);
+    const job = try rig.rec.get(a, try rig.rec.wait("localrouter.job.done", 1));
+    try testing.expectEqualStrings("completed", job.object.get("status").?.string);
+    try testing.expectEqualStrings("call_e", job.object.get("call_id").?.string);
+    _ = try rig.rec.wait("response.done", 3);
+    try testing.expectEqual(@as(usize, 2), rig.fake.specs.items.len);
+    const edit = rig.fake.specs.items[1];
+    try testing.expectEqual(backend.JobKind.image, edit.kind);
+    try testing.expectEqualStrings("make it night", edit.prompt);
+    try testing.expectEqualStrings("/jobs/img_1/0.png", edit.input_file);
 }
 
 test "a turn whose answer makes several tool calls still says aloud that the picture is ready" {

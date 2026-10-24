@@ -114,6 +114,7 @@ pub const Session = struct {
     responded: bool = false, // a response has begun: the tool execution mode is fixed from then on
     waiters: std.ArrayList(std.Thread) = .empty,
     close_stop: Stop = .{}, // set when the session closes: ends transcriptions and tool waits
+    last_image: ?[]u8 = null, // the file of the last picture this session's tools made or edited: edit_image's default input
     // The last spoken turn's marks (awake-clock ns; 0: none), for the timing of the response that answers it.
     stop_ns: i96 = 0, // VAD ended the turn
     stt_start_ns: i96 = 0,
@@ -169,6 +170,7 @@ pub const Session = struct {
         if (s.warmer) |t| t.join(); // close_stop ends its sentence
         for (s.waiters.items) |t| t.join();
         s.waiters.deinit(s.gpa);
+        if (s.last_image) |p| s.gpa.free(p);
         for (s.tasks.items) |t| t.free(s.gpa);
         s.tasks.deinit(s.gpa);
         for (s.items.items) |it| freeItem(s.gpa, it);

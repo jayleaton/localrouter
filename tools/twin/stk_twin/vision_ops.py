@@ -78,7 +78,7 @@ def _mod():
 
     major, minor = torch.cuda.get_device_capability()
     arch = f"{major}{minor}" + ("a" if major >= 9 else "")
-    digest = hashlib.sha256((KDIR / "vision.cu").read_bytes() + CU.encode()).hexdigest()
+    digest = hashlib.sha256((KDIR / "vision.cu").read_bytes() + (KDIR.parent / "common" / "erf.cuh").read_bytes() + CU.encode()).hexdigest()
     return load_inline(f"stk_vision_{digest[:12]}", cpp_sources=DECL, cuda_sources=CU,
                        functions=["vis_ln", "vis_pos", "vis_qkv", "vis_unpad", "vis_gelu", "vis_from_f32"],
                        extra_cuda_cflags=["-O3", f"-gencode=arch=compute_{arch},code=sm_{arch}"],

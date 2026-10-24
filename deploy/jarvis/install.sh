@@ -70,6 +70,9 @@ if [ "${BUILD_ONLY:-0}" != 1 ]; then
   fi
   if wanted qwen-image-2.1-turbo; then
     [ -f "$J/lr/weights/qwen-image-2.1/turbo-fp8s/manifest.json" ] || die "no image pack under $J/lr/weights/qwen-image-2.1"
+    # edits need the edit pack (the vision tower and the VAE encoder; tools/spark/prepare.sh adds it): without it the
+    # image model serves text to image only and does not list image_edit
+    [ -f "$J/lr/weights/qwen-image-2.1/edit.json" ] || echo "install: no edit pack under $J/lr/weights/qwen-image-2.1: image edits are off (re-run tools/spark/prepare.sh to add it)" >&2
   fi
   if wanted knowline-4b; then # tools/decide/knowline/README.md: the pinned weights (checked against SHA256SUMS) and its venv
     [ "$(cat "$J/models/decide/knowline-4b-gen5.5/.revision" 2> /dev/null)" = "$KNOWLINE_REV" ] ||

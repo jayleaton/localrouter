@@ -2,8 +2,9 @@
 
   python3 -I tools/jarvis/mcp_check.py OUT [URL]       URL default http://127.0.0.1:8190 (its /mcp)
 
-Writes OUT/models.json, voices.json, chat.txt, image.png, video.mp4, speech-<voice>.wav (two voices),
-transcript.json (of the first WAV, fetched by its URL) and calls.jsonl (every request and reply, base64 trimmed).
+Writes OUT/models.json, voices.json, chat.txt, image.png, edit.png (edit_image of image.png, "make it night", when a
+model lists image_edit; else a SKIP line), video.mp4, speech-<voice>.wav (two voices), transcript.json (of the first
+WAV, fetched by its URL) and calls.jsonl (every request and reply, base64 trimmed).
 Exits 1 if any call fails. Stdlib only.
 With pairing on (pairing.required), $LOCALROUTER_TOKEN is sent as a Bearer token (deploy/jarvis/pair.sh token NAME).
 """
@@ -87,6 +88,26 @@ for c in img:
         with open(os.path.join(OUT, "image.png"), "wb") as f:
             f.write(base64.b64decode(c["data"]))
         break
+
+# edit_image of that picture, sent as base64 (the daemon fetches a URL without a token, which pairing refuses), at the
+# input's shape (no size)
+editors = [m["id"] for m in (json.loads(models[0])["models"] if models else []) if "image_edit" in m.get("capabilities", [])]
+png = open(os.path.join(OUT, "image.png"), "rb").read() if os.path.exists(os.path.join(OUT, "image.png")) else b""
+if not editors:
+    print("SKIP edit_image: no model lists image_edit", flush=True)
+elif not png:
+    failed.append("edit_image-input")
+else:
+    t0 = time.time()
+    ed = call("edit_image", {"prompt": "make it night", "image": base64.b64encode(png).decode(), "wait_s": 900})
+    for c in ed:
+        if c.get("type") == "image":
+            with open(os.path.join(OUT, "edit.png"), "wb") as f:
+                f.write(base64.b64decode(c["data"]))
+            break
+    else:
+        failed.append("edit_image-file")
+    print(f"edit_image: {round(time.time() - t0, 1)} s", flush=True)
 
 vid = texts(call("generate_video", {"prompt": "gentle waves at dusk, gulls calling", "seconds": 2, "wait_s": 30}))
 job = json.loads(vid[-1]) if vid else {}

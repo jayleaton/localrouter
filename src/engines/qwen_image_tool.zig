@@ -303,8 +303,8 @@ const QwenImage = struct {
         var bridge: Bridge = .{ .sink = sink };
         for (names, 0..) |*name, i| {
             const seed = v.seed +% i;
-            const made = if (refs.len > 0) p.edit(v.prompt, refs, height, width, steps, seed, pixels, bridge.progress(), null) else p.generate(v.prompt, height, width, steps, seed, pixels, bridge.progress());
-            _ = made catch |err| switch (err) {
+            const made: anyerror!void = if (refs.len > 0) voidOf(p.edit(v.prompt, refs, height, width, steps, seed, pixels, bridge.progress(), null)) else voidOf(p.generate(v.prompt, height, width, steps, seed, pixels, bridge.progress()));
+            made catch |err| switch (err) {
                 error.ImageTooLarge => return refuse("{d}x{d} is larger than this model takes: lower size", .{ width, height }),
                 error.SizeNotMultipleOf16 => return refuse("size {d}x{d}: each side must be a multiple of 16", .{ width, height }),
                 error.PromptTooLong => return refuse("the prompt (with the input images' tokens) is longer than the text encoder takes: shorten it", .{}),
@@ -395,6 +395,11 @@ fn create(comptime v: Variant) fn (env: engine.Env, cfg: *const ToolConfig) anye
             return .{ .ptr = t, .vtable = &.{ .load = QwenImage.load, .generate = QwenImage.generate, .unload = QwenImage.unload } };
         }
     }.f;
+}
+
+/// A result the caller does not keep, as its error alone.
+fn voidOf(r: anytype) anyerror!void {
+    _ = try r;
 }
 
 /// Refuses the request (the API's 400) with a reason the caller can act on.

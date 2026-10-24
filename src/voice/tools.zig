@@ -1,6 +1,7 @@
 //! Built-in tool calls of a voice session: the image or video job a call asks for (a waiter thread reports the result
 //! as `localrouter.job.done` and asks for a spoken follow-up once voice is back), and the model management tools
-//! (list_models, reserve_for, unload_model, load_model), whose JSON answers the call.
+//! (list_models, reserve_for, unload_model, load_model), whose JSON answers the call. The session keeps the file of
+//! its last picture: edit_image edits it unless the call names another, and generate_video's from_last_image animates it.
 
 const std = @import("std");
 const session = @import("session.zig");
@@ -40,7 +41,7 @@ fn wait(s: *Session, c: Call) void {
         const text = if (m.ok) m.text else std.fmt.allocPrint(a, "{{\"error\": {s}}}", .{std.json.Stringify.valueAlloc(a, m.text, .{}) catch return}) catch return;
         return answer(s, a, c, text);
     }
-    if (!std.mem.eql(u8, c.name, "generate_image") and !std.mem.eql(u8, c.name, "generate_video")) {
+    if (!isJob(c.name)) {
         // A model management tool (list_models, reserve_for, unload_model, load_model): its JSON is the output.
         const m = s.backend.manage(a, c.name, c.arguments);
         const text = if (m.ok) m.text else std.fmt.allocPrint(a, "{{\"error\": {s}}}", .{std.json.Stringify.valueAlloc(a, m.text, .{}) catch return}) catch return;
@@ -50,7 +51,7 @@ fn wait(s: *Session, c: Call) void {
     var job_id: []const u8 = "";
     const kind: backend.JobKind = if (std.mem.eql(u8, c.name, "generate_video")) .video else .image;
     const outcome: backend.Outcome = blk: {
-        const spec = jobSpec(a, kind, c.arguments, &why) orelse break :blk .{ .status = "failed", .@"error" = why.message };
+        const spec = jobSpec(a, c.name, c.arguments, lastImage(s, a), &why) orelse break :blk .{ .status = "failed", .@"error" = why.message };
         const job = s.backend.startJob(a, spec, &why) catch break :blk .{ .status = "failed", .@"error" = why.message };
         job_id = job.id;
         s.mutex.lockUncancelable(s.io);
@@ -60,12 +61,31 @@ fn wait(s: *Session, c: Call) void {
     };
     if (s.close_stop.cancelled()) return;
     s.mutex.lockUncancelable(s.io);
+    if (kind == .image and std.mem.eql(u8, outcome.status, "completed") and outcome.files.len > 0) {
+        if (s.gpa.dupe(u8, outcome.files[0])) |p| {
+            if (s.last_image) |old| s.gpa.free(old);
+            s.last_image = p;
+        } else |_| {}
+    }
     if (!s.closing) s.emit.send(a, "localrouter.job.done", .{ .call_id = c.call_id, .job_id = job_id, .kind = @tagName(kind), .status = outcome.status, .urls = outcome.urls, .@"error" = outcome.@"error" });
     s.mutex.unlock(s.io);
     waitForVoice(s); // the models a video unloaded come back right after it: then say it is ready
     const back = comingBack(s, a);
     const output = std.json.Stringify.valueAlloc(a, .{ .status = outcome.status, .job_id = job_id, .urls = outcome.urls, .@"error" = outcome.@"error", .coming_back = back, .note = if (back.len > 0) "these models were unloaded to make room and come back by themselves" else null }, .{ .emit_null_optional_fields = false }) catch return;
     answer(s, a, c, output);
+}
+
+/// The built-in tools that run a job (the rest answer at once).
+fn isJob(name: []const u8) bool {
+    for ([_][]const u8{ "generate_image", "edit_image", "generate_video" }) |n| if (std.mem.eql(u8, name, n)) return true;
+    return false;
+}
+
+/// The session's last picture's file, copied into `a` ("" when it has made none).
+fn lastImage(s: *Session, a: std.mem.Allocator) []const u8 {
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    return a.dupe(u8, s.last_image orelse return "") catch "";
 }
 
 /// The server's own memory check after a job, so the chat model need not call list_models around a picture or a video:
@@ -133,9 +153,11 @@ fn answer(s: *Session, a: std.mem.Allocator, c: Call, output: []const u8) void {
     s.push(.{ .respond = .{ .auto = true } }) catch {};
 }
 
-/// The job a tool call's arguments ask for; null with `why` set when they are not usable.
-fn jobSpec(a: std.mem.Allocator, kind: backend.JobKind, arguments: []const u8, why: *backend.Why) ?backend.JobSpec {
-    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0 };
+/// The job tool call `name`'s arguments ask for, with `last` the file of the session's last picture ("": none); null
+/// with `why` set when they are not usable. edit_image edits `image` (a URL) or else the last picture; generate_video
+/// with from_last_image starts from the last picture.
+fn jobSpec(a: std.mem.Allocator, name: []const u8, arguments: []const u8, last: []const u8, why: *backend.Why) ?backend.JobSpec {
+    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0, image: []const u8 = "", from_last_image: bool = false };
     const args = std.json.parseFromSliceLeaky(Args, a, arguments, .{ .ignore_unknown_fields = true }) catch {
         why.set("the tool call's arguments are not valid JSON: {s}", .{arguments[0..@min(arguments.len, 200)]});
         return null;
@@ -144,16 +166,39 @@ fn jobSpec(a: std.mem.Allocator, kind: backend.JobKind, arguments: []const u8, w
         why.set("the tool call has no prompt", .{});
         return null;
     }
-    return .{ .kind = kind, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
+    const edit = std.mem.eql(u8, name, "edit_image");
+    var spec: backend.JobSpec = .{ .kind = if (std.mem.eql(u8, name, "generate_video")) .video else .image, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
+    if (edit and args.image.len > 0) {
+        spec.input_url = args.image;
+    } else if (edit or (spec.kind == .video and args.from_last_image)) {
+        if (last.len == 0) {
+            why.set("there is no picture in this conversation yet to {s}: make one with generate_image first", .{if (edit) "edit" else "animate"});
+            return null;
+        }
+        spec.input_file = last;
+    }
+    return spec;
 }
 
-test "a tool call's arguments: a prompt is needed, JSON only" {
+test "a tool call's arguments: a prompt is needed, JSON only; an edit takes the last picture, or says there is none" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var why: backend.Why = .{};
-    try std.testing.expect(jobSpec(a, .image, "{\"prompt\": \"a fox\", \"size\": \"512x512\"}", &why) != null);
-    try std.testing.expect(jobSpec(a, .image, "{\"size\": \"512x512\"}", &why) == null);
+    try std.testing.expect(jobSpec(a, "generate_image", "{\"prompt\": \"a fox\", \"size\": \"512x512\"}", "", &why) != null);
+    try std.testing.expect(jobSpec(a, "generate_image", "{\"size\": \"512x512\"}", "", &why) == null);
     try std.testing.expectEqualStrings("the tool call has no prompt", why.message);
-    try std.testing.expect(jobSpec(a, .video, "not json", &why) == null);
+    try std.testing.expect(jobSpec(a, "generate_video", "not json", "", &why) == null);
+    try std.testing.expect(jobSpec(a, "edit_image", "{\"prompt\": \"make it night\"}", "", &why) == null);
+    try std.testing.expectEqualStrings("there is no picture in this conversation yet to edit: make one with generate_image first", why.message);
+    const e = jobSpec(a, "edit_image", "{\"prompt\": \"make it night\"}", "/jobs/img_1/0.png", &why).?;
+    try std.testing.expectEqual(backend.JobKind.image, e.kind);
+    try std.testing.expectEqualStrings("/jobs/img_1/0.png", e.input_file);
+    const u = jobSpec(a, "edit_image", "{\"prompt\": \"make it night\", \"image\": \"http://x/v1/files/img_2/0.png\"}", "/jobs/img_1/0.png", &why).?;
+    try std.testing.expectEqualStrings("http://x/v1/files/img_2/0.png", u.input_url);
+    try std.testing.expectEqualStrings("", u.input_file);
+    const v = jobSpec(a, "generate_video", "{\"prompt\": \"waves\", \"from_last_image\": true}", "/jobs/img_1/0.png", &why).?;
+    try std.testing.expectEqual(backend.JobKind.video, v.kind);
+    try std.testing.expectEqualStrings("/jobs/img_1/0.png", v.input_file);
+    try std.testing.expectEqualStrings("", jobSpec(a, "generate_video", "{\"prompt\": \"waves\"}", "/jobs/img_1/0.png", &why).?.input_file);
 }

@@ -28,7 +28,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     const tri = try qi.triton_k.specsFromCapture(a, io, cap.dir);
     const source: qi.pipeline.TritonSource = if (tri[0] != null) .{ .specs = tri } else .pack;
-    const p = try qi.pipeline.Pipeline.createEdit(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, side, @intCast(refs.len));
+    const p = try qi.pipeline.Pipeline.createEdit(gpa, io, .{ .dit = args[0], .te = args[1], .vae = args[2] }, source, side, @as(u64, side) * side, @intCast(refs.len));
     defer p.destroy();
     const sig = try p.sigmas(a, height, width, steps);
     const expected_sig = (cap.note("sigmas") orelse return error.NoSigmas).object.get("values").?.array.items;

@@ -60,6 +60,12 @@ test "capabilities: the contract version, and every surface it lists answers as 
     const kinds = try strings(a, get(caps, &.{ "models", "kinds" }));
     for ([_][]const u8{ "chat", "speech", "transcription", "image" }) |k| try testing.expect(has(kinds, k));
     try testing.expect(!get(caps, &.{ "decisions", "available" }).bool); // no decision model here
+    // Edits and image to video follow the models: tp (testpattern) edits; there is no video model here.
+    try testing.expect(has(try strings(a, get(caps, &.{ "models", "capabilities" })), "image_edit"));
+    try testing.expect(get(caps, &.{ "media", "image_edit" }).bool);
+    try testing.expect(!get(caps, &.{ "media", "image_to_video" }).bool);
+    try testing.expect(has(try strings(a, get(caps, &.{ "mcp", "tools" })), "edit_image"));
+    try testing.expect(has(try strings(a, get(caps, &.{ "media", "mcp_tools" })), "edit_image"));
 
     // Each model's licence, as /v1/models lists it: the configured one, and none (omitted) where nothing states one.
     const models = get(try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .GET, "/v1/models", null)).body, .{}), &.{"data"}).array.items;

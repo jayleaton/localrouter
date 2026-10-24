@@ -99,6 +99,9 @@ fn guards(a: std.mem.Allocator) ![]const Guard {
     return out.items;
 }
 
+/// The MCP tools for media and its jobs, as `media.mcp_tools`.
+const media_tools = [_][]const u8{ "generate_image", "edit_image", "generate_video", "transcribe_audio", "synthesize_speech", "get_job", "cancel_job" };
+
 /// One thing a harness might expect that this daemon does not offer (or not yet), and what to do instead.
 const Gap = struct { feature: []const u8, status: []const u8, note: []const u8 };
 
@@ -216,7 +219,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .tool_execution = std.meta.fieldNames(@import("../voice/events.zig").ToolExecution),
             .tool_execution_default = "server",
             .tool_execution_set = "session.update {session: {localrouter: {tool_execution}}} before the first response",
-            .server_tools = .{ .media = cfg.voice.tools, .model_management = cfg.voice.tools and cfg.voice.manage_models, .computer = computer and cfg.computer.voice },
+            .server_tools = .{ .media = cfg.voice.tools, .image_edit = cfg.voice.tools and has(caps.items, .image_edit), .image_to_video = cfg.voice.tools and has(caps.items, .image_to_video), .model_management = cfg.voice.tools and cfg.voice.manage_models, .computer = computer and cfg.computer.voice },
             .client_events = realtime_client_events,
             .server_events = realtime_server_events,
             .extension_events = realtime_extension_events,
@@ -234,6 +237,10 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         .media = .{
             .images = "/v1/images/generations",
             .image_edits = "/v1/images/edits",
+            // from the resolved models (engine.resolve): an image model edits only with its edit pack installed
+            .image_edit = has(caps.items, .image_edit),
+            .image_to_video = has(caps.items, .image_to_video),
+            .mcp_tools = media_tools,
             .videos = "/v1/videos",
             .speech = "/v1/audio/speech",
             .transcriptions = "/v1/audio/transcriptions",
@@ -253,4 +260,12 @@ fn contains(list: []const []const u8, s: []const u8) bool {
 
 test "every gap names a status a client can branch on" {
     for (gaps) |g| try std.testing.expect(std.mem.eql(u8, g.status, "coming") or std.mem.eql(u8, g.status, "unsupported"));
+}
+
+test "every media tool discovery names is an MCP tool, and no gap claims edits or image to video are missing" {
+    for (media_tools) |t| try std.testing.expect(contains(&mcp.tool_name_list, t));
+    for (gaps) |g| {
+        try std.testing.expect(std.mem.indexOf(u8, g.feature, "edit") == null);
+        try std.testing.expect(std.mem.indexOf(u8, g.feature, "image_to_video") == null);
+    }
 }
