@@ -5,6 +5,8 @@ import { hostname, tmpdir } from 'node:os'
 import { extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
+import { AddressError, classify, CodeError, connectionOf, connectView, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tooOld } from './connect.ts'
+import type { ConnectError, Connection, Draft } from './connect.ts'
 import { grantStates } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -19,6 +21,7 @@ import type { ClientToolsSession } from '../harness/realtime.ts'
 import { startRuntime } from '../harness/runtime.ts'
 import type { Runtime } from '../harness/runtime.ts'
 import { normalizeBase, pair, Spark } from '../harness/spark.ts'
+import type { Fetch } from '../harness/spark.ts'
 
 /**
  * LocalRouter for the desktop: the reference harness on the user's computer (docs/HARNESS.md). The models stay on the
@@ -342,26 +345,71 @@ function registerIpc() {
       return fn(...args)
     })
   setup('setup:state', () => state())
-  setup('setup:pair', async (base, code, name) => {
-    const b = normalizeBase(String(base))
-    const caps = await new Spark(b, '').capabilities().catch((error: unknown) => {
-      throw new Error(`That address does not answer as a LocalRouter box: ${error instanceof Error ? error.message : String(error)}`)
-    })
-    if (!caps.realtime?.tool_execution?.includes('client')) throw new Error('That box is too old for this app: it needs client tool execution (contract 2026-10-23). Update it first.')
-    const p = await pair(b, String(code), String(name || settings.name))
-    settings = { ...settings, base: b, device: p.device, name: String(name || settings.name) }
-    saveSettings(settings)
-    saveSecrets({ ...loadSecrets(), token: p.token })
-    await startRuntimeFromSettings()
+  // Connect: the address (checked before any code is spent), the code, the connection, re-pair and disconnect.
+  setup('setup:checkAddress', async (input) => {
+    errors = {}
+    let linkCode: string | null = null
+    try {
+      const text = String(input ?? '').trim()
+      const link = parsePairLink(text)
+      linkCode = link?.code ?? null
+      const b = sparkBase(link ? link.url : text)
+      const caps = await new Spark(b, '', timed(CHECK_S)).capabilities()
+      if (typeof caps?.contract !== 'string') throw new SyntaxError('no contract in /v1/capabilities')
+      if (!supportsApp(caps)) errors.address = tooOld()
+      else draft = { base: b, server: serverOf(caps), repair: Boolean(runtime) && b === settings.base }
+    } catch (error) {
+      errors.address = classify(error, 'address', CHECK_S)
+    }
+    return { ...(await state()), link_code: errors.address ? null : linkCode }
+  })
+  setup('setup:pair', async (code, name) => {
+    if (!draft) throw new Error('Check the Spark address first')
+    delete errors.code
+    try {
+      const c = normalizeCode(String(code ?? ''))
+      if (!c) throw new CodeError('not a code')
+      const nm = String(name || settings.name).trim() || settings.name
+      const p = await pair(draft.base, c, nm, timed(PAIR_S))
+      settings = { ...settings, base: draft.base, device: p.device, name: nm }
+      saveSettings(settings)
+      saveSecrets({ ...loadSecrets(), token: p.token })
+      draft = null
+      errors = {}
+      await startRuntimeFromSettings()
+      await checkConnection()
+    } catch (error) {
+      errors.code = classify(error, 'code', PAIR_S)
+    }
     return state()
   })
-  setup('setup:unpair', async () => {
+  setup('setup:check', async () => {
+    await checkConnection()
+    return state()
+  })
+  // Pairs again with the same Spark; the working token stays until a new code replaces it.
+  setup('setup:repair', async () => {
+    if (settings.base) draft = { base: settings.base, server: connection?.ok ? connection.server : null, repair: true }
+    errors = {}
+    return state()
+  })
+  setup('setup:cancel', async () => {
+    draft = null
+    errors = {}
+    return state()
+  })
+  // Forgets the Spark here: its token, the older clients' token and the address. The box keeps the entry until revoked there.
+  setup('setup:disconnect', async () => {
     await stopRuntime()
-    settings = { ...settings, device: null, legacy: false }
+    settings = { ...settings, base: '', device: null, legacy: false }
     saveSettings(settings)
     saveSecrets({ token: '', legacy_token: '' })
+    draft = null
+    connection = null
+    errors = {}
     return state()
   })
+  setup('setup:discover', () => discoverSparks())
   setup('setup:resetGrant', async (kind) => {
     if (process.platform !== 'darwin') return { ok: false, text: 'not a Mac', state: await state() }
     const r = await resetGrant(kind === 'screen' ? 'ScreenCapture' : 'Accessibility')
@@ -503,7 +551,87 @@ const PANES: Record<string, string> = {
   screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
 }
 
+// ------------------------------------------------------------------ connect: the address, the code, the connection
+
+const CHECK_S = 8
+const PAIR_S = 15
+let draft: Draft | null = null
+let connection: Connection | null = null
+let errors: Partial<Record<'address' | 'code', ConnectError>> = {}
+
+/** fetch with a time limit, so a host that never answers is an error the page can name, not a spinner. */
+const timed = (s: number): Fetch => (input, init) => {
+  const limit = AbortSignal.timeout(s * 1000)
+  return fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, limit]) : limit })
+}
+
+/** The Spark's base URL from what was typed, or an AddressError saying why not. */
+function sparkBase(text: string): string {
+  if (!text) throw new AddressError('Enter the address your Spark answers on')
+  try {
+    return normalizeBase(text)
+  } catch (error) {
+    throw new AddressError(error instanceof Error && !/invalid url/i.test(error.message) ? error.message : 'That does not read as an address')
+  }
+}
+
+/** The connection step: the box's discovery document and what it says about this token, both open reads. */
+async function checkConnection() {
+  if (!runtime) {
+    connection = null
+    return
+  }
+  try {
+    const spark = new Spark(settings.base, loadSecrets().token, timed(CHECK_S))
+    const [caps, who] = await Promise.all([spark.capabilities(), spark.whoami()])
+    connection = connectionOf(caps, who, Date.now())
+  } catch (error) {
+    connection = { ok: false, at: Date.now(), error: classify(error, 'connection', CHECK_S) }
+  }
+  log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
+}
+
+const TAILSCALE = ['/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', '/usr/bin/tailscale']
+
+function tailscaleStatus(): Promise<unknown> {
+  const tryAt = (i: number): Promise<unknown> =>
+    i >= TAILSCALE.length
+      ? Promise.resolve(null)
+      : new Promise((resolve) => {
+          if (!existsSync(TAILSCALE[i])) return resolve(tryAt(i + 1))
+          execFile(TAILSCALE[i], ['status', '--json'], { timeout: 4000, maxBuffer: 8 << 20 }, (error, stdout) => {
+            if (error && !stdout) return resolve(tryAt(i + 1))
+            try {
+              resolve(JSON.parse(stdout))
+            } catch {
+              resolve(tryAt(i + 1))
+            }
+          })
+        })
+  return tryAt(0)
+}
+
+/**
+ * LocalRouter boxes on this Mac's tailnet: each online peer's MagicDNS name, asked for `/v1/capabilities` (open, no
+ * secrets) at `tailscale serve`'s ports. `tailnet`: whether Tailscale runs here, so the page can say so.
+ */
+async function discoverSparks(): Promise<{ tailnet: 'running' | 'off'; found: Array<{ base: string; host: string; version: string; machine: string }> }> {
+  const peers = tailnetPeers(await tailscaleStatus())
+  if (!peers) return { tailnet: 'off', found: [] }
+  const probes = peers.slice(0, 16).map(async (p) => {
+    for (const base of peerBases(p)) {
+      const caps = await new Spark(base, '', timed(3)).capabilities().catch(() => null)
+      if (caps && typeof caps.contract === 'string') return { base, host: p.host, version: caps.server?.version ?? '', machine: caps.server?.machine ?? '' }
+    }
+    return null
+  })
+  const found = (await Promise.all(probes)).filter((f) => f !== null)
+  log.info('connect.discover', { peers: peers.length, found: found.length })
+  return { tailnet: 'running', found }
+}
+
 async function state() {
+  const permissionState = await permissions()
   const callers = runtime?.executor.enrollment.list().map((c) => ({ id: c.id, name: c.name, created: c.created })) ?? []
   return {
     version: VERSION,
@@ -517,7 +645,8 @@ async function state() {
     secrets: safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only',
     control: runtime ? !runtime.executor.broker.disabled : false,
     machine: machineKind(),
-    permissions: await permissions(),
+    permissions: permissionState,
+    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
     mcp: { command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), socket: executorSocket(dir) },
@@ -633,9 +762,15 @@ async function smoke() {
     result.executor = caps.ok ? caps.result : caps.error
     result.secrets = safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only'
     result.presence = gate.method
+    // The settings window: its page draws the steps, and an address that refuses is named as such through the IPC.
+    const setupWin = new BrowserWindow({ show: false, webPreferences })
+    await setupWin.loadURL(`${ORIGIN}/setup.html`)
+    result.setup = await setupWin.webContents.executeJavaScript('new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:9")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind }))')
     const page = result.page as { shim: boolean; bridge: boolean }
     const status = result.status as { computers: number; placement: string }
-    ok = page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502
+    const setupPage = result.setup as { version: string; error: string }
+    ok = page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502 && setupPage.version === VERSION && setupPage.error === 'refused'
+    setupWin.destroy()
     win.destroy()
   } catch (error) {
     result.error = error instanceof Error ? error.stack ?? error.message : String(error)
