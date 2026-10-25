@@ -24,6 +24,8 @@ pub const Registry = struct {
     closed: bool = false,
     io: ?Io = null, // set by `notifier`
     gpa: ?std.mem.Allocator = null,
+    remote_calls: std.atomic.Value(u32) = .init(0), // voice calls open on the front of a multi-node topology (`api/node.zig`)
+    remote_until_ns: std.atomic.Value(i64) = .init(0), // until then: the front tells it again with each health check
 
     fn bind(r: *Registry, io: Io, gpa: std.mem.Allocator, s: *Session) void {
         r.mutex.lockUncancelable(io);
@@ -47,10 +49,21 @@ pub const Registry = struct {
         return .{ .ctx = r, .paused = paused, .resumed = resumed, .sessions = openSessions };
     }
 
+    /// The scheduler's count of open calls: this daemon's sessions, and those the front last said it has open (a node
+    /// of a multi-node topology guards the voice loop's models for the front's calls as for its own).
     fn openSessions(ctx: *anyopaque) usize {
         const r: *Registry = @ptrCast(@alignCast(ctx));
         const io = r.io orelse return 0;
-        return r.count(io);
+        const now: i64 = @intCast(Io.Clock.awake.now(io).toNanoseconds());
+        const remote: usize = if (now < r.remote_until_ns.load(.acquire)) r.remote_calls.load(.acquire) else 0;
+        return r.count(io) + remote;
+    }
+
+    /// The front has `n` voice calls open; it says so again within `valid_ms`, or they are taken as ended.
+    pub fn remoteCalls(r: *Registry, io: Io, n: u32, valid_ms: i64) void {
+        const now: i64 = @intCast(Io.Clock.awake.now(io).toNanoseconds());
+        r.remote_calls.store(n, .release);
+        r.remote_until_ns.store(now + valid_ms * std.time.ns_per_ms, .release);
     }
 
     fn paused(ctx: *anyopaque, model: []const u8, for_model: []const u8) void {

@@ -117,6 +117,29 @@ pub const Computer = struct {
     approval_timeout_s: u32 = 60, // how long a tap may take before the step is refused
 };
 
+/// How many machines serve this LocalRouter (`src/topology.zig`, docs/dev/MULTI-SPARK.md). `single` (the default): this
+/// daemon is the whole box, as before. `multi`: several node daemons, each admitting its own models against its own
+/// memory and GPU lock; one of them, the front, serves the API for all of them and sends each request to the node that
+/// hosts its model.
+pub const Topology = struct {
+    mode: enum { single, multi } = .single,
+    self: []const u8 = "", // this daemon's node id (`serve --node` overrides it)
+    nodes: []const Node = &.{},
+    token_file: []const u8 = "", // a file holding the bearer token the front sends to the other nodes (a paired device's)
+    health_interval_ms: u32 = 2000, // how often the front asks each node how it is
+    down_after: u32 = 3, // missed health answers in a row before a node counts as down
+};
+
+/// One machine of a multi-node topology.
+pub const Node = struct {
+    id: []const u8,
+    addresses: []const []const u8, // IPv4 addresses of its daemon, tried in order (both ConnectX-7 links, then the LAN)
+    port: u16 = 8190,
+    role: enum { front, node } = .node,
+    models: []const []const u8 = &.{}, // the tools it runs (ids in `tools`)
+    fallback: []const []const u8 = &.{}, // front only: tools of other nodes it runs itself while their node is down
+};
+
 pub const Config = struct {
     host: []const u8 = bind.default_host, // an IP, localhost, all (0.0.0.0) or tailscale (this machine's tailnet IPv4)
     port: u16 = 8190,
@@ -133,6 +156,7 @@ pub const Config = struct {
     voice: Voice = .{},
     pairing: Pairing = .{},
     computer: Computer = .{},
+    topology: Topology = .{},
     tools: []const ToolConfig = &default_tools,
 
     pub fn tool(c: *const Config, id: []const u8) ?*const ToolConfig {

@@ -99,6 +99,9 @@ test {
     _ = @import("api/decide.zig");
     _ = @import("tool/systemone.zig");
     _ = @import("tool/upstream.zig");
+    _ = @import("tool/node.zig");
+    _ = @import("topology.zig");
+    _ = @import("api/node.zig");
     _ = @import("engines/openai_server.zig");
     _ = @import("media/audio.zig");
     _ = @import("api/realtime.zig");
