@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The companion app's Connect window is a step flow in the `/voice` page's look: the Spark address (offered from the
+  Mac's tailnet when Tailscale runs there, checked before a code is spent; a `localrouter://pair` link fills in both),
+  the pairing code with what `pair.sh add` does, the connection (the box, the token's scopes, what it can use from
+  `/v1/capabilities`), and the macOS permissions with the stale-grant card. Each failure is named with its fix: a host
+  that does not resolve, answer or listen, a timeout, a certificate problem, something other than LocalRouter, a box
+  too old, a wrong or expired code, a revoked token. **Re-pair** and **Disconnect** replace **Unpair**. The pairing
+  protocol and auth are unchanged.
 - `tools/jarvis/smoke.sh`'s `stt` check finds its pinned LibriSpeech fixture in `fetch.py`'s cache
   (`~/.cache/localrouter-speech/fixtures`) as well as under `~/jarvis`, and builds it with `fetch.py` (pinned, checked
   download) when it is nowhere. A cleanup of scratch directories under `~/jarvis` had removed the only copy, and every

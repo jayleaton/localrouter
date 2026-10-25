@@ -1,32 +1,129 @@
 'use strict';
+// The settings window. The Connect steps come computed from the main process (src/app/connect.ts): this page draws
+// them, sends what is typed and shows what went wrong. It never sees the device token.
 const $ = (id) => document.getElementById(id);
 const api = window.companion.setup;
+let last = null;
+let confirming = false;
+let discovered = null;
 
-function show(error) {
-  const e = $('pairError');
-  e.hidden = !error;
-  e.textContent = error ? String(error.message || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : '';
+const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not a Mac' };
+const PERM_DOT = { granted: 'ready', stale: 'failed', denied: 'failed' };
+
+const ipcMessage = (error) => String((error && error.message) || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+/** Text with `commands` in backticks, as code. */
+function withCode(el, text) {
+  el.replaceChildren(...String(text).split('`').map((part, i) => {
+    if (i % 2 === 0) return part;
+    const c = document.createElement('code');
+    c.textContent = part;
+    return c;
+  }));
+  return el;
 }
 
-function render(s) {
+/** An error card: what went wrong, what to do, and the technical detail under it. */
+function alertCard(el, error) {
+  el.hidden = !error;
+  if (!error) return el.replaceChildren();
+  const title = document.createElement('b');
+  title.textContent = error.title;
+  const parts = [title];
+  if (error.hint) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    parts.push(withCode(hint, error.hint));
+  }
+  if (error.detail && error.detail !== error.hint) {
+    const detail = document.createElement('p');
+    detail.className = 'detail';
+    detail.textContent = error.detail;
+    parts.push(detail);
+  }
+  el.replaceChildren(...parts);
+}
 
-  $('version').textContent = s.version;
-  $('unpaired').hidden = s.paired;
-  $('paired').hidden = !s.paired;
+function chip(text, small) {
+  const c = document.createElement('span');
+  c.className = 'chip';
+  c.textContent = text;
+  if (small) {
+    const s = document.createElement('small');
+    s.textContent = ` ${small}`;
+    c.append(s);
+  }
+  return c;
+}
+
+function renderSteps(s) {
+  const c = s.connect;
+  const byId = Object.fromEntries(c.steps.map((st) => [st.id, st]));
+  for (const st of c.steps) {
+    $(`step-${st.id}`).dataset.s = st.status;
+    $(`sum-${st.id}`).textContent = st.summary;
+  }
+  const repairing = Boolean(c.draft && c.draft.repair);
+
+  // 1. Address: open until it is checked; Change goes back to it before pairing.
+  $('open-address').hidden = byId.address.status === 'done';
+  $('changeAddress').hidden = !(byId.address.status === 'done' && !s.paired);
+  alertCard($('err-address'), c.errors.address);
+  const typed = $('base').value.trim();
+  if (!typed) $('base').value = (c.draft && c.draft.base) || s.base || '';
+
+  // 2. Code: open once the address answers, while not paired or re-pairing.
+  $('open-code').hidden = byId.address.status !== 'done' || (s.paired && !repairing);
+  $('pairCmd').textContent = `deploy/jarvis/pair.sh add "${$('name').value.trim() || s.name}" --scopes inference,media,read`;
+  $('cancelRepair').hidden = !repairing;
+  $('pair').textContent = repairing ? 'Pair again' : 'Pair';
+  $('repairNote').hidden = !(repairing && s.device);
+  if (repairing && s.device) $('repairNote').textContent = `The Spark keeps the current entry (“${s.device.name}”) until you revoke it there: deploy/jarvis/pair.sh revoke ${s.device.id}`;
+  alertCard($('err-code'), c.errors.code);
+
+  // 3. Connection: the box, this token's scopes and what it can use; re-pair and disconnect.
+  const conn = c.connection;
+  $('open-connection').hidden = !s.paired || repairing;
+  alertCard($('err-connection'), conn && !conn.ok ? conn.error : null);
+  $('warn-connection').hidden = !(conn && conn.ok && conn.warning);
+  $('warn-connection').textContent = conn && conn.ok && conn.warning ? conn.warning : '';
+  $('linked').hidden = !(conn && conn.ok);
   $('pairedBase').textContent = s.base;
   $('pairedName').textContent = s.device ? s.device.name : s.name;
-  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted with the OS keychain' : 'for this run only (no keychain)';
-  if (!$('name').value) $('name').value = s.name;
-  $('suggestName').textContent = s.name;
-  for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
-  if (s.base && !$('base').value) $('base').value = s.base;
+  if (conn && conn.ok) {
+    $('serverText').textContent = [`LocalRouter ${conn.server.version}`, conn.server.machine && `on ${conn.server.machine}`, conn.server.contract && `· contract ${conn.server.contract}`].filter(Boolean).join(' ');
+    const scopes = conn.scopes.length ? conn.scopes.map((sc) => chip(sc.name, sc.label)) : [chip('every service', '(paired before scopes)')];
+    if (!conn.pairing_required) scopes.push(chip('pairing is off on the Spark', ''));
+    $('scopes').replaceChildren(...scopes);
+    $('caps').replaceChildren(...conn.capabilities.map((cap) => {
+      const li = document.createElement('li');
+      li.className = cap.ok ? '' : 'no';
+      li.textContent = cap.label;
+      const d = document.createElement('span');
+      d.textContent = cap.detail;
+      d.title = cap.detail;
+      li.append(d);
+      return li;
+    }));
+  }
+  // A token the Spark refuses: re-pairing is the way on.
+  $('open').hidden = Boolean(conn && !conn.ok);
+  $('repair').classList.toggle('primary', Boolean(conn && !conn.ok && conn.error.kind === 'revoked'));
+  $('checkedAt').textContent = conn ? `Checked ${new Date(conn.at).toLocaleTimeString()}` : 'Checking…';
+  $('confirmDisconnect').hidden = !confirming || !s.paired;
+  $('revokeCmd').textContent = `deploy/jarvis/pair.sh revoke ${s.device ? s.device.id : `"${s.name}"`}`;
+
+  // The header pill.
+  const pill = $('linkPill');
+  const host = (s.base || '').replace(/^https?:\/\//, '').split(/[.:]/)[0];
+  if (!s.paired) [pill.dataset.s, $('linkText').textContent] = ['offline', 'Not connected'];
+  else if (!conn) [pill.dataset.s, $('linkText').textContent] = ['loading', `Checking ${host}…`];
+  else if (!conn.ok) [pill.dataset.s, $('linkText').textContent] = ['failed', `${host}: ${conn.error.kind === 'revoked' ? 'needs re-pairing' : 'not reachable'}`];
+  else [pill.dataset.s, $('linkText').textContent] = ['ready', `Connected to ${host}`];
+}
+
+function renderPermissions(s) {
   const p = s.permissions;
-  const word = (v) => (v === 'granted' ? 'granted' : v === 'n/a' ? 'not a Mac' : v === 'stale' ? 'kept from an older build: grant it again' : v.replace('-', ' '));
-  const stale = p.stale || {};
-  $('stale').hidden = !(stale.accessibility || stale.screen);
-  $('staleText').textContent = s.stale_message;
-  $('staleAx').hidden = $('resetAx').hidden = !stale.accessibility;
-  $('staleScreen').hidden = $('resetScreen').hidden = !stale.screen;
   // Linux and Windows: the platform's own list of what it needs, each with how to get it.
   const reqs = p.requirements || null;
   $('macPerms').hidden = Boolean(reqs);
@@ -35,39 +132,104 @@ function render(s) {
     $('osBackend').textContent = p.backend || 'this computer';
     $('osReqs').replaceChildren(...reqs.map((r) => {
       const row = document.createElement('div');
-      row.className = 'row';
+      row.className = 'perm';
       const name = document.createElement('span');
-      name.textContent = `${r.label} (${r.for})`;
-      const status = document.createElement('span');
-      status.className = 'status';
-      status.textContent = r.granted === true ? 'ready' : r.granted === false ? (r.fix || 'missing') : 'asked on first use';
-      row.append(name, status);
+      name.className = 'pname';
+      name.textContent = r.label;
+      const why = document.createElement('small');
+      why.textContent = `for ${r.for}`;
+      name.append(why);
+      const pill = document.createElement('span');
+      pill.className = 'pill';
+      pill.dataset.s = r.granted === true ? 'ready' : r.granted === false ? 'failed' : 'loading';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      pill.append(dot, r.granted === true ? 'ready' : r.granted === false ? 'missing' : 'asked on first use');
+      row.append(name, pill);
+      if (r.granted === false && r.fix) {
+        const fix = document.createElement('small');
+        fix.className = 'note';
+        fix.textContent = r.fix;
+        row.append(fix);
+      }
       return row;
     }));
+    return;
   }
+  for (const k of ['microphone', 'accessibility', 'screen']) {
+    const row = $(`perm-${k}`);
+    const v = p[k];
+    row.querySelector('.pill').dataset.s = PERM_DOT[v] || (v === 'n/a' ? 'offline' : 'loading');
+    row.querySelector('.pstate').textContent = PERM_WORD[v] || v.replace('-', ' ');
+    row.querySelector('button').hidden = v === 'granted' || v === 'n/a';
+  }
+  const stale = p.stale || {};
+  $('stale').hidden = !(stale.accessibility || stale.screen);
+  $('staleText').textContent = s.stale_message;
+  $('staleAx').hidden = $('resetAx').hidden = !stale.accessibility;
+  $('staleScreen').hidden = $('resetScreen').hidden = !stale.screen;
+}
+
+function renderFound() {
+  const box = $('found');
+  const note = $('tailnetNote');
+  if (!discovered) {
+    box.hidden = true;
+    note.textContent = 'Looking for LocalRouter on your tailnet…';
+    return;
+  }
+  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this Mac (or not signed in): start it to find your Spark here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
+  box.hidden = discovered.found.length === 0;
+  box.replaceChildren(...discovered.found.map((f) => {
+    const b = document.createElement('button');
+    b.className = 'pill';
+    b.dataset.s = 'ready';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    const small = document.createElement('small');
+    small.textContent = [f.version && `LocalRouter ${f.version}`, f.machine].filter(Boolean).join(' · ');
+    b.append(dot, `${f.base.replace(/^https:\/\//, '')} `, small);
+    b.onclick = () => {
+      $('base').value = f.base;
+      checkAddress();
+    };
+    return b;
+  }));
+}
+
+function render(s) {
+  last = s;
+  $('version').textContent = s.version;
+  if (!$('name').value) $('name').value = s.name;
+  for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
+  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted with the OS keychain' : 'for this run only (no keychain here)';
   if (s.stop_words) $('stopWords').textContent = s.stop_words;
-  $('pMic').textContent = word(p.microphone);
-  $('pAx').textContent = word(p.accessibility);
-  $('pScreen').textContent = word(p.screen);
+  renderSteps(s);
+  renderPermissions(s);
+  renderFound();
   $('control').checked = s.control;
   $('control').disabled = !s.paired;
   $('presence').textContent = s.presence;
   $('folders').replaceChildren(...s.shared.map((f) => {
     const li = document.createElement('li');
-    li.textContent = f + ' ';
+    const t = document.createElement('span');
+    t.textContent = f;
     const b = document.createElement('button');
+    b.className = 'btn';
     b.textContent = 'Remove';
-    b.onclick = async () => render(await api.removeFolder(f));
-    li.append(b);
+    b.onclick = () => guarded(() => api.removeFolder(f));
+    li.append(t, b);
     return li;
   }));
   $('callers').replaceChildren(...s.callers.map((c) => {
     const li = document.createElement('li');
-    li.textContent = `${c.name} (since ${new Date(c.created).toLocaleDateString()}) `;
+    const t = document.createElement('span');
+    t.textContent = `${c.name} (since ${new Date(c.created).toLocaleDateString()})`;
     const b = document.createElement('button');
+    b.className = 'btn';
     b.textContent = 'Revoke';
-    b.onclick = async () => render(await api.revoke(c.id));
-    li.append(b);
+    b.onclick = () => guarded(() => api.revoke(c.id));
+    li.append(t, b);
     return li;
   }));
   $('enroll').disabled = !s.paired;
@@ -76,31 +238,93 @@ function render(s) {
   $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? 'connected to the Spark' : 'connecting…') : '';
 }
 
-async function guarded(work) {
-  show(null);
+/** Runs `work` with `button` showing it is busy; an error the main process threw goes into `errorEl`. */
+async function guarded(work, button, busyText, errorEl) {
+  const label = button && button.textContent;
+  if (button) {
+    button.disabled = true;
+    button.classList.add('busy');
+    if (busyText) button.textContent = busyText;
+  }
+  if (errorEl) alertCard(errorEl, null);
   try {
-    render(await work());
+    const s = await work();
+    if (s && s.connect) render(s);
+    return s;
   } catch (error) {
-    show(error);
+    const el = errorEl || $('err-general');
+    alertCard(el, { title: ipcMessage(error) });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('busy');
+      if (busyText) button.textContent = label;
+    }
   }
 }
 
-$('pair').onclick = () => guarded(async () => {
-  const s = await api.pair($('base').value, $('code').value, $('name').value);
-  $('code').value = '';
-  return s;
-});
-$('unpair').onclick = () => guarded(() => api.unpair());
+async function checkAddress() {
+  const s = await guarded(() => api.checkAddress($('base').value), $('checkAddress'), 'Checking…');
+  if (s && s.link_code) $('code').value = s.link_code;
+  if (s && !s.connect.errors.address) $(s.link_code ? 'pair' : 'code').focus();
+}
+
+async function discover() {
+  discovered = null;
+  renderFound();
+  try {
+    discovered = await api.discover();
+  } catch {
+    discovered = { tailnet: 'off', found: [] };
+  }
+  // One box on the tailnet and nothing typed: that is the Spark.
+  if (discovered.found.length === 1 && !$('base').value.trim()) $('base').value = discovered.found[0].base;
+  renderFound();
+}
+
+$('checkAddress').onclick = checkAddress;
+$('base').addEventListener('keydown', (e) => e.key === 'Enter' && checkAddress());
+// A pasted pairing link carries the address and the code: check it straight away.
+$('base').addEventListener('paste', () => setTimeout(() => /^localrouter:\/\//i.test($('base').value.trim()) && checkAddress()));
+$('changeAddress').onclick = () => guarded(() => api.cancel()).then(() => $('base').focus());
+$('name').addEventListener('input', () => last && renderSteps(last));
+$('code').addEventListener('keydown', (e) => e.key === 'Enter' && $('pair').click());
+$('copyCmd').onclick = async () => {
+  await navigator.clipboard.writeText($('pairCmd').textContent).catch(() => undefined);
+  $('copyCmd').textContent = 'Copied';
+  setTimeout(() => ($('copyCmd').textContent = 'Copy'), 1500);
+};
+$('pair').onclick = async () => {
+  const s = await guarded(() => api.pair($('code').value, $('name').value), $('pair'), 'Pairing…');
+  if (s && !s.connect.errors.code) $('code').value = '';
+};
+$('cancelRepair').onclick = () => guarded(() => api.cancel());
+$('check').onclick = () => guarded(() => api.check(), $('check'), 'Checking…');
+$('repair').onclick = () => guarded(() => api.repair()).then(() => $('code').focus());
+$('disconnect').onclick = () => {
+  confirming = true;
+  if (last) renderSteps(last);
+};
+$('disconnectNo').onclick = () => {
+  confirming = false;
+  if (last) renderSteps(last);
+};
+$('disconnectYes').onclick = async () => {
+  confirming = false;
+  await guarded(() => api.disconnect(), $('disconnectYes'), 'Disconnecting…');
+  discover();
+};
 $('open').onclick = () => api.openVoice();
-for (const b of document.querySelectorAll('[data-perm]')) b.onclick = () => guarded(() => api.permission(b.dataset.perm));
-for (const b of document.querySelectorAll('[data-pane]')) b.onclick = () => guarded(() => api.permission(b.dataset.pane));
+$('recheck').onclick = () => guarded(() => api.state(), $('recheck'), 'Checking…');
+for (const b of document.querySelectorAll('[data-perm]')) b.onclick = () => guarded(() => api.permission(b.dataset.perm), b);
+for (const b of document.querySelectorAll('[data-pane]')) b.onclick = () => guarded(() => api.permission(b.dataset.pane), b);
 for (const b of document.querySelectorAll('[data-reset]')) b.onclick = () => guarded(async () => {
   const r = await api.resetGrant(b.dataset.reset);
   const out = $('resetResult');
   out.hidden = false;
   out.textContent = r.ok ? 'Reset. Switch LocalRouter on in the list that opened, then Quit and reopen.' : `macOS did not reset it (${r.text}): remove LocalRouter in the list by hand, add it again, then Quit and reopen.`;
   return r.state;
-});
+}, b);
 $('relaunch').onclick = () => api.relaunch();
 $('control').onchange = () => guarded(() => api.control($('control').checked));
 $('addFolder').onclick = () => guarded(() => api.addFolder());
@@ -112,11 +336,19 @@ $('enroll').onclick = () => guarded(async () => {
   $('enrolled').textContent = `Token for ${r.caller.name} (shown once):\n${r.token}\n\nMCP config:\n${JSON.stringify(cfg, null, 2)}`;
   $('callerName').value = '';
   return r.state;
-});
-$('legacy').onchange = () => guarded(() => api.legacy($('legacy').checked, $('legacyCode').value));
+}, $('enroll'));
+$('legacy').onchange = () => guarded(() => api.legacy($('legacy').checked, $('legacyCode').value), null, null, $('err-legacy'));
 $('export').onclick = async () => {
   const path = await api.exportConversations();
   $('exported').textContent = path ? `saved to ${path}` : '';
 };
-window.addEventListener('focus', () => guarded(() => api.state()));
-guarded(() => api.state());
+
+// The connection is checked when the window opens and again on focus once it is a minute old.
+async function refresh() {
+  const s = await guarded(() => api.state());
+  if (s && s.paired && (!s.connect.connection || Date.now() - s.connect.connection.at > 60_000)) await guarded(() => api.check());
+}
+window.addEventListener('focus', refresh);
+refresh().then(() => {
+  if (last && !last.paired) discover();
+});

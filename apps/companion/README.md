@@ -41,14 +41,28 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
    › Privacy & Security › **Open Anyway**.
 3. On the Spark, make a pairing code (ten minutes, single use):
    `deploy/jarvis/pair.sh add "JJ's MacBook" --scopes inference,media,read`
-4. In LocalRouter's first window, enter the Spark address (`https://<spark>.<tailnet>.ts.net:10443`, the
-   `tailscale serve` one; the Mac must be on the tailnet), the computer's name and the code, then **Pair**. The token
-   is kept in the macOS keychain.
-5. Permissions, from the same window: **Microphone** (for calls), **Accessibility** (to control the Mac) and
-   **Screen Recording** (for apps that hide their window from accessibility). Add LocalRouter in each System Settings
-   list, then quit and reopen LocalRouter. macOS asks about **Automation** (System Events, Chrome, Music…) the first
-   time Jarvis uses each app.
-6. **Open Jarvis**: the familiar page. Call with the mic button, chat, generations appear in the reel. Ask it to do
+4. LocalRouter's first window, **Connect**, walks four steps:
+   1. **Spark address**: the `https://<spark>.<tailnet>.ts.net:10443` one `tailscale serve` gives the box (the Mac must
+      be on the tailnet). If Tailscale runs on the Mac, the app asks each online peer's MagicDNS name for
+      `/v1/capabilities` and offers the LocalRouter boxes it finds (one found and nothing typed: filled in).
+      **Continue** checks the address before any code is spent. Pasting the `localrouter://pair?...` link `pair.sh add`
+      prints fills in the code too.
+   2. **Pairing code**: the computer's name and the code, then **Pair**. The token is kept in the macOS keychain.
+   3. **Connection**: the box (version, machine, contract), this token's scopes and what it can use (chat, calls,
+      pictures, video, speech, transcription, decisions, MCP), checked when the window opens and again on focus.
+      **Re-pair** trades a new code for a new token (the old one works until then; revoke its entry on the Spark).
+      **Disconnect** forgets the Spark on this Mac.
+   4. **Permissions**: **Microphone** (for calls), **Accessibility** (to control the Mac) and **Screen Recording** (for
+      apps that hide their window from accessibility). Add LocalRouter in each System Settings list, then quit and
+      reopen LocalRouter. macOS asks about **Automation** (System Events, Chrome, Music…) the first time Jarvis uses
+      each app.
+
+   Each failure says what it was and what to do: an address that does not resolve or answer (Tailscale off, wrong
+   name, nothing on that port, no answer within 8 s), a certificate the Mac does not trust (an IP address instead of
+   the `.ts.net` name, an expired certificate, HTTP on an HTTPS port), something that is not LocalRouter, a box too old
+   for the app, a code that is not a code (checked here, so a typo never counts toward the box's five wrong codes), a
+   wrong, expired or used code, and a token the box no longer accepts.
+5. **Open Jarvis**: the familiar page. Call with the mic button, chat, generations appear in the reel. Ask it to do
    something on the Mac ("open Safari", "search my notes for groceries"); anything consequential shows an approval
    card in the page and Touch ID confirms it. **Stop**: the card's Stop button, ⌘⇧⎋, the menu bar's **LR** menu, or
    the pointer in the top-left corner of the screen.
