@@ -208,7 +208,7 @@ fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8, vo
     for ([_]bool{ true, false }) |with_voice| for (app.cfg.voice.speech_models) |id| {
         const c = app.cfg.tool(id) orelse continue;
         if (!engine.supports(c, .text_to_speech) or engine.unqualified(app.io, a, c, &buf) != null) continue;
-        if ((voice.len > 0 and engine.hasVoice(c, voice)) == with_voice) try list.append(a, id);
+        if ((voice.len > 0 and routes.hasVoice(app, c, voice)) == with_voice) try list.append(a, id);
     };
     if (list.items.len == 0) try list.append(a, null);
     return list.items;
@@ -258,7 +258,7 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
 /// (the model's default voice).
 fn voiceFor(app: *App, model: ?[]const u8, wanted: []const u8) []const u8 {
     const c = app.cfg.tool(model orelse return wanted) orelse return wanted;
-    if (wanted.len == 0 or engine.voices(c) == null or engine.hasVoice(c, wanted)) return wanted;
+    if (wanted.len == 0 or engine.voices(c) == null or routes.hasVoice(app, c, wanted)) return wanted;
     std.log.warn("voice: {s} has no voice '{s}'; speaking in its default voice", .{ c.id, wanted });
     return "";
 }

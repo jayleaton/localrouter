@@ -6,11 +6,12 @@
     {
       "id": "fishaudio/drama-3",
       "kind": "speech",
+      "capabilities": ["text_to_speech", "voice_clone"],
       "name": "Fish Audio Drama 3 (TensorFold native, 44.1 kHz). Built with Fish Audio",
       "cmd": ["/usr/bin/python3", "-I", "/opt/localrouter/tools/speech/drama3/drama3_worker.py"],
       "weights": "/data/models/drama3",
       "qualification": "/data/models/drama3/nvfp4-qualification.json",
-      "resident_bytes": 22075092992,
+      "resident_bytes": 22309502976,
       "working_bytes": 0,
       "keep_loaded": true,
       "priority": 50,
@@ -31,7 +32,8 @@
         "port": 18793,
         "max_frames": 1024,
         "long_form": false,
-        "verify": "size"
+        "verify": "size",
+        "clone_working_bytes": 2147483648
       }
     }
   ]

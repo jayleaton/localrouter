@@ -6,9 +6,27 @@ Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on std
     {"op":"load"}                                   -> {"ok":true,"resident":0,"cancel":"signal"}
     SIGUSR1 during a generate                       -> {"ok":false,"type":"cancelled"} (the server connection closed, still loaded)
     {"op":"generate","id","dir","request":{"speech":{"input":"Hello.","voice":"default","stream":false,
-        "references":""}}}                          -> {"ok":true,"files":["speech.wav"],"seed":0,"ms":…,
+        "references":"","voice_references":""}}}    -> {"ok":true,"files":["speech.wav"],"seed":0,"ms":…,
                                                         "finish_reason":"stop","segments":""}
+    {"op":"generate","id","dir","request":{"speech":{"input":"","clone":"clone.json"}}}
+                                                    -> {"ok":true,"files":["voice.json"],"seed":0,"ms":…}
     {"op":"exit"}
+
+`references` and `voice_references` name JSON files in the job directory, each a list of {text, vq_codes} (the latter
+may be a clone's whole voice.json; only text and vq_codes are sent). With
+`voice_references` (a cloned voice's, voice.json's `references`) the server gets the request's references and then
+those, and no `voice`: the built-in voice with exactly these references; `voice` then names the clone for the logs only.
+Otherwise a `voice` of "" or "default" is sent as the tool's `default_voice` (when that is not "default"): the worker,
+not the server's --default-voice, names it, so a clone's request is not given the default voice's references too, and
+every other request builds the same prompt rows, so the same audio, as before.
+
+`clone` (clone.json: {"name", "references": [{"audio": "ref0.wav", "text": the clip's exact words}]}, 1 to 8 clips
+the daemon has trimmed and levelled, 16-bit mono 44.1 kHz, at most 30 s each) encodes a voice: each clip through the
+engine binary's `voice encode` (its codec encoder on the GPU, BF16, the running server untouched; ENCODE_TIMEOUT_S a
+clip), into voice.json: {"format": "localrouter-voice-codes/1", "references": [{"text", "vq_codes" (10 x frames),
+"frames", "audio_sha256"}], "encoder": the first clip's, "native_sha256": the engine binary's}. A clip or transcript the
+encoder refuses is invalid_request_error ("reference N: …", N from 0); any other failure server_error; SIGUSR1 kills
+the encode and the reply is cancelled. The tool's `clone_working_bytes` is the daemon's booking for it.
 
 The model is plotarmordev/drama-tensorfold's native server (TensorFold's Zig/CUDA engine with the Drama 3 patch
 series), built from the pins in pins.json and started by that repository's own launcher, recipe/pilot.py, with
@@ -62,6 +80,15 @@ MODEL = "fishaudio/drama-3"  # the name the launcher serves the model under
 UNIT_FILE = "localrouter-drama3.unit"  # in the runtime directory: the launcher's unit while this worker runs it
 READY = "DRAMA_PILOT_READY"
 BUSY_WAIT_S = 10  # how long a request waits while the server drops a cancelled synthesis (`Worker._post`)
+VOICE_OUTPUT = "voice.json"  # a clone's output (`Worker._clone`)
+VOICE_FORMAT = "localrouter-voice-codes/1"
+MAX_CLONE_REFERENCES = 8
+ENCODE_TIMEOUT_S = 120  # one reference's `tensorfold-native voice encode`
+CODEBOOKS = 10
+# `voice encode`'s own words (exit 1, "tensorfold: …") when the clip or its transcript is what it refuses: the clip's
+# WAV (families/drama/clip.zig) or a transcript its voice file loader would not take (voice_cli.voiceFile).
+ENCODE_REFUSALS = ("the voice file would not load", "reference audio lasts", "the clip ", "the WAV ",
+                   "unsupported WAV", "malformed WAVE", "resampling ")
 PR_SET_PDEATHSIG = 1
 _prctl = ctypes.CDLL(None, use_errno=True).prctl  # resolved before any fork, so the child only calls it
 
@@ -151,7 +178,7 @@ class Options:
         known = {"voices", "default_voice", "max_input_chars", "min_speed", "max_speed", "presets", "stream",
                  "references", "port", "max_frames", "long_form", "long_form_chars", "long_form_history",
                  "voices_dir", "verify", "pilot", "native_bin", "checkpoint", "runtime_dir", "ready_timeout_s",
-                 "admission", "variant", "guidance"}
+                 "admission", "variant", "guidance", "clone_working_bytes"}
         unknown = sorted(set(o) - known)
         if unknown:
             log(f"options not used by the worker: {unknown}")
@@ -205,9 +232,11 @@ class Options:
         if o.get("presets"):
             raise ValueError("Drama 3 has no presets: its style is written in the input ([sighs], [laughs])")
 
-    def serve_args(self):
+    def serve_args(self, default_voice=False):
         """The server flags after the launcher's `--`: the variant's own first (nvfp4: the guidance it was measured
-        with)."""
+        with). The worker names the default voice itself (`Worker._speak`), so the server keeps its built-in one for a
+        cloned voice's references; `default_voice` adds --default-voice for a client that talks to the server
+        directly (qualify.py's benchmark, whose requests say "default")."""
         args = list(self.variant_pins["serve"]) if self.variant_pins and self.guidance else []
         if self.max_frames is not None:
             args += ["--max-frames", str(int(self.max_frames))]
@@ -219,7 +248,7 @@ class Options:
                 args += ["--long-form-history", str(int(self.long_form_history))]
         if self.voices_dir:
             args += ["--voices", self.voices_dir]
-        if self.default_voice != "default":
+        if default_voice and self.default_voice != "default":
             args += ["--default-voice", self.default_voice]
         return args
 
@@ -299,9 +328,10 @@ class Http:
 class Worker:
     """The Drama 3 server behind one LocalRouter tool. Every method returns a protocol reply."""
 
-    def __init__(self, tool, require_qualification=True, environ=None):
+    def __init__(self, tool, require_qualification=True, environ=None, server_default_voice=False):
         self.tool = tool
         self.require_qualification = require_qualification
+        self.server_default_voice = server_default_voice  # --default-voice too (`Options.serve_args`)
         self.environ = os.environ if environ is None else environ
         self.opts = Options(tool)
         self.pilot = None
@@ -344,7 +374,7 @@ class Worker:
                 "--ready-timeout", str(self.opts.ready_timeout_s)]
         if self.opts.admission == "external":
             argv.append("--external-admission")
-        serve = self.opts.serve_args()
+        serve = self.opts.serve_args(self.server_default_voice)
         if serve:
             argv += ["--", *serve]
         log(f"starting the launcher: {' '.join(argv)}")
@@ -444,7 +474,8 @@ class Worker:
                 raise ValueError(f"{path} sha256 differs from the pin {digest}")
 
     def _check_voices(self):
-        wanted = [v for v in self.opts.voices if v != "default"]
+        # the default voice too: the worker names it in every request that names none, so it must be loaded
+        wanted = [v for v in dict.fromkeys(self.opts.voices + [self.opts.default_voice]) if v != "default"]
         if not wanted:
             return
         r = Http(self.opts.port, "GET", "/v1/voices", timeout=30)
@@ -461,7 +492,11 @@ class Worker:
     def generate(self, cmd):
         began = time.monotonic()
         try:
-            finish, segments = self._speak(cmd["dir"], cmd["request"]["speech"])
+            r = cmd["request"]["speech"]
+            if r.get("clone"):
+                self._clone(cmd["dir"], r["clone"])
+                return {"ok": True, "files": [VOICE_OUTPUT], "seed": 0, "ms": int((time.monotonic() - began) * 1000)}
+            finish, segments = self._speak(cmd["dir"], r)
         except Refused as e:
             return {"ok": False, "error": str(e), "type": "invalid_request_error"}
         except Unavailable as e:
@@ -480,11 +515,33 @@ class Worker:
             raise Gone("the Drama 3 server is not running")
         stream = bool(r.get("stream"))
         body = {"model": MODEL, "input": r["input"], "response_format": "pcm" if stream else "wav"}
-        if r.get("voice"):
-            body["voice"] = r["voice"]
+        references = None
         if r.get("references"):
             with open(os.path.join(job_dir, r["references"]), encoding="utf-8") as f:
-                body["references"] = json.load(f)
+                references = json.load(f)
+        if r.get("voice_references"):
+            # A cloned voice: its references after the request's own, on the built-in voice (no `voice`, so the
+            # server adds none); the request's voice names it only in the daemon's logs.
+            # The list, or the voice.json a clone wrote; only text and vq_codes go on (the server refuses other fields).
+            with open(os.path.join(job_dir, r["voice_references"]), encoding="utf-8") as f:
+                cloned = json.load(f)
+            if isinstance(cloned, dict) and cloned.get("format") == VOICE_FORMAT:
+                cloned = cloned.get("references")
+            if not isinstance([] if references is None else references, list) or not isinstance(cloned, list) \
+                    or not cloned or not all(isinstance(c, dict) for c in cloned):
+                raise Refused("references and voice_references must each be a list of {text, vq_codes}")
+            cloned = [{"text": c.get("text"), "vq_codes": c.get("vq_codes")} for c in cloned]
+            references = ([] if references is None else references) + cloned
+        else:
+            # "" and "default" are the operator's default voice, as the server's --default-voice made them: the same
+            # voice file, so the same prompt rows and the same audio.
+            voice = r.get("voice") or ""
+            if voice in ("", "default") and self.opts.default_voice != "default":
+                voice = self.opts.default_voice
+            if voice:
+                body["voice"] = voice
+        if references is not None:
+            body["references"] = references
         if stream:
             body["stream"] = True
         res = self._post(json.dumps(body).encode())
@@ -544,6 +601,103 @@ class Worker:
             if n % 2:
                 raise RuntimeError("the Drama 3 stream ended inside a sample")
             os.pwrite(f.fileno(), wav_header(rate, n), 0)
+
+    # ------------------------------------------------------------ clone
+
+    def _clone(self, job_dir, name):
+        """A voice from clips: each of clone.json's references through `voice encode` (the engine binary's codec
+        encoder, on the GPU beside the running server, which it does not touch), then voice.json, the references a
+        speech request sends as `voice_references`. The per-reference files are removed whatever the outcome."""
+        try:
+            with open(os.path.join(job_dir, name), encoding="utf-8") as f:
+                spec = json.load(f)
+        except (OSError, ValueError) as e:
+            raise Refused(f"clone: {name} cannot be read ({e})") from e
+        refs = spec.get("references") if isinstance(spec, dict) else None
+        if not isinstance(refs, list) or not 1 <= len(refs) <= MAX_CLONE_REFERENCES:
+            raise Refused(f"clone: references must be a list of 1 to {MAX_CLONE_REFERENCES} {{audio, text}}")
+        for i, ref in enumerate(refs):
+            audio = ref.get("audio") if isinstance(ref, dict) else None
+            text = ref.get("text") if isinstance(ref, dict) else None
+            if not isinstance(audio, str) or os.path.basename(audio) != audio or audio.startswith("."):
+                raise Refused(f"reference {i}: audio must name a file in the job directory")
+            if not os.path.isfile(os.path.join(job_dir, audio)):
+                raise Refused(f"reference {i}: {audio} is missing")
+            if not isinstance(text, str) or not text.strip():
+                raise Refused(f"reference {i}: text must be the clip's exact words")
+        log(f"cloning voice {spec.get('name')!r} from {len(refs)} reference(s)")
+        native_sha256 = sha256_file(self.opts.native_bin)
+        outs = [os.path.join(job_dir, f"ref{i}.codes.json") for i in range(len(refs))]
+        try:
+            encoded = [self._encode(job_dir, i, ref, out) for i, (ref, out) in enumerate(zip(refs, outs))]
+        finally:
+            for out in outs:
+                try:
+                    os.unlink(out)
+                except OSError:
+                    pass
+        voice = {"format": VOICE_FORMAT,
+                 "references": [{k: e[k] for k in ("text", "vq_codes", "frames", "audio_sha256")} for e in encoded],
+                 "encoder": encoded[0]["encoder"], "native_sha256": native_sha256}
+        out = os.path.join(job_dir, VOICE_OUTPUT)
+        with open(out + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(voice, f, ensure_ascii=False)
+            f.write("\n")
+        os.replace(out + ".tmp", out)
+
+    def _encode(self, job_dir, i, ref, out):
+        """One reference through `voice encode`, its output checked: a [10, frames] grid of codes for this clip. Its
+        output is logged, never passed on (stdout is the protocol). A cancel kills it and goes on up as Cancelled."""
+        clip = os.path.join(job_dir, ref["audio"])
+        stem = os.path.basename(out)[:-len(".json")]  # --out must be NAME.json
+        argv = [self.opts.native_bin, "voice", "encode", clip, "--model", self.opts.checkpoint, "--text", ref["text"],
+                "--name", stem, "--out", out]
+        try:
+            os.unlink(out)  # nothing stale is read back as this clip's codes
+        except OSError:
+            pass
+        began = time.monotonic()
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             preexec_fn=lambda: _prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0))
+        try:
+            stdout, stderr = p.communicate(timeout=ENCODE_TIMEOUT_S)
+        except BaseException as e:  # a timeout or a cancel (SIGUSR1): the encode ends with it
+            p.kill()
+            p.wait()
+            if isinstance(e, subprocess.TimeoutExpired):
+                raise RuntimeError(f"reference {i}: the encoder did not finish within {ENCODE_TIMEOUT_S} s") from e
+            log(f"reference {i}: encode killed ({type(e).__name__})")
+            raise
+        lines = [ln for ln in (stdout + stderr).decode("utf-8", "replace").splitlines() if ln.strip()]
+        for ln in lines:
+            log(f"encode ref{i}: {ln}")
+        if p.returncode != 0:
+            said = [ln for ln in stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+            why = said[-1] if said else f"exit {p.returncode}"
+            for prefix in ("tensorfold: ", "tensorfold-native voice: error: "):
+                if why.startswith(prefix):
+                    why = why[len(prefix):]
+            refused = (p.returncode == 1 and any(why.startswith(m) for m in ENCODE_REFUSALS)) or \
+                      (p.returncode == 2 and why == "--text is empty")
+            if refused:
+                raise Refused(f"reference {i}: {why}")
+            raise RuntimeError(f"reference {i}: the encoder failed (exit {p.returncode}): {why}")
+        try:
+            with open(out, encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"reference {i}: the encoder wrote no readable {os.path.basename(out)} ({e})") from e
+        frames, codes = doc.get("frames"), doc.get("vq_codes")
+        if not (isinstance(frames, int) and frames > 0 and isinstance(codes, list) and len(codes) == CODEBOOKS
+                and all(isinstance(row, list) and len(row) == frames
+                        and all(type(c) is int and 0 <= c < 4096 for c in row) for row in codes)):
+            raise RuntimeError(f"reference {i}: the encoder's vq_codes are not a [{CODEBOOKS}, frames] grid of codes")
+        if not isinstance(doc.get("text"), str) or not isinstance(doc.get("encoder"), dict):
+            raise RuntimeError(f"reference {i}: the encoder's file has no text or encoder")
+        if doc.get("audio_sha256") != sha256_file(clip):
+            raise RuntimeError(f"reference {i}: the encoder's audio_sha256 is not this clip's")
+        log(f"reference {i}: {frames} frames in {time.monotonic() - began:.2f} s")
+        return doc
 
     # ------------------------------------------------------------ exit
 

@@ -12,7 +12,7 @@
   "DRAMA_ROOT": "$J/qualify-drama3/root",
   "DRAMA_VARIANT": "nvfp4",
   "DRAMA_MARKER": "$J/qualify-drama3/drama3-nvfp4-qualification.json",
-  "DRAMA_RESIDENT": "22075092992",
+  "DRAMA_RESIDENT": "22309502976",
   "DRAMA_PORT": "$((PORT + 10603))",
   "UV_CACHE_DIR": "$J/uv-cache",
   "NGC_IMAGE": "nvcr.io/nvidia/pytorch:26.07-py3",
@@ -107,7 +107,7 @@
               "lossy weights: routed experts in NVFP4 and pruned to 7,369 of 10,240 (qualify.sh --accept-lossy; docs/dev/DRAMA3.md has its measured quality against the full model)"],
    "pins": "tools/speech/drama3/pins.json, tools/speech/drama3/pins-nvfp4.json",
    "reuse": {"paths": ["qualify-drama3/root/drama-3-NVFP4-Pruned"]},
-   "download_bytes": 22600000000, "disk_bytes": 25000000000, "memory_bytes": 22075092992,
+   "download_bytes": 22600000000, "disk_bytes": 25000000000, "memory_bytes": 22309502976,
    "skip": "leave tts out of --models; the box then has no speech model and the voice loop cannot speak",
    "steps": [
     {"id": "fetch", "download_bytes": 22300000000, "reused": true, "disk_bytes": 22400000000, "title": "the drama-tensorfold checkout, the launcher, the voices and the NVFP4 checkpoint (22.3 GB; files a full checkpoint already holds are linked), every file against its pins",

@@ -29,6 +29,7 @@ adding a model, or a new kind of model, does not touch the orchestration.
 | API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig`, `src/api/decide.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/responses` (`src/api/responses.zig`: a stateless adapter whose items become one chat request and whose completion becomes output items); typed decisions on `/v1/systemone` (the System One shape, `src/tool/systemone.zig`); output files; `/v1/tools` for operators; `/v1/capabilities` (`src/api/capabilities.zig`), the harness contract's discovery document ([HARNESS.md](HARNESS.md)) |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
 | Voice | `src/api/realtime.zig`, `src/voice/` | `/v1/realtime` (OpenAI Realtime API over a WebSocket) and the `/voice` page: VAD, STT, chat, sentence-chunked TTS, barge-in, tool jobs ([VOICE.md](dev/VOICE.md)) |
+| Cloned voices | `src/voices.zig`, `src/api/voices.zig`, `src/media/voiceprep.zig` | `/v1/voices`: a voice cloned from someone's recordings for a speech model with `voice_clone` (clips checked and levelled, transcribed, encoded by the model), kept in `<data_dir>/voices/`, and spoken anywhere a configured voice is ([DRAMA3.md](dev/DRAMA3.md#cloned-voices)) |
 | Pairing | `src/pair.zig`, `src/api/pair.zig`, `src/cli/pair.zig` | with `pairing.required`, every route but `/health`, `/v1/pair` and `/voice` answers paired devices only, each within its scopes (`inference`, `media`, `decisions`, `read`, `manage`; the legacy `voice` and `mcp` grant them all): `routes.need` names a route's scope, `pair.admit` checks it (401 or 403 before the body or upgrade), MCP tools and voice-session tools check theirs per call, and a job and its files are its device's alone (`Caller.sees`); `/v1/pair` trades a one-time code for a token; `localrouter pair` makes codes and tokens; hashes in `<data_dir>/devices.json`, read on every check |
 | Computer control | `src/computer/`, `src/api/desktop.zig`, `apps/desktop-helper/` | a paired desktop helper on the user's Mac (`/v1/desktop`); the box decides each step (the chat model behind a System One shaped `decide.Provider`), grants it by policy, waits for the user's tap on consequential ones (`/v1/computer/approvals`) and audits it ([COMPUTER.md](dev/COMPUTER.md)) |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
@@ -141,6 +142,12 @@ the model: input decoding, response encodings, and the limits checked before a t
   WebM, AAC) with ffmpeg, one at a time, under a deadline, with demuxers from a fixed list and local files only, and
   caps it at the tool's `max_audio_s` (at most 30 minutes). Its length is in `duration_ms`, so `needs` can price it.
   An adapter does no decoding.
+- A cloned voice (`src/voices.zig`) is spoken with its own references: the daemon writes them to `voice.json` and
+  sends `"voice_references": "voice.json"` beside the voice's name; the tool speaks them after any `references` and
+  with nothing else (no voice of its own). A tool with `voice_clone` also encodes a voice: `"clone": "clone.json"`
+  (`{name, references: [{audio, text}]}`, prepared 44.1 kHz clips and their words, `input` empty) -> `voice.json`
+  (`{references: [{text, vq_codes, frames}]}`). The scheduler books such a job at the tool's `clone_working_bytes`
+  (the encoder's measured peak; 8 GiB when the config gives none) beside the loaded model.
 - `speech.wav` is the only text to speech output. `/v1/audio/speech` returns it as `wav` or raw `pcm` (with
   `x-sample-rate`, `x-channels` and `x-sample-format: s16le` headers), or encodes `flac`, `mp3`, `opus` or `aac`.
 - Fields a segment or word carries beyond the ones above (`avg_logprob`, `no_speech_prob`, …) are passed through

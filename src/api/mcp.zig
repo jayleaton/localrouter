@@ -307,7 +307,8 @@ fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
         const c = slot.tool.config();
         const st = slot.tool.state();
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded, .license = engine.license(c), .min_thinking_tokens = if (c.kind == .chat) c.min_thinking_tokens else null };
-        const info = engine.audioInfo(c);
+        var info = engine.audioInfo(c);
+        if (c.kind == .speech) info.voices = try routes.speechVoices(app, a, c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
         if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
@@ -327,7 +328,8 @@ fn listVoices(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
         const info = engine.audioInfo(c);
         var buf: [512]u8 = undefined;
         const defaults = try routes.defaultFor(app, a, i);
-        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = info.voices orelse &.{}, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0) engine.unqualified(app.io, a, c, &buf) == null else null });
+        const voices = (try routes.speechVoices(app, a, c)) orelse &.{}; // its own voices and those cloned for it
+        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = voices, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0) engine.unqualified(app.io, a, c, &buf) == null else null });
     }
     if (list.items.len == 0) return fail(a, out, "no speech model is configured on this machine", .{});
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .speech_models = list.items }, .{ .emit_null_optional_fields = false }) });
@@ -805,10 +807,10 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat or decision), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision), voices (speech models), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat or decision), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision, voice_clone), voices (speech models; voices cloned for a model included), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
     } },
-    .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices, default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
+    .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices (its own and those cloned for it on this machine), default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
     } },
     .{ .name = "reserve_for", .title = "Make room for a model", .description = "Before a heavy job (a video), make room for its model: unloads idle models other than the chat model, lowest priority first (the image model, then voice models), loads the target and holds it for its next job. What it unloads comes back by itself when that job is done (or after hold_s). dry_run: true only says what it would unload, how much the model needs and how much is free, so you can tell the user first (for example that voice pauses). Voice sessions are told before a voice model goes, and wait for it instead of failing. The chat model is never unloaded.", .inputSchema = .{ .text =

@@ -61,7 +61,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
-| `media` | the media and job routes, `image_edit` and `image_to_video` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
+| `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
 | `model_management` | the operator routes and the MCP tools that change what is loaded |
 | `computer` | `enabled`, the helper and approval routes, and `placement` (`box_policy` today) |
 | `unsupported` | `[{feature, status, note}]`: `status` is `unsupported` or `coming`; `note` says what to use instead |
@@ -298,7 +298,8 @@ questions) and returns typed answers with probabilities, checked against the que
 
 OpenAI's Images (`/v1/images/generations`, `/v1/images/edits`), Videos (`/v1/videos`, `/v1/videos/{id}`,
 `/content`, `DELETE`) and Audio (`/v1/audio/speech`, `/v1/audio/transcriptions`) APIs with documented extensions
-(`seed`, `steps`, `stream` for PCM speech...): [AGENTS.md](AGENTS.md). Any job's state: `GET /v1/jobs/{id}` `{id, kind,
+(`seed`, `steps`, `stream` for PCM speech...): [AGENTS.md](AGENTS.md). Voices (an extension): `GET /v1/voices` lists
+every speech model's, and a model with `voice_clone` clones one from recordings ([AGENTS.md](AGENTS.md#voices-cloning)). Any job's state: `GET /v1/jobs/{id}` `{id, kind,
 status, progress, phase, urls, error}`. Outputs: `GET /v1/files/{job}/{name}`, kept `keep_outputs_s` (24 h by
 default). Absolute output URLs (MCP results, `response_format: url`, `localrouter.job.done`) are built from the
 request's `Host` and the scheme the client used: `https` when a TLS proxy in front (`tailscale serve`) sends

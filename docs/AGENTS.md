@@ -8,7 +8,7 @@ Base URL: `http://<host>:8190/v1` (any API key, or none). When the operator turn
 (`pairing.required`), every route but `/health` and `/v1/pair` needs a paired device's token as
 `Authorization: Bearer <token>`, with the scope the route needs: `inference` (chat, responses, `/v1/realtime`), `media` (images,
 videos, speech, transcription), `decisions` (`/v1/systemone`), `read` (models, voices, residency) or `manage` (load,
-unload, release). No token is a 401 `invalid_api_key`, a missing scope a 403 naming it; ask the operator for a token with
+unload, release, cloning a voice). No token is a 401 `invalid_api_key`, a missing scope a 403 naming it; ask the operator for a token with
 what you need (`localrouter pair token NAME --scopes inference,media,read` on the box; `GET /v1/pair` shows yours).
 Your jobs and output files are then yours alone: fetch `/v1/jobs/...` and `/v1/files/...` with the same token. The
 table of scopes and the legacy profile are in [MCP.md](MCP.md#scopes).
@@ -36,7 +36,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `edit_image` | `prompt` and `image` (one base64 string, data URL or URL) or `images` (1 to 5), optional `mask`, `size` (omit it for the input's shape), `n`, `seed`, `model`: the edited PNG(s) as `generate_image` returns them. Needs a model that lists `image_edit` |
 | `generate_video` | `prompt`, `size` (omit it for the model's own size), `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
-| `list_voices` | each speech model's voices, its default voice, whether it is loaded and whether it is the default |
+| `list_voices` | each speech model's voices (cloned ones included), its default voice, whether it is loaded and whether it is the default |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside the config's `local_files`), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
 | `chat` | `prompt` and/or `messages`, `system`, `model`, `reasoning` (false: no thinking), `max_tokens`, `temperature`, `top_p`, `stop`, `seed`, `tools`, `tool_choice`, `response_format`: the reply's text (its tool calls as JSON when it called one instead), then the whole completion |
@@ -63,7 +63,8 @@ version, each surface's profile and authorization, the MCP tools and the feature
 
 `kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now.
 `capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
-`text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`. Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
+`text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`, `voice_clone` (a speech model that clones a
+voice from recordings: [Voices](#voices-cloning)). Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
 `max_input_chars`, `stream` (whether `stream: true` works), `references` (whether voice references do) and
 `instructions` (whether `instructions` do);
 transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
@@ -181,7 +182,7 @@ curl -s -m 900 $BASE/audio/speech -H 'content-type: application/json' \
 | Field | Notes |
 | --- | --- |
 | `input` | up to 4096 characters (or the model's `max_input_chars`) |
-| `voice` | one of the model's `voices`; omit for its `default_voice`. Without `model`, a voice the default speech model lacks goes to the speech model that lists it |
+| `voice` | one of the model's `voices` (a voice cloned for it included); omit for its `default_voice`. Without `model`, a voice the default speech model lacks goes to the speech model that lists it |
 | `speed` | 0.25 to 4 within the model's `speed` range; a model without a speed control takes only 1 |
 | `response_format` | `wav` (default), `pcm` (16-bit little-endian, mono; rate in the `x-sample-rate` header), `flac`, `mp3`, `opus`, `aac` |
 | `preset`, `seed` | Extensions: a model-native style from its `presets`; a seed for models that sample |
@@ -214,10 +215,40 @@ model's built-in voice is not one speaker (each text lands on its own), so it is
 delivery cues in the text, such as `[sighs]` or `[laughs]` where they should land. Drama 3 has no separate style
 control (its system prompt is fixed), so `instructions` become such a bracketed direction before the line:
 `{"input": "I'm fine.", "instructions": "whispering, nervous"}` speaks `[whispering, nervous] I'm fine.` (after a
-leading `<|speaker:N|>` tag, when the text starts with one). Clone only a voice the model
-invented, your own, or one whose owner has consented on record: the model's licence forbids imitating anyone else.
+leading `<|speaker:N|>` tag, when the text starts with one). It clones voices ([Voices](#voices-cloning)). Clone only a
+voice the model invented, your own, or one whose owner has consented on record: the model's licence forbids imitating
+anyone else.
 Until the operator has qualified it on the machine's GPU it is listed with `"qualified": false` and every request gets
 a 503 saying it is not GPU-qualified on this host.
+
+## Voices (cloning)
+
+```bash
+curl -s $BASE/voices | jq '.data[] | {id, model, kind}'                     # every voice: named (configured) and cloned
+curl -s -m 900 $BASE/voices -F consent=true -F name=Sam -F file=@take1.webm -F file=@take2.wav   # clone (manage scope)
+curl -s -X PATCH $BASE/voices/draft-1a2b3c4d -H 'content-type: application/json' -d '{"name": "Sam"}'
+curl -s -X DELETE $BASE/voices/Sam
+```
+
+A speech model that lists `voice_clone` makes a voice from recordings of one person: `POST /v1/voices` takes the clips
+as the multipart field `file` (repeat it; WAV, MP3, FLAC, OGG/Opus, M4A, WebM; up to 8, 32 MB and 2 minutes each, 10 to
+60 s of speech in all) and `consent=true`, the caller's statement that the voice is their own (`source=owner`, the
+default) or that its owner consented on record (`source=consented` with a `note` saying where). Optional: `name`,
+`transcript` (once per clip, in order: the clip's exact words; blank or absent, the transcription model writes them),
+`model`, `language`. Each clip is trimmed to its speech and cut at pauses into references of at most 30 s, each brought
+to the same level; a clip is refused with a 400 saying which and why when it is silent, clipped, starts inside a word,
+or its background is less than 30 dB under the speech, and so is a set with less than 10 s or more than 60 s of speech.
+The model then encodes the references (a few seconds on the GPU) and the clips are deleted.
+
+Without `name` the voice is a draft (`"status": "draft"`, `id` `draft-...`, `expires_at` an hour on), usable as a
+`voice` for a preview but not listed; `PATCH /v1/voices/{id}` with a `name` saves it (and renames a saved voice), and
+`DELETE /v1/voices/{id}` removes it. Names are 1 to 64 of `A-Z a-z 0-9 . _ -`, led by a letter or digit, not `default`
+or `draft-...`, and not a name already in use (ignoring case; 409). A voice is the model's: it is listed in that
+model's `voices` (`/v1/models`, MCP `list_voices`) and spoken there in speech requests, voice sessions and
+`synthesize_speech`; a request that names it without a `model` goes to that model. The voice object: `id`, `name`,
+`model`, `kind` (`named` or `cloned`), `status`, `created_at`, `seconds`, `transcribed`, `source`, `clips` (per clip:
+`seconds_in`, `seconds_kept`, `speech_left_out_s`, `references`) and `references` (each `text`, `seconds`, `frames`,
+`level_dbfs`, `gain_db`, `snr_db`). Creating, renaming and deleting need `manage`; listing needs `read`.
 
 ## Transcriptions (OpenAI Audio API)
 

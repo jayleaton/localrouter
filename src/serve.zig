@@ -88,6 +88,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     defer app.voice.deinit(gpa);
+    try app.cloned.init(io, gpa, try std.fs.path.join(arena, &.{ cfg.data_dir, "voices" })); // cloned voices (voices.zig)
+    defer app.cloned.deinit();
     var computer: desktop.Service = undefined;
     if (cfg.computer.enabled) {
         try computer.init(&app, cfg.data_dir, arena);

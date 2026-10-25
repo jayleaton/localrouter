@@ -55,13 +55,22 @@ pub fn startSpeech(app: *App, a: std.mem.Allocator, b: SpeechArgs, owner: []cons
         why.message = said.buffered();
         return null;
     };
-    var refs: [1]inputs.File = undefined;
+    var refs: [2]inputs.File = undefined;
     var n: usize = 0;
+    var given = false;
     if (b.references) |v| if (!(v == .null or (v == .array and v.array.items.len == 0))) {
-        refs[0] = .{ .name = "references.json", .data = referencesFile(a, v, why) orelse return null };
-        n = 1;
+        refs[n] = .{ .name = "references.json", .data = referencesFile(a, v, why) orelse return null };
+        n += 1;
+        given = true;
     };
-    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (n > 0) "references.json" else "" }) };
+    // a cloned voice is spoken with its own references (`voices.zig`)
+    var cloned = false;
+    if (b.voice.len > 0) if (app.cloned.references(app.io, a, cfg.id, b.voice, @import("../sched/scheduler.zig").nowUnix(app.io))) |codes| {
+        refs[n] = .{ .name = "voice.json", .data = codes };
+        n += 1;
+        cloned = true;
+    };
+    const r: request.Request = .{ .speech = engine.speechDefaults(cfg, .{ .input = input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed orelse routes.randomSeed(app.io), .stream = b.stream, .references = if (given) "references.json" else "", .voice_references = if (cloned) "voice.json" else "" }) };
     return routes.enqueue(app, tool, r, refs[0..n], owner, why);
 }
 
