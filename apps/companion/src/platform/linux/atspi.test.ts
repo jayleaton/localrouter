@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LinuxScreen, NO_ORIGIN, addressUrl } from './atspi.ts'
+import { ATSPI_SCRIPT, LinuxScreen, NO_ORIGIN, addressUrl } from './atspi.ts'
 import { MULTILINE, chooseInjector } from './input.ts'
 import type { Session } from './session.ts'
 import { atspiOp, fakeRunner, fakeSession, tool } from './testing.ts'
@@ -105,6 +105,13 @@ describe('LinuxScreen act', () => {
     const { screen: x11, lines } = screen(X11, () => FALLBACK)
     expect(await x11.act({ kind: 'click', ref: '0.4' })).toEqual({ pointer: { x: 140, y: 70 } })
     expect(lines()).toEqual(['atspi act', 'xdotool mousemove --sync 140 70 click 1'])
+  })
+
+  it('asks the script for the pointer path when the pointer is asked for (a background click changed nothing)', async () => {
+    const { screen: x11, calls } = screen(X11, () => FALLBACK)
+    expect(await x11.act({ kind: 'click', ref: '0.4' }, { pointer: true })).toEqual({ pointer: { x: 140, y: 70 } })
+    expect(JSON.parse(calls[0]?.input ?? '')).toMatchObject({ kind: 'click', ref: '0.4', pointer: true })
+    expect(ATSPI_SCRIPT).toContain("if op == 'click' and req.get('pointer'):")
   })
 
   it('on Hyprland clicks at the window origin plus the element’s offset', async () => {

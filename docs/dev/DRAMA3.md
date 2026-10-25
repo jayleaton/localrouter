@@ -257,6 +257,11 @@ named voices. Two clones of 60 s add 7 MiB more, so the NVFP4 tool's `resident_b
 (20.78 GiB: that peak and 256 MiB) instead of 20.56 GiB. The full weights' figure gets the same 224 MiB (the same
 cache code), not measured on them.
 
+**Several nodes.** When Drama 3 runs on another node (`docs/dev/TWO-SPARK.md`), the front prepares the clips, keeps the
+voices and sends each encode and speech job to that node with its files, as for any job; the node's copy of an encode
+job's directory (the prepared clips) stays there until its `keep_outputs_s` expiry, not deleted at once as the front's
+is. Not run on two nodes.
+
 **Not verified:** a real person's own recordings (no recording of JJ yet); a clone in a voice call on DGX-01 beyond the
 smoke; voices of other languages or accents; the encoder's codes against the reference encoder's (upstream measured
 2.5 to 3 % of semantic codes different, with equal similarity); the full weights.

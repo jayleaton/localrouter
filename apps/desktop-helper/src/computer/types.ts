@@ -74,8 +74,12 @@ export type ActResult = { pointer?: Point; background?: boolean }
 
 export type ObserveOptions = { signal?: AbortSignal }
 
-/** `signal` aborts an action under way (a stop): long typing stops between chunks, a running script is killed. */
-export type ActOptions = { signal?: AbortSignal }
+/**
+ * `signal` aborts an action under way (a stop): long typing stops between chunks, a running script is killed.
+ * `pointer`: do it with the real pointer and keys even where an accessibility action exists (the controller asks for
+ * this once, when a background action left the screen as it was).
+ */
+export type ActOptions = { signal?: AbortSignal; pointer?: boolean }
 
 /**
  * The front window as an image. `region` is the part of the screen it shows (global coordinates) and `scale` the

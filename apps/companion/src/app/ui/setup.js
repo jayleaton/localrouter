@@ -164,10 +164,11 @@ function renderPermissions(s) {
     row.querySelector('button').hidden = v === 'granted' || v === 'n/a';
   }
   const stale = p.stale || {};
-  $('stale').hidden = !(stale.accessibility || stale.screen);
+  $('stale').hidden = !(stale.accessibility || stale.screen || stale.microphone);
   $('staleText').textContent = s.stale_message;
   $('staleAx').hidden = $('resetAx').hidden = !stale.accessibility;
   $('staleScreen').hidden = $('resetScreen').hidden = !stale.screen;
+  $('resetMic').hidden = !stale.microphone;
 }
 
 function renderFound() {

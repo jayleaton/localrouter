@@ -39,6 +39,21 @@ pub const App = struct {
     pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
     computer: ?*desktop.Service = null, // computer control (desktop.zig); null when the config switches it off
     cloned: @import("../voices.zig").Store = .{}, // cloned voices (`voices.zig`, `api/voices.zig`)
+    plan: ?*const @import("../topology.zig").Plan = null, // where each tool runs (a multi-node topology); null: here
+
+    /// Why tool `c` is refused on this machine until it is qualified here (`engine.unqualified`), or null; a tool that
+    /// runs on another node now is that node's to check.
+    pub fn unqualified(app: *App, a: std.mem.Allocator, c: *const @import("../config.zig").ToolConfig, buf: []u8) ?[]const u8 {
+        if (toolIndex(app, c.id)) |i| if (!app.scheduler.slots[i].tool.local()) return null;
+        return engine.unqualified(app.io, a, c, buf);
+    }
+
+    /// The node that runs tool `id` ("" in a single topology): its own node for a tool served here, else its host's.
+    pub fn nodeOf(app: *const App, id: []const u8) []const u8 {
+        const p = app.plan orelse return "";
+        if (!p.multi) return "";
+        return if (p.hostOf(id)) |n| n.id else p.nodes[p.self].id;
+    }
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -86,6 +101,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
+    if (std.mem.startsWith(u8, p, "/v1/node/")) return @import("node.zig").route(app, req, a, p["/v1/node/".len..], caller);
     return h.fail(req, a, 404, "invalid_request_error", "no such route");
 }
 
@@ -130,7 +146,8 @@ test "every route class needs its scope; only the open routes need none; an unna
         .{ .POST, "/v1/models", .manage },           .{ .GET, "/v1/something-new", .manage },
         .{ .GET, "/v1/voices", .read },              .{ .GET, "/v1/voices/JJ", .read },
         .{ .POST, "/v1/voices", .manage },           .{ .PATCH, "/v1/voices/draft-1", .manage },
-        .{ .DELETE, "/v1/voices/JJ", .manage },
+        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/node/status", .manage },
+        .{ .POST, "/v1/node/jobs", .manage },
     };
     for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));
 }
@@ -142,7 +159,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -152,7 +169,9 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         if (c.kind == .speech) info.voices = try speechVoices(app, a, c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
-        if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way
+        if (c.qualification.len > 0 and slot.tool.local()) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way; a remote tool's node lists its own
+        const n = app.nodeOf(c.id);
+        if (n.len > 0) e.node = n;
         if (c.kind == .chat) e.min_thinking_tokens = c.min_thinking_tokens; // a smaller limit answers without thinking
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
@@ -176,11 +195,12 @@ pub fn hasVoice(app: *App, c: *const @import("../config.zig").ToolConfig, voice:
 }
 
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8, license: ?@import("../config.zig").License };
+    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8, license: ?@import("../config.zig").License, node: ?[]const u8 = null, local: bool = true };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message, .license = engine.license(c) };
+        const n = app.nodeOf(c.id);
+        e.* = .{ .node = if (n.len > 0) n else null, .local = slot.tool.local(), .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message, .license = engine.license(c) };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });
@@ -386,7 +406,7 @@ pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const in
     // A model gated by a qualification file is refused before anything loads until this machine has qualified it.
     var gate: std.heap.ArenaAllocator = .init(app.gpa);
     defer gate.deinit();
-    if (engine.unqualified(app.io, gate.allocator(), cfg, why.buf[0..384])) |msg| {
+    if (app.unqualified(gate.allocator(), cfg, why.buf[0..384])) |msg| {
         why.status = 503;
         why.typ = "server_error";
         why.message = msg;

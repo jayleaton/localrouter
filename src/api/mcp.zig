@@ -311,7 +311,7 @@ fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
         if (c.kind == .speech) info.voices = try routes.speechVoices(app, a, c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
-        if (c.qualification.len > 0) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
+        if (c.qualification.len > 0 and slot.tool.local()) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
     }
     const memory = .{ .mem_available_bytes = sched_memory.available() orelse 0, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_paused = app.scheduler.voicePaused() };
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine, .memory = memory }, .{ .emit_null_optional_fields = false }) });
@@ -329,7 +329,7 @@ fn listVoices(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) Too
         var buf: [512]u8 = undefined;
         const defaults = try routes.defaultFor(app, a, i);
         const voices = (try routes.speechVoices(app, a, c)) orelse &.{}; // its own voices and those cloned for it
-        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = voices, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0) engine.unqualified(app.io, a, c, &buf) == null else null });
+        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = voices, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0 and slot.tool.local()) engine.unqualified(app.io, a, c, &buf) == null else null });
     }
     if (list.items.len == 0) return fail(a, out, "no speech model is configured on this machine", .{});
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .speech_models = list.items }, .{ .emit_null_optional_fields = false }) });

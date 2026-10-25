@@ -1,16 +1,16 @@
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
-import { extname, join, normalize, sep } from 'node:path'
+import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { grantStates } from './grants.ts'
+import { grantStates, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -186,7 +186,7 @@ async function startRuntimeFromSettings(): Promise<void> {
 /** A computer task failed for lack of access: if macOS kept an older build's grant, say so and show the fix. */
 async function checkStale() {
   const p = await permissions().catch(() => null)
-  if (!p || (!p.stale.accessibility && !p.stale.screen)) return
+  if (!p || (!p.stale.accessibility && !p.stale.screen && !p.stale.microphone)) return
   if (Notification.isSupported()) new Notification({ title: 'LocalRouter needs its permission again', body: STALE_GRANT }).show()
   showSetup()
 }
@@ -412,12 +412,16 @@ function registerIpc() {
   setup('setup:discover', () => discoverSparks())
   setup('setup:resetGrant', async (kind) => {
     if (process.platform !== 'darwin') return { ok: false, text: 'not a Mac', state: await state() }
-    const r = await resetGrant(kind === 'screen' ? 'ScreenCapture' : 'Accessibility')
+    const which = kind === 'screen' ? 'screen' : kind === 'microphone' ? 'microphone' : 'accessibility'
+    const r = await resetGrant(which === 'screen' ? 'ScreenCapture' : which === 'microphone' ? 'Microphone' : 'Accessibility')
     if (r.ok) {
-      // Asks again (macOS shows its prompt and lists LocalRouter, off) and opens the pane to switch it on.
-      if (kind !== 'screen') systemPreferences.isTrustedAccessibilityClient(true)
-      await shell.openExternal(PANES[kind === 'screen' ? 'screen' : 'accessibility'])
-      settings = { ...settings, grants: { ...(settings.grants ?? {}), [kind === 'screen' ? 'screen' : 'accessibility']: undefined } }
+      // Asks again: the microphone with macOS's own prompt; Accessibility lists LocalRouter, off, and the pane opens.
+      if (which === 'microphone') await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+      else {
+        if (which === 'accessibility') systemPreferences.isTrustedAccessibilityClient(true)
+        await shell.openExternal(PANES[which])
+      }
+      settings = { ...settings, grants: { ...(settings.grants ?? {}), [which]: undefined } }
       saveSettings(settings)
     }
     return { ...r, state: await state() }
@@ -428,7 +432,13 @@ function registerIpc() {
   })
   setup('setup:permission', async (kind) => {
     if (process.platform !== 'darwin') return state()
-    if (kind === 'microphone') await systemPreferences.askForMediaAccess('microphone')
+    if (kind === 'microphone') {
+      // Denied (or held by an older build's entry that macOS reports as denied): macOS never asks again by itself, so
+      // this app's entry is reset first and macOS shows its prompt.
+      const status = systemPreferences.getMediaAccessStatus('microphone')
+      if (status === 'denied' || status === 'restricted') await resetGrant('Microphone')
+      await systemPreferences.askForMediaAccess('microphone')
+    }
     if (kind === 'accessibility') {
       systemPreferences.isTrustedAccessibilityClient(true)
       await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
@@ -504,44 +514,53 @@ function callEnded() {
 // ------------------------------------------------------------------ macOS permissions, and grants macOS kept from an older build
 
 export const BUNDLE_ID = 'com.localrouter.companion'
-export const STALE_GRANT = 'macOS kept a permission from an older LocalRouter. Open Settings, remove LocalRouter, add it again.'
+export const STALE_GRANT = 'macOS kept a permission from a LocalRouter build signed differently, and it does nothing for this one. Reset it here (macOS asks again), or in System Settings remove LocalRouter and add it again.'
 
-/** This build, as far as a grant is concerned: the version and when the app's executable was written. */
-function buildId(): string {
-  let at = 0
-  try {
-    at = Math.round(statSync(app.getPath('exe')).mtimeMs)
-  } catch {
-    // Not a file we can read: the version alone.
-  }
-  return `${VERSION}@${at}`
+let identity: Promise<string | null> | null = null
+
+/**
+ * This build as far as a grant is concerned: its designated requirement (the bundle id and the signing certificate),
+ * which every build signed with the stable identity shares, so an update keeps its grants. Read once; null when it
+ * cannot be read (unsigned in development), and then no grant is called stale from history.
+ */
+function signingIdentity(): Promise<string | null> {
+  identity ??= new Promise((resolve) => {
+    // …/LocalRouter.app/Contents/MacOS/LocalRouter → …/LocalRouter.app
+    const bundle = dirname(dirname(dirname(app.getPath('exe'))))
+    execFile('/usr/bin/codesign', ['-d', '-r-', bundle], { timeout: 10_000 }, (error, stdout, stderr) => {
+      const requirement = /designated => (.+)/.exec(`${stdout}${stderr}`)?.[1]
+      resolve(error || !requirement ? null : signingId(requirement))
+    })
+  })
+  return identity
 }
 
 /**
- * What macOS says, what actually works (the executor's own check: an AX read and a screen capture, through the same
- * osascript the computer control uses), and whether a grant is stale: macOS says granted but it does not work, or it
- * worked in another build and does not now. macOS ties a grant to the build's code requirement: an older build's grant
- * still shows as on in System Settings and does nothing for this one.
+ * Each permission as macOS answers this process (the truth: Accessibility's trust check, the in-process TCC status for
+ * Screen Recording and the Microphone), the Accessibility probe (an AX read through the executor) only to catch a
+ * "yes" that does not work, and whether a grant is stale: missing now, and seen working under another signing
+ * identity (the ad-hoc builds before the stable certificate). See grants.ts.
  */
 async function permissions() {
   if (process.platform !== 'darwin') {
     // Linux and Windows have no TCC grants to go stale: the platform says what it needs and how to get it.
     const report = runtime ? await runtime.executor.built.platform.access().catch(() => null) : null
-    return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false }, backend: report?.backend ?? '', requirements: report?.requirements ?? [] }
+    return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false, microphone: false }, backend: report?.backend ?? '', requirements: report?.requirements ?? [] }
   }
-  const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted' }
-  const works = runtime ? await runtime.executor.built.platform.access().then((a) => ({ accessibility: a.accessibility, screen: a.screen_recording }), () => null) : null
-  const { state: grant, grants } = grantStates(said, works, settings.grants ?? {}, buildId())
+  const microphone = systemPreferences.getMediaAccessStatus('microphone')
+  const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted', microphone: microphone === 'granted' }
+  const works = runtime ? await runtime.executor.built.platform.access().then((a) => ({ accessibility: a.accessibility }), () => null) : null
+  const { state: grant, grants } = grantStates(said, works, settings.grants ?? {}, await signingIdentity())
   if (JSON.stringify(grants) !== JSON.stringify(settings.grants ?? {})) {
     settings = { ...settings, grants }
     saveSettings(settings)
   }
-  const stale = { accessibility: grant.accessibility === 'stale', screen: grant.screen === 'stale' }
-  return { microphone: systemPreferences.getMediaAccessStatus('microphone'), accessibility: grant.accessibility, screen: grant.screen, stale }
+  const stale = { accessibility: grant.accessibility === 'stale', screen: grant.screen === 'stale', microphone: grant.microphone === 'stale' }
+  return { microphone: stale.microphone ? 'stale' : microphone, accessibility: grant.accessibility, screen: grant.screen, stale }
 }
 
 /** `tccutil reset` for this app only: runs as the user, no admin. What it said, and whether it worked. */
-function resetGrant(service: 'Accessibility' | 'ScreenCapture'): Promise<{ ok: boolean; text: string }> {
+function resetGrant(service: 'Accessibility' | 'ScreenCapture' | 'Microphone'): Promise<{ ok: boolean; text: string }> {
   return new Promise((resolve) => {
     execFile('/usr/bin/tccutil', ['reset', service, BUNDLE_ID], { timeout: 10_000 }, (error, stdout, stderr) => {
       const text = `${stdout}${stderr}`.trim()

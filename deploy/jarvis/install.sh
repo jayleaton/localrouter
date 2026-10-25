@@ -59,7 +59,7 @@ if [ "${BUILD_ONLY:-0}" != 1 ]; then
   echo "== preflight: $TOOLS"
   if wanted qwen3.8-27b; then
     marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
-    [ -x "$CHAT_ROOT/tensorfold-1.1.4/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
+    [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
   fi
   if wanted fishaudio/drama-3; then
     marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3" "$DRAMA_VARIANT"

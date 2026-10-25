@@ -2,8 +2,8 @@
 # Downloads the pinned TensorFold release and the Qwen3.8-27B checkpoint and DFlash2 drafter (pins.json), and checks
 # every byte against the pins.
 #   tools/chat/qwen38-27b/fetch.sh ROOT [--hf DIR]
-# ROOT/downloads: the release archive for this host (uname -m). ROOT/tensorfold-1.1.4: the extracted archive, every
-# file checked against the archive's own SHA256SUMS; ROOT/tensorfold-1.1.4.archive-sha256 records which archive.
+# ROOT/downloads: the release archive for this host (uname -m). ROOT/tensorfold-1.1.1: the extracted archive, every
+# file checked against the archive's own SHA256SUMS; ROOT/tensorfold-1.1.1.archive-sha256 records which archive.
 # DIR (default ROOT/hf): a Hugging Face cache, models--Org--Name/{refs/main,snapshots/REV/...}, plain files.
 # Idempotent and resumable: files with the pinned size and hash are kept, partial downloads (.part) resume. HF_TOKEN,
 # if set, is sent to huggingface.co only (curl reads it from stdin, never argv) and is never printed.

@@ -207,7 +207,7 @@ fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8, vo
     var buf: [512]u8 = undefined;
     for ([_]bool{ true, false }) |with_voice| for (app.cfg.voice.speech_models) |id| {
         const c = app.cfg.tool(id) orelse continue;
-        if (!engine.supports(c, .text_to_speech) or engine.unqualified(app.io, a, c, &buf) != null) continue;
+        if (!engine.supports(c, .text_to_speech) or app.unqualified(a, c, &buf) != null) continue;
         if ((voice.len > 0 and routes.hasVoice(app, c, voice)) == with_voice) try list.append(a, id);
     };
     if (list.items.len == 0) try list.append(a, null);

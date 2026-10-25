@@ -5,7 +5,7 @@
     {
       "id": "qwen3.8-27b",
       "kind": "chat",
-      "name": "Qwen3.8 27B (TensorFold 1.1.4, MLX 4-bit + DFlash2 drafter)",
+      "name": "Qwen3.8 27B (TensorFold 1.1.1, MLX 4-bit + DFlash2 drafter)",
       "engine": "openai_server",
       "weights": "/data/models/chat/hf",
       "resident_bytes": 25769803776,
@@ -17,7 +17,7 @@
       "generate_timeout_s": 600,
       "qualification": "/data/models/chat/qwen38-27b-qualification.json",
       "options": {
-        "server": ["/opt/localrouter/chat/tensorfold-1.1.4/bin/tensorfold-native", "serve",
+        "server": ["/opt/localrouter/chat/tensorfold-1.1.1/bin/tensorfold-native", "serve",
                    "TensorFold/Qwen3.8-27B-MLX-4bit", "--drafter", "z-lab/Qwen3.8-27B-DFlash2",
                    "--host", "127.0.0.1", "--port", "{port}", "--name", "{id}", "--context", "32768",
                    "--prompt-cache-gib", "4", "--parallel", "1", "--no-update-check"],

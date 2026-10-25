@@ -2,7 +2,7 @@
 import type { Logger } from '../log.ts'
 import { choiceProbability } from './decisions.ts'
 import type { Answers, Decider, Question } from './decisions.ts'
-import type { BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
+import type { ActResult, BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
  * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this computer (macOS, Linux or Windows) toward a goal.
@@ -152,7 +152,9 @@ export class ComputerUse {
     return Boolean(this.deps.desktop)
   }
 
-  async run(task: ComputerTask, options: RunOptions = {}): Promise<ComputerOutcome> {
+  async run(given: ComputerTask, options: RunOptions = {}): Promise<ComputerOutcome> {
+    // "Go to example.com" carries the text to type in the goal itself: the address, taken literally.
+    const task: ComputerTask = given.text === null ? { ...given, text: navigationText(given.goal) } : given
     const run: Run = {
       task,
       signal: options.signal ?? new AbortController().signal,
@@ -184,10 +186,21 @@ export class ComputerUse {
       if (target.switchedTab && plainClickGoal(task)) return end('done', '', target.switchedTab)
       if (quoted.length && quoted.every((name) => clicked.has(name)) && plainClickGoal(task)) return end('done', '')
       let previous = ''
-      let repeats = 0
+      // Actions that did nothing on this screen (the same action, the screen unchanged): left out of the next question,
+      // with the decider told so, until the screen changes. Steering instead of retrying.
+      let avoid = new Map<string, string>()
+      let avoidOn = ''
+      // The signature of an action done in the background (an accessibility action, no pointer): the same action on a
+      // screen it left unchanged is first tried once more with the real pointer, and only then steered away from.
+      let backgroundAt = ''
       for (let step = 0; step < run.maxSteps; step += 1) {
         this.checkpoint(run)
         const screen = await backend.observe({ signal: run.signal })
+        const key = screenKey(screen)
+        if (key !== avoidOn) {
+          avoid = new Map()
+          avoidOn = key
+        }
         surface = `${screen.app}: ${clip(screen.title, 60)}`
         const match = quoted.find((name) => !clicked.has(name))
         const direct = match ? matchControl(screen.controls, match) : null
@@ -198,18 +211,27 @@ export class ComputerUse {
           await this.sleep(this.settleMs)
           continue
         }
-        const decision = await this.decide(run, screen)
+        const decision = await this.decide(run, screen, avoid)
+        const tried = [...avoid.values()].at(-1)
         // A quoted name that is not on screen is the honest reason to give, not "could not tell what to do".
         if ('stop' in decision && decision.stop === 'stuck' && match) return end('stuck', `It could not find “${match}” in ${screen.app}.`)
+        if ('stop' in decision && decision.stop === 'stuck' && tried) return end('stuck', `It kept doing the same thing (${tried}) without the screen changing, and nothing else on screen looked right.`)
         if ('stop' in decision) return end(decision.stop, decision.reason)
         this.checkpoint(run)
         const { action, step: said } = decision
         // The same action on the same screen: what is on it, not only how many controls (a scrolled list keeps its count).
-        const signature = `${JSON.stringify(action)}|${screenKey(screen)}`
-        repeats = signature === previous ? repeats + 1 : 0
+        const signature = `${JSON.stringify(action)}|${key}`
+        const same = signature === previous
+        const viaPointer = same && backgroundAt === signature
+        if (same && !viaPointer) {
+          avoid.set(actionKey(action), said)
+          previous = ''
+          backgroundAt = ''
+          continue
+        }
         previous = signature
-        if (repeats >= 2) return end('stuck', `It kept doing the same thing (${said}) without the screen changing.`)
-        await this.act(run, backend, screen, action, said)
+        const result = await this.act(run, backend, screen, action, said, viaPointer)
+        backgroundAt = result?.background && !viaPointer ? signature : ''
         await this.sleep(this.settleMs)
       }
       return end('stuck', `It did not finish within ${run.maxSteps} steps.`)
@@ -294,7 +316,7 @@ export class ComputerUse {
    * One action on screen: the control it names must be on the screen it was chosen from, the box must
    * grant it, and after a tap (time has passed) the same control must still be there, or nothing happens.
    */
-  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string) {
+  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string, pointer = false): Promise<ActResult | void> {
     const request = this.request(run, screen, action)
     const grant = await this.authorize(run, summary(screen), request)
     if (grant === 'approved' && (action.kind === 'click' || action.kind === 'type')) {
@@ -309,14 +331,15 @@ export class ComputerUse {
     run.watch?.moving()
     let left: Awaited<ReturnType<ScreenBackend['act']>>
     try {
-      left = await backend.act(action, { signal: run.signal })
+      left = await backend.act(action, { signal: run.signal, ...(pointer ? { pointer: true } : {}) })
     } catch (error) {
       run.watch?.left(null)
       throw error
     }
     run.watch?.left(typeof left === 'object' && left !== null ? left.pointer : undefined)
     if (action.kind === 'type') run.typedInto = this.control(screen, action.ref)
-    this.record(run, said)
+    this.record(run, pointer ? `${said} (again, with the pointer)` : said)
+    return left
   }
 
   /** The control a ref names on this screen; a ref that is not on it is never acted on. */
@@ -438,7 +461,7 @@ export class ComputerUse {
   }
 
   /** One step: which action next, chosen among the controls on screen (and where to type, when there is text). */
-  private async decide(run: Run, screen: Observation): Promise<Decision> {
+  private async decide(run: Run, screen: Observation, avoid: Map<string, string> = new Map()): Promise<Decision> {
     const { task } = run
     const controls = screen.controls
     const typed = run.typedInto !== null
@@ -449,18 +472,19 @@ export class ComputerUse {
       ...(task.text ? { textToType: clip(task.text, 400), alreadyTyped: typed } : {}),
       screen: { app: screen.app, title: screen.title, ...(screen.url ? { url: screen.url } : {}), visibleText: clip(screen.text ?? '', 1_500), ...(screen.visual ? { readFrom: VISUAL_NOTE } : {}) },
       stepsSoFar: run.steps.slice(-8),
+      ...(avoid.size ? { triedWithoutEffect: [...avoid.values()], note: 'Those moves did not change this screen, so they are not offered again; choose another.' } : {}),
     }
     const questions: Record<string, Question> = {
       next: {
         type: 'choice',
         instructions: `What is the one next step toward the goal on this screen? Choose a control to click, or one of the other moves. ${STATE_NOTE}`,
         criteria: {
-          ...Object.fromEntries(controls.map((control, index) => [`c${index}`, `Click the ${describeControl(control)}`])),
-          scroll_down: 'Scroll down to see more of this page or list.',
-          scroll_up: 'Scroll up to see earlier content.',
+          ...Object.fromEntries(controls.map((control, index) => [`c${index}`, `Click the ${describeControl(control)}`] as const).filter(([key]) => !avoid.has(`click:${controls[Number(key.slice(1))].ref}`))),
+          ...(avoid.has('scroll:down') ? {} : { scroll_down: 'Scroll down to see more of this page or list.' }),
+          ...(avoid.has('scroll:up') ? {} : { scroll_up: 'Scroll up to see earlier content.' }),
           ...(canType ? { type_text: 'Type the prepared text (`textToType`) into a text box.' } : {}),
-          ...(typed ? { press_enter: 'Press Enter, for example to send what was just typed or to run a search.' } : {}),
-          press_space: 'Press Space, which plays or pauses the video or audio on this page.',
+          ...(typed && !avoid.has('press:enter') ? { press_enter: 'Press Enter, for example to send what was just typed or to run a search.' } : {}),
+          ...(avoid.has('press:space') ? {} : { press_space: 'Press Space, which plays or pauses the video or audio on this page.' }),
           done: 'The goal is already done on this screen.',
           stuck: 'None of these moves toward the goal.',
         },
@@ -482,6 +506,10 @@ export class ComputerUse {
     }
     const control = /^c\d+$/.test(next) ? controls[Number(next.slice(1))] : undefined
     if (!control) return { stop: 'stuck', reason: 'The control it chose is not on the screen.' }
+    // Clicking a text box that already has the focus changes nothing: with text to type, that is where it goes.
+    if (control.role === 'textbox' && control.focused && canType && task.text) {
+      return { action: { kind: 'type', ref: control.ref, text: task.text }, step: `typed the text into the ${describeControl(control)}` }
+    }
     return { action: { kind: 'click', ref: control.ref }, step: `clicked the ${describeControl(control)}` }
   }
 }
@@ -544,6 +572,32 @@ export class ComputerUseRuns {
     run.controller.abort(reason)
     return true
   }
+}
+
+/** An action as the steering remembers it ("click:0.1.3", "scroll:down", "press:enter"). */
+function actionKey(action: ScreenAction): string {
+  switch (action.kind) {
+    case 'click':
+    case 'type':
+      return `${action.kind}:${action.ref}`
+    case 'press':
+      return `press:${action.key}`
+    case 'scroll':
+      return `scroll:${action.direction}`
+  }
+}
+
+/**
+ * The address a navigation goal names, exactly as written: "go to example.com" → "example.com", "open
+ * https://example.com/a in Chrome" → that URL. Null for anything else (the decider never writes text: this is the
+ * request's own words).
+ */
+export function navigationText(goal: string): string | null {
+  const address = String.raw`https?:\/\/[^\s"“”'‘’<>]+|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|tv|app|dev|co|ai|me|edu|gov|uk|de|fr|jp|info|news|blog)(?:\/[^\s"“”'‘’<>]*)?`
+  // The address right after the verb: "go to example.com", "open the site example.com", not "open the email from x.com".
+  const verb = String.raw`\b(?:go(?:\s+over)?\s+to|navigate\s+to|browse\s+to|head\s+to|open|visit|load|pull\s+up)\s+(?:the\s+)?(?:(?:web)?site\s+|page\s+|url\s+)?`
+  const found = new RegExp(`${verb}(${address})`, 'i').exec(goal)?.[1]
+  return found ? found.replace(/[.,;:!?)]+$/, '') : null
 }
 
 /** What a screen shows, for telling whether an action changed it: title, page, controls and text. */

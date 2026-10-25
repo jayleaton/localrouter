@@ -169,7 +169,8 @@ under way: the running script is killed, and long typing stops between chunks.
 | Type | Click the box; check the app's focused element is that box (else nothing is typed); select its text through the app's Edit › Select All item by its ⌘ character; printable one-line ASCII is typed in chunks of 50 (a stop comes between chunks), anything else (other scripts, emoji, line breaks) is pasted through a pasteboard item marked transient and concealed, and the pasteboard is put back; then the box is read back, and text that did not land fails the step | Key code 0 with ⌘ is ⌘A on a US layout and ⌘Q on AZERTY; System Events keystrokes mangle characters the layout lacks; a typed line break is a Return, which sends in a chat. The typed text is never in an error or the audit |
 | Scroll | The pointer goes over the window's largest scroll or web area (or the control `ref` names), then wheel events | The view under the window's middle is often a sidebar |
 | Click | Refused when the control's middle is off every display ("scroll it into view first") | CGEvent would clamp it to the nearest edge and click something else |
-| Unchanged screen | Three times the same action on a screen whose app, title, page, controls and text are all the same stops the task | A scrolled list keeps its count of rows, so counting controls called progress "stuck" |
+| Unchanged screen | The same action chosen again on a screen whose app, title, page, controls and text are all the same is not done again: it is left out of the next question, with the decider told it did nothing (`triedWithoutEffect`), until the screen changes; the task ends `stuck` only when nothing else fits | A scrolled list keeps its count of rows, so counting controls called progress "stuck"; and on JJ's Mac a focused address bar was clicked three times running |
+| Navigation | "Go to example.com" with no `text`: the address the goal names right after the verb is the text to type (exactly as written); a click chosen on a text box that already has the focus types into it instead | The decider never writes text; the goal's own words are the request's text. Clicking a focused box changes nothing |
 | Reading | One AX answer at most 1.5 s (`AXUIElementSetMessagingTimeout`), the walk 4 s, 2,500 elements, 150 controls; past any of them the observation says `truncated`. The page's URL comes from the web area's `AXURL`, so approvals in browsers bind to it; password fields are listed without their value | A hung app answered each call after 6 s |
 
 The executor also offers two reads to the harnesses the person enrolled (MCP `computer_observe` and
@@ -224,6 +225,28 @@ a failed judgment asks. With the legacy bridge on, the box's `authorize` grant i
 an allow does not replace the local rules or approval. New harnesses need none of `desktop_helper`, `computer` or
 `approve`. Other harnesses on the computer use the executor through `localrouter-executor-mcp` (MCP stdio), after the
 person enrolls them in the app.
+
+## Background control (the "virtual cursor")
+
+Where the OS lets an app act on a control through accessibility, the executor does that instead of moving the
+person's pointer or sending global keys: the action reports `background`, the pointer stays where the person left it,
+and the local stop sees no movement of its own. When a background action leaves the screen exactly as it was and the
+next step is the same action, it is done once more with the real pointer (`ActOptions.pointer`), so an app whose
+accessible action does nothing still works; only then do repeats count toward "stuck".
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Click | `AXPress` on buttons, links, checkboxes, radio buttons, menu items and pop-up buttons; rows, text and screenshot spots use the pointer | AT-SPI Action (`click`/`press`/`activate`) or Selection on the parent (tabs, list items), every session | `Invoke`, `SelectionItem.Select`, `Toggle`, `ExpandCollapse` (a modal that holds the call past 2.5 s counts as done) |
+| Type | the keyboard (focus checked, Select All through the Edit menu, read back) | `EditableText.set_text_contents` (or delete + insert), read back; else the injector | `ValuePattern.SetValue`, read back; else SendInput |
+| Scroll | wheel events over the scroll area (moves the pointer) | `Component.scroll_to` / the scroll bar's value | `ScrollPattern` |
+| Keys (Enter, Tab…) | global key events | global key events (injector) | global key events (SendInput) |
+| Surface (tab, app forward) | Dock click / tab-strip click (pointer) | AT-SPI Selection on the tab strip; compositor focus | `SelectionItem.Select` on the tab strip; `SetForegroundWindow` |
+
+How far this goes today: actions still target the window in front. Working in an app behind the one the person uses
+(observing and acting on a named app's window without bringing it forward) is the next step: AX and UI Automation
+both read and act on background windows, AT-SPI too where the app exposes them, but keys, typing through the keyboard
+and anything the pointer does still need the window in front, and approvals bind to what is on screen. Until then the
+person moving the pointer during a task still counts as taking over, since both would use the same window.
 
 ## Status
 

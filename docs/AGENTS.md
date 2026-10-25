@@ -61,7 +61,8 @@ curl -s $BASE/capabilities | jq '{contract, unsupported}'   # what this box offe
 `GET /v1/capabilities` is the harness contract's discovery document ([HARNESS.md](HARNESS.md)): the contract
 version, each surface's profile and authorization, the MCP tools and the features not offered.
 
-`kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now.
+`kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now. On a
+multi-node LocalRouter each model also names the `node` that runs it; the API is the same whichever node that is.
 `capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
 `text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`, `voice_clone` (a speech model that clones a
 voice from recordings: [Voices](#voices-cloning)). Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),

@@ -1,4 +1,4 @@
-# Qwen3.8-27B chat on GB10 (TensorFold 1.1.4)
+# Qwen3.8-27B chat on GB10 (TensorFold 1.1.1)
 
 The `qwen3.8-27b` chat tool: TensorFold's native server (`bin/tensorfold-native serve`) running
 `TensorFold/Qwen3.8-27B-MLX-4bit` with the `z-lab/Qwen3.8-27B-DFlash2` drafter, behind LocalRouter's `openai_server`
@@ -10,8 +10,8 @@ GPU-qualified on this host") until `qualify.sh` passes on the machine and writes
 
 | File | Does |
 | --- | --- |
-| `pins.json` | TensorFold v1.1.4 (tag, commit, both Linux archives by size and sha256), the checkpoint and drafter revisions, and every file needed to serve (LFS files by sha256, small files by git blob sha1) |
-| `fetch.sh ROOT [--hf DIR]` | downloads the archive for this host to `ROOT/downloads`, extracts it to `ROOT/tensorfold-1.1.4` (checked against the archive's `SHA256SUMS`), and fetches the checkpoint and drafter into the Hugging Face cache layout under DIR (default `ROOT/hf`). Resumable and idempotent; `HF_TOKEN` is used if set |
+| `pins.json` | TensorFold v1.1.1 (tag, commit, both Linux archives by size and sha256), the checkpoint and drafter revisions, and every file needed to serve (LFS files by sha256, small files by git blob sha1) |
+| `fetch.sh ROOT [--hf DIR]` | downloads the archive for this host to `ROOT/downloads`, extracts it to `ROOT/tensorfold-1.1.1` (checked against the archive's `SHA256SUMS`), and fetches the checkpoint and drafter into the Hugging Face cache layout under DIR (default `ROOT/hf`). Resumable and idempotent; `HF_TOKEN` is used if set |
 | `setup.sh ROOT [--hf DIR] [--marker PATH]` | runs `--version`, `capabilities --json`, `models` and `info` with the cache offline, checks `lib/libtfgrammar.so`, and writes and prints `ROOT/config.json`, the tool config with this host's paths |
 | `config.example.json` | the daemon config fragment (`gpu_lock`, `defaults.chat_completion`, the tool). `options.memory` says where `resident_bytes` (24 GiB, measured on DGX-01) comes from |
 | `prompts.json` | the fixed prompt set P1 to P8: factual, reasoning on, reasoning off, a required tool call, a tool result, a JSON schema, stop + `max_tokens` 64, a ~2k-token multi-turn prompt. Temperature 0, seed 7 |

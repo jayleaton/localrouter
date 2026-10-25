@@ -151,7 +151,7 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     const cfg = app.scheduler.slots[tool].tool.config();
     if (!engine.supports(cfg, .voice_clone)) return h.fail(req, a, 400, "invalid_request_error", try std.fmt.allocPrint(a, "model '{s}' cannot clone a voice; models that can list voice_clone in /v1/models", .{cfg.id}));
     var gate_buf: [512]u8 = undefined;
-    if (engine.unqualified(app.io, a, cfg, &gate_buf)) |gate| return h.fail(req, a, 503, "server_error", gate);
+    if (app.unqualified(a, cfg, &gate_buf)) |gate| return h.fail(req, a, 503, "server_error", gate);
 
     // decode and prepare, one decode at a time
     const clips = try a.alloc(voiceprep.Clip, raws.items.len);

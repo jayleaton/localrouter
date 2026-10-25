@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.8-27B (TensorFold 1.1.4) qualification roles; qualify.sh runs them in order. Standard library only.
+"""Qwen3.8-27B (TensorFold 1.1.1) qualification roles; qualify.sh runs them in order. Standard library only.
 
     python3 -I qualify.py ROLE --root ROOT --config CONFIG --out OUT [--tool ID] [--bin LOCALROUTER] [--marker PATH]
 
