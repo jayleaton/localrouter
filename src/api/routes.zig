@@ -391,6 +391,10 @@ pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_reque
 /// directory first; null with `why` set on refusal. A model without the capability the request needs is refused.
 pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const inputs.File, owner: []const u8, why: *Refusal) ?*jobs.Job {
     const cfg = app.scheduler.slots[tool].tool.config();
+    if (app.plan) |p| if (p.places[tool] == .follower) {
+        why.message = std.fmt.bufPrint(why.buf[0..384], "this node runs rank {d} of '{s}', which serves no requests: send them to rank 0's node, {s} (or the front)", .{ p.places[tool].follower.rank, cfg.id, p.nodes[p.places[tool].follower.nodes[0]].id }) catch "this node runs another rank of the model: send requests to its rank 0";
+        return null;
+    };
     var r = asked;
     engine.fill(cfg, &r); // what the request left to the model (a video's size)
     if (!engine.supports(cfg, r.capability())) {

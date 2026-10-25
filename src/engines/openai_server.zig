@@ -5,6 +5,12 @@
 //! no GPU lock: the scheduler holds the host's for every LocalRouter model and admits by memory alone. Unload stops the
 //! server (SIGTERM, then SIGKILL after `stop_timeout_s`). If the daemon dies, the worker takes the server with it.
 //! Memory is the config's `resident_bytes` and `working_bytes`: the model's measured figures, not guessed here.
+//! As a rank of a tensor-parallel group (the daemon sets LOCALROUTER_RANK, LOCALROUTER_WORLD and LOCALROUTER_MASTER,
+//! `topology.zig`), `{rank}`, `{world}` and `{master}` are substituted too, in the command line, `options.env` and
+//! `options.rank_env` (which only a rank gets: how the server is told its rank, e.g. TensorFold's
+//! `{"TF_GLM_RANK": "{rank}", "TF_GLM_WORLD": "{world}", "NCCL_COMM_ID": "{master}:29583"}`). Rank 0 is ready when its
+//! health path answers, which means every rank has joined; any other rank serves no HTTP, so it is ready once its server
+//! has run `options.rank_start_ms` (default 1000) without exiting.
 
 const std = @import("std");
 const posix = std.posix;
@@ -53,15 +59,19 @@ const Server = struct {
             }
             d.* = try substitute(a, v.string, port_text, s.cfg);
         }
+        const rank = rankOf(s.env.environ);
         var env = std.process.Environ.Map.init(a);
         if (s.env.environ) |parent| {
             var it = parent.iterator();
             while (it.next()) |kv| try env.put(kv.key_ptr.*, kv.value_ptr.*);
         }
-        if (s.cfg.options.?.object.get("env")) |extra| if (extra == .object) {
+        for ([_][]const u8{ "env", "rank_env" }) |key| {
+            if (std.mem.eql(u8, key, "rank_env") and rank == null) break; // not a rank: no rank variables
+            const extra = s.cfg.options.?.object.get(key) orelse continue;
+            if (extra != .object) continue;
             var it = extra.object.iterator();
-            while (it.next()) |kv| if (kv.value_ptr.* == .string) try env.put(kv.key_ptr.*, kv.value_ptr.string);
-        };
+            while (it.next()) |kv| if (kv.value_ptr.* == .string) try env.put(kv.key_ptr.*, try substitute(a, kv.value_ptr.string, port_text, s.cfg));
+        }
         // The daemon's death reaches this worker as SIGTERM (not the default SIGKILL), so it can stop the server first.
         const act: posix.Sigaction = .{ .handler = .{ .handler = onTerm }, .mask = posix.sigemptyset(), .flags = 0 };
         posix.sigaction(posix.SIG.TERM, &act, null);
@@ -73,6 +83,11 @@ const Server = struct {
         };
         s.pid = child.id.?;
         server_pid.store(s.pid, .release);
+        if (rank) |r| if (r > 0) {
+            try s.awaitRunning(engine.optionInt(s.cfg, "rank_start_ms", 1000));
+            std.log.info("rank {d} started: it follows rank 0", .{r});
+            return 0;
+        };
         try s.awaitReady();
         std.log.info("server ready on 127.0.0.1:{d}", .{s.listen_port});
         return 0; // the scheduler keeps the config's resident_bytes, the measured figure
@@ -99,6 +114,21 @@ const Server = struct {
                 return error.ServerNotReady;
             }
             std.Io.sleep(s.env.io, .fromMilliseconds(250), .awake) catch {};
+        }
+    }
+
+    /// A rank past 0: its server must still run after `ms` (one that cannot reach rank 0 or refuses its settings exits).
+    fn awaitRunning(s: *Server, ms: u64) !void {
+        var waited: u64 = 0;
+        while (waited < ms) : (waited += 50) {
+            var status: c_int = 0;
+            if (std.c.waitpid(s.pid, &status, std.c.W.NOHANG) == s.pid) {
+                s.pid = 0;
+                server_pid.store(0, .release);
+                engine.explain("the rank's server exited as it started (wait status {d}); its output is in the tool's log", .{status});
+                return error.ServerExited;
+            }
+            std.Io.sleep(s.env.io, .fromMilliseconds(50), .awake) catch {};
         }
     }
 
@@ -135,6 +165,7 @@ const Server = struct {
 fn create(env: engine.Env, cfg: *const ToolConfig) anyerror!engine.Engine {
     const s = try env.gpa.create(Server);
     s.* = .{ .env = env, .cfg = cfg };
+    if (env.environ) |e| rank_vars = .{ e.get("LOCALROUTER_RANK") orelse "", e.get("LOCALROUTER_WORLD") orelse "", e.get("LOCALROUTER_MASTER") orelse "" };
     return .{ .ptr = s, .vtable = &.{ .load = Server.load, .generate = Server.generate, .unload = Server.unload, .port = Server.port } };
 }
 
@@ -145,11 +176,28 @@ fn onTerm(_: posix.SIG) callconv(.c) void {
     std.c._exit(0);
 }
 
-/// `arg` with `{port}`, `{id}` and `{weights}` replaced.
+/// This worker's rank of a tensor-parallel group (LOCALROUTER_RANK), or null.
+fn rankOf(environ: ?*const std.process.Environ.Map) ?u64 {
+    const e = environ orelse return null;
+    const v = e.get("LOCALROUTER_RANK") orelse return null;
+    return std.fmt.parseInt(u64, v, 10) catch null;
+}
+
+/// `arg` with `{port}`, `{id}` and `{weights}` replaced, and a rank's `{rank}`, `{world}` and `{master}` (from the
+/// worker's environment; empty when it is not a rank).
 fn substitute(a: std.mem.Allocator, arg: []const u8, port_text: []const u8, cfg: *const ToolConfig) ![]const u8 {
-    const with_port = try std.mem.replaceOwned(u8, a, arg, "{port}", port_text);
-    const with_id = try std.mem.replaceOwned(u8, a, with_port, "{id}", cfg.id);
-    return std.mem.replaceOwned(u8, a, with_id, "{weights}", cfg.weights);
+    return substituteIn(a, arg, port_text, cfg, rank_vars);
+}
+
+var rank_vars: [3][]const u8 = .{ "", "", "" }; // rank, world, master: set once by `create`, read on load
+
+fn substituteIn(a: std.mem.Allocator, arg: []const u8, port_text: []const u8, cfg: *const ToolConfig, vars: [3][]const u8) ![]const u8 {
+    var out = try std.mem.replaceOwned(u8, a, arg, "{port}", port_text);
+    out = try std.mem.replaceOwned(u8, a, out, "{id}", cfg.id);
+    out = try std.mem.replaceOwned(u8, a, out, "{weights}", cfg.weights);
+    out = try std.mem.replaceOwned(u8, a, out, "{rank}", vars[0]);
+    out = try std.mem.replaceOwned(u8, a, out, "{world}", vars[1]);
+    return std.mem.replaceOwned(u8, a, out, "{master}", vars[2]);
 }
 
 test "the server's command line gets its port, id and weights" {
@@ -160,5 +208,7 @@ test "the server's command line gets its port, id and weights" {
     try std.testing.expectEqualStrings("--port=8123", try substitute(a, "--port={port}", "8123", &cfg));
     try std.testing.expectEqualStrings("qwen3.8-27b@/data/hf", try substitute(a, "{id}@{weights}", "1", &cfg));
     try std.testing.expectEqualStrings("serve", try substitute(a, "serve", "1", &cfg));
+    const vars = [3][]const u8{ "1", "2", "192.168.100.11" };
+    try std.testing.expectEqualStrings("1/2@192.168.100.11:29583", try substituteIn(a, "{rank}/{world}@{master}:29583", "1", &cfg, vars));
     try std.testing.expectEqual(@as(u64, 7), needs(&.{ .id = "c", .kind = .chat, .resident_bytes = 7 }, &.{ .chat = .{ .body = "{}" } }).resident);
 }

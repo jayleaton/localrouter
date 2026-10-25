@@ -17,6 +17,7 @@ const bind = @import("bind.zig");
 const engine = @import("engine/engine.zig");
 const topology = @import("topology.zig");
 const node = @import("tool/node.zig");
+const ranks = @import("tool/ranks.zig");
 
 var stop_flag: std.atomic.Value(bool) = .init(false);
 
@@ -60,7 +61,13 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     if (!plan.front) topology.trimDefaults(&plan, &cfg.defaults); // a node serves its own tools only
     const tools = try arena.dupe(config.ToolConfig, plan.tools);
     // what each tool's weights can do, before anything lists it; a remote tool's weights are on its node, which checks
-    for (tools, plan.places, 0..) |_, pl, k| if (pl != .remote) try engine.resolve(io, arena, tools[k .. k + 1]);
+    for (tools, plan.places, 0..) |*t, pl, k| {
+        if (pl != .remote) try engine.resolve(io, arena, tools[k .. k + 1]);
+        if (pl == .follower) { // another rank of a group: it loads when rank 0 asks, and stays until rank 0 stops it
+            t.keep_loaded = false;
+            t.idle_ttl_s = std.math.maxInt(u32);
+        }
+    }
     cfg.tools = tools;
     if (!engine.checkDefaults(&cfg, &why)) {
         std.log.err("{s}: {s}", .{ path orelse "config", why.buffered() });
@@ -97,11 +104,20 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
 
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
     const remotes = try arena.alloc(node.NodeTool, cfg.tools.len);
+    const leads = try arena.alloc(ranks.RankTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
-    for (procs, remotes, slots, cfg.tools, plan.places, 0..) |*p, *r, *s, *t, pl, k| {
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path }, t);
+    for (procs, remotes, leads, slots, cfg.tools, plan.places, 0..) |*p, *r, *l, *s, *t, pl, k| {
+        const rank: ?process.Rank = switch (pl) {
+            .lead, .follower => |g| .{ .rank = g.rank, .world = g.world(), .master = plan.nodes[g.nodes[0]].addresses[0] },
+            else => null,
+        };
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path, .rank = rank }, t);
         switch (pl) {
-            .local => s.* = .{ .tool = p.asTool() },
+            .local, .follower => s.* = .{ .tool = p.asTool() },
+            .lead => |g| {
+                l.* = .{ .cluster = &cluster, .rank0 = p, .followers = g.nodes[1..] };
+                s.* = .{ .tool = l.asTool() };
+            },
             .remote, .fallback => |n| {
                 r.* = .{ .cluster = &cluster, .cfg = t, .node = n, .slot = k, .fallback = if (pl == .fallback) p else null };
                 try cluster.tools.append(gpa, r);

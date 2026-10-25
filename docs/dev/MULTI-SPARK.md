@@ -6,8 +6,7 @@
 | --- | --- | --- |
 | `single` (the default) | one Spark, exactly as before | unchanged |
 | placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)) |
-| TP=2 | one chat model split across two Sparks over ConnectX-7 | see [Tensor parallel](#tensor-parallel) |
-| TP=N | more ranks | the config, the plan and the routing take N nodes; no rank code yet |
+| TP=2, TP=N | one model split across N Sparks over ConnectX-7, one rank a node | built and tested with the engines' rank contract ([Tensor parallel](#tensor-parallel)); the 27B has no CUDA ranks, and no CUDA-rank model's weights are on the boxes yet |
 
 The multi-node modes run today's Qwen3.8-27B as the chat model. The chat model is config: swapping in a bigger one
 on Spark 1 later changes the tool entry, not the code.
@@ -42,8 +41,8 @@ each daemon's own `host` differ.
 
 The daemon checks the topology at start and stops with the reason (exit 2): no front or two fronts, an unknown or
 duplicate node, an address that is not IPv4, a tool on no node, a model that is not a tool, a fallback that is the
-front's own, or a node `self` does not name. A tool listed on two nodes is refused as tensor parallel, which no engine
-in this build serves.
+front's own, or a node `self` does not name. A tool listed on several nodes is a tensor-parallel group, checked as
+[Tensor parallel](#tensor-parallel) says.
 
 **What runs where.**
 - **Admission is per node.** A node serves only its own tools and admits them against its own `MemAvailable`, its own
@@ -117,20 +116,69 @@ memory table holds.
 
 ## Tensor parallel
 
-Read on 2026-10-25 against TensorFold `main` `35e46c09` (after v1.1.4) and our chat pin v1.1.1:
+**What is built.** A model listed under several nodes' `models` is one tensor-parallel group, one rank a node, of any
+size (TP=2, TP=3, ...; `src/topology.zig`, `src/tool/ranks.zig`). The model is config: a swap changes the tool entry
+and the nodes that list it, not the code.
 
-- **The native CUDA build has no ranks for this model.** It runs a family across ranks only through that family's
-  own follower loop (`zig/src/native/cuda_follow.zig`: otherwise "this family has no tensor-parallel follower
-  loop"). On CUDA, the families that have one are GLM-5.3-Flash (`TF_GLM_RANK` of `TF_GLM_WORLD`), Nemotron
-  (`TF_NEMOTRON_RANK`) and Flash Next (`flashnext/cuda_lanes.zig`). `docs/multi-rank-receipts.md` says the same: "The
-  native CUDA build serves neither `--tp` nor `--rank`: a family's own variables place its ranks". The Qwen3.8-27B
-  family (`qwen3_5`) has ranks only on the HIP backend (`--tp --rank --master`).
-- **Its two-rank 27B is the frozen Python engine.** The 27B recipe's "MLX 4-bit, one or two ranks" runs the frozen
-  Python 0.6.6 engine in NVIDIA's container (`docs/recipes/cuda.md`: "Two ranks are the Python engine's; the native
-  CUDA build serves one GPU"). That is a different engine from the qualified native server Jarvis runs.
+```json
+{"id": "nemotron-3.5-super", "kind": "chat", "engine": "openai_server", "resident_bytes": 45097156608,
+ "options": {"server": ["/opt/tf-1.1.4/bin/tensorfold-native", "serve", "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
+                        "--host", "127.0.0.1", "--port", "{port}", "--name", "{id}", "--parallel", "1"],
+             "env": {"NCCL_SOCKET_IFNAME": "enp1s0f1np1", "NCCL_IB_HCA": "rocep1s0f1"},
+             "rank_env": {"TF_NEMOTRON_RANK": "{rank}", "TF_NEMOTRON_WORLD": "{world}", "NCCL_COMM_ID": "{master}:29741"}}}
+```
 
-So the native TP=2 chat mode for the 27B waits on TensorFold. The placement mode ships first. The topology refuses
-a model listed on two nodes rather than serving it any other way.
+- **Ranks.** Rank 0 is the front when it hosts the model, else the first of its nodes in topology order; the others
+  follow in that order. `{rank}`, `{world}` and `{master}` (rank 0's first address) are filled in the command line,
+  `options.env` and `options.rank_env`. Only a rank gets `rank_env`, so the same tool runs alone in a single topology.
+- **Memory.** `resident_bytes` is one rank's share: each node admits its own rank against its own memory and GPU lock.
+- **Start order.** Loading the model on rank 0's node first restarts every other rank through its node's daemon
+  (`POST /v1/tools/{id}/load` there; a rank's server is up once it has run `rank_start_ms`, default 1000, without
+  exiting), then starts rank 0. Rank 0 is ready when its health path answers, which means every rank has joined.
+- **Failure.** The ranks stop together, which is the engines' contract (TensorFold's ranks keep a line to rank 0). When
+  rank 0's server is gone, the other ranks are unloaded too, and the next load starts the whole group again. A request
+  made while a rank's node is down is refused with a 503 naming that node.
+- **Requests go to rank 0.** The front sends them there; another rank's node refuses them with a 400 naming rank 0's
+  node. A rank that is not rank 0 is never kept loaded on its own and never idles out: rank 0 starts and stops it.
+- **Refused at start.** A group whose engine is not `openai_server`, a group without `options.rank_env`, and a
+  group listed as a `fallback` (one node cannot run the group's share alone).
+- **Tested.** `tests/ranks.zig` runs three real daemons: a TP=2 group behind the front, and a TP=3 group whose rank
+  0 is the front. The fake TensorFold server (`tests/fixtures/chat_server.py`) keeps the same contract: the other ranks
+  join rank 0 before it serves, and a rank whose peer goes stops. The test checks that each node holds its own rank,
+  that replies come from rank 0 of 2 and of 3, that another rank refuses requests, and that losing a rank's node stops
+  its groups, with requests refused naming that node.
+
+**Which models can run this way (read 2026-10-25, TensorFold `main` `81b476df`, after v1.1.4).** In the native CUDA
+build, a family runs across hosts only through its own rank variables:
+
+| Family | Variables | Smallest checkpoint | Size |
+| --- | --- | --- | --- |
+| Nemotron 3.5 Super VL 120B-A12B | `TF_NEMOTRON_RANK`, `TF_NEMOTRON_WORLD`, `NCCL_COMM_ID` | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` | 75.1 GB download; weights 70.8 GiB on one GB10, split over two |
+| GLM-5.3-Flash | `TF_GLM_RANK`, `TF_GLM_WORLD`, `NCCL_COMM_ID` | `nvidia/GLM-5.3-Flash-NVFP4` (model 96.11 GiB at TP=2), or Mia-AiLab's EXL3/TR3 4 bpw (about 176 GB) | larger |
+| Flash Next | its two-rank path is experimental and local (ModelOpt NVFP4) | | |
+
+**Qwen3.8-27B has no CUDA ranks.** Its family (`qwen3_5`) has ranks only on the HIP backend and in the frozen Python
+0.6.6 engine (`docs/recipes/cuda.md`: "Two ranks are the Python engine's; the native CUDA build serves one GPU").
+Doug's TensorFold bump reached the same conclusion. So Jarvis's 27B runs in placement, one node, until TensorFold adds
+CUDA ranks to that family.
+
+**What is on the boxes (searched 2026-10-25).** Nothing a native rank group can serve:
+- DGX-01's `~/ai/models/glm-5.3-flash-exl3-2.05bpw` (79 GiB) uses the `mul1` codebook. The CUDA GLM family reads
+  only `mcg` with 4-bit experts, and refuses `mul1` by name (`families/glm/cuda_exl3.zig`).
+- `~/ai/models/qwen38-flash-next-unc-3bpw` (64 GiB) is an EXL3 pack; Flash Next's rank path is ModelOpt NVFP4.
+- The rest are DeepSeek-V4.1 packs, which belong to the DeepSeek project and which no release serves, and MiniMax M3
+  packs of another project.
+
+Both boxes also lack NCCL 2.30, the minimum TensorFold's Nemotron and Flash Next ranks load. The only NCCL is 2.29.7,
+in the PyTorch venvs.
+
+**The pin.** Each tool names its own server binary, so the 27B chat server stays on TensorFold 1.1.1 while a group's
+server runs 1.1.4 or later from its own root. One daemon serves both without conflict. A group's model qualifies the
+way the 27B does (`tools/chat/qwen38-27b/qualify.sh` is the pattern), on every node of the group, with every rank
+running. Its qualify must include the cached next-turn check of `tools/spark/jarvis/chat_bench.py` (`turn` and
+`cached_tokens`): 1.1.4's prompt cache resumes only at 4,096-token boundaries, which re-prefilled every short voice
+turn and is why the chat pin went back to 1.1.1 (#97). Until a release fixes that, a 1.1.4 group serves long-context
+work, not the voice loop's chat.
 
 ## The design behind it
 

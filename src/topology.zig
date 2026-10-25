@@ -4,8 +4,11 @@
 //! the front also serves every other node's, as remote tools it sends to their node (`tool/node.zig`), and runs a
 //! remote tool itself while its node is down when it lists the tool under its `fallback`.
 //!
-//! A tool hosted by more than one node would be one model split across them (tensor parallel ranks). No engine this
-//! build runs can do that, so it is refused with that reason rather than served as something else.
+//! A tool hosted by several nodes is one model split across them: a tensor-parallel group of ranks, one on each. Rank 0
+//! is the front when it hosts the model, else the first of its nodes in topology order; the others follow in that
+//! order. Rank 0 serves the model and starts the other ranks first (`tool/ranks.zig`); each node admits its own rank.
+//! The tool says how its engine is told its rank (`options.rank_env`, `engines/openai_server.zig`), so a model swap is a
+//! config change. A group has no fallback: a single node cannot run its share alone.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -17,6 +20,18 @@ pub const Place = union(enum) {
     local, // here, as in a single topology
     remote: usize, // on that node (an index into `Plan.nodes`); never here
     fallback: usize, // on that node while it is up, here while it is down
+    lead: Group, // rank 0 of a tensor-parallel group: it runs here and serves, the other ranks run on their nodes
+    follower: Group, // another rank of a group: its process runs here when rank 0 asks; it serves no request
+};
+
+/// A tensor-parallel group as one of its nodes sees it.
+pub const Group = struct {
+    rank: usize, // this node's
+    nodes: []const usize, // the group's nodes in rank order (indices into `Plan.nodes`): `nodes[0]` is rank 0
+
+    pub fn world(g: Group) usize {
+        return g.nodes.len;
+    }
 };
 
 pub const Plan = struct {
@@ -30,8 +45,9 @@ pub const Plan = struct {
     /// The node that hosts tool `id`, or null for a tool of this node (or of a single topology).
     pub fn hostOf(p: *const Plan, id: []const u8) ?*const config.Node {
         for (p.tools, p.places) |t, pl| if (std.mem.eql(u8, t.id, id)) return switch (pl) {
-            .local => null,
+            .local, .lead => null,
             .remote, .fallback => |n| &p.nodes[n],
+            .follower => |g| &p.nodes[g.nodes[0]],
         };
         return null;
     }
@@ -70,25 +86,36 @@ pub fn plan(a: std.mem.Allocator, cfg: *const Config, self_flag: ?[]const u8, wh
         if (std.mem.eql(u8, n.id, self_id)) break i;
     } else return refuse(why, "topology: this daemon is node '{s}', which is not one of its nodes ({s})", .{ self_id, try ids(a, t.nodes) });
 
-    // every tool on exactly one node; every model a node lists is a tool
-    const host = try a.alloc(?usize, cfg.tools.len);
-    @memset(host, null);
+    // every model a node lists is a tool, and every tool is on at least one node: on several, its ranks in order
+    const hosts = try a.alloc(std.ArrayList(usize), cfg.tools.len);
+    @memset(hosts, .empty);
     for (t.nodes, 0..) |n, ni| for (n.models) |m| {
         const ti = toolIndex(cfg, m) orelse return refuse(why, "topology: node '{s}' hosts '{s}', which is not a configured tool", .{ n.id, m });
-        if (host[ti]) |other| return refuse(why, "topology: '{s}' is listed on nodes '{s}' and '{s}'; one model on several nodes is tensor parallel, which no engine in this build serves: list it on one node", .{ m, t.nodes[other].id, n.id });
-        host[ti] = ni;
+        for (hosts[ti].items) |other| if (other == ni) return refuse(why, "topology: node '{s}' lists '{s}' twice", .{ n.id, m });
+        if (ni == f) try hosts[ti].insert(a, 0, ni) else try hosts[ti].append(a, ni); // the front is rank 0 when it hosts it
     };
-    for (cfg.tools, host) |tl, hst| if (hst == null) return refuse(why, "topology: tool '{s}' is on no node: list it under one node's models", .{tl.id});
+    for (cfg.tools, hosts) |*tl, hs| {
+        if (hs.items.len == 0) return refuse(why, "topology: tool '{s}' is on no node: list it under one node's models", .{tl.id});
+        if (hs.items.len == 1) continue;
+        if (!std.mem.eql(u8, tl.engine, "openai_server")) return refuse(why, "topology: '{s}' is on {d} nodes (tensor parallel), which only a model's own server can run (engine openai_server); its engine is '{s}'", .{ tl.id, hs.items.len, if (tl.engine.len > 0) tl.engine else "a cmd worker" });
+        const re = if (tl.options) |o| (if (o == .object) o.object.get("rank_env") else null) else null;
+        if (re == null or re.? != .object or re.?.object.count() == 0)
+            return refuse(why, "topology: '{s}' is on {d} nodes (tensor parallel), but its tool has no options.rank_env telling its server which rank it is (TensorFold's GLM: {{\"TF_GLM_RANK\": \"{{rank}}\", \"TF_GLM_WORLD\": \"{{world}}\", \"NCCL_COMM_ID\": \"{{master}}:29583\"}})", .{ tl.id, hs.items.len });
+        if (listed(t.nodes[f].fallback, tl.id)) return refuse(why, "topology: '{s}' is tensor parallel over {d} nodes and cannot fall back to the front alone", .{ tl.id, hs.items.len });
+    }
     for (t.nodes[f].fallback) |m| {
         const ti = toolIndex(cfg, m) orelse return refuse(why, "topology: the front's fallback '{s}' is not a configured tool", .{m});
-        if (host[ti].? == f) return refuse(why, "topology: the front's fallback '{s}' is one of its own models", .{m});
+        if (hosts[ti].items[0] == f) return refuse(why, "topology: the front's fallback '{s}' is one of its own models", .{m});
     }
 
     var tools: std.ArrayList(ToolConfig) = .empty;
     var places: std.ArrayList(Place) = .empty;
-    for (cfg.tools, host) |tl, hst| {
-        const h = hst.?;
-        const pl: Place = if (h == self) .local else if (self != f) continue else if (listed(t.nodes[f].fallback, tl.id)) .{ .fallback = h } else .{ .remote = h };
+    for (cfg.tools, hosts) |tl, hs| {
+        const h = hs.items[0];
+        const rank = std.mem.indexOfScalar(usize, hs.items, self);
+        const pl: Place = if (hs.items.len > 1 and rank != null)
+            (if (rank.? == 0) .{ .lead = .{ .rank = 0, .nodes = hs.items } } else .{ .follower = .{ .rank = rank.?, .nodes = hs.items } })
+        else if (h == self) .local else if (self != f) continue else if (listed(t.nodes[f].fallback, tl.id)) .{ .fallback = h } else .{ .remote = h };
         try tools.append(a, tl);
         try places.append(a, pl);
     }
@@ -236,6 +263,39 @@ test "multi: invalid topologies are refused with the reason" {
     try std.testing.expect((try planOf(a, "{\"topology\": {\"mode\": \"multi\", \"nodes\": [{\"id\": \"x\", \"addresses\": [\"10.0.0.1\"]}]}}", null, &why)) == null);
     try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "at least two nodes") != null);
     try std.testing.expect((try planOf(a, "{\"topology\": {\"nodes\": [{\"id\": \"x\", \"addresses\": [\"10.0.0.1\"]}]}}", null, &why)) == null);
+}
+
+test "tensor parallel: a model on several nodes is a group; the front is rank 0 when it hosts it, else the first node" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [512]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    const text =
+        \\{"tools": [{"id": "big", "kind": "chat", "engine": "openai_server", "options": {"rank_env": {"R": "{rank}"}}},
+        \\           {"id": "wide", "kind": "chat", "engine": "openai_server", "options": {"rank_env": {"R": "{rank}"}}}],
+        \\ "topology": {"mode": "multi", "nodes": [
+        \\  {"id": "n2", "addresses": ["10.0.0.2"], "models": ["big", "wide"]},
+        \\  {"id": "n3", "addresses": ["10.0.0.3"], "models": ["big", "wide"]},
+        \\  {"id": "f", "addresses": ["10.0.0.1"], "role": "front", "models": ["wide"]}]}}
+    ;
+    const front = (try planOf(a, text, "f", &why)).?;
+    try std.testing.expectEqual(Place{ .remote = 0 }, front.places[0]); // big: rank 0 is n2, the first of its nodes
+    try std.testing.expect(front.places[1] == .lead); // wide: the front hosts it, so it is rank 0
+    try std.testing.expectEqualSlices(usize, &.{ 2, 0, 1 }, front.places[1].lead.nodes);
+    try std.testing.expectEqual(@as(usize, 3), front.places[1].lead.world());
+    const n2 = (try planOf(a, text, "n2", &why)).?;
+    try std.testing.expect(n2.places[0] == .lead and n2.places[0].lead.world() == 2);
+    try std.testing.expectEqual(@as(usize, 1), n2.places[1].follower.rank);
+    const n3 = (try planOf(a, text, "n3", &why)).?;
+    try std.testing.expectEqual(@as(usize, 1), n3.places[0].follower.rank);
+    try std.testing.expectEqual(@as(usize, 2), n3.places[1].follower.rank);
+    try std.testing.expectEqualStrings("n2", n3.hostOf("big").?.id); // requests for it go to rank 0
+    try std.testing.expectEqualStrings("f", n3.hostOf("wide").?.id);
+    // a group needs a server engine and its rank_env, and has no fallback
+    const no_env = try std.mem.replaceOwned(u8, a, text, "\"rank_env\": {\"R\": \"{rank}\"}", "\"x\": 1");
+    try std.testing.expect((try planOf(a, no_env, "f", &why)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "no options.rank_env") != null);
 }
 
 test "ip4 parses dotted IPv4 only" {
