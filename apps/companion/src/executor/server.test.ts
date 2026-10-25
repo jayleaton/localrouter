@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { handleMcp, TOOLS } from './mcp.ts'
+import { executorSocket } from './paths.ts'
 import { Enrollment, ExecutorClient, ExecutorServer, OPS, serve } from './server.ts'
 import { fakeBroker } from './testing.ts'
 
@@ -45,9 +46,10 @@ describe('other harnesses reach the executor only through bounded, enrolled oper
     const { broker, mac } = fakeBroker(['c4', 'c3', 'done'])
     const enrollment = new Enrollment(join(dir, 'callers.json'))
     const { token } = enrollment.add('claude-code')
-    const server = new ExecutorServer(join(dir, 'executor.sock'), broker, enrollment)
+    // A Unix socket in the folder (mode 0600), or on Windows the folder's named pipe.
+    const server = new ExecutorServer(executorSocket(dir), broker, enrollment)
     await server.listen()
-    expect(statSync(server.path).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect(statSync(server.path).mode & 0o777).toBe(0o600)
     const client = new ExecutorClient(server.path, token)
     const call = (op: string, args: Record<string, unknown>) => client.request(op, args)
     const listed = await handleMcp({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, call, '0')

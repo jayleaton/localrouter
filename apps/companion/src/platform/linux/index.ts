@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join } from 'node:path/posix'
 import { execRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import type { BrowserTab, BrowserTabs } from '../../../../desktop-helper/src/computer/types.ts'

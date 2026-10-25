@@ -26,7 +26,7 @@ import type { Session } from './session.ts'
  * Python 3.8+; the script must not contain a backtick or a dollar-brace (it is a TypeScript template).
  */
 export const ATSPI_SCRIPT = String.raw`
-import json, re, sys, time
+import json, os, re, sys, time
 try:
     import gi
     gi.require_version('Atspi', '2.0')
@@ -78,11 +78,17 @@ PREFERRED = ('click', 'press', 'activate', 'jump', 'toggle', 'switch', 'select',
 
 MAX_NODES, MAX_CONTROLS, MAX_TEXT, BUDGET_S = 2500, 150, 1500, 3.0
 
+DEBUG = os.environ.get('LOCALROUTER_ATSPI_DEBUG', '')
+
 def safe(fn, default=None):
     try:
         value = fn()
         return default if value is None else value
-    except Exception:
+    except Exception as error:
+        # LOCALROUTER_ATSPI_DEBUG=<file> (CI): every swallowed failure appended there, for a backend not run elsewhere.
+        if DEBUG:
+            with open(DEBUG, 'a') as log:
+                log.write('%s: %r\n' % (getattr(fn, '__name__', 'call'), error))
         return default
 
 def clip(text, limit):
@@ -104,7 +110,8 @@ def text_of(acc, limit):
     if t is None:
         return ''
     n = safe(t.get_character_count, 0)
-    return safe(lambda: t.get_text(0, min(n, limit)), '') or ''
+    # Atspi.Text.get_text, not t.get_text: on an Accessible, get_text() is the one-argument alias for the interface.
+    return safe(lambda: Atspi.Text.get_text(t, 0, min(n, limit)), '') or ''
 
 def children(acc):
     n = safe(acc.get_child_count, 0)

@@ -17,6 +17,8 @@ import { fakeRunner, fakeSession } from './testing.ts'
  * semantic-first actions are exercised for real. Skipped where python3 is missing.
  */
 const python = (() => {
+  // These are Linux scripts with Linux paths: run where Linux runs them (and macOS), not on a Windows runner.
+  if (process.platform === 'win32') return false
   try {
     execFileSync('python3', ['--version'], { stdio: 'ignore' })
     return true
@@ -26,8 +28,10 @@ const python = (() => {
 })()
 
 // PYTHONPATH splits on ':', so the fake gi must live in a directory without one (TMPDIR may have one).
-const dir = mkdtempSync(join(tmpdir().includes(':') ? '/tmp' : tmpdir(), 'localrouter-py-'))
-afterAll(() => rmSync(dir, { recursive: true, force: true }))
+const dir = python ? mkdtempSync(join(tmpdir().includes(':') ? '/tmp' : tmpdir(), 'localrouter-py-')) : ''
+afterAll(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true })
+})
 
 const SCRIPTS = { ATSPI_SCRIPT, PORTAL_KEYS, PORTAL_SCREENSHOT, GDK_MONITORS, GI_PROBE }
 
@@ -59,6 +63,10 @@ def log(entry):
     with open(os.environ['FAKE_ATSPI_LOG'], 'a') as f:
         f.write(json.dumps(entry) + '\n')
 
+class Text:
+    @staticmethod
+    def get_text(obj, start, end): return obj.spec['text'][start:end]
+
 class Rect:
     def __init__(self, box):
         self.x, self.y, self.width, self.height = box
@@ -89,7 +97,9 @@ class Node:
     def grab_focus(self): return False
     def get_text_iface(self): return self if 'text' in self.spec else None
     def get_character_count(self): return len(self.spec['text'])
-    def get_text(self, start, end): return self.spec['text'][start:end]
+    # As in PyGObject: Accessible.get_text() is the one-argument alias for the Text interface, so the interface's
+    # get_text(start, end) is reached only as Atspi.Text.get_text(obj, start, end).
+    def get_text(self): return self.get_text_iface()
     def get_editable_text_iface(self): return self if self.spec.get('editable') else None
     def set_text_contents(self, text):
         log({'set_text': self.get_name()})
