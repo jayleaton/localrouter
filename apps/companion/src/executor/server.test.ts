@@ -61,4 +61,35 @@ describe('other harnesses reach the executor only through bounded, enrolled oper
     client.close()
     await server.close()
   })
+
+  it('reads the front window for an enrolled harness: the tree, and a scaled screenshot as MCP image content', async () => {
+    const { broker, audit } = fakeBroker([])
+    const enrollment = new Enrollment(join(temp(), 'callers.json'))
+    const { token } = enrollment.add('codex')
+    const call = (op: string, args: Record<string, unknown>) => serve(broker, enrollment, { op, token, args })
+    const tree = await handleMcp({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'computer_observe', arguments: {} } }, call, '0')
+    const seen = JSON.parse(((tree?.result as { content: Array<{ text: string }> }).content[0]).text) as { app: string; controls: Array<{ label: string }> }
+    expect(seen.app).toBe('Notes')
+    expect(seen.controls.map((c) => c.label)).toContain('Send')
+    const shot = await handleMcp({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'computer_screenshot', arguments: { max_edge: 1000 } } }, call, '0')
+    const content = (shot?.result as { content: Array<{ type: string; data?: string; mimeType?: string; text?: string }> }).content
+    expect(content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' })
+    expect(Buffer.from(content[0].data ?? '', 'base64').subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const meta = JSON.parse(content[1].text ?? '{}') as { width: number; height: number; scale: number; region: { x: number } }
+    expect([meta.width, meta.height]).toEqual([1000, 667])
+    expect(meta.scale).toBeCloseTo(1000 / 1200)
+    expect(audit.tail(10).map((line) => line.event)).toEqual(expect.arrayContaining(['observe', 'screenshot']))
+  })
+
+  it('never reads for the box or a voice turn, while switched off, or when LocalRouter itself is in front', async () => {
+    const { broker } = fakeBroker([])
+    for (const kind of ['box', 'voice'] as const) {
+      expect(await broker.observe({ caller: { id: kind, name: kind, kind }, utterance: 'what is on my screen' })).toMatchObject({ ok: false, error: expect.stringMatching(/only for harnesses/) })
+    }
+    broker.setDisabled(true)
+    expect(await broker.screenshot({ caller: { id: 'm', name: 'MCP: x', kind: 'mcp' } })).toMatchObject({ ok: false, error: expect.stringMatching(/switched off/) })
+    const own = fakeBroker([], { ownApps: ['Notes'] }).broker
+    expect(await own.observe({ caller: { id: 'm', name: 'MCP: x', kind: 'mcp' } })).toMatchObject({ ok: false, error: expect.stringMatching(/never read/) })
+    expect(await own.screenshot({ caller: { id: 'm', name: 'MCP: x', kind: 'mcp' } })).toMatchObject({ ok: false, error: expect.stringMatching(/never read/) })
+  })
 })

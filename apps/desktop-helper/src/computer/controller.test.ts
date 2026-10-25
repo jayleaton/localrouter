@@ -286,8 +286,19 @@ describe('ComputerUse', () => {
       const actions: ScreenAction[] = []
       const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: [control('0.1', 'button', 'Refresh')] }), act: async (action) => void actions.push(action) }
       const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('c0') }], { page, tabs: null })
-      expect(await computer.run({ goal: 'refresh the inbox until mail arrives', text: null })).toMatchObject({ status: 'stuck', reason: 'It kept trying to clicked the button “Refresh” without the screen changing.' })
+      expect(await computer.run({ goal: 'refresh the inbox until mail arrives', text: null })).toMatchObject({ status: 'stuck', reason: 'It kept doing the same thing (clicked the button “Refresh”) without the screen changing.' })
       expect(actions).toHaveLength(2)
+    })
+
+    it('keeps scrolling a list whose rows change even when as many are visible each time', async () => {
+      const actions: ScreenAction[] = []
+      let first = 0
+      const rows = () => Array.from({ length: 20 }, (_, i) => control(`0.${i}`, 'row', `Message ${first + i}`))
+      const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: rows() }), act: async (action) => { actions.push(action); first += 20 } }
+      const replies: Answers[] = [{ surface: choice('current') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('done') }]
+      const { computer } = computerWith(replies, { page, tabs: null })
+      expect(await computer.run({ goal: 'scroll down to the oldest mail', text: null })).toMatchObject({ status: 'done' })
+      expect(actions).toHaveLength(4)
     })
 
     it('stops before its next action when aborted, with the reason given', async () => {

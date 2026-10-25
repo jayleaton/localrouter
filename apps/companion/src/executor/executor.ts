@@ -77,7 +77,8 @@ export async function startExecutor(o: ExecutorOptions): Promise<Executor> {
   const id = identity(o.dir, o.name)
   const built = buildMachine(o.machine)
   const log = o.log ?? silentLogger
-  const stop = built.pointer ? new LocalStop({ pointer: built.pointer, log }) : null
+  const desktop = built.machine.desktop
+  const stop = built.pointer ? new LocalStop({ pointer: built.pointer, ...(desktop?.displays ? { displays: () => desktop.displays!() } : {}), log }) : null
   const broker = new Broker({
     executorId: id.executor,
     name: id.name,

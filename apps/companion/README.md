@@ -99,8 +99,11 @@ With the app running, enroll the harness in the app (Settings › Harnesses give
   "env": { "LOCALROUTER_EXECUTOR_TOKEN": "lrx_..." } } } }
 ```
 
-Tools: `computer_capabilities`, `computer_control`, `computer_use`, `computer_status`, `computer_stop`. Approvals
-appear in the app on this computer. No tool can approve.
+Tools: `computer_capabilities`, `computer_control`, `computer_use`, `computer_status`, `computer_stop`, and two reads
+of the front window: `computer_observe` (its accessibility tree: controls with role, label, bounds; visible text; the
+page URL) and `computer_screenshot` (a PNG scaled to at most 1568 pixels on its longer edge, with the mapping back to
+screen points). Approvals appear in the app on this computer. No tool can approve, and nothing reads LocalRouter's own
+window.
 
 ## Checks
 

@@ -143,6 +143,8 @@ async function startRuntimeFromSettings(): Promise<void> {
       showMain()
       if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
     }
+    // A card nobody answered: say so, since the task ended while the person may have been away from the window.
+    if (e.type === 'approval.end' && e.outcome === 'expired' && Notification.isSupported()) new Notification({ title: 'Jarvis stopped', body: 'Nobody approved the step in time, so nothing was done.' }).show()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })

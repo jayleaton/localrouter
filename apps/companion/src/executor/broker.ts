@@ -3,7 +3,8 @@ import { ComputerUse, clampLimit, MAX_STEPS, TIMEOUT_MS } from '../../../desktop
 import type { AuthorizeAction, AuthorizeRequest, ComputerOutcome, Deps, Grant, Authorize, TaskWatch } from '../../../desktop-helper/src/computer/controller.ts'
 import type { Answers, Decider, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import type { ComputerControl } from '../../../desktop-helper/src/computer/macControls.ts'
-import type { BrowserTabs, Observation, ScreenBackend } from '../../../desktop-helper/src/computer/types.ts'
+import { SCREENSHOT_MAX_EDGE } from '../../../desktop-helper/src/computer/types.ts'
+import type { BrowserTabs, Observation, ScreenBackend, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
 import { silentLogger } from '../../../desktop-helper/src/log.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { Store } from './approvals.ts'
@@ -109,6 +110,8 @@ export type Started = { ok: true; task_id: string; finished: Promise<ComputerOut
 
 export const DISABLED_MESSAGE = 'Computer control is switched off on this computer'
 export const OWN_TARGET = 'LocalRouter’s own windows are never a target.'
+export const OWN_READ = 'LocalRouter’s own window is in front, and it is never read: bring the app you mean forward first.'
+const ACCESS_HINT = 'give LocalRouter the accessibility access it asks for in Settings'
 const MAX_DECISIONS_PER_STEP = 2
 
 type Task = {
@@ -247,7 +250,7 @@ export class Broker {
     if (text !== null && (!text || Buffer.byteLength(text, 'utf8') > policy.MAX_TEXT)) return { ok: false, error: 'text is at most 4000 characters' }
     const decider = extra.decider ?? this.options.decider
     if (!decider) return { ok: false, error: 'computer use needs the decision service on the Spark, which is not connected' }
-    if (!this.machine.desktop) return { ok: false, error: `${this.name} cannot read its screen: give LocalRouter Accessibility access in System Settings` }
+    if (!this.machine.desktop) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
     if (this.active) return { ok: false, error: `${this.name} is busy with another task; stop it first` }
     const task = this.newTask('use', who, g, extra.taskId)
     this.options.audit.record('task.start', { task_id: task.id, kind: 'use', goal: clip(g), text: text === null ? null : textDigest(text), requester: who.caller.name, caller: who.caller.kind })
@@ -330,6 +333,56 @@ export class Broker {
 
   audit(limit = 100) {
     return this.options.audit.tail(Math.max(1, Math.min(1000, limit)))
+  }
+
+  // ------------------------------------------------------------------ reading the screen
+
+  /**
+   * The front window's accessibility tree (controls with role, label, bounds; visible text; app, title, page), for a
+   * harness on this computer that the person enrolled, or this app's own harness. Read only: nothing is clicked or
+   * typed, so no step budget or approval applies, but the local switch does, LocalRouter's own windows (its approval
+   * cards) are never read, password fields never carry a value, and every read is audited.
+   */
+  async observe(who: Requester): Promise<{ ok: true; observation: Observation } | { ok: false; error: string }> {
+    const refused = this.readRefused(who)
+    if (refused) return { ok: false, error: refused }
+    const desktop = this.machine.desktop
+    if (!desktop) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
+    let seen: Observation
+    try {
+      seen = await desktop.observe()
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+    if (this.isOwn(seen.app)) return { ok: false, error: OWN_READ }
+    this.options.audit.record('observe', { requester: who.caller.name, caller: who.caller.kind, app: clip(seen.app), title: clip(seen.title), controls: seen.controls.length })
+    return { ok: true, observation: seen }
+  }
+
+  /** The front window as a scaled PNG, under the same rules as `observe`. */
+  async screenshot(who: Requester, maxEdge?: number): Promise<{ ok: true; screenshot: Screenshot } | { ok: false; error: string }> {
+    const refused = this.readRefused(who)
+    if (refused) return { ok: false, error: refused }
+    const desktop = this.machine.desktop
+    if (!desktop?.screenshot) return { ok: false, error: `${this.name} cannot take screenshots` }
+    const edge = typeof maxEdge === 'number' && Number.isFinite(maxEdge) ? Math.max(200, Math.min(SCREENSHOT_MAX_EDGE * 2, Math.floor(maxEdge))) : SCREENSHOT_MAX_EDGE
+    let shot: Screenshot
+    try {
+      shot = await desktop.screenshot({ maxEdge: edge })
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+    // Captured first, judged after: the image of LocalRouter's own window is dropped, never returned.
+    if (this.isOwn(shot.app)) return { ok: false, error: OWN_READ }
+    this.options.audit.record('screenshot', { requester: who.caller.name, caller: who.caller.kind, app: clip(shot.app), title: clip(shot.title), width: shot.width, height: shot.height })
+    return { ok: true, screenshot: shot }
+  }
+
+  /** Reads are for the person's own harnesses on this computer: never the box's bridge, never a voice turn's model. */
+  private readRefused(who: Requester): string | null {
+    if (this.disabledFlag) return DISABLED_MESSAGE
+    if (who.caller.kind !== 'app' && who.caller.kind !== 'mcp') return 'reading the screen is only for harnesses the person enrolled on this computer'
+    return null
   }
 
   /**
@@ -619,7 +672,14 @@ export class Broker {
     const desktop = m.desktop
     return {
       desktop: desktop
-        ? { kind: desktop.kind, observe: () => desktop.observe(), act: (a) => during(() => desktop.act(a)), ...(desktop.pointer ? { pointer: () => desktop.pointer!() } : {}) }
+        ? {
+            kind: desktop.kind,
+            observe: (o) => desktop.observe(o),
+            act: (a, o) => during(() => desktop.act(a, o)),
+            ...(desktop.pointer ? { pointer: () => desktop.pointer!() } : {}),
+            ...(desktop.displays ? { displays: () => desktop.displays!() } : {}),
+            ...(desktop.screenshot ? { screenshot: (o) => desktop.screenshot!(o) } : {}),
+          }
         : null,
       tabs: m.tabs ? Object.assign(Object.create(m.tabs) as BrowserTabs, { activate: (tab: Parameters<BrowserTabs['activate']>[0]) => during(() => m.tabs!.activate(tab)), ...(m.tabs.search ? { search: (name: string) => during(() => m.tabs!.search!(name)) } : {}) }) : null,
       dock: m.dock ? { list: () => m.dock!.list(), activate: (name) => during(() => m.dock!.activate(name)) } : null,

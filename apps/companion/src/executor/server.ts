@@ -10,9 +10,10 @@ import type { Broker, Requester } from './broker.ts'
  * How other programs on this computer reach the executor: a Unix socket in the app's data folder (mode 0600, so only
  * this user), one JSON request a line, one reply a line. Each caller is enrolled by the person in the app first and
  * presents its token; the executor's lease, policy and approvals apply to it like to anyone. The operations are the
- * bounded computer-control ones and nothing else: there is no way to answer an approval or change the policy here.
+ * bounded computer-control ones and two reads of the front window (its accessibility tree, a scaled screenshot) and
+ * nothing else: there is no way to answer an approval or change the policy here.
  */
-export const OPS = ['hello', 'capabilities', 'control', 'use', 'status', 'stop'] as const
+export const OPS = ['hello', 'capabilities', 'control', 'use', 'status', 'stop', 'observe', 'screenshot'] as const
 export type Op = (typeof OPS)[number]
 
 export type Enrolled = { id: string; name: string; token_sha256: string; created: number }
@@ -117,6 +118,16 @@ export async function serve(broker: Broker, enrollment: Enrollment, request: unk
       }
       case 'stop':
         return { ok: true, result: { stopped: broker.stop(typeof args.task_id === 'string' && args.task_id ? args.task_id : undefined, `MCP: ${caller.name}`) } }
+      case 'observe': {
+        const seen = await broker.observe(who)
+        return seen.ok ? { ok: true, result: seen.observation } : { ok: false, error: seen.error }
+      }
+      case 'screenshot': {
+        const shot = await broker.screenshot(who, typeof args.max_edge === 'number' ? args.max_edge : undefined)
+        if (!shot.ok) return { ok: false, error: shot.error }
+        const { png, ...meta } = shot.screenshot
+        return { ok: true, result: { ...meta, png_base64: Buffer.from(png).toString('base64') } }
+      }
     }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }

@@ -1,33 +1,20 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/use/desktop.ts), reused in LocalRouter with the owner's permission.
-import { execFile } from 'node:child_process'
-import { rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { array, boolean, json, nullable, number, object, oneOf, optional, string } from '../validate.ts'
-import type { CommandRunner } from './macControls.ts'
-import { CONTROL_ROLES } from './types.ts'
-import type { ActResult, Observation, Point, PointerReading, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
-
-const execFileAsync = promisify(execFile)
+import { execRunner } from './runner.ts'
+import type { CommandRunner } from './runner.ts'
+import { CONTROL_ROLES, fitScale, SCREENSHOT_MAX_EDGE } from './types.ts'
+import type { ActOptions, ActResult, Observation, ObserveOptions, Point, PointerReading, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './types.ts'
 
 /**
  * Default runner for the computer-use backends. osascript prints the script's return value on
  * stdout; on failure only stderr is kept, because execFile's own message repeats the whole script
  * and the error patterns below would otherwise match the script source instead of the real error.
+ * A stop (`signal`) kills the script under way.
  */
-export const jxaRunner: CommandRunner = {
-  async run(file, args) {
-    try {
-      const { stdout } = await execFileAsync(file, args, { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 })
-      return stdout
-    } catch (error) {
-      const stderr = typeof error === 'object' && error !== null && 'stderr' in error ? String(error.stderr).trim() : ''
-      const killed = typeof error === 'object' && error !== null && 'killed' in error && error.killed === true
-      throw new Error(killed ? 'The Mac took too long to answer (osascript timed out)' : stderr || (error instanceof Error ? error.message : String(error)))
-    }
-  },
-}
+export const jxaRunner: CommandRunner = execRunner({ timeoutMs: 15_000, maxBuffer: 16 * 1024 * 1024, slow: 'The Mac (osascript)' })
 
 /**
  * osascript argv for a JXA script whose `run(argv)` receives `argv`. The `--` stops osascript from
@@ -97,13 +84,39 @@ function trusted() {
 // refuses when it cannot identify the app itself, as when the program file it runs from was deleted
 // while it was open (on 2026-09-26 a disk cleanup removed the owner's Chrome's code-sign clone). That
 // is reported as the app's refusal, not as a missing control or a missing permission.
+// A hung app answers every AX call only after the messaging timeout (6 s by default), so a walk of a few hundred
+// elements would outlast the script's own limit: 1.5 s an answer, and the walk keeps its own time budget too.
 function axApp(pid) {
-  var app = $.AXUIElementCreateApplication(pid), ref = Ref(), code = $.AXUIElementCopyAttributeValue(app, $('AXRole'), ref);
+  var app = $.AXUIElementCreateApplication(pid), ref = Ref();
+  $.AXUIElementSetMessagingTimeout(app, 1.5);
+  var code = $.AXUIElementCopyAttributeValue(app, $('AXRole'), ref);
   if (code === -25211 || code === -25204) {
     var running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
     throw new Error('LOCALROUTER_UNREACHABLE:' + (running && !running.isNil() ? ObjC.unwrap(running.localizedName) : 'The app') + ':');
   }
   return app;
+}
+// Every display's bounds in global top-left-origin points. NSScreen frames have a bottom-left origin at the
+// main display (the first screen, with the menu bar), so y is flipped against its height.
+function displays() {
+  var screens = $.NSScreen.screens, out = [];
+  if (!screens.count) return out;
+  var mainHeight = screens.objectAtIndex(0).frame.size.height;
+  for (var i = 0; i < screens.count; i++) {
+    var f = screens.objectAtIndex(i).frame;
+    out.push({ x: f.origin.x, y: mainHeight - f.origin.y - f.size.height, w: f.size.width, h: f.size.height });
+  }
+  return out;
+}
+// A click outside every display would land on the nearest edge instead (CGEvent clamps it): never clicked.
+function onScreen(point) {
+  var list = displays();
+  if (!list.length) return true;
+  for (var i = 0; i < list.length; i++) {
+    var d = list[i];
+    if (point[0] >= d.x && point[0] < d.x + d.w && point[1] >= d.y && point[1] < d.y + d.h) return true;
+  }
+  return false;
 }
 function post(event, dryrun) { if (!dryrun) $.CGEventPost($.kCGHIDEventTap, event); }
 function mouse(type, point, dryrun) {
@@ -113,6 +126,7 @@ function mouse(type, point, dryrun) {
 }
 // Moves the real pointer onto the point first so hover-dependent controls are ready for the click.
 function clickAt(point, dryrun) {
+  if (!onScreen(point)) throw new Error('LOCALROUTER_OFFSCREEN');
   mouse($.kCGEventMouseMoved, point, dryrun);
   if (!dryrun) delay(0.08);
   mouse($.kCGEventLeftMouseDown, point, dryrun);
@@ -130,7 +144,7 @@ function front() {
   var app = axApp(running.processIdentifier);
   var win = attr(app, 'AXMainWindow') || attr(app, 'AXFocusedWindow');
   if (!win) { var windows = attr(app, 'AXWindows'); win = windows && windows.count ? windows.objectAtIndex(0) : null; }
-  return { name: ObjC.unwrap(running.localizedName) || '', win: win };
+  return { name: ObjC.unwrap(running.localizedName) || '', win: win, app: app };
 }
 `
 
@@ -155,32 +169,43 @@ function innerText(el, depth) {
   }
   return out;
 }
+// The page a browser window shows: the URL of its web area (Safari, Chrome, Electron), else the window's document.
+function urlOf(el) {
+  var value = attr(el, 'AXURL');
+  if (value == null) return '';
+  try { return ObjC.unwrap(value.absoluteString) || ''; } catch (error) { return ''; }
+}
+var WALK_MS = 4000;
 function run() {
   var target = front();
   if (!target.win) return JSON.stringify({ app: target.name, title: '', controls: [], text: '' });
-  var win = target.win;
+  var win = target.win, started = Date.now(), truncated = false;
   var wp = pair(win, 'AXPosition'), ws = pair(win, 'AXSize');
   var left = wp[0], top = wp[1], right = wp[0] + ws[0], bottom = wp[1] + ws[1];
-  var queue = [{ el: win, path: [], depth: 0 }], visited = 0, controls = [], text = '';
-  while (queue.length && visited < 2500 && controls.length < 150) {
+  var queue = [{ el: win, path: [], depth: 0 }], visited = 0, controls = [], text = '', url = '';
+  while (queue.length) {
+    if (visited >= 2500 || controls.length >= 150 || Date.now() - started > WALK_MS) { truncated = true; break; }
     var node = queue.shift(), kids = children(node.el);
-    for (var i = 0; i < kids.length && visited < 2500 && controls.length < 150; i++) {
+    for (var i = 0; i < kids.length; i++) {
+      if (visited >= 2500 || controls.length >= 150) { truncated = true; break; }
       visited++;
       var el = kids[i], role = plain(el, 'AXRole'), p = pair(el, 'AXPosition'), s = pair(el, 'AXSize');
       var sized = p && s && s[0] > 0 && s[1] > 0;
       if (sized && (p[0] >= right || p[1] >= bottom || p[0] + s[0] <= left || p[1] + s[1] <= top)) continue;
       var path = node.path.concat([i]);
+      if (role === 'AXWebArea' && !url) url = urlOf(el);
       if (role === 'AXStaticText') {
         var words = plain(el, 'AXValue');
         if (text.length < 1500 && words) text += (text ? ' ' : '') + clip(words, 1500);
       } else if (ROLES[role] && sized) {
-        var kind = ROLES[role], value = plain(el, 'AXValue');
+        // A password field (subrole AXSecureTextField) is listed so it can be typed into, never with its value.
+        var kind = ROLES[role], value = plain(el, 'AXSubrole') === 'AXSecureTextField' ? '' : plain(el, 'AXValue');
         var label = plain(el, 'AXTitle') || plain(el, 'AXDescription') || (kind === 'textbox' ? '' : value) ||
           (kind === 'row' ? innerText(el, 0) : '') ||
           (plain(el, 'AXSubrole') ? plain(el, 'AXRoleDescription') : '') || plain(el, 'AXHelp') || '';
         label = clip(label, 100);
         if (kind !== 'row' || label) {
-          var control = { ref: path.join('.'), role: kind, label: label, x: p[0], y: p[1] };
+          var control = { ref: path.join('.'), role: kind, label: label, bounds: { x: p[0], y: p[1], w: s[0], h: s[1] } };
           if (kind === 'textbox') {
             control.value = clip(value, 200);
             if (plain(el, 'AXFocused') === true) control.focused = true;
@@ -191,9 +216,12 @@ function run() {
       if (!LEAVES[role] && node.depth + 1 < 20) queue.push({ el: el, path: path, depth: node.depth + 1 });
     }
   }
-  controls.sort(function (a, b) { return Math.round(a.y / 8) - Math.round(b.y / 8) || a.x - b.x; });
-  controls.forEach(function (control) { delete control.x; delete control.y; });
-  return JSON.stringify({ app: target.name, title: plain(win, 'AXTitle') || '', controls: controls, text: text.slice(0, 1500) });
+  if (!url) { var doc = plain(win, 'AXDocument'); if (typeof doc === 'string' && /^(https?|file):/.test(doc)) url = doc; }
+  controls.sort(function (a, b) { return Math.round(a.bounds.y / 8) - Math.round(b.bounds.y / 8) || a.bounds.x - b.bounds.x; });
+  var out = { app: target.name, title: plain(win, 'AXTitle') || '', controls: controls, text: text.slice(0, 1500), window: { x: left, y: top, w: ws[0], h: ws[1] } };
+  if (url) out.url = url;
+  if (truncated) out.truncated = true;
+  return JSON.stringify(out);
 }`
 
 /**
@@ -243,6 +271,90 @@ function middleOfWindow() {
     return [seen.x + seen.w / 2, seen.y + seen.h / 2];
   }
 }
+var TEXT_ROLES = { AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1 };
+// The scroll view a person would scroll: the largest scroll or web area inside the window (not a sidebar), else null.
+function scrollArea(win) {
+  var queue = [{ el: win, depth: 0 }], seen = 0, best = null, bestArea = 0;
+  while (queue.length && seen < 400) {
+    var node = queue.shift(), kids = children(node.el);
+    for (var i = 0; i < kids.length && seen < 400; i++) {
+      seen++;
+      var el = kids[i], role = plain(el, 'AXRole');
+      if (role === 'AXScrollArea' || role === 'AXWebArea') {
+        var s = pair(el, 'AXSize'), area = s ? s[0] * s[1] : 0;
+        if (area > bestArea) { best = el; bestArea = area; }
+      }
+      if (node.depth + 1 < 10 && role !== 'AXWebArea') queue.push({ el: el, depth: node.depth + 1 });
+    }
+  }
+  return best ? center(best) : null;
+}
+// Whether the text box took the typing focus after the click: the app's focused element is it, or sits inside it
+// (a combo box's own field), and is a text element.
+function hasFocus(app, el) {
+  var focused = attr(app, 'AXFocusedUIElement');
+  if (!focused) return false;
+  if (!TEXT_ROLES[plain(focused, 'AXRole')] && plain(el, 'AXFocused') !== true) return false;
+  var c = center(focused), p = pair(el, 'AXPosition'), s = pair(el, 'AXSize');
+  return Boolean(c && p && s && c[0] >= p[0] - 2 && c[0] <= p[0] + s[0] + 2 && c[1] >= p[1] - 2 && c[1] <= p[1] + s[1] + 2);
+}
+// The app's own menu item for a Command shortcut (Edit › Select All is ⌘A, Paste ⌘V), pressed through
+// accessibility. Unlike a key code, this does not depend on the keyboard layout: key code 0 with Command is ⌘A on a
+// US layout but ⌘Q (quit) on AZERTY.
+function menuCommand(app, letter) {
+  var bar = attr(app, 'AXMenuBar');
+  if (!bar) return false;
+  var menus = children(bar);
+  for (var i = 0; i < menus.length; i++) {
+    var lists = children(menus[i]);
+    for (var j = 0; j < lists.length; j++) {
+      var items = children(lists[j]);
+      for (var k = 0; k < items.length && k < 80; k++) {
+        if (String(plain(items[k], 'AXMenuItemCmdChar') || '').toUpperCase() === letter && plain(items[k], 'AXMenuItemCmdModifiers') === 0 && plain(items[k], 'AXEnabled') !== false) {
+          return $.AXUIElementPerformAction(items[k], $('AXPress')) === 0;
+        }
+      }
+    }
+  }
+  return false;
+}
+// A Command shortcut by its character: the menu item, else System Events, which maps the character to the key that
+// types it on the current layout.
+function command(app, letter, events) {
+  if (menuCommand(app, letter)) return;
+  events.keystroke(letter.toLowerCase(), { using: 'command down' });
+}
+// Pastes text through the pasteboard, marked transient and concealed so clipboard managers do not keep it, then
+// puts back what the pasteboard held. For text the keyboard cannot type as is (other scripts, emoji, line breaks).
+function paste(app, text, events) {
+  var pb = $.NSPasteboard.generalPasteboard, saved = [], items = pb.pasteboardItems;
+  for (var i = 0; items && i < items.count; i++) {
+    var item = items.objectAtIndex(i), types = item.types, entries = [];
+    for (var j = 0; j < types.count; j++) {
+      var type = types.objectAtIndex(j), data = item.dataForType(type);
+      if (data && !data.isNil()) entries.push([type, data]);
+    }
+    saved.push(entries);
+  }
+  pb.clearContents;
+  var mine = $.NSPasteboardItem.alloc.init;
+  mine.setStringForType($(text), $.NSPasteboardTypeString);
+  mine.setStringForType($(''), $('org.nspasteboard.TransientType'));
+  mine.setStringForType($(''), $('org.nspasteboard.ConcealedType'));
+  pb.writeObjects($([mine]));
+  try {
+    command(app, 'V', events);
+    delay(0.5);
+  } finally {
+    pb.clearContents;
+    var back = saved.map(function (entries) {
+      var it = $.NSPasteboardItem.alloc.init;
+      entries.forEach(function (entry) { it.setDataForType(entry[1], entry[0]); });
+      return it;
+    });
+    if (back.length) pb.writeObjects($(back));
+  }
+}
 function run(argv) {
   var op = argv[0], payload = JSON.parse(argv[1] || '{}'), dryrun = payload.dryrun === true;
   var events = Application('System Events');
@@ -252,34 +364,61 @@ function run(argv) {
     return 'ok';
   }
   if (op === 'scroll') {
-    var middle = middleOfWindow();
-    if (!middle) throw new Error('LOCALROUTER_NO_WINDOW');
+    var target = null;
+    if (payload.ref) {
+      var w = front().win;
+      if (!w) throw new Error('LOCALROUTER_NO_WINDOW');
+      target = center(resolve(w, payload.ref));
+      if (!target) throw new Error('LOCALROUTER_GONE');
+    } else {
+      try { var fw = front().win; target = fw ? scrollArea(fw) : null; } catch (error) { target = null; }
+      target = target || middleOfWindow();
+    }
+    if (!target) throw new Error('LOCALROUTER_NO_WINDOW');
+    if (!onScreen(target)) throw new Error('LOCALROUTER_OFFSCREEN');
     var up = payload.direction === 'up' || payload.direction === 'top';
     var steps = payload.direction === 'top' || payload.direction === 'bottom' ? 20 : 3;
-    // Scroll events go to the view under the pointer, so it is moved over the window first.
-    mouse($.kCGEventMouseMoved, middle, dryrun);
-    for (var s = 0; s < steps; s++) post($.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 1, up ? 15 : -15), dryrun);
-    return JSON.stringify({ x: middle[0], y: middle[1] });
+    // Scroll events go to the view under the pointer, so it is moved over the scroll area first.
+    mouse($.kCGEventMouseMoved, target, dryrun);
+    for (var n = 0; n < steps; n++) post($.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 1, up ? 15 : -15), dryrun);
+    return JSON.stringify({ x: target[0], y: target[1] });
   }
-  var spot = /^v:(-?[\\d.]+),(-?[\\d.]+)$/.exec(String(payload.ref || '')), point;
+  if (op === 'keys') {
+    if (/[\\r\\n]/.test(payload.text)) throw new Error('LOCALROUTER_NEWLINE');
+    if (!dryrun) events.keystroke(payload.text);
+    return 'ok';
+  }
+  var spot = /^v:(-?[\\d.]+),(-?[\\d.]+)$/.exec(String(payload.ref || '')), point, el = null, ax = null;
   if (spot) point = [Number(spot[1]), Number(spot[2])];
   else {
-    var win = front().win;
-    if (!win) throw new Error('LOCALROUTER_NO_WINDOW');
-    point = center(resolve(win, payload.ref));
+    var here = front();
+    if (!here.win) throw new Error('LOCALROUTER_NO_WINDOW');
+    ax = here.app;
+    el = resolve(here.win, payload.ref);
+    point = center(el);
+  }
+  if (op === 'value') return JSON.stringify({ value: el && plain(el, 'AXSubrole') !== 'AXSecureTextField' ? plain(el, 'AXValue') : null });
+  if (op === 'paste') {
+    if (!dryrun) paste(ax || front().app, payload.text, events);
+    return 'ok';
   }
   if (!point) throw new Error('LOCALROUTER_GONE');
   clickAt(point, dryrun);
   // Where the pointer was left, for the local stop: a later move away from it is the person's.
-  var left = JSON.stringify({ x: point[0], y: point[1] });
-  if (op === 'click') return left;
-  if (op === 'type') {
-    if (dryrun) return left;
-    delay(0.1);
-    // Key code 0 is "a": command-A selects the field's current text so typing replaces it.
-    events.keyCode(0, { using: 'command down' });
-    events.keystroke(payload.text);
-    return left;
+  var left = { x: point[0], y: point[1] };
+  if (op === 'click') return JSON.stringify(left);
+  if (op === 'focus') {
+    if (dryrun || !el) return JSON.stringify(left);
+    delay(0.15);
+    if (!hasFocus(ax, el)) {
+      $.AXUIElementSetAttributeValue(el, $('AXFocused'), $.NSNumber.numberWithBool(true));
+      delay(0.1);
+      if (!hasFocus(ax, el)) throw new Error('LOCALROUTER_NOT_FOCUSED');
+    }
+    // The text it holds is selected (to be replaced) only when there is any.
+    var current = plain(el, 'AXValue');
+    if (typeof current === 'string' && current.length) command(ax, 'A', events);
+    return JSON.stringify(left);
   }
   throw new Error('LOCALROUTER_UNKNOWN_OP');
 }`
@@ -350,7 +489,7 @@ const KEY_CODES = { enter: 36, escape: 53, tab: 48, space: 49 } as const
 /** The JSON handed to the act script as argv: key codes for presses, otherwise the action's own fields. */
 function actionPayload(action: ScreenAction): object {
   if (action.kind === 'press') return { code: KEY_CODES[action.key] }
-  if (action.kind === 'scroll') return { direction: action.direction }
+  if (action.kind === 'scroll') return action.ref ? { direction: action.direction, ref: action.ref } : { direction: action.direction }
   if (action.kind === 'type') return { ref: action.ref, text: action.text }
   return { ref: action.ref }
 }
@@ -417,34 +556,98 @@ export function pointShape(value: unknown, what = 'point'): Point {
   return { x: number(point.x, `${what} x`), y: number(point.y, `${what} y`) }
 }
 
+function rectShape(value: unknown, what: string): Rect {
+  const raw = object(value, what)
+  return { x: number(raw.x, `${what} x`), y: number(raw.y, `${what} y`), w: number(raw.w, `${what} w`), h: number(raw.h, `${what} h`) }
+}
+
 function controlShape(value: unknown, what: string): ScreenControl {
   const raw = object(value, what)
   const control: ScreenControl = { ref: string(raw.ref, `${what} ref`), role: oneOf(raw.role, CONTROL_ROLES, `${what} role`), label: string(raw.label, `${what} label`) }
   const text = optional(raw.value, `${what} value`, string)
   const focused = optional(raw.focused, `${what} focused`, boolean)
+  const bounds = optional(raw.bounds, `${what} bounds`, rectShape)
   if (text !== undefined) control.value = text
   if (focused !== undefined) control.focused = focused
+  if (bounds !== undefined) control.bounds = bounds
   return control
 }
 
 function observationShape(value: unknown): Omit<Observation, 'backend'> {
   const raw = object(value, 'observation')
-  return { app: string(raw.app, 'observation app'), title: string(raw.title, 'observation title'), controls: array(raw.controls, 'observation controls', controlShape), text: string(raw.text, 'observation text') }
+  const seen: Omit<Observation, 'backend'> = { app: string(raw.app, 'observation app'), title: string(raw.title, 'observation title'), controls: array(raw.controls, 'observation controls', controlShape), text: string(raw.text, 'observation text') }
+  const url = optional(raw.url, 'observation url', string)
+  const window = optional(raw.window, 'observation window', rectShape)
+  if (url) seen.url = url
+  if (window) seen.window = window
+  if (optional(raw.truncated, 'observation truncated', boolean)) seen.truncated = true
+  return seen
 }
+
+/** Every display's bounds (global, top-left-origin points). */
+const DISPLAYS_SCRIPT = `${JXA_HELPERS}
+function run() { return JSON.stringify(displays()); }`
+
+export function displaysShape(value: unknown): Rect[] {
+  return array(value, 'displays', rectShape)
+}
+
+/**
+ * Text the keyboard types as is: printable ASCII on one line. Anything else (other scripts, emoji, line breaks,
+ * where a typed Return would send a message) is pasted through a transient pasteboard instead.
+ */
+const KEYBOARD_TEXT = /^[\x20-\x7e]{1,400}$/
+/** Characters a keystroke script types at once: a stop takes effect between chunks. */
+export const KEY_CHUNK = 50
+/** Time for a field (a web page's especially) to report what was typed before it is read back. */
+const READBACK_MS = 200
+
+/** Splits text into chunks of at most `size` characters, never inside a surrogate pair. */
+export function chunks(text: string, size: number): string[] {
+  const out: string[] = []
+  let at = 0
+  while (at < text.length) {
+    let end = Math.min(text.length, at + size)
+    if (end < text.length && /[\ud800-\udbff]/.test(text[end - 1])) end -= 1
+    out.push(text.slice(at, end))
+    at = end
+  }
+  return out
+}
+
+const squash = (text: string) => text.replace(/\s+/g, '')
+
+/**
+ * Whether typed text is in the field now. A field that cannot be read back (null) is taken at its word; one that
+ * reformats what was typed (spaces in a card number) still holds the same characters.
+ */
+export function landed(value: string | null, text: string): boolean {
+  if (value === null) return true
+  return squash(value).includes(squash(text))
+}
+
+export type DesktopOptions = { sleep?: (ms: number) => Promise<void>; tmp?: () => string }
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+const stopped = (signal: AbortSignal) => new Error(typeof signal.reason === 'string' && signal.reason ? signal.reason : 'It was stopped.')
 
 /** Reads the frontmost app's main window through accessibility and drives it with the real pointer and keyboard. */
 export class DesktopBackend implements ScreenBackend {
   readonly kind = 'desktop'
   private readonly runner: CommandRunner
+  private readonly sleep: (ms: number) => Promise<void>
+  private readonly tmp: () => string
 
-  constructor(runner: CommandRunner = jxaRunner) {
+  constructor(runner: CommandRunner = jxaRunner, options: DesktopOptions = {}) {
     this.runner = runner
+    this.sleep = options.sleep ?? pause
+    this.tmp = options.tmp ?? (() => join(tmpdir(), `localrouter-screen-${process.pid}-${Date.now()}.png`))
   }
 
-  async observe(): Promise<Observation> {
+  async observe(options: ObserveOptions = {}): Promise<Observation> {
     let output: string
     try {
-      output = await this.runner.run(...jxa(OBSERVE_SCRIPT))
+      output = await this.runner.run(...jxa(OBSERVE_SCRIPT), options.signal ? { signal: options.signal } : undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (UNREACHABLE.test(message)) return this.observeScreenshot(macAccessError(message) ?? new Error(message))
@@ -462,7 +665,7 @@ export class DesktopBackend implements ScreenBackend {
     const front = frontWindowShape(json((await this.runner.run(...jxa(FRONT_WINDOW_SCRIPT))).trim(), 'front window'))
     if (!front.window) throw refused
     const window = front.window
-    const file = join(tmpdir(), `localrouter-screen-${process.pid}-${Date.now()}.png`)
+    const file = this.tmp()
     let controls: ScreenControl[]
     try {
       await this.runner.run('screencapture', ['-x', '-o', `-l${window.id}`, file])
@@ -473,18 +676,37 @@ export class DesktopBackend implements ScreenBackend {
       await rm(file, { force: true })
     }
     if (!controls.length) throw refused
-    return { backend: 'desktop', app: front.app, title: window.title, controls, text: controls.map((control) => control.label).join(' ').slice(0, 1_500), visual: true }
+    return { backend: 'desktop', app: front.app, title: window.title, controls, text: controls.map((control) => control.label).join(' ').slice(0, 1_500), visual: true, window: { x: window.x, y: window.y, w: window.w, h: window.h } }
   }
 
   /** Acts, and reports where a click, typing, or scroll left the pointer. */
-  async act(action: ScreenAction): Promise<ActResult> {
-    const output = (await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(actionPayload(action))])).trim()
-    if (!output.startsWith('{')) return {}
-    try {
-      return { pointer: pointShape(JSON.parse(output)) }
-    } catch {
-      return {}
+  async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
+    const signal = options.signal
+    if (signal?.aborted) throw stopped(signal)
+    if (action.kind === 'type') return this.type(action.ref, action.text, signal)
+    return pointerOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(actionPayload(action))], signal))
+  }
+
+  /**
+   * Typing: click the box, check it took the focus (else nothing is typed, so a select-all never lands on the page),
+   * select what it holds through the app's Edit menu, type plain text in chunks a stop can come between (or paste
+   * anything else), then read the box back: text that did not land is a failure, not a step done.
+   */
+  private async type(ref: string, text: string, signal: AbortSignal | undefined): Promise<ActResult> {
+    const left = pointerOf(await this.call(ACT_SCRIPT, ['focus', JSON.stringify({ ref })], signal))
+    if (KEYBOARD_TEXT.test(text)) {
+      for (const chunk of chunks(text, KEY_CHUNK)) {
+        if (signal?.aborted) throw stopped(signal)
+        await this.call(ACT_SCRIPT, ['keys', JSON.stringify({ text: chunk })], signal)
+      }
+    } else {
+      await this.call(ACT_SCRIPT, ['paste', JSON.stringify({ ref, text })], signal)
     }
+    await this.sleep(READBACK_MS)
+    const read = object(json((await this.call(ACT_SCRIPT, ['value', JSON.stringify({ ref })], signal)).trim(), 'typed value'), 'typed value')
+    const value = read.value === null || read.value === undefined ? null : string(read.value, 'typed value')
+    if (!landed(value, text)) throw new Error('The text did not land in the text box, so it stopped.')
+    return left
   }
 
   async pointer(): Promise<PointerReading> {
@@ -494,19 +716,76 @@ export class DesktopBackend implements ScreenBackend {
     return typeof since === 'number' && Number.isFinite(since) && since >= 0 ? { ...point, sinceClickS: since } : point
   }
 
-  private async call(script: string, argv: string[]): Promise<string> {
+  async displays(): Promise<Rect[]> {
+    return displaysShape(json((await this.call(DISPLAYS_SCRIPT, [])).trim(), 'displays'))
+  }
+
+  /**
+   * The front window as a PNG, scaled so its longer edge is at most `maxEdge` pixels (a Retina capture is twice the
+   * window's points). Needs Screen Recording: without it macOS returns the desktop instead of the window, so it is
+   * checked first. The file is deleted at once.
+   */
+  async screenshot(options: ScreenshotOptions = {}): Promise<Screenshot> {
+    const access = await macAccess(this.runner)
+    if (!access.screenRecording) throw new Error('A screenshot needs Screen Recording access. Allow LocalRouter in System Settings › Privacy & Security › Screen Recording, then try again.')
+    const front = frontWindowShape(json((await this.call(FRONT_WINDOW_SCRIPT, [], options.signal)).trim(), 'front window'))
+    if (!front.window) throw new Error('The app in front has no open window.')
+    const window = front.window
+    const file = this.tmp()
     try {
-      return await this.runner.run(...jxa(script, argv))
+      await this.runner.run('screencapture', ['-x', '-o', '-t', 'png', `-l${window.id}`, file], options.signal ? { signal: options.signal } : undefined)
+      let size = pixelSize(await this.runner.run('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', file]))
+      const fit = fitScale(size.w, size.h, options.maxEdge ?? SCREENSHOT_MAX_EDGE)
+      if (fit < 1) {
+        await this.runner.run('sips', ['--resampleWidth', String(Math.max(1, Math.round(size.w * fit))), file])
+        size = pixelSize(await this.runner.run('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', file]))
+      }
+      const png = new Uint8Array(await readFile(file))
+      return { png, width: size.w, height: size.h, region: { x: window.x, y: window.y, w: window.w, h: window.h }, scale: window.w > 0 ? size.w / window.w : 1, app: front.app, title: window.title }
+    } finally {
+      await rm(file, { force: true })
+    }
+  }
+
+  private async call(script: string, argv: string[], signal?: AbortSignal): Promise<string> {
+    try {
+      return await this.runner.run(...jxa(script, argv), signal ? { signal } : undefined)
     } catch (error) {
+      if (signal?.aborted) throw stopped(signal)
       throw explain(error instanceof Error ? error.message : String(error)) ?? error
     }
   }
 }
+
+/** The pointer position an act script printed (`{"x":…,"y":…}`), or nothing when it did not move it. */
+function pointerOf(output: string): ActResult {
+  const text = output.trim()
+  if (!text.startsWith('{')) return {}
+  try {
+    return { pointer: pointShape(JSON.parse(text)) }
+  } catch {
+    return {}
+  }
+}
+
+/** `sips -g pixelWidth -g pixelHeight` output → the image's size. */
+export function pixelSize(output: string): { w: number; h: number } {
+  const w = Number(/pixelWidth:\s*(\d+)/.exec(output)?.[1])
+  const h = Number(/pixelHeight:\s*(\d+)/.exec(output)?.[1])
+  if (!(w > 0 && h > 0)) throw new Error('The screenshot could not be measured.')
+  return { w, h }
+}
+
+/** Every script this backend runs, by name: the tests parse each one, as osascript would. */
+export const SCRIPTS = { observe: OBSERVE_SCRIPT, act: ACT_SCRIPT, frontWindow: FRONT_WINDOW_SCRIPT, ocr: OCR_SCRIPT, access: ACCESS_SCRIPT, pointer: POINTER_SCRIPT, displays: DISPLAYS_SCRIPT }
 
 /** A script failure in words a person can act on, or null to pass it through. */
 function explain(message: string): Error | null {
   if (message.includes('LOCALROUTER_GONE')) return new Error('That control is gone; look again.')
   if (message.includes('LOCALROUTER_NO_APP')) return new Error('No app is in front on the Mac.')
   if (message.includes('LOCALROUTER_NO_WINDOW')) return new Error('The app in front has no open window.')
+  if (message.includes('LOCALROUTER_OFFSCREEN')) return new Error('That control is off screen; scroll it into view first.')
+  if (message.includes('LOCALROUTER_NOT_FOCUSED')) return new Error('The text box did not take the typing focus, so nothing was typed.')
+  if (message.includes('LOCALROUTER_NEWLINE')) return new Error('Line breaks are never typed as keys (a Return could send a message).')
   return macAccessError(message)
 }
