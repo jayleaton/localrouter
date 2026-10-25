@@ -5,7 +5,7 @@
 | Topology | What it is | State |
 | --- | --- | --- |
 | `single` (the default) | one Spark, exactly as before | unchanged |
-| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built (this page, [Configuration](#configuration)) |
+| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)) |
 | TP=2 | one chat model split across two Sparks over ConnectX-7 | see [Tensor parallel](#tensor-parallel) |
 | TP=N | more ranks | the config, the plan and the routing take N nodes; no rank code yet |
 
@@ -64,6 +64,56 @@ in this build serves.
   When the node comes back, chat moves back. A request already streaming when its node dies fails with a 503.
 - **Not forwarded yet.** `unload_model` and the release of a remote model act on the front's handle only; the node
   keeps or drops the model by its own rules.
+
+## Measured: placement against a single box (2026-10-25)
+
+DGX-01 is the front (Spark 2: Drama 3 NVFP4, Whisper) and DGX-02 the chat node (Spark 1: Qwen3.8-27B, TensorFold
+1.1.1, qualified on DGX-02 by `qualify.sh`: 273 of 273 checks). Both run main `3b652f9` built ReleaseSafe. The front
+reaches the node over ConnectX-7 (`192.168.100.11:8191`).
+
+`tools/spark/multi/placement_window.sh` ran inside `tools/spark/window.sh` on DGX-01 (the live service gave up the
+image model and KnowLine for the window and got them back after). It alternates single, placement, single,
+placement, with the deployed tools and voice settings, and runs these in each mode:
+- `placement_bench.py contention`, two rounds;
+- two voice e2e smokes (`tools/spark/jarvis/voice_e2e.py --smoke --skip-barge`), every check passing in all 16;
+- in placement, `placement_bench.py link` (20 rounds, alternated).
+
+The results are from two windows, four runs a mode. Window 1's first placement run is left out: its chat decoded at
+14.6 tok/s even alone, and a GPU sampler on DGX-02 was not yet running to show why. In window 3 that sampler showed
+another project's `tf-cuda-test` kernel benchmarks on DGX-02's GPU through both placement runs.
+
+| Measured | Single box (chat beside Drama 3) | Placement (chat on its own Spark) |
+| --- | ---: | ---: |
+| Chat decode, alone | 34.2 tok/s (30.2–34.3) | 33.3 tok/s (33.0–33.9) |
+| **Chat decode while Drama 3 speaks** | **18.4 tok/s** (15.9–18.5) | **33.1 tok/s** (32.3–33.8) |
+| Chat time to first token, alone / while speaking | 0.14 s / 0.27–0.28 s | 0.14 s / 0.14 s |
+| Drama 3 real-time factor, alone | 0.71–0.73 | 0.71–0.82 |
+| **Drama 3 real-time factor while chat decodes** | **1.75** (1.74–2.00: slower than playback) | **0.71** (faster than playback) |
+| Drama 3 first audio (streamed), alone / while chat decodes | 0.27 s / 0.27 s | 0.27–0.29 s / 0.26–0.28 s |
+| Voice turn, speech end to first audio: short answer ("capital") | 877 ms median (871–885) | 900 ms median (883–1195) |
+| Voice turn, speech end to first audio: a few sentences ("tips") | 1189 ms median (1103–1205) | 1335 ms median (1001–1634) |
+
+**The link.**
+- Per turn, a short streamed chat request costs 3.7 to 6.6 ms more through the front than asked of the node itself
+  (window 3's two runs; each is the median of 20 alternated rounds). Window 1's two runs measured 4.0 and 19.3 ms.
+- First content: +5.3 ms and −8.2 ms (noise of that size).
+- ICMP round trip over ConnectX-7: 0.13 ms minimum, 0.57–0.73 ms average.
+- This is more than the 1–2 ms the design estimated. The front daemon writes the stream into its job directory and
+  forwards it, as it does for a local chat server.
+
+**What it means.**
+- **Placement removes the contention.** While Drama 3 speaks, chat decodes 1.8× faster, at its alone speed, and
+  Drama 3 stays faster than playback (RTF 0.71) instead of falling behind it (1.75). A long reply's audio no longer
+  runs dry while the reply is written, so the start hold no longer has to wait for the writing (single box: 2.9 to
+  5.9 s, VOICE.md).
+- **It does not shorten a short turn.** A short answer's first audio was about the same (+23 ms); a few sentences' was 146 ms
+  slower at the median, with more spread. The chat node's GPU was shared with another project's benchmarks in both
+  placement runs, and turn-to-turn spread of this size is what such sharing produces. The mode is not shown slower:
+  a run on a quiet node is the open measurement.
+
+**Memory.** The chat node books the 27B's 22.13 GiB. The front books Drama 3 (20.56 GiB) and Whisper (3.75 GiB), plus
+the image model, video model and KnowLine once they are listed there. This is section 3's placement (a), and its
+memory table holds.
 
 ## Tensor parallel
 
