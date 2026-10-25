@@ -294,6 +294,18 @@ describe('ComputerUse', () => {
       expect((last.state as { triedWithoutEffect?: string[] }).triedWithoutEffect).toEqual(['clicked the button “Refresh”'])
     })
 
+    it('keeps scrolling a list whose rows change even when as many are visible each time', async () => {
+      const actions: ScreenAction[] = []
+      let first = 0
+      const rows = () => Array.from({ length: 20 }, (_, i) => control(`0.${i}`, 'row', `Message ${first + i}`))
+      const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: rows() }), act: async (action) => { actions.push(action); first += 20 } }
+      const replies: Answers[] = [{ surface: choice('current') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('scroll_down') }, { next: choice('done') }]
+      const { computer } = computerWith(replies, { page, tabs: null })
+      expect(await computer.run({ goal: 'scroll down to the oldest mail', text: null })).toMatchObject({ status: 'done' })
+      expect(actions).toHaveLength(4)
+    })
+
+
     it('after steering, does what the decider picks instead', async () => {
       const actions: ScreenAction[] = []
       let archived = false
