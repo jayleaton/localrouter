@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chatDecider, decisionRequest, parseDecision, transient } from './decide.ts'
+import { chatDecider, DecisionError, decisionRequest, parseDecision, redactReply, transient } from './decide.ts'
 
 const questions = { next: { type: 'choice' as const, instructions: 'Which?', criteria: { c0: 'Click Send', stuck: 'none' } }, consequential: { type: 'noul' as const, instructions: 'Could it send?' } }
 
@@ -64,6 +64,31 @@ describe('decisions that go missing without anything being wrong with the task (
     expect(transient(Object.assign(new Error('bad schema'), { status: 400 }))).toBe(false)
     expect(transient(Object.assign(new Error('model loading'), { status: 500 }))).toBe(true)
     expect(transient(Object.assign(new Error('internal error'), { status: 500 }))).toBe(false)
+  })
+})
+
+describe('a decision that cannot be read leaves a redacted trace (Windows run cu_ca6be1d17285: "not the JSON asked for")', () => {
+  it('says how many times it was asked and what came back, as a shape without the screen’s words', async () => {
+    const replies = ['I would click the “Address and search bar containing https://github.com/jayleaton/t3code/pull/138” first.', '']
+    const decider = chatDecider(async () => replies.shift() ?? '')
+    const error = await decider.ask({}, questions).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(DecisionError)
+    const e = error as DecisionError
+    expect(e.attempts).toBe(2)
+    expect(e.message).toBe('the decision was not the JSON asked for (asked 2 times)')
+    expect(e.replies[1]).toBe('(empty reply)')
+    expect(e.replies[0]).not.toContain('jayleaton')
+    expect(e.replies[0]).toMatch(/<\d+ chars>/)
+  })
+
+  it('keeps a reply’s shape: short keys stay, long strings and numbers do not', () => {
+    expect(redactReply('{"next":{"choice":"c12","confidence":"high"}')).toBe('{"next":{"choice":"c12","confidence":"high"}')
+    expect(redactReply('{"next":"a very long free text answer that repeats the page"}')).toBe('{"next":"<50 chars>"}')
+    expect(redactReply('call 4155551234')).toBe('call #')
+  })
+
+  it('gives a reply room to finish its object', () => {
+    expect(decisionRequest({}, questions).max_tokens).toBe(96 + 64 * 2)
   })
 })
 

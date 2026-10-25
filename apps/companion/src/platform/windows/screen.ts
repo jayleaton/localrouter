@@ -207,7 +207,8 @@ export class WindowsScreen implements ScreenBackend {
       }
       case 'type': {
         const ref = checkRef(action.ref)
-        if (done(await call('semantic', { kind: 'type', ref, text: action.text }), 'type')) return { background: true }
+        const semantic = object(await call('semantic', { kind: 'type', ref, text: action.text }), 'type')
+        if (boolean(semantic.done, 'type done')) return { background: true, how: semantic.focused === true ? 'value set, field focused' : 'value set, field not focused' }
         // Keys cannot type a line break without pressing Enter, which could send or submit.
         if (/[\r\n]/.test(action.text)) throw new Error(NEWLINE_REFUSED)
         const at = target(await call('point', { ref }))
@@ -218,7 +219,7 @@ export class WindowsScreen implements ScreenBackend {
           throwIfAborted(signal)
           await call('type', { hwnd: at.hwnd, text: chunk })
         }
-        return { pointer }
+        return { pointer, how: 'clicked into the field, selected its text, typed keys' }
       }
       case 'scroll': {
         const ref = action.ref === undefined ? undefined : checkRef(action.ref)

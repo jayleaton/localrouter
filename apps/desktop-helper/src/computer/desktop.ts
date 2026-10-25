@@ -721,7 +721,7 @@ export class DesktopBackend implements ScreenBackend {
     const read = object(json((await this.call(ACT_SCRIPT, ['value', JSON.stringify({ ref })], signal)).trim(), 'typed value'), 'typed value')
     const value = read.value === null || read.value === undefined ? null : string(read.value, 'typed value')
     if (!landed(value, text)) throw new Error('The text did not land in the text box, so it stopped.')
-    return left
+    return { ...left, how: KEYBOARD_TEXT.test(text) ? 'clicked into the field, focus checked, typed keys' : 'clicked into the field, focus checked, pasted' }
   }
 
   async pointer(): Promise<PointerReading> {

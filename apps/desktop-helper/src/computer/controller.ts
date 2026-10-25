@@ -185,11 +185,11 @@ export class ComputerUse {
       // the page (the Skool tab is titled "Early AI-dopters"), so it is not looked for on screen afterwards.
       if (target.switchedTab && plainClickGoal(task)) return end('done', '', target.switchedTab)
       if (quoted.length && quoted.every((name) => clicked.has(name)) && plainClickGoal(task)) return end('done', '')
-      let previous = ''
-      // Actions that did nothing on this screen (the same action, the screen unchanged): left out of the next question,
-      // with the decider told so, until the screen changes. Steering instead of retrying.
-      let avoid = new Map<string, string>()
-      let avoidOn = ''
+      // Every action done in this run, with the screen it was done on: the same action on a screen it was already done on
+      // (right before, or after going round a cycle such as an address bar that gains and loses the focus) is not done
+      // again but left out of that screen's next question, with the decider told so. Steering instead of retrying.
+      const acted = new Set<string>()
+      const avoidBy = new Map<string, Map<string, string>>()
       // The signature of an action done in the background (an accessibility action, no pointer): the same action on a
       // screen it left unchanged is first tried once more with the real pointer, and only then steered away from.
       let backgroundAt = ''
@@ -197,11 +197,12 @@ export class ComputerUse {
         this.checkpoint(run)
         const screen = await backend.observe({ signal: run.signal })
         const key = screenKey(screen)
-        if (key !== avoidOn) {
-          avoid = new Map()
-          avoidOn = key
-        }
+        const avoid = avoidBy.get(key) ?? new Map<string, string>()
+        avoidBy.set(key, avoid)
         surface = `${screen.app}: ${clip(screen.title, 60)}`
+        // Only going to an address ("go to example.com", "open Chrome and go to example.com"): done once the page on screen
+        // is on that host, rather than leaving the decider to say so (it preferred the address bar over "done").
+        if (pureNavigation(task.goal) && navigationReached(task.goal, screen)) return end('done', '')
         const match = quoted.find((name) => !clicked.has(name))
         const direct = match ? matchControl(screen.controls, match) : null
         if (match && direct) {
@@ -221,16 +222,22 @@ export class ComputerUse {
         const { action, step: said } = decision
         // The same action on the same screen: what is on it, not only how many controls (a scrolled list keeps its count).
         const signature = `${JSON.stringify(action)}|${key}`
-        const same = signature === previous
+        // Typing is offered again only when the field lost the text (the app put its own back, often leaving the screen as
+        // it was before), and its read-back fails a step that did not land: it has its own guard.
+        const same = acted.has(signature) && action.kind !== 'type'
         const viaPointer = same && backgroundAt === signature
         if (same && !viaPointer) {
           avoid.set(actionKey(action), said)
-          previous = ''
           backgroundAt = ''
           continue
         }
-        previous = signature
+        acted.add(signature)
         const result = await this.act(run, backend, screen, action, said, viaPointer)
+        // Typing starts a new attempt: what was tried before it (an Enter the app lost) may be right again after it.
+        if (action.kind === 'type') {
+          acted.clear()
+          avoidBy.clear()
+        }
         backgroundAt = result?.background && !viaPointer ? signature : ''
         await this.sleep(this.settleMs)
       }
@@ -464,10 +471,11 @@ export class ComputerUse {
   private async decide(run: Run, screen: Observation, avoid: Map<string, string> = new Map()): Promise<Decision> {
     const { task } = run
     const controls = screen.controls
-    // Going to an address whose page is not there yet, and the field typed into no longer holds the address (an app put
-    // its own text back after an Enter that went elsewhere): it may be typed again. Only for addresses, where typing
+    // Going to an address whose page is not known to be there (Windows leaves the page out while the address bar has the
+    // focus), and the field typed into no longer holds the address (an app put its own text back after an Enter that
+    // went elsewhere): it may be typed again. Only for addresses, where typing
     // again is harmless; a message box emptied by sending never re-offers its text.
-    if (run.typedInto && task.text && navigationUnmet(task.goal, screen)) {
+    if (run.typedInto && task.text && navigationText(task.goal) && !navigationReached(task.goal, screen)) {
       const field = run.typedInto
       const now = controls.find((c) => c.role === field.role && c.label === field.label)
       if (now?.value !== undefined && !now.value.replace(/\s+/g, '').includes(task.text.replace(/\s+/g, ''))) run.typedInto = null
@@ -487,7 +495,16 @@ export class ComputerUse {
         type: 'choice',
         instructions: `What is the one next step toward the goal on this screen? Choose a control to click, or one of the other moves. ${STATE_NOTE}`,
         criteria: {
-          ...Object.fromEntries(controls.map((control, index) => [`c${index}`, `Click the ${describeControl(control)}`] as const).filter(([key]) => !avoid.has(`click:${controls[Number(key.slice(1))].ref}`))),
+          // A text box that already has the focus is never a click to make: it changes nothing (on Windows it toggles what the
+          // page reports, which made a loop). With text still to type, choosing it types instead (below).
+          ...Object.fromEntries(
+            controls
+              .map((control, index) => [`c${index}`, `Click the ${describeControl(control)}`] as const)
+              .filter(([key]) => {
+                const control = controls[Number(key.slice(1))]
+                return !avoid.has(`click:${control.ref}`) && !(control.role === 'textbox' && control.focused && !canType)
+              }),
+          ),
           ...(avoid.has('scroll:down') ? {} : { scroll_down: 'Scroll down to see more of this page or list.' }),
           ...(avoid.has('scroll:up') ? {} : { scroll_up: 'Scroll up to see earlier content.' }),
           ...(canType ? { type_text: 'Type the prepared text (`textToType`) into a text box.' } : {}),
@@ -603,9 +620,23 @@ const hostOf = (address: string) => address.toLowerCase().replace(/^[a-z]+:\/\//
  * shows, and that page is on another host. When the backend cannot read the page (no `url`), it cannot be told, and
  * the decider's word stands.
  */
-export function navigationUnmet(goal: string, screen: Observation): boolean {
+export function navigationReached(goal: string, screen: Observation): boolean {
   const target = navigationText(goal)
   if (!target || !screen.url) return false
+  const want = hostOf(target)
+  const have = hostOf(screen.url)
+  return have === want || have.endsWith(`.${want}`)
+}
+
+/** A browser's address bar, by the names Chrome, Edge, Firefox and Safari give it. */
+export const ADDRESS_BAR = /address and search bar|search or enter address|search with .+ or enter address|address bar|^location$|search or type (a )?(web address|url)|smart search field/i
+
+export function navigationUnmet(goal: string, screen: Observation): boolean {
+  const target = navigationText(goal)
+  if (!target) return false
+  // No page reported while the address bar has the focus (Windows leaves it out: the bar then holds what is typed): the
+  // page is not known to be there yet, so it is not done.
+  if (!screen.url) return screen.controls.some((c) => c.role === 'textbox' && c.focused === true && ADDRESS_BAR.test(c.label))
   const want = hostOf(target)
   const have = hostOf(screen.url)
   return !(have === want || have.endsWith(`.${want}`))
@@ -617,10 +648,14 @@ export function navigationUnmet(goal: string, screen: Observation): boolean {
  * request's own words).
  */
 export function navigationText(goal: string): string | null {
-  const address = String.raw`https?:\/\/[^\s"“”'‘’<>]+|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|tv|app|dev|co|ai|me|edu|gov|uk|de|fr|jp|info|news|blog)(?:\/[^\s"“”'‘’<>]*)?`
-  // The address right after the verb: "go to example.com", "open the site example.com", not "open the email from x.com".
-  const verb = String.raw`\b(?:go(?:\s+over)?\s+to|navigate\s+to|browse\s+to|head\s+to|open|visit|load|pull\s+up)\s+(?:the\s+)?(?:(?:web)?site\s+|page\s+|url\s+)?`
-  const found = new RegExp(`${verb}(${address})`, 'i').exec(goal)?.[1]
+  // Never an address inside an email address ("bob@example.com").
+  const address = String.raw`(?<![@\w.-])(?:https?:\/\/[^\s"“”'‘’<>]+|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|tv|app|dev|co|ai|me|edu|gov|uk|de|fr|jp|info|news|blog)(?:\/[^\s"“”'‘’<>]*)?)`
+  // The address right after the verb: "go to example.com", "navigate Chrome to x.com", "take me to x.com", "open the
+  // site x.com", "bring up x.com"; not "open the email from x.com" (the address is not what is opened).
+  const toVerb = String.raw`\b(?:go|navigate|browse|head|get|take\s+me|bring\s+me|switch)(?:\s+\S+){0,3}?\s+to\s+`
+  const openVerb = String.raw`\b(?:open|visit|load|pull\s+up|bring\s+up|show\s+me|launch)\s+`
+  const what = String.raw`(?:the\s+)?(?:(?:web)?site\s+|page\s+|url\s+|address\s+)?`
+  const found = new RegExp(`(?:${toVerb}|${openVerb})${what}(${address})`, 'i').exec(goal)?.[1]
   return found ? found.replace(/[.,;:!?)]+$/, '') : null
 }
 
@@ -712,6 +747,14 @@ function matchControl(controls: ScreenControl[], name: string): ScreenControl | 
 }
 
 /** A goal that is only clicking named things ("click the tab X", "select Y"), so clicking them finishes it. */
+/** A goal that is only going to an address: nothing to do on the page once it is there. */
+export function pureNavigation(goal: string): boolean {
+  const address = navigationText(goal)
+  if (!address) return false
+  const rest = goal.replace(address, ' ')
+  return !/\b(then|and then|scroll|type|write|send|message|search|find|fill|enter|reply|draft|play|pause|press|watch|mute|click|tap|select|log ?in|sign|buy|order|pay|download|upload|read|copy|paste|book|subscribe|post|share|delete|check)\b/i.test(rest)
+}
+
 function plainClickGoal(task: ComputerTask) {
   // Going to a site is done when the page is there, not when a tab is clicked (a blank tab once counted as done).
   if (task.text || navigationText(task.goal)) return false

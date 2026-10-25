@@ -32,7 +32,8 @@ export function decisionRequest(state: unknown, questions: Record<string, Questi
     ...extra,
     messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: user }],
     temperature: 0,
-    max_tokens: 64 + 48 * ids.length,
+    // Room for a short preamble or a pretty-printed object as well: a reply cut off mid-object is not the JSON asked for.
+    max_tokens: 96 + 64 * ids.length,
     response_format: { type: 'json_schema', json_schema: { name: 'decisions', strict: true, schema: { type: 'object', properties, required: ids, additionalProperties: false } } },
   }
 }
@@ -87,6 +88,30 @@ export function parseDecision(content: string, questions: Record<string, Questio
 export const NOT_JSON = 'the decision was not the JSON asked for'
 
 /**
+ * A reply as the audit may keep it: its shape, not the screen's words. Clipped to 240 characters, every string longer
+ * than 24 characters replaced by its length, long digit runs masked; an empty reply says so.
+ */
+export function redactReply(content: string): string {
+  if (!content.trim()) return '(empty reply)'
+  const shape = content
+    .replace(/"([^"\\]|\\.){25,}"/g, (m) => `"<${m.length - 2} chars>"`)
+    .replace(/[^\s"{}[\]:,]{25,}/g, (m) => `<${m.length} chars>`)
+    .replace(/\d{6,}/g, '#')
+  return shape.length > 240 ? `${shape.slice(0, 240)}… (${content.length} chars)` : shape
+}
+
+/** A decision that could not be read: how many times it was asked, and what came back (redacted), for the audit. */
+export class DecisionError extends Error {
+  readonly attempts: number
+  readonly replies: string[]
+  constructor(message: string, attempts: number, replies: string[]) {
+    super(message)
+    this.attempts = attempts
+    this.replies = replies
+  }
+}
+
+/**
  * Whether a failed request is the decision service being briefly away, worth waiting for: the box unreachable or
  * restarting (a deploy restarts it, and the chat model is back about 15 s later), 502/503/504/429, or a 5xx saying the
  * model's server is gone or loading. Anything else (a refused token, a bad request) is not.
@@ -119,7 +144,7 @@ export function chatDecider(complete: Complete, extra: Record<string, unknown> =
   return {
     ask: async (state, questions) => {
       const body = decisionRequest(state, questions, extra)
-      let reasked = false
+      const replies: string[] = []
       let waited = 0
       let delay = 1_000
       for (;;) {
@@ -140,8 +165,8 @@ export function chatDecider(complete: Complete, extra: Record<string, unknown> =
         try {
           return parseDecision(content, questions)
         } catch (error) {
-          if (reasked) throw error
-          reasked = true
+          replies.push(redactReply(content))
+          if (replies.length >= 2) throw new DecisionError(`${error instanceof Error ? error.message : String(error)} (asked ${replies.length} times)`, replies.length, replies)
         }
       }
     },

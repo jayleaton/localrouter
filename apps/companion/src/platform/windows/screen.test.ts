@@ -99,7 +99,7 @@ describe('WindowsScreen act', () => {
 
   it('sets a value semantically; a value that did not land is an error, not a retry with keys', async () => {
     const set = fakeWorker(() => ({ done: true, how: 'value' }))
-    expect(await new WindowsScreen(set.worker).act({ kind: 'type', ref: REF, text: 'line one\nline two' })).toEqual({ background: true })
+    expect(await new WindowsScreen(set.worker).act({ kind: 'type', ref: REF, text: 'line one\nline two' })).toMatchObject({ background: true })
     expect(set.calls[0]!.args).toEqual({ kind: 'type', ref: REF, text: 'line one\nline two' })
     const missed = fakeWorker(() => new Error('LR_DID_NOT_TAKE|Search mail|'))
     await expect(new WindowsScreen(missed.worker).act({ kind: 'type', ref: REF, text: 'x' })).rejects.toThrow('The text did not land in “Search mail”')
@@ -114,7 +114,7 @@ describe('WindowsScreen act', () => {
       if (call.op === 'click') return { x: 10, y: 20 }
       return {}
     })
-    expect(await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text })).toEqual({ pointer: { x: 10, y: 20 } })
+    expect(await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text })).toEqual({ pointer: { x: 10, y: 20 }, how: 'clicked into the field, selected its text, typed keys' })
     expect(calls.map((c) => c.op)).toEqual(['semantic', 'point', 'click', 'select_all', 'type', 'type', 'type'])
     expect(calls.filter((c) => c.op === 'type').map((c) => (c.args.text as string).length)).toEqual([200, 200, 50])
     expect(calls.filter((c) => c.op === 'type').every((c) => c.args.hwnd === 77)).toBe(true)
@@ -242,6 +242,15 @@ describe('setting a field’s value gives it the focus first (Windows run, 2026-
     const typing = HELPER_CS.slice(HELPER_CS.indexOf('private static Dictionary<string, object> SemanticType'), HELPER_CS.indexOf('private static ScrollPattern Scrollable'))
     expect(typing.indexOf('el.SetFocus();')).toBeGreaterThan(0)
     expect(typing.indexOf('el.SetFocus();')).toBeLessThan(typing.indexOf('vp.SetValue(text);'))
+  })
+})
+
+describe('typing says whether the field had the focus (for the audit)', () => {
+  it('reports how a value was set, never the text', async () => {
+    const focused = fakeWorker((c) => (c.op === 'semantic' ? { done: true, how: 'value', focused: true } : {}))
+    expect(await new WindowsScreen(focused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ background: true, how: 'value set, field focused' })
+    const unfocused = fakeWorker((c) => (c.op === 'semantic' ? { done: true, how: 'value', focused: false } : {}))
+    expect(await new WindowsScreen(unfocused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ background: true, how: 'value set, field not focused' })
   })
 })
 

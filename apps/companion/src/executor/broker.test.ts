@@ -26,6 +26,19 @@ function nextCard(broker: ReturnType<typeof fakeBroker>['broker']): Promise<Card
 }
 
 describe('the executor broker: final authority on this computer', () => {
+  it('audits a decision that could not be read (attempts, redacted replies) and how each action was done', async () => {
+    const { broker, audit } = fakeBroker(['type_text', 'done'], {})
+    const started = broker.startUse(app, 'search my notes for groceries', 'groceries')
+    if (!started.ok) throw new Error(started.error)
+    await started.finished
+    expect(audit.lines.filter((l) => l.event === 'act').map((l) => l.kind)).toContain('type')
+    const failing = fakeBroker([], { decider: { ask: async () => { throw Object.assign(new Error('the decision was not the JSON asked for (asked 2 times)'), { attempts: 2, replies: ['(empty reply)', '(empty reply)'] }) } } })
+    const second = failing.broker.startUse(app, 'search my notes for groceries', null)
+    if (!second.ok) throw new Error(second.error)
+    expect((await second.finished).status).toBe('stuck')
+    expect(failing.audit.lines.find((l) => l.event === 'decide.failed')).toMatchObject({ attempts: 2, replies: ['(empty reply)', '(empty reply)'] })
+  })
+
   it('says before Approve that the OS will ask, and does not let the card run out while it does (Windows run, 2026-10-25)', async () => {
     // Windows Hello opened Windows Security after Approve; the 60 s card ran out meanwhile and typing was denied.
     const hello = { method: 'Windows Hello', asked: 0, verify: async () => { hello.asked += 1; await new Promise((r) => setTimeout(r, 250)); return true } }

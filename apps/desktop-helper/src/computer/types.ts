@@ -70,7 +70,12 @@ export type ScreenAction =
  * pointer or global key events at all (an accessibility action such as AXPress, UIA Invoke or AT-SPI doAction), so
  * the person's own pointer and keyboard were never touched.
  */
-export type ActResult = { pointer?: Point; background?: boolean }
+export type ActResult = {
+  pointer?: Point
+  background?: boolean
+  /** How it was done, for the audit ("value set, field focused", "keys"): never the text itself. */
+  how?: string
+}
 
 export type ObserveOptions = { signal?: AbortSignal }
 
