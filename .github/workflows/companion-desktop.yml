@@ -149,6 +149,10 @@ jobs:
           openbox & sleep 1
           /usr/libexec/at-spi-bus-launcher --launch-immediately & sleep 1
           python3 scripts/smoke/gtk-window.py & sleep 3
+          export LOCALROUTER_ATSPI_DEBUG="$RUNNER_TEMP/atspi.log"
           LOCALROUTER_REAL_LINUX=1 npx vitest run src/platform/linux/real.test.ts
           SH
-          dbus-run-session -- bash "$RUNNER_TEMP/session.sh"
+          status=0
+          dbus-run-session -- bash "$RUNNER_TEMP/session.sh" || status=$?
+          echo "--- AT-SPI calls that failed (LOCALROUTER_ATSPI_DEBUG)"; cat "$RUNNER_TEMP/atspi.log" 2>/dev/null || echo none
+          exit $status

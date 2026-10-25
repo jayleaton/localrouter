@@ -1,5 +1,5 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname } from 'node:path/posix'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import type { ActOptions, Point } from '../../../../desktop-helper/src/computer/types.ts'
 import { json, object, optional, string } from '../../../../desktop-helper/src/validate.ts'

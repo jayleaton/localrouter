@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
 import { access, readFile } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { delimiter, join } from 'node:path/posix'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 
 /**

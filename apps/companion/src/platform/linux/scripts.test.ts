@@ -17,6 +17,8 @@ import { fakeRunner, fakeSession } from './testing.ts'
  * semantic-first actions are exercised for real. Skipped where python3 is missing.
  */
 const python = (() => {
+  // These are Linux scripts with Linux paths: run where Linux runs them (and macOS), not on a Windows runner.
+  if (process.platform === 'win32') return false
   try {
     execFileSync('python3', ['--version'], { stdio: 'ignore' })
     return true
@@ -26,8 +28,10 @@ const python = (() => {
 })()
 
 // PYTHONPATH splits on ':', so the fake gi must live in a directory without one (TMPDIR may have one).
-const dir = mkdtempSync(join(tmpdir().includes(':') ? '/tmp' : tmpdir(), 'localrouter-py-'))
-afterAll(() => rmSync(dir, { recursive: true, force: true }))
+const dir = python ? mkdtempSync(join(tmpdir().includes(':') ? '/tmp' : tmpdir(), 'localrouter-py-')) : ''
+afterAll(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true })
+})
 
 const SCRIPTS = { ATSPI_SCRIPT, PORTAL_KEYS, PORTAL_SCREENSHOT, GDK_MONITORS, GI_PROBE }
 

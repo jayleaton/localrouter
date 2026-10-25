@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join } from 'node:path/posix'
 import { ControlError } from '../../../../desktop-helper/src/computer/macControls.ts'
 import type { ComputerControl, Player } from '../../../../desktop-helper/src/computer/macControls.ts'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'

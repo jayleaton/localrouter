@@ -58,7 +58,12 @@ describe.runIf(REAL)('Linux, for real (Xvfb, openbox, at-spi, the GTK smoke wind
 
   it('types into a text box and reads it back', async () => {
     const search = find(await observe(), 'textbox', /^Search$/)!
-    await platform.screen!.act({ kind: 'type', ref: search.ref, text: 'groceries list' })
+    try {
+      await platform.screen!.act({ kind: 'type', ref: search.ref, text: 'groceries list' })
+    } catch (error) {
+      console.log(`typing failed; the box now holds ${JSON.stringify(find(await observe(), 'textbox', /^Search$/)?.value)}`)
+      throw error
+    }
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(find(await observe(), 'textbox', /^Search$/)?.value).toBe('groceries list')
   })

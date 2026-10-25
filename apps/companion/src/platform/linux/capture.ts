@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join } from 'node:path/posix'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import { SCREENSHOT_MAX_EDGE, fitScale } from '../../../../desktop-helper/src/computer/types.ts'
 import type { Rect, Screenshot, ScreenshotOptions } from '../../../../desktop-helper/src/computer/types.ts'

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { homedir, userInfo } from 'node:os'
-import { join } from 'node:path'
+import { posix, win32 } from 'node:path'
 
 /**
  * Where the companion keeps its data on this computer: the app's folder on macOS (the same one Electron's
@@ -10,8 +10,10 @@ import { join } from 'node:path'
 export function dataDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = homedir()): string {
   const set = env.LOCALROUTER_COMPANION_HOME?.trim()
   if (set) return set
+  // Joined for the OS asked about, not the one running (the tests ask about every OS from one).
+  if (platform === 'win32') return win32.join(env.APPDATA?.trim() || win32.join(home, 'AppData', 'Roaming'), 'LocalRouter')
+  const join = posix.join
   if (platform === 'darwin') return join(home, 'Library', 'Application Support', 'LocalRouter')
-  if (platform === 'win32') return join(env.APPDATA?.trim() || join(home, 'AppData', 'Roaming'), 'LocalRouter')
   return join(env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state'), 'localrouter-companion')
 }
 
@@ -22,10 +24,11 @@ export function dataDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.P
  * admits it, as on the socket.
  */
 export function executorSocket(dir: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform !== 'win32') return join(dir, 'executor.sock')
+  if (platform !== 'win32') return posix.join(dir, 'executor.sock')
   const key = createHash('sha256').update(`${userInfo().username}\0${dir.toLowerCase()}`).digest('hex').slice(0, 16)
   return `\\\\.\\pipe\\localrouter-executor-${key}`
 }
-export const callersPath = (dir: string) => join(dir, 'callers.json')
-export const auditPath = (dir: string) => join(dir, 'audit.jsonl')
-export const identityPath = (dir: string) => join(dir, 'executor.json')
+const local = process.platform === 'win32' ? win32 : posix
+export const callersPath = (dir: string) => local.join(dir, 'callers.json')
+export const auditPath = (dir: string) => local.join(dir, 'audit.jsonl')
+export const identityPath = (dir: string) => local.join(dir, 'executor.json')
