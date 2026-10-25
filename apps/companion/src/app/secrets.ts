@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { chmod, copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+// The keychain helper is macOS's (Linux and Windows have none, and never reach these paths): POSIX paths on any host.
+import { dirname, join } from 'node:path/posix'
 
 /**
  * Where the app keeps its Spark tokens on macOS: the login keychain, through `localrouter-keychain`
