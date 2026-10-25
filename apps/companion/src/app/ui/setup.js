@@ -15,7 +15,7 @@ function render(s) {
   $('paired').hidden = !s.paired;
   $('pairedBase').textContent = s.base;
   $('pairedName').textContent = s.device ? s.device.name : s.name;
-  $('secrets').textContent = s.secrets === 'keychain' ? 'in the macOS keychain' : 'for this run only (no keychain)';
+  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted with the OS keychain' : 'for this run only (no keychain)';
   if (!$('name').value) $('name').value = s.name;
   $('suggestName').textContent = s.name;
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
@@ -27,6 +27,25 @@ function render(s) {
   $('staleText').textContent = s.stale_message;
   $('staleAx').hidden = $('resetAx').hidden = !stale.accessibility;
   $('staleScreen').hidden = $('resetScreen').hidden = !stale.screen;
+  // Linux and Windows: the platform's own list of what it needs, each with how to get it.
+  const reqs = p.requirements || null;
+  $('macPerms').hidden = Boolean(reqs);
+  $('osPerms').hidden = !reqs;
+  if (reqs) {
+    $('osBackend').textContent = p.backend || 'this computer';
+    $('osReqs').replaceChildren(...reqs.map((r) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const name = document.createElement('span');
+      name.textContent = `${r.label} (${r.for})`;
+      const status = document.createElement('span');
+      status.className = 'status';
+      status.textContent = r.granted === true ? 'ready' : r.granted === false ? (r.fix || 'missing') : 'asked on first use';
+      row.append(name, status);
+      return row;
+    }));
+  }
+  if (s.stop_words) $('stopWords').textContent = s.stop_words;
   $('pMic').textContent = word(p.microphone);
   $('pAx').textContent = word(p.accessibility);
   $('pScreen').textContent = word(p.screen);

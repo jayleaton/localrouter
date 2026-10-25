@@ -198,6 +198,27 @@ beneath every API:
 | Stop and the local switch work with no network and no model | `Broker.stop`, `setDisabled` |
 | Audit on the device, typed text as length and digest | `src/executor/audit.ts` |
 
+### One executor, a platform per OS
+
+What is the same on every computer lives in the executor: the policy, approvals, budgets, audit, revalidation, the
+lease and the local stop's rules (`src/executor/`, `apps/desktop-helper/src/stop.ts`, the controller). What differs is a
+`Platform` (`apps/companion/src/platform/types.ts`), chosen by `createPlatform` at start:
+
+| Part | Does | macOS | Linux | Windows |
+| --- | --- | --- | --- | --- |
+| `screen` | `observe` (tree), `act` (click, type, press, scroll), `pointer`, `displays`, `screenshot` | AX + CGEvent (`platform/mac.ts`) | AT-SPI + XTest / portal / ydotool | UI Automation + SendInput |
+| `tabs`, `launcher`, `apps` | a browser's tabs; the person's own app list; running apps and bringing one forward | Chrome scripting; the Dock | AT-SPI tab strip; dash favourites | UIA tab strip; pinned taskbar apps |
+| `controls` | the fixed controls; `unsupported` lists the ones the OS cannot run, refused before the policy with the reason | `MacControls` | | |
+| `pointer`, `displays` | the local stop's readings; null where the OS hides the pointer (the stop is then the shortcut and the tray) | | | |
+| `presence` | an OS check for approvals; null: the app's Touch ID or its dialog | (Touch ID in the app) | | Windows Hello |
+| `access()` | what it needs, granted or not, with the fix, for Settings | | | |
+
+Every coordinate a platform takes or reports is in one global space (points on macOS, physical pixels with per-monitor
+DPI awareness on Windows, compositor pixels on Linux), so the stop's corners, screenshots' `region` and controls'
+`bounds` agree. The keyboard stop is ⌘⇧⎋ on macOS and Ctrl+Shift+Alt+Esc elsewhere (Ctrl+Shift+Esc is the Task
+Manager on Windows, Ctrl+Alt+Esc xkill on KDE). The executor's socket is a Unix socket in the data folder, or a per-user
+named pipe on Windows. An OS with no platform yet reads nothing and refuses every control, saying so.
+
 The box's decisions (the chat model asked as `decide.Qwen` asks it) are advice: they choose steps and judge clicks, and
 a failed judgment asks. With the legacy bridge on, the box's `authorize` grant is one more input: a refusal there holds,
 an allow does not replace the local rules or approval. New harnesses need none of `desktop_helper`, `computer` or

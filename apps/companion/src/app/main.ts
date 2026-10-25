@@ -17,6 +17,8 @@ import { prepareVideo, restoreVoice } from '../harness/models.ts'
 import { pageView } from '../harness/realtime.ts'
 import type { ClientToolsSession } from '../harness/realtime.ts'
 import { startRuntime } from '../harness/runtime.ts'
+import { stopShortcut } from '../platform/shortcut.ts'
+import type { PlatformPresence } from '../platform/types.ts'
 import type { Runtime } from '../harness/runtime.ts'
 import { normalizeBase, pair, Spark } from '../harness/spark.ts'
 
@@ -87,10 +89,24 @@ function computerName() {
 
 // ------------------------------------------------------------------ the presence gate
 
-/** Touch ID where this Mac has it; otherwise a native confirmation (weaker: documented in the README). */
-class MacPresenceGate implements PresenceGate {
+/**
+ * The person's presence for an approval: Touch ID where the Mac has it, the platform's own check where it has one
+ * (Windows Hello), otherwise a native confirmation dialog (weaker: documented in the README).
+ */
+class AppPresenceGate implements PresenceGate {
+  private os: PlatformPresence | null = null
+  private osReady = false
+
+  /** The running platform's check, once the executor has started; its availability is read once. */
+  async use(presence: PlatformPresence | null) {
+    this.os = presence
+    this.osReady = presence ? await presence.available().catch(() => false) : false
+  }
+
   get method() {
-    return process.platform === 'darwin' && systemPreferences.canPromptTouchID() ? 'Touch ID' : 'a confirmation on this computer'
+    if (process.platform === 'darwin' && systemPreferences.canPromptTouchID()) return 'Touch ID'
+    if (this.os && this.osReady) return this.os.method
+    return 'a confirmation on this computer'
   }
 
   async verify(card: Card): Promise<boolean> {
@@ -102,6 +118,7 @@ class MacPresenceGate implements PresenceGate {
         return false
       }
     }
+    if (this.os && this.osReady) return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200)).catch(() => false)
     const where = [card.app, card.title, card.url].filter(Boolean).join(' · ')
     const options = {
       type: 'warning' as const,
@@ -117,7 +134,10 @@ class MacPresenceGate implements PresenceGate {
   }
 }
 
-const gate = new MacPresenceGate()
+const gate = new AppPresenceGate()
+const STOP = stopShortcut(process.platform)
+/** The tray's icon off macOS (a menu bar title needs none): an empty image is invisible in a Windows or Linux tray. */
+const TRAY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAg0lEQVR42u2XSw4AERBE3cfVHMLNzc5iMj41tCqiEuv3QvTHud3iQ4q1swKaGmeuDAD+FGGAx0UmwnEJAzgmYQTPEkx4XcLw6vueYhG8fAuowDtDAgi8lV8S2wj05gqcK3DuL6AXIqVSzGtG9HYsMZBIjGT0oVRiLJdYTGRWM4nl1DIPCdZ3uuZOWEUAAAAASUVORK5CYII='
 
 // ------------------------------------------------------------------ the runtime
 
@@ -129,8 +149,8 @@ let setupWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 const sessions = new Map<string, { session: ClientToolsSession; owner: WebContents }>()
 
-function machineKind(): 'mac' | 'fake' {
-  return process.platform === 'darwin' && process.env.LOCALROUTER_COMPANION_FAKE !== '1' ? 'mac' : 'fake'
+function machineKind(): 'native' | 'fake' {
+  return process.env.LOCALROUTER_COMPANION_FAKE === '1' ? 'fake' : 'native'
 }
 
 async function startRuntimeFromSettings(): Promise<void> {
@@ -138,6 +158,7 @@ async function startRuntimeFromSettings(): Promise<void> {
   const secrets = loadSecrets()
   if (!settings.base || !secrets.token) return
   runtime = await startRuntime({ base: settings.base, token: secrets.token, dir, name: settings.name, machine: machineKind(), gate, shared: () => settings.shared, listen: true, ownApps: ['LocalRouter', 'Electron'], log })
+  await gate.use(runtime.executor.built.platform.presence)
   runtime.executor.broker.on((e) => {
     if (e.type === 'approval') {
       showMain()
@@ -149,7 +170,7 @@ async function startRuntimeFromSettings(): Promise<void> {
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })
   if (settings.legacy && secrets.legacy_token) {
-    legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: runtime.executor.broker, access: runtime.executor.built.access, log })
+    legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: runtime.executor.broker, access: () => runtime!.executor.built.platform.access(), log })
     legacy.start()
   }
   refreshTray()
@@ -478,9 +499,13 @@ function buildId(): string {
  * still shows as on in System Settings and does nothing for this one.
  */
 async function permissions() {
-  if (process.platform !== 'darwin') return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false } }
+  if (process.platform !== 'darwin') {
+    // Linux and Windows have no TCC grants to go stale: the platform says what it needs and how to get it.
+    const report = runtime ? await runtime.executor.built.platform.access().catch(() => null) : null
+    return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false }, backend: report?.backend ?? '', requirements: report?.requirements ?? [] }
+  }
   const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted' }
-  const works = runtime ? await runtime.executor.built.access().then((a) => ({ accessibility: a.accessibility, screen: a.screen_recording }), () => null) : null
+  const works = runtime ? await runtime.executor.built.platform.access().then((a) => ({ accessibility: a.accessibility, screen: a.screen_recording }), () => null) : null
   const { state: grant, grants } = grantStates(said, works, settings.grants ?? {}, buildId())
   if (JSON.stringify(grants) !== JSON.stringify(settings.grants ?? {})) {
     settings = { ...settings, grants }
@@ -520,6 +545,7 @@ async function state() {
     control: runtime ? !runtime.executor.broker.disabled : false,
     machine: machineKind(),
     permissions: await permissions(),
+    stop_words: runtime?.executor.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
     stale_message: STALE_GRANT,
     callers,
     mcp: { command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), socket: executorSocket(dir) },
@@ -592,7 +618,7 @@ function refreshTray() {
 
 function buildMenu() {
   const template: MenuItemConstructorOptions[] = [
-    { label: 'LocalRouter', submenu: [{ role: 'about' }, { type: 'separator' }, { label: 'Settings…', accelerator: 'CommandOrControl+,', click: () => showSetup() }, { label: 'Stop what Jarvis is doing', accelerator: 'CommandOrControl+Shift+Escape', click: () => stopAll('the keyboard') }, { type: 'separator' }, { role: 'hide' }, { role: 'quit' }] },
+    { label: 'LocalRouter', submenu: [{ role: 'about' }, { type: 'separator' }, { label: 'Settings…', accelerator: 'CommandOrControl+,', click: () => showSetup() }, { label: 'Stop what Jarvis is doing', accelerator: STOP.accelerator, click: () => stopAll('the keyboard') }, { type: 'separator' }, { role: 'hide' }, { role: 'quit' }] },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
@@ -673,9 +699,9 @@ if (process.argv.includes('--version')) {
     permissionHandlers()
     buildMenu()
     settings = loadSettings()
-    tray = new Tray(nativeImage.createEmpty())
+    tray = new Tray(process.platform === 'darwin' ? nativeImage.createEmpty() : nativeImage.createFromDataURL(TRAY_ICON))
     tray.setToolTip('LocalRouter')
-    globalShortcut.register('CommandOrControl+Shift+Escape', () => stopAll('the keyboard'))
+    if (!globalShortcut.register(STOP.accelerator, () => stopAll('the keyboard'))) log.warn('stop_shortcut.unavailable', { accelerator: STOP.accelerator })
     try {
       await startRuntimeFromSettings()
     } catch (error) {

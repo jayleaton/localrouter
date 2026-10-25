@@ -42,18 +42,24 @@
       </div>
       <p class="note" id="resetResult" hidden></p>
     </div>
+    <div id="macPerms">
     <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows). macOS asks about Automation the first time Jarvis uses an app.</p>
     <div class="row"><span>Microphone</span><span class="status" id="pMic"></span><button data-perm="microphone">Allow</button></div>
     <div class="row"><span>Accessibility</span><span class="status" id="pAx"></span><button data-perm="accessibility">Open System Settings</button></div>
     <div class="row"><span>Screen Recording</span><span class="status" id="pScreen"></span><button data-perm="screen">Open System Settings</button></div>
     <div class="row"><span>Automation</span><span class="status">asked on first use</span><button data-perm="automation">Open System Settings</button></div>
     <p class="note">After granting Accessibility or Screen Recording, quit and reopen LocalRouter.</p>
+    </div>
+    <div id="osPerms" hidden>
+      <p class="note">Computer control here uses <b id="osBackend"></b>. What it needs on this computer:</p>
+      <div id="osReqs"></div>
+    </div>
   </section>
 
   <section>
     <h2>3. This computer</h2>
     <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
-    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner.</p>
+    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <span id="stopWords">⌘⇧⎋, the menu bar, or move the pointer to the top-left corner</span>.</p>
   </section>
 
   <section>

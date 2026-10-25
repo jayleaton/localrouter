@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto'
 import { ComputerUse, clampLimit, MAX_STEPS, TIMEOUT_MS } from '../../../desktop-helper/src/computer/controller.ts'
-import type { AuthorizeAction, AuthorizeRequest, ComputerOutcome, Deps, Grant, Authorize, TaskWatch } from '../../../desktop-helper/src/computer/controller.ts'
+import type { AuthorizeAction, AuthorizeRequest, ComputerOutcome, Grant, Authorize, TaskWatch } from '../../../desktop-helper/src/computer/controller.ts'
 import type { Answers, Decider, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import type { ComputerControl } from '../../../desktop-helper/src/computer/macControls.ts'
+import type { Platform } from '../platform/types.ts'
 import { SCREENSHOT_MAX_EDGE } from '../../../desktop-helper/src/computer/types.ts'
-import type { BrowserTabs, Observation, ScreenBackend, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
+import type { BrowserTabs, Observation, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
 import { silentLogger } from '../../../desktop-helper/src/log.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { Store } from './approvals.ts'
@@ -30,14 +31,11 @@ export type Caller = { id: string; name: string; kind: CallerKind }
 /** Who asks, and the person's own words when the request came from a conversation turn. */
 export type Requester = { caller: Caller; utterance?: string }
 
-/** What the executor drives: the real Mac, or the fake one. */
-export type Machine = {
-  desktop: ScreenBackend | null
-  tabs: BrowserTabs | null
-  dock: Deps['dock']
-  apps: Deps['apps']
-  controls: { run(control: ComputerControl): Promise<{ done: string }>; notify?(title: string, text: string): Promise<void> }
-}
+/**
+ * What the executor drives: one OS's platform (platform/types.ts) — the screen, the browser's tabs, the person's
+ * launcher, running apps and fixed controls. `os` and `backend` name it in the capabilities.
+ */
+export type Machine = Pick<Platform, 'screen' | 'tabs' | 'launcher' | 'apps' | 'controls'> & Partial<Pick<Platform, 'os' | 'backend'>>
 
 export type Card = {
   id: string
@@ -75,6 +73,8 @@ export type BrokerOptions = {
   gate: PresenceGate
   /** The local stop for one task (the pointer corner / takeover watch). */
   watch?: (abort: (reason: string) => void) => TaskWatch | null
+  /** How the person stops a task on this computer, for the task-start notice ("Move the pointer to the top-left corner to stop."). */
+  stopHint?: string
   /** App names that are this companion itself: never observed as a target, never acted on. */
   ownApps?: string[]
   limits?: Partial<Limits>
@@ -200,8 +200,11 @@ export class Broker {
     return {
       executor: this.executorId,
       computer: this.name,
-      controls: [...policy.CONTROL_KINDS],
-      computer_use: Boolean(this.options.machine.desktop) && this.options.decider !== null,
+      os: this.options.machine.os ?? process.platform,
+      backend: this.options.machine.backend ?? '',
+      controls: this.controlKinds(),
+      computer_use: Boolean(this.options.machine.screen) && this.options.decider !== null,
+      reads: { observe: Boolean(this.options.machine.screen), screenshot: Boolean(this.options.machine.screen?.screenshot) },
       presence: this.options.gate.method,
       limits: { max_steps: this.limits.maxSteps, timeout_ms: this.limits.timeoutMs, approval_timeout_ms: this.limits.approvalTimeoutMs },
       disabled: this.disabledFlag,
@@ -214,6 +217,8 @@ export class Broker {
   async control(who: Requester, ctl: ComputerControl, describe: (c: ComputerControl) => string = describeControl): Promise<{ ok: boolean; text: string; task_id?: string }> {
     const refused = this.admit(who)
     if (refused) return { ok: false, text: refused }
+    const unsupported = this.machine.controls.unsupported?.[ctl.kind]
+    if (unsupported) return { ok: false, text: unsupported }
     const d = policy.control(ctl.kind)
     if (d.verdict === 'refused') return { ok: false, text: d.why }
     if (ctl.kind === 'open_app' || ctl.kind === 'quit_app') {
@@ -250,7 +255,7 @@ export class Broker {
     if (text !== null && (!text || Buffer.byteLength(text, 'utf8') > policy.MAX_TEXT)) return { ok: false, error: 'text is at most 4000 characters' }
     const decider = extra.decider ?? this.options.decider
     if (!decider) return { ok: false, error: 'computer use needs the decision service on the Spark, which is not connected' }
-    if (!this.machine.desktop) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
+    if (!this.machine.screen) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
     if (this.active) return { ok: false, error: `${this.name} is busy with another task; stop it first` }
     const task = this.newTask('use', who, g, extra.taskId)
     this.options.audit.record('task.start', { task_id: task.id, kind: 'use', goal: clip(g), text: text === null ? null : textDigest(text), requester: who.caller.name, caller: who.caller.kind })
@@ -265,14 +270,14 @@ export class Broker {
         extra.onStep?.(step)
       },
       tabs: this.machine.tabs,
-      desktop: this.machine.desktop,
-      dock: this.machine.dock,
+      desktop: this.machine.screen,
+      dock: this.machine.launcher,
       apps: this.machine.apps,
       log: this.log,
       now: this.now,
       ...(this.options.settleMs !== undefined ? { settleMs: this.options.settleMs } : {}),
     })
-    void this.machine.controls.notify?.('LocalRouter', `Jarvis is using ${this.name}: ${g}. Move the pointer to the top-left corner to stop.`).catch(() => undefined)
+    void this.machine.controls.notify?.('LocalRouter', `Jarvis is using ${this.name}: ${g}. ${this.options.stopHint ?? 'Move the pointer to the top-left corner to stop.'}`).catch(() => undefined)
     const finished = computer
       .run({ goal: g, text }, { signal: task.controller.signal, limits: { maxSteps: Math.min(this.limits.maxSteps, extra.limits?.maxSteps ?? MAX_STEPS), timeoutMs: Math.min(this.limits.timeoutMs, extra.limits?.timeoutMs ?? TIMEOUT_MS) }, ...(watch ? { watch } : {}) })
       .then((outcome) => {
@@ -320,7 +325,7 @@ export class Broker {
     const now = this.now()
     const cards = this.store.list(now)
     return {
-      computers: [{ helper_id: this.executorId, name: this.name, controls: [...policy.CONTROL_KINDS], computer_use: this.capabilities.computer_use, accessibility: Boolean(this.options.machine.desktop), busy: this.active?.id ?? null, disabled: this.disabledFlag, placement: 'device_executor' }],
+      computers: [{ helper_id: this.executorId, name: this.name, controls: this.controlKinds(), computer_use: this.capabilities.computer_use, accessibility: Boolean(this.options.machine.screen), busy: this.active?.id ?? null, disabled: this.disabledFlag, placement: 'device_executor' }],
       tasks: [...this.tasks].reverse().map((t) => this.view(t)),
       pending_approvals: cards.filter((c) => c.state === 'pending').length,
     }
@@ -346,7 +351,7 @@ export class Broker {
   async observe(who: Requester): Promise<{ ok: true; observation: Observation } | { ok: false; error: string }> {
     const refused = this.readRefused(who)
     if (refused) return { ok: false, error: refused }
-    const desktop = this.machine.desktop
+    const desktop = this.machine.screen
     if (!desktop) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
     let seen: Observation
     try {
@@ -363,7 +368,7 @@ export class Broker {
   async screenshot(who: Requester, maxEdge?: number): Promise<{ ok: true; screenshot: Screenshot } | { ok: false; error: string }> {
     const refused = this.readRefused(who)
     if (refused) return { ok: false, error: refused }
-    const desktop = this.machine.desktop
+    const desktop = this.machine.screen
     if (!desktop?.screenshot) return { ok: false, error: `${this.name} cannot take screenshots` }
     const edge = typeof maxEdge === 'number' && Number.isFinite(maxEdge) ? Math.max(200, Math.min(SCREENSHOT_MAX_EDGE * 2, Math.floor(maxEdge))) : SCREENSHOT_MAX_EDGE
     let shot: Screenshot
@@ -415,6 +420,12 @@ export class Broker {
     this.options.audit.record('approval.answer', { approval_id: id, decision, by, presence: this.options.gate.method })
     this.waiters.get(id)?.()
     return { ok: true }
+  }
+
+  /** The fixed controls this computer runs: the policy's, less those its OS cannot. */
+  private controlKinds() {
+    const unsupported = this.options.machine.controls.unsupported ?? {}
+    return policy.CONTROL_KINDS.filter((kind) => !unsupported[kind])
   }
 
   // ------------------------------------------------------------------ the rules
@@ -530,7 +541,7 @@ export class Broker {
   private async revalidate(request: AuthorizeRequest): Promise<string | null> {
     const action = request.action
     if (action.kind === 'scroll' || action.kind === 'surface') return null
-    const desktop = this.machine.desktop
+    const desktop = this.machine.screen
     if (!desktop) return 'The screen cannot be read to check it again.'
     let now: Observation
     try {
@@ -669,22 +680,24 @@ export class Broker {
         this.injecting -= 1
       }
     }
-    const desktop = m.desktop
+    const screen = m.screen
     return {
-      desktop: desktop
+      ...(m.os ? { os: m.os } : {}),
+      ...(m.backend ? { backend: m.backend } : {}),
+      screen: screen
         ? {
-            kind: desktop.kind,
-            observe: (o) => desktop.observe(o),
-            act: (a, o) => during(() => desktop.act(a, o)),
-            ...(desktop.pointer ? { pointer: () => desktop.pointer!() } : {}),
-            ...(desktop.displays ? { displays: () => desktop.displays!() } : {}),
-            ...(desktop.screenshot ? { screenshot: (o) => desktop.screenshot!(o) } : {}),
+            kind: screen.kind,
+            observe: (o) => screen.observe(o),
+            act: (a, o) => during(() => screen.act(a, o)),
+            ...(screen.pointer ? { pointer: () => screen.pointer!() } : {}),
+            ...(screen.displays ? { displays: () => screen.displays!() } : {}),
+            ...(screen.screenshot ? { screenshot: (o) => screen.screenshot!(o) } : {}),
           }
         : null,
       tabs: m.tabs ? Object.assign(Object.create(m.tabs) as BrowserTabs, { activate: (tab: Parameters<BrowserTabs['activate']>[0]) => during(() => m.tabs!.activate(tab)), ...(m.tabs.search ? { search: (name: string) => during(() => m.tabs!.search!(name)) } : {}) }) : null,
-      dock: m.dock ? { list: () => m.dock!.list(), activate: (name) => during(() => m.dock!.activate(name)) } : null,
+      launcher: m.launcher ? { list: () => m.launcher!.list(), activate: (name) => during(() => m.launcher!.activate(name)) } : null,
       apps: m.apps ? { running: () => m.apps!.running(), activate: (name) => during(() => m.apps!.activate(name)) } : null,
-      controls: { run: (c) => during(() => m.controls.run(c)), ...(m.controls.notify ? { notify: (t: string, x: string) => m.controls.notify!(t, x) } : {}) },
+      controls: { run: (c) => during(() => m.controls.run(c)), ...(m.controls.notify ? { notify: (t: string, x: string) => m.controls.notify!(t, x) } : {}), ...(m.controls.unsupported ? { unsupported: m.controls.unsupported } : {}) },
     }
   }
 }
