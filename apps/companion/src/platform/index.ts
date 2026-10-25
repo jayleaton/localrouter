@@ -1,6 +1,7 @@
 import { ControlError } from '../../../desktop-helper/src/computer/macControls.ts'
 import { createFakePlatform } from './fake.ts'
 import type { FakeMachine } from './fake.ts'
+import { createLinuxPlatform } from './linux/index.ts'
 import { createMacPlatform } from './mac.ts'
 import type { ControlSupport, Platform } from './types.ts'
 
@@ -20,6 +21,7 @@ export async function createPlatform(choice: PlatformChoice, options: PlatformOp
   if (choice === 'fake') return createFakePlatform()
   const os = options.os ?? process.platform
   if (os === 'darwin') return { platform: createMacPlatform(), fake: null }
+  if (os === 'linux') return { platform: await createLinuxPlatform(options.dataDir ? { dataDir: options.dataDir } : {}), fake: null }
   return { platform: unsupportedPlatform(os), fake: null }
 }
 
