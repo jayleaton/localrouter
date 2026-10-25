@@ -427,9 +427,10 @@ const words = (s: string) => fold(s).split(/[^a-z0-9]+/).filter(Boolean)
 /**
  * The installed app a spoken or typed name means: its exact name (or bundle/display name), a common alias, the same
  * letters without spaces or punctuation ("googlechrome", "zoom us"), then a case-insensitive word-prefix match
- * ("photoshop" is "Adobe Photoshop 2026"). Several equally good matches are a question, never a guess.
+ * ("photoshop" is "Adobe Photoshop 2026"). Several equally good matches are a question, never a guess. `aliases`: the
+ * platform's alias table (APP_ALIASES is the Mac's).
  */
-export function resolveInstalled(requested: string, apps: InstalledApp[]): string {
+export function resolveInstalled(requested: string, apps: InstalledApp[], aliases: Record<string, string[]> = APP_ALIASES): string {
   const asked = requested.trim()
   const names = (app: InstalledApp) => [app.name, ...(app.aliases ?? [])]
   const unique = (found: InstalledApp[]) => [...new Map(found.map((app) => [app.name, app])).values()]
@@ -441,7 +442,7 @@ export function resolveInstalled(requested: string, apps: InstalledApp[]): strin
   }
   const exact = pick(apps.filter((app) => names(app).some((n) => fold(n) === fold(asked))))
   if (exact) return exact
-  for (const preferred of APP_ALIASES[fold(asked).replace(/\s+/g, ' ')] ?? []) {
+  for (const preferred of aliases[fold(asked).replace(/\s+/g, ' ')] ?? []) {
     const hit = apps.find((app) => names(app).some((n) => fold(n) === fold(preferred)))
     if (hit) return hit.name
   }
