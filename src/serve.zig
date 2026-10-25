@@ -1,5 +1,7 @@
 //! `localrouter serve`: reads the config, builds one ProcessTool per tool, starts the scheduler's executor thread, and
 //! serves the API until SIGINT or SIGTERM. The first stdout line names the address (tests read it for port 0).
+//! In a multi-node topology (`topology.zig`) it serves this node's tools, and on the front a NodeTool for each tool
+//! another node runs (`tool/node.zig`), with the health checks that move a fallback tool here while its node is down.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,6 +15,8 @@ const desktop = @import("api/desktop.zig");
 const http = @import("api/http.zig");
 const bind = @import("bind.zig");
 const engine = @import("engine/engine.zig");
+const topology = @import("topology.zig");
+const node = @import("tool/node.zig");
 
 var stop_flag: std.atomic.Value(bool) = .init(false);
 
@@ -21,12 +25,13 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var host: ?[]const u8 = null;
     var port: ?u16 = null;
     var data: ?[]const u8 = null;
+    var node_id: ?[]const u8 = null;
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 2) {
         const a, const v = .{ args[i], args[i + 1] };
         if (std.mem.eql(u8, a, "--config")) path = v else if (std.mem.eql(u8, a, "--host")) host = v else if (std.mem.eql(u8, a, "--port")) {
             port = std.fmt.parseInt(u16, v, 10) catch return 2;
-        } else if (std.mem.eql(u8, a, "--data")) data = v else {
+        } else if (std.mem.eql(u8, a, "--data")) data = v else if (std.mem.eql(u8, a, "--node")) node_id = v else {
             std.log.err("unknown option {s}", .{a});
             return 2;
         }
@@ -46,11 +51,17 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             return 2;
         };
     }
-    const tools = try arena.dupe(config.ToolConfig, cfg.tools);
-    try engine.resolve(io, arena, tools); // what each tool's weights can do, before anything lists it
-    cfg.tools = tools;
-    var why_buf: [256]u8 = undefined;
+    var why_buf: [512]u8 = undefined;
     var why: Io.Writer = .fixed(&why_buf);
+    const plan = (try topology.plan(arena, &cfg, node_id, &why)) orelse {
+        std.log.err("{s}: {s}", .{ path orelse "config", why.buffered() });
+        return 2;
+    };
+    if (!plan.front) topology.trimDefaults(&plan, &cfg.defaults); // a node serves its own tools only
+    const tools = try arena.dupe(config.ToolConfig, plan.tools);
+    // what each tool's weights can do, before anything lists it; a remote tool's weights are on its node, which checks
+    for (tools, plan.places, 0..) |_, pl, k| if (pl != .remote) try engine.resolve(io, arena, tools[k .. k + 1]);
+    cfg.tools = tools;
     if (!engine.checkDefaults(&cfg, &why)) {
         std.log.err("{s}: {s}", .{ path orelse "config", why.buffered() });
         return 2;
@@ -73,13 +84,36 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const gate_path = try std.fs.path.join(arena, &.{ cfg.data_dir, "locks", "speech.gate" }); // speech first (sched/speech_gate.zig)
     try Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(gate_path).?);
 
+    var bearer: []const u8 = "";
+    if (plan.multi and cfg.topology.token_file.len > 0) {
+        const text = Io.Dir.cwd().readFileAlloc(io, cfg.topology.token_file, arena, .limited(4096)) catch |err| {
+            std.log.err("topology.token_file {s}: {s}", .{ cfg.topology.token_file, @errorName(err) });
+            return 2;
+        };
+        bearer = std.mem.trim(u8, text, " \t\r\n");
+    }
+    var cluster = try node.Cluster.init(gpa, io, arena, &plan, cfg.topology, bearer);
+    defer cluster.deinit();
+
     const procs = try arena.alloc(process.ProcessTool, cfg.tools.len);
+    const remotes = try arena.alloc(node.NodeTool, cfg.tools.len);
     const slots = try arena.alloc(sched.Slot, cfg.tools.len);
-    for (procs, slots, cfg.tools) |*p, *s, *t| {
+    for (procs, remotes, slots, cfg.tools, plan.places, 0..) |*p, *r, *s, *t, pl, k| {
         p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path }, t);
-        s.* = .{ .tool = p.asTool() };
+        switch (pl) {
+            .local => s.* = .{ .tool = p.asTool() },
+            .remote, .fallback => |n| {
+                r.* = .{ .cluster = &cluster, .cfg = t, .node = n, .slot = k, .fallback = if (pl == .fallback) p else null };
+                try cluster.tools.append(gpa, r);
+                s.* = .{ .tool = r.asTool() };
+            },
+        }
     }
     defer for (procs) |*p| p.deinit();
+    if (plan.multi) {
+        std.log.info("topology: node {s} ({s}), {d} tools served here", .{ plan.nodes[plan.self].id, if (plan.front) "the front" else "a node", cfg.tools.len });
+        if (plan.front) cluster.probeAll(); // before anything loads: a tool starts on the side that can run it
+    }
 
     var table: jobs.Table = .{ .gpa = gpa };
     defer table.deinit();
@@ -88,6 +122,12 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     defer app.voice.deinit(gpa);
+    app.plan = &plan;
+    if (plan.multi and plan.front) {
+        cluster.refresh = .{ .ctx = &scheduler, .f = refreshSlot };
+        cluster.calls = .{ .ctx = &app, .f = openCalls };
+        try cluster.start();
+    }
     var computer: desktop.Service = undefined;
     if (cfg.computer.enabled) {
         try computer.init(&app, cfg.data_dir, arena);
@@ -121,6 +161,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     const exec_decide = try std.Thread.spawn(.{}, sched.Scheduler.run, .{ &scheduler, sched.Lane.decide });
     const watcher = try std.Thread.spawn(.{}, watchStop, .{ io, &server, &app });
     http.Server(routes.App, routes.handle).serve(io, &server, &app, &stop_flag);
+    cluster.stop(); // before the scheduler goes: the health checks move tools on it
     scheduler.stop();
     exec.join();
     exec_rt.join();
@@ -129,6 +170,16 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     exec_decide.join();
     watcher.join();
     return 0;
+}
+
+fn refreshSlot(ctx: *anyopaque, slot: usize) void {
+    const s: *sched.Scheduler = @ptrCast(@alignCast(ctx));
+    s.refresh(slot);
+}
+
+fn openCalls(ctx: *anyopaque) usize {
+    const app: *routes.App = @ptrCast(@alignCast(ctx));
+    return app.voice.count(app.io);
 }
 
 fn onSignal(_: posix.SIG) callconv(.c) void {

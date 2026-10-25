@@ -79,6 +79,9 @@ pub const Tool = struct {
         cancel: *const fn (ptr: *anyopaque) bool,
         state: *const fn (ptr: *anyopaque) State,
         failure: *const fn (ptr: *anyopaque) Failure,
+        // Whether it runs on this machine now (its memory and the host's GPU lock are this scheduler's); null: always.
+        // A remote tool (`node.zig`) runs on another node, which admits it there.
+        local: ?*const fn (ptr: *anyopaque) bool = null,
     };
 
     /// The tool's configuration (id, kind, timeouts).
@@ -116,5 +119,10 @@ pub const Tool = struct {
     }
     pub fn failure(t: Tool) Failure {
         return t.vtable.failure(t.ptr);
+    }
+    /// Whether it runs here now, on this machine's memory and GPU (false: another node runs it).
+    pub fn local(t: Tool) bool {
+        const f = t.vtable.local orelse return true;
+        return f(t.ptr);
     }
 };

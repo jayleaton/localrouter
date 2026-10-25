@@ -1,6 +1,7 @@
-//! A small HTTP/1.1 client for a model's own server on loopback (127.0.0.1:<port>): one request a connection, raw
-//! sockets so another thread can end a request (`shutdown`), and a deadline on every read (`poll`). A response body may
-//! be framed by Content-Length, by chunked transfer coding, or by the end of the connection.
+//! A small HTTP/1.1 client for a model's own server on loopback (127.0.0.1:<port>), and for another node's daemon
+//! (`connectTo`, `sendWith`): one request a connection, raw sockets so another thread can end a request (`shutdown`),
+//! and a deadline on every read (`poll`). A response body may be framed by Content-Length, by chunked transfer coding,
+//! or by the end of the connection.
 
 const std = @import("std");
 const posix = std.posix;
@@ -21,6 +22,35 @@ pub fn connect(port: u16) Error!posix.fd_t {
     }
 }
 
+/// A TCP connection to `addr`:`port` within `timeout_ms` (a node that is down must not hold the caller for the
+/// kernel's minutes of retries); the caller closes it. The socket is blocking again once connected.
+pub fn connectTo(addr: [4]u8, port: u16, timeout_ms: i32) Error!posix.fd_t {
+    const fd = c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC | c.SOCK.NONBLOCK, 0);
+    if (fd < 0) return error.ConnectFailed;
+    errdefer _ = c.close(fd);
+    const sa: c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast(addr) };
+    if (c.connect(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in)) != 0) {
+        const e = posix.errno(@as(c_int, -1));
+        if (e != .INPROGRESS and e != .INTR) return error.ConnectFailed;
+        var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+        const ready = posix.poll(&fds, timeout_ms) catch return error.ConnectFailed;
+        if (ready == 0) return error.Timeout;
+        var soerr: c_int = 0;
+        var len: c.socklen_t = @sizeOf(c_int);
+        if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, @ptrCast(&soerr), &len) != 0 or soerr != 0) return error.ConnectFailed;
+    }
+    const flags = c.fcntl(fd, c.F.GETFL);
+    if (flags < 0 or c.fcntl(fd, c.F.SETFL, flags & ~@as(c_int, @bitCast(c.O{ .NONBLOCK = true }))) < 0) return error.ConnectFailed;
+    return fd;
+}
+
+/// What `sendWith` puts in the request head beyond the defaults.
+pub const Head = struct {
+    host: []const u8 = "127.0.0.1",
+    bearer: []const u8 = "", // an `Authorization: Bearer` token; "": none
+    calls: ?usize = null, // `x-localrouter-calls`: the front's open voice sessions (`tool/node.zig`)
+};
+
 /// A loopback port nothing listens on now (bind to port 0 and read the one the kernel chose).
 pub fn freePort() Error!u16 {
     const fd = c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC, 0);
@@ -35,12 +65,19 @@ pub fn freePort() Error!u16 {
 
 /// Sends a request: a JSON `body` (POST) or none (GET). `Connection: close`, so the server may end a body at EOF.
 pub fn send(fd: posix.fd_t, method: []const u8, path: []const u8, body: ?[]const u8) Error!void {
-    var head_buf: [512]u8 = undefined;
-    const head = if (body) |b|
-        std.fmt.bufPrint(&head_buf, "{s} {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ method, path, b.len })
-    else
-        std.fmt.bufPrint(&head_buf, "{s} {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n", .{ method, path });
-    try writeAll(fd, head catch return error.WriteFailed);
+    return sendWith(fd, method, path, body, .{});
+}
+
+/// `send` with another Host, a bearer token or the front's call count (`Head`).
+pub fn sendWith(fd: posix.fd_t, method: []const u8, path: []const u8, body: ?[]const u8, extra: Head) Error!void {
+    var head_buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&head_buf);
+    w.print("{s} {s} HTTP/1.1\r\nHost: {s}\r\nAccept: */*\r\n", .{ method, path, extra.host }) catch return error.WriteFailed;
+    if (extra.bearer.len > 0) w.print("Authorization: Bearer {s}\r\n", .{extra.bearer}) catch return error.WriteFailed;
+    if (extra.calls) |n| w.print("x-localrouter-calls: {d}\r\n", .{n}) catch return error.WriteFailed;
+    if (body) |b| w.print("Content-Type: application/json\r\nContent-Length: {d}\r\n", .{b.len}) catch return error.WriteFailed;
+    w.writeAll("Connection: close\r\n\r\n") catch return error.WriteFailed;
+    try writeAll(fd, w.buffered());
     if (body) |b| try writeAll(fd, b);
 }
 

@@ -1,8 +1,88 @@
-# Two Sparks: one LocalRouter on two GB10s (design, for decision)
+# Multi-Spark: one LocalRouter on several GB10s
 
-**Status: design only. Nothing here is built.** Written 2026-10-25 against `main` `bd233f9`. Every number is tagged:
-**M** is measured (the source is named), **E** is estimated (the method is shown). Nothing new ran on a GPU for this
-page. On DGX-01 it read only `/proc/meminfo`, `/v1/tools` and the NIC state. dgx-02 was not touched.
+**Status.** JJ decided on 2026-10-25: the topology is chosen at startup, and every one must work.
+
+| Topology | What it is | State |
+| --- | --- | --- |
+| `single` (the default) | one Spark, exactly as before | unchanged |
+| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built (this page, [Configuration](#configuration)) |
+| TP=2 | one chat model split across two Sparks over ConnectX-7 | see [Tensor parallel](#tensor-parallel) |
+| TP=N | more ranks | the config, the plan and the routing take N nodes; no rank code yet |
+
+The multi-node modes run today's Qwen3.8-27B as the chat model. The chat model is config: swapping in a bigger one
+on Spark 1 later changes the tool entry, not the code.
+
+## Configuration
+
+Every node's daemon gets the same `tools` and the same `topology`; only `topology.self` (or `serve --node ID`) and
+each daemon's own `host` differ.
+
+```json
+"topology": {
+  "mode": "multi", "self": "spark-2", "token_file": "/home/dgx01/jarvis/lr/node-token",
+  "health_interval_ms": 2000, "down_after": 3,
+  "nodes": [
+    {"id": "spark-1", "addresses": ["192.168.100.11", "192.168.101.11"], "port": 8190, "role": "node",
+     "models": ["qwen3.8-27b"]},
+    {"id": "spark-2", "addresses": ["192.168.100.10", "192.168.101.10"], "port": 8190, "role": "front",
+     "models": ["fishaudio/drama-3", "whisper-large-v3-turbo", "qwen-image-2.1-turbo", "minimax-h3", "knowline-4b"],
+     "fallback": ["qwen3.8-27b"]}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `mode` | `single` (default; takes no nodes) or `multi` |
+| `self` | this daemon's node; `serve --node ID` overrides it |
+| `nodes[].addresses` | IPv4 addresses of that node's daemon, tried in order: both ConnectX-7 links, then the LAN |
+| `nodes[].role` | exactly one `front`: it serves `/v1`, `/mcp`, `/v1/realtime` and `/voice` for every node |
+| `nodes[].models` | the tools that node runs. Every tool is on exactly one node |
+| `nodes[].fallback` | front only: tools of other nodes that the front runs itself while their node is down |
+| `token_file` | the bearer token the front sends to the other nodes: a device paired on each of them with `manage` (when they require pairing) |
+| `health_interval_ms`, `down_after` | the front asks each node how it is this often; this many unanswered checks in a row, or one request that fails to connect, and the node is down |
+
+The daemon checks the topology at start and stops with the reason (exit 2): no front or two fronts, an unknown or
+duplicate node, an address that is not IPv4, a tool on no node, a model that is not a tool, a fallback that is the
+front's own, or a node `self` does not name. A tool listed on two nodes is refused as tensor parallel, which no engine
+in this build serves.
+
+**What runs where.**
+- **Admission is per node.** A node serves only its own tools and admits them against its own `MemAvailable`, its own
+  `reserve_bytes` and its own GPU lock, as a single box does.
+- **The front routes.** For each tool another node runs, the front holds a remote tool. It books no memory for it and
+  takes no GPU lock for it, and it is never an eviction victim (`Tool.local`, `src/tool/node.zig`).
+- **Chat is forwarded as it is.** A chat request goes to the node's `/v1/chat/completions` and streams back as a
+  local chat server's does.
+- **Every other kind runs as a node job.** Images, video, speech, transcription and decisions go to `/v1/node/jobs`
+  (`src/api/node.zig`): the request and its input files go over, and the output files come back into the front's
+  job directory. Speech from a remote node arrives whole, not streamed, so keep the voice models on the front.
+- **One surface.** `/v1/models` and `/v1/tools` list every node's models, each with its `node`. `/v1/tools` also says
+  whether a model runs `local`ly now.
+- **Voice calls count on every node.** Each health check tells the node how many voice calls the front has open, so
+  a node guards the voice loop's models (chat) for the front's calls as it does for its own.
+- **Failover.** When the chat node is down, the chat model loads on the front from its `fallback` entry, where memory
+  allows: ordinary admission, so it may evict the image model, and it is refused when even that does not make room.
+  When the node comes back, chat moves back. A request already streaming when its node dies fails with a 503.
+- **Not forwarded yet.** `unload_model` and the release of a remote model act on the front's handle only; the node
+  keeps or drops the model by its own rules.
+
+## Tensor parallel
+
+Read on 2026-10-25 against TensorFold `main` `35e46c09` (after v1.1.4) and our chat pin v1.1.1:
+
+- **The native CUDA build has no ranks for this model.** It runs a family across ranks only through that family's
+  own follower loop (`zig/src/native/cuda_follow.zig`: otherwise "this family has no tensor-parallel follower
+  loop"). On CUDA, the families that have one are GLM-5.3-Flash (`TF_GLM_RANK` of `TF_GLM_WORLD`), Nemotron
+  (`TF_NEMOTRON_RANK`) and Flash Next (`flashnext/cuda_lanes.zig`). `docs/multi-rank-receipts.md` says the same: "The
+  native CUDA build serves neither `--tp` nor `--rank`: a family's own variables place its ranks". The Qwen3.8-27B
+  family (`qwen3_5`) has ranks only on the HIP backend (`--tp --rank --master`).
+- **Its two-rank 27B is the frozen Python engine.** The 27B recipe's "MLX 4-bit, one or two ranks" runs the frozen
+  Python 0.6.6 engine in NVIDIA's container (`docs/recipes/cuda.md`: "Two ranks are the Python engine's; the native
+  CUDA build serves one GPU"). That is a different engine from the qualified native server Jarvis runs.
+
+So the native TP=2 chat mode for the 27B waits on TensorFold. The placement mode ships first. The topology refuses
+a model listed on two nodes rather than serving it any other way.
+
+## The design behind it
 
 JJ's sketch is this. Spark 1 runs a larger chat model, perhaps with its KV cache spilled to Spark 2. Spark 2 runs
 everything smaller: voice (Drama 3, Whisper), image, video and the decision model (KnowLine).

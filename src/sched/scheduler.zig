@@ -28,6 +28,9 @@
 //! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
 //! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
 //! and releases it when none is. Co-residency is decided by the memory budget alone; a tool never takes the lock itself.
+//!
+//! A remote tool (`Tool.local` false: another node of a multi-node topology runs it, `tool/node.zig`) holds no memory
+//! here and needs no lock: its node admits it against its own. It is never a victim, and holds nothing back.
 
 const std = @import("std");
 const posix = std.posix;
@@ -198,7 +201,7 @@ pub const Scheduler = struct {
         while (!s.fits(p.needed -| freed)) {
             var victim: ?usize = null;
             for (s.slots, 0..) |*x, i| {
-                if (i == target or x.in_use or x.visited or x.tool.state() != .ready or x.tool.config().kind == .chat) continue;
+                if (i == target or x.in_use or x.visited or x.tool.state() != .ready or x.tool.config().kind == .chat or !x.tool.local()) continue;
                 if (victim == null or evictsBefore(x, &s.slots[victim.?])) victim = i;
             }
             const v = victim orelse return p; // fits stays false
@@ -260,7 +263,7 @@ pub const Scheduler = struct {
     /// Under `gate`: releases the GPU lock once no tool is loaded, loading or in use, so GPU users outside LocalRouter may run.
     fn releaseIdleGpuLock(s: *Scheduler) void {
         if (s.gpu_lock_fd < 0) return;
-        for (s.slots) |slot| if (slot.in_use or slot.tool.state() != .unloaded) return;
+        for (s.slots) |slot| if (slot.tool.local() and (slot.in_use or slot.tool.state() != .unloaded)) return;
         s.releaseGpuLock();
     }
 
@@ -628,6 +631,20 @@ pub const Scheduler = struct {
         return null;
     }
 
+    /// From any thread: where tool `i` runs has changed (its node went down or came back, `tool/node.zig`). It is unloaded
+    /// now, or when its lane is done with it, without counting as released: a `keep_loaded` tool comes back by itself
+    /// (on its new side, at once: a load that failed while its node was down waits no backoff), and any other loads
+    /// with its next request.
+    pub fn refresh(s: *Scheduler, i: usize) void {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        const slot = &s.slots[i];
+        slot.retry_ns = 0;
+        slot.backoff_ns = reload_backoff_min_ns;
+        if (slot.in_use) slot.unload_after = true else s.unloadSlot(slot);
+        s.releaseIdleGpuLock();
+    }
+
     /// What tool `i` needs for its default request: resident bytes, and a job's working bytes.
     pub fn defaultNeeds(s: *Scheduler, i: usize) tool_mod.Needs {
         const r = placeholder(s.slots[i].tool.config().kind);
@@ -693,10 +710,12 @@ pub const Scheduler = struct {
     /// the measured bytes; `error.GpuLockHeld` (why: `lockMessage`) when a GPU user outside LocalRouter holds it.
     fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
         const estimate = slot.tool.needs(&placeholder(slot.tool.config().kind)).resident;
-        s.gate.lockUncancelable(s.io);
-        const locked = s.holdGpuLock();
-        s.gate.unlock(s.io);
-        if (!locked) return error.GpuLockHeld;
+        if (slot.tool.local()) { // a remote tool's node holds its own lock
+            s.gate.lockUncancelable(s.io);
+            const locked = s.holdGpuLock();
+            s.gate.unlock(s.io);
+            if (!locked) return error.GpuLockHeld;
+        }
         const measured = try slot.tool.load();
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
@@ -785,7 +804,7 @@ pub const Scheduler = struct {
         if (below != null or want.spare_room_only or call) {
             var freeable: u64 = 0;
             for (s.slots, 0..) |slot, i| {
-                if (i != target and !slot.in_use and slot.tool.state() == .ready and (below == null or !slot.held) and
+                if (i != target and !slot.in_use and slot.tool.state() == .ready and slot.tool.local() and (below == null or !slot.held) and
                     mayEvict(want, slot.tool.config(), below, call)) freeable += slot.resident;
             }
             if (!s.fits(extra -| freeable)) return false;
@@ -794,7 +813,7 @@ pub const Scheduler = struct {
             if (s.fits(extra)) return true;
             var victim: ?*Slot = null;
             for (s.slots, 0..) |*slot, i| {
-                if (i == target or slot.in_use or slot.tool.state() != .ready) continue;
+                if (i == target or slot.in_use or slot.tool.state() != .ready or !slot.tool.local()) continue; // a remote tool frees nothing here
                 if (below != null and slot.held) continue; // a reservation's target waits for its job
                 if (!mayEvict(want, slot.tool.config(), below, call)) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
