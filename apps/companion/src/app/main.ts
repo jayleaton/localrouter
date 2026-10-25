@@ -458,7 +458,13 @@ function registerIpc() {
   })
   setup('setup:permission', async (kind) => {
     if (process.platform !== 'darwin') return state()
-    if (kind === 'microphone') await systemPreferences.askForMediaAccess('microphone')
+    if (kind === 'microphone') {
+      // Denied (or held by an older build's entry that macOS reports as denied): macOS never asks again by itself, so
+      // this app's entry is reset first and macOS shows its prompt.
+      const status = systemPreferences.getMediaAccessStatus('microphone')
+      if (status === 'denied' || status === 'restricted') await resetGrant('Microphone')
+      await systemPreferences.askForMediaAccess('microphone')
+    }
     if (kind === 'accessibility') {
       systemPreferences.isTrustedAccessibilityClient(true)
       await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
