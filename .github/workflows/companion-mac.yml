@@ -97,7 +97,7 @@ jobs:
           tools=$(jq -c 'select(.id == 2) | [.result.tools[].name]' "$RUNNER_TEMP/mcp.txt")
           echo "tools: $tools"
           [ "$(jq 'index("computer_use") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list has no computer_use"; exit 1; }
-      - name: update keeps the stored token with no keychain prompt (install previous, store, install this over it, read; 4 rounds)
+      - name: update keeps the stored token with no keychain prompt (previous build moves an old token; launches and updates never ask; a refused move asks to pair again; 3 rounds)
         run: |
           apps="$RUNNER_TEMP/Applications"; mkdir -p "$apps"; app="$apps/LocalRouter.app"; bin="$app/Contents/MacOS/LocalRouter"
           ms() { perl -MTime::HiRes=time -e 'printf "%d", time*1000'; }
@@ -133,28 +133,44 @@ jobs:
           }
           j() { jq -r "$2" "$RUNNER_TEMP/$1.json"; }
           fail=0; check() { if [ "$1" = "$2" ]; then echo "ok   $3"; else echo "::error::round $round: $3: got $1, want $2"; fail=1; fi; }
-          for round in 1 2 3 4; do
+          gone() { if security find-generic-password -s "$1" "$login" > /dev/null 2>&1; then echo kept; else echo gone; fi; }
+          for round in 1 2 3; do
             echo "=== round $round"
             clean
             home="$RUNNER_TEMP/lrhome"; control="$RUNNER_TEMP/lrcontrol"
             ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"
-            step a-write-legacy "$home" write-legacy tok-from-an-old-build
-            step a-load "$home" load
+            step a-write-legacy "$home" write-legacy tok-from-an-old-build     # an older build's safeStorage file and item
+            step a-migrate "$home" migrate                                      # the one-time move, in its child process
+            a_item=$(gone "LocalRouter Safe Storage")
+            step a-load "$home" load                                            # a second launch: no move, no keychain prompt
             step a-control "$control" write-legacy control-token
-            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"   # the update
             step b-load "$home" load
             step b-save "$home" save tok-saved-after-update
-            step b-control "$control" load-legacy
+            step b-load2 "$home" load                                           # a second launch after the update
+            step b-legacy-control "$control" load-legacy                        # the old store: asks after an update
+            export LR_MIGRATE_TIMEOUT_MS=15000; step b-deny "$control" migrate; unset LR_MIGRATE_TIMEOUT_MS   # nobody answers that prompt (or Deny)
+            step b-deny-again "$control" migrate                                # never asked again
+            step b-deny-load "$control" load                                    # no token: pair again
+            rm -rf "$app"; ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"; step c-load "$home" load        # another update
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"; step d-load "$home" load  # and another
             set +e; "$home/bin/localrouter-keychain" get LocalRouter spark-tokens > /dev/null 2>&1; direct=$?; set -e
-            check "$(j a-load .token)" "$(sha tok-from-an-old-build)" "previous build: the safeStorage token moved into the keychain helper"
-            check "$(j a-load .legacy_file)" false "previous build: the old safeStorage file is gone after the move"
-            check "$(j b-load .ok)/$(j b-load .store)" true/keychain "this build, installed over it: loads from the keychain helper"
-            check "$(j b-load .token)" "$(sha tok-from-an-old-build)" "this build, installed over it: the same token, with no prompt (none allowed)"
-            check "$(j b-save .token)" "$(sha tok-saved-after-update)" "this build: saves and reads back, with no prompt"
+            t1=$(sha tok-from-an-old-build); t2=$(sha tok-saved-after-update)
+            check "$(j a-migrate .outcome)/$(j a-migrate .migration.state)/$(j a-migrate .token)" "migrated/done/$t1" "the older build's token moved into the keychain helper, once"
+            check "$(j a-migrate .legacy_file)/$a_item" false/gone "after the move: the old file and the old Safe Storage item are gone"
+            check "$(j a-load .ok)/$(j a-load .token)" "true/$t1" "a second launch: the token, no prompt"
+            check "$(j b-load .ok)/$(j b-load .store)/$(j b-load .token)" "true/keychain/$t1" "the first launch after an update: the token, no prompt"
+            check "$(j b-save .token)" "$t2" "after the update: saves and reads back, no prompt"
+            check "$(j b-load2 .ok)/$(j b-load2 .token)" "true/$t2" "a second launch after the update: no prompt"
+            check "$(j b-legacy-control .ok)" false "control: the old safeStorage store cannot read after the update without asking"
+            check "$(j b-deny .outcome)/$(j b-deny .migration.state)/$(j b-deny .legacy_file)" failed/failed/false "an unanswered or refused move: recorded, the old file dropped"
+            check "$(j b-deny-again .outcome)" none "a refused move is never asked again"
+            check "$(j b-deny-load .ok)/$(j b-deny-load .token)/$(j b-deny-load .migration.state)" "true//failed" "after a refused move: no token, so the app asks to pair again"
+            check "$(j c-load .ok)/$(j c-load .token)" "true/$t2" "another update: no prompt"
+            check "$(j d-load .ok)/$(j d-load .token)" "true/$t2" "and another: no prompt"
             check "$direct" 3 "the helper answers only LocalRouter"
-            check "$(j b-control .ok)" false "control: safeStorage (the old store) cannot read after the update without asking"
-            echo "### Keychain across an update, round $round" >> "$GITHUB_STEP_SUMMARY"
-            for f in a-load b-load b-save b-control; do echo "- $f: \`$(cat "$RUNNER_TEMP/$f.json")\`" >> "$GITHUB_STEP_SUMMARY"; done
+            echo "### Keychain across updates, round $round" >> "$GITHUB_STEP_SUMMARY"
+            for f in a-migrate a-load b-load b-save b-load2 b-legacy-control b-deny b-deny-again b-deny-load c-load d-load; do echo "- $f: \`$(cat "$RUNNER_TEMP/$f.json")\`" >> "$GITHUB_STEP_SUMMARY"; done
           done
           echo "installed helper: $(codesign -dvvv "$RUNNER_TEMP/lrhome/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
           echo "bundled helper:   $(codesign -dvvv out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-keychain 2>&1 | grep '^CDHash=')"

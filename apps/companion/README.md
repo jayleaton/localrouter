@@ -100,8 +100,13 @@ Allow" lasts one build). The app keeps its tokens through `localrouter-keychain`
 copies once to `~/Library/Application Support/LocalRouter/bin` and keeps across updates: the process that touches the
 keychain keeps its code hash, so updates never ask. The helper answers only a parent that meets LocalRouter's
 designated requirement (this bundle id and the signing certificate); before each use the app checks the installed
-helper is signed like the one it ships, and replaces it otherwise (one last prompt). The first start of this build
-moves the token from the older safeStorage file once (that read may ask one last time) and deletes the file. Limits:
+helper is signed like the one it ships, and replaces it otherwise (one last prompt). The app itself runs on Chromium's mock keychain, so neither safeStorage nor
+Chromium reads the real keychain at start. The first start after updating from an older build moves its token once,
+after the window is up and in a child process (`--secrets-migrate`): macOS asks once (choose Always Allow or Allow).
+Deny, or no answer within two minutes, is recorded, the old file is dropped, and the app asks to pair again: it
+never asks the keychain about the old token again. The old "LocalRouter Safe Storage" item is deleted after the move
+when macOS lets it go without asking. The log is in `~/Library/Logs/LocalRouter/LocalRouter.log` (migration start,
+success and failure included). Limits:
 same-user code that can run as LocalRouter itself (for example `ELECTRON_RUN_AS_NODE` with the app binary, which the
 MCP launcher uses) passes the helper's check, as it would pass any keychain ACL naming this app. CI proves the update
 path on every macOS build: it installs a previous build, stores a token, installs the new build over it and reads the

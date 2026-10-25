@@ -141,3 +141,50 @@ export async function loadSecrets(o: {
   const secrets = await o.helper.get()
   return { secrets: secrets ?? { ...EMPTY }, store: 'keychain', migrated: false }
 }
+
+/**
+ * Moving an older build's safeStorage token into the keychain helper, once in the life of an install.
+ *
+ * The read goes through Electron safeStorage, whose keychain item belongs to older builds: macOS asks the person,
+ * and that read blocks the process that makes it. So it runs in a short-lived child process (`--secrets-migrate`),
+ * never on the app's main thread, and with a time limit. Whatever happens (moved, refused, no answer in time), the
+ * outcome is recorded and the old file is gone afterwards: a refused or unanswered move is never asked again, the
+ * person pairs again instead.
+ */
+export type Migration = { state: 'done' | 'failed'; at: number; reason?: string }
+export type MigrationRun = (timeoutMs: number) => Promise<{ ok: boolean; reason: string }>
+
+export const MIGRATION_TIMEOUT_MS = 120_000
+
+export async function migrateLegacy(o: {
+  legacyPath: string
+  previous: Migration | undefined
+  /** The token already in the keychain: the old file is only a leftover then. */
+  haveToken: boolean
+  run: MigrationRun
+  timeoutMs?: number
+  now?: () => number
+  log?: (event: string, fields?: Record<string, unknown>) => void
+}): Promise<{ outcome: 'none' | 'migrated' | 'failed' | 'dropped'; migration?: Migration }> {
+  const log = o.log ?? (() => undefined)
+  const now = o.now ?? Date.now
+  const exists = await stat(o.legacyPath).then(() => true, () => false)
+  if (!exists) return { outcome: 'none' }
+  if (o.haveToken || o.previous?.state === 'failed') {
+    await rm(o.legacyPath, { force: true })
+    log('secrets.migration.dropped', { why: o.haveToken ? 'the token is in the keychain already' : 'an earlier move failed' })
+    return { outcome: 'dropped' }
+  }
+  log('secrets.migration.start', {})
+  let r: { ok: boolean; reason: string }
+  try {
+    r = await o.run(o.timeoutMs ?? MIGRATION_TIMEOUT_MS)
+  } catch (error) {
+    r = { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+  // Moved or not, the old file is never read again.
+  await rm(o.legacyPath, { force: true })
+  const migration: Migration = r.ok ? { state: 'done', at: now() } : { state: 'failed', at: now(), reason: r.reason.slice(0, 300) }
+  log(r.ok ? 'secrets.migration.done' : 'secrets.migration.failed', r.ok ? {} : { reason: migration.reason })
+  return { outcome: r.ok ? 'migrated' : 'failed', migration }
+}
