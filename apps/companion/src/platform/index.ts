@@ -3,6 +3,7 @@ import { createFakePlatform } from './fake.ts'
 import type { FakeMachine } from './fake.ts'
 import { createLinuxPlatform } from './linux/index.ts'
 import { createMacPlatform } from './mac.ts'
+import { createWindowsPlatform } from './windows/index.ts'
 import type { ControlSupport, Platform } from './types.ts'
 
 /** `native`: this OS's platform; `fake`: the scripted Notes app on any OS. */
@@ -21,6 +22,7 @@ export async function createPlatform(choice: PlatformChoice, options: PlatformOp
   if (choice === 'fake') return createFakePlatform()
   const os = options.os ?? process.platform
   if (os === 'darwin') return { platform: createMacPlatform(), fake: null }
+  if (os === 'win32') return { platform: createWindowsPlatform(), fake: null }
   if (os === 'linux') return { platform: await createLinuxPlatform(options.dataDir ? { dataDir: options.dataDir } : {}), fake: null }
   return { platform: unsupportedPlatform(os), fake: null }
 }

@@ -6,6 +6,10 @@ import { createPlatform, unsupportedPlatform } from './index.ts'
 describe('the platform each OS gets', () => {
   it('macOS gets its AX backend; the fake is the same Notes app everywhere; another OS reads nothing and says why', async () => {
     expect((await createPlatform('native', { os: 'darwin' })).platform).toMatchObject({ os: 'darwin', backend: expect.stringMatching(/^macOS/) })
+    // Windows: its UI Automation platform, whose PowerShell workers start only on first use (none here).
+    const windows = (await createPlatform('native', { os: 'win32' })).platform
+    expect(windows).toMatchObject({ os: 'win32', backend: 'Windows (UI Automation, SendInput)' })
+    windows.close?.()
     const fake = await createPlatform('fake', { os: 'win32' })
     expect(fake.platform.os).toBe('fake')
     expect((await fake.platform.screen?.observe())?.app).toBe('Notes')
