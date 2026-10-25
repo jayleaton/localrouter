@@ -16,7 +16,8 @@
 # check passed. Writes OUT/results.jsonl, OUT/summary.json, OUT/watch-{image,video}.txt and each check's files.
 # Env: CHAT, DRAMA, STT, IMAGE, VIDEO, DECIDE (model ids; the deploy's defaults; the edit and image to video checks
 # prefer IMAGE and VIDEO, else the first model listing the capability), STT_FIXTURE (the pinned LibriSpeech
-# WAV, tools/speech/fixtures/manifest.json; found under ~/jarvis by its sha256 when unset), LOCK (~/jarvis/.dgx01.lock),
+# WAV, tools/speech/fixtures/manifest.json; when unset, found by its sha256 in fetch.py's cache or under ~/jarvis, else
+# built by fetch.py), LOCK (~/jarvis/.dgx01.lock),
 # LOCALROUTER_TOKEN (with pairing.required).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -99,11 +100,23 @@ call=$(jq -c '.choices[0].message.tool_calls[0].function // empty' <<< "$r" 2> /
 record tool_call "$(jq -e '.name == "get_weather" and (.arguments | test("tokyo"; "i"))' <<< "${call:-null}" > /dev/null 2>&1 && echo true || echo false)" "$(secs $t)" "${call:-$(head -c 200 <<< "$r")}"
 
 # speech to text on the pinned fixture
-fixture=${STT_FIXTURE:-}
-if [ -z "$fixture" ]; then
-  for f in $(find "$HOME/jarvis" -name en_librispeech_1272-128104-0000.wav 2> /dev/null); do
-    [ "$(sha256sum "$f" | cut -d' ' -f1)" = $FIXTURE_SHA ] && { fixture=$f; break; }
+# (STT_FIXTURE, else fetch.py's cache, else anywhere under ~/jarvis; missing: built once by fetch.py, which pins and
+# checks its download, so a cleanup of scratch directories cannot fail this check)
+fixture_cache=${XDG_CACHE_HOME:-$HOME/.cache}/localrouter-speech/fixtures
+find_fixture() {
+  local f
+  for f in "$fixture_cache/en_librispeech_1272-128104-0000.wav" $(find "$HOME/jarvis" -name en_librispeech_1272-128104-0000.wav 2> /dev/null); do
+    [ -f "$f" ] && [ "$(sha256sum "$f" | cut -d' ' -f1)" = $FIXTURE_SHA ] && { echo "$f"; return 0; }
   done
+  return 1
+}
+fixture=${STT_FIXTURE:-$(find_fixture)}
+if [ -z "$fixture" ]; then
+  echo "stt: building the speech fixtures (tools/speech/fixtures/fetch.py)"
+  # a copy: fetch.py also rewrites the manifest beside it, which must not touch this tree
+  mkdir -p "$out/fixtures-tool" && cp "$here/../speech/fixtures/"{fetch.py,extract_parquet.py,manifest.json} "$out/fixtures-tool/"
+  python3 -I "$out/fixtures-tool/fetch.py" --out "$fixture_cache" > "$out/fixtures-fetch.log" 2>&1 || tail -3 "$out/fixtures-fetch.log"
+  fixture=$(find_fixture)
 fi
 t=$(now)
 if [ -n "$fixture" ]; then
