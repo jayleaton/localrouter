@@ -124,6 +124,38 @@ function renderSteps(s) {
 
 function renderPermissions(s) {
   const p = s.permissions;
+  // Linux and Windows: the platform's own list of what it needs, each with how to get it.
+  const reqs = p.requirements || null;
+  $('macPerms').hidden = Boolean(reqs);
+  $('osPerms').hidden = !reqs;
+  if (reqs) {
+    $('osBackend').textContent = p.backend || 'this computer';
+    $('osReqs').replaceChildren(...reqs.map((r) => {
+      const row = document.createElement('div');
+      row.className = 'perm';
+      const name = document.createElement('span');
+      name.className = 'pname';
+      name.textContent = r.label;
+      const why = document.createElement('small');
+      why.textContent = `for ${r.for}`;
+      name.append(why);
+      const pill = document.createElement('span');
+      pill.className = 'pill';
+      pill.dataset.s = r.granted === true ? 'ready' : r.granted === false ? 'failed' : 'loading';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      pill.append(dot, r.granted === true ? 'ready' : r.granted === false ? 'missing' : 'asked on first use');
+      row.append(name, pill);
+      if (r.granted === false && r.fix) {
+        const fix = document.createElement('small');
+        fix.className = 'note';
+        fix.textContent = r.fix;
+        row.append(fix);
+      }
+      return row;
+    }));
+    return;
+  }
   for (const k of ['microphone', 'accessibility', 'screen']) {
     const row = $(`perm-${k}`);
     const v = p[k];
@@ -170,7 +202,8 @@ function render(s) {
   $('version').textContent = s.version;
   if (!$('name').value) $('name').value = s.name;
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
-  $('secrets').textContent = s.secrets === 'keychain' ? 'in the macOS keychain' : 'for this run only (no keychain here)';
+  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted with the OS keychain' : 'for this run only (no keychain here)';
+  if (s.stop_words) $('stopWords').textContent = s.stop_words;
   renderSteps(s);
   renderPermissions(s);
   renderFound();

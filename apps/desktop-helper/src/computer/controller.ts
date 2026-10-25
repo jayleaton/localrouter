@@ -5,7 +5,7 @@ import type { Answers, Decider, Question } from './decisions.ts'
 import type { BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
- * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this Mac toward a goal.
+ * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this computer (macOS, Linux or Windows) toward a goal.
  * It picks the surface (an open browser tab or an app window), then repeats one small decision per
  * step, choosing among the controls the screen actually has (found through accessibility), until the
  * goal is reached or no step is clearly right. Every decision is the box's (`decide`), and every
@@ -387,7 +387,7 @@ export class ComputerUse {
         instructions: `Where does this happen? ${STATE_NOTE}`,
         criteria: {
           browser: 'In a website or web app, or a browser tab (including clicking a browser tab).',
-          app: 'In a native app window on this Mac (not a website).',
+          app: 'In a native app window on this computer (not a website).',
           current: 'In whatever is on screen right now; no app or site is named.',
         },
       },

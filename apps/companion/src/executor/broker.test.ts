@@ -54,7 +54,7 @@ describe('the executor broker: final authority on this computer', () => {
       const c = await card
       // The executor's own input arriving as the "click" on Approve: the answer comes while an injected action runs.
       let answered: Awaited<ReturnType<typeof broker.answer>> | null = null
-      const slow = broker.driven.desktop!
+      const slow = broker.driven.screen!
       await Promise.all([slow.act({ kind: 'scroll', direction: 'down' }), broker.answer(c.id, 'approve', 'app window').then((r) => (answered = r))])
       expect(answered).toMatchObject({ ok: false, status: 403 })
       expect(broker.approvals().find((x) => x.id === c.id)?.state).toBe('pending')
@@ -228,7 +228,7 @@ function fromLocalRouter(pick: { surface: string; app?: string; next: string[] }
   }
   const desktop = { kind: 'desktop' as const, observe: async () => screens[front], act: async (a: ScreenAction) => void actions.push(a) }
   const dock = { list: async () => ['LocalRouter', 'Google Chrome', 'Mail'], activate: async (name: string) => { brought.push(name); if (screens[name]) front = name } }
-  const broker = new Broker({ executorId: 'exec_t', name: 'JJ’s MacBook', machine: { desktop, tabs: null, dock, apps: null, controls: { run: async () => ({ done: 'ok' }) } }, decider, audit: new MemoryAudit(), gate: new TestGate(), minDwellMs: 0, settleMs: 1, refocusMs: 0, ownApps: ['LocalRouter', 'Electron'] })
+  const broker = new Broker({ executorId: 'exec_t', name: 'JJ’s MacBook', machine: { screen: desktop, tabs: null, launcher: dock, apps: null, controls: { run: async () => ({ done: 'ok' }) } }, decider, audit: new MemoryAudit(), gate: new TestGate(), minDwellMs: 0, settleMs: 1, refocusMs: 0, ownApps: ['LocalRouter', 'Electron'] })
   return { broker, actions, brought }
 }
 

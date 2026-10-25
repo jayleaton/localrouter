@@ -148,15 +148,19 @@ export class ExecutorServer {
   }
 
   async listen(): Promise<void> {
-    if (Buffer.byteLength(this.path) > 103) throw new Error(`the executor's socket path is longer than a Unix socket allows (${this.path}): set LOCALROUTER_COMPANION_HOME to a shorter folder`)
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
-    rmSync(this.path, { force: true })
+    // A Windows named pipe is no file: nothing to make room for, shorten or chmod.
+    const pipe = this.path.startsWith('\\\\.\\pipe\\')
+    if (!pipe) {
+      if (Buffer.byteLength(this.path) > 103) throw new Error(`the executor's socket path is longer than a Unix socket allows (${this.path}): set LOCALROUTER_COMPANION_HOME to a shorter folder`)
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
+      rmSync(this.path, { force: true })
+    }
     const server = createServer((socket) => this.connection(socket))
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
       server.listen(this.path, () => resolve())
     })
-    chmodSync(this.path, 0o600)
+    if (!pipe) chmodSync(this.path, 0o600)
     this.server = server
   }
 
@@ -164,7 +168,7 @@ export class ExecutorServer {
     const server = this.server
     this.server = null
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
-    rmSync(this.path, { force: true })
+    if (!this.path.startsWith('\\\\.\\pipe\\')) rmSync(this.path, { force: true })
   }
 
   private connection(socket: Socket) {

@@ -1,48 +1,27 @@
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { ChromeTabs } from '../../../desktop-helper/src/computer/chromeTabs.ts'
 import type { Decider } from '../../../desktop-helper/src/computer/decisions.ts'
-import { DesktopBackend, macAccess } from '../../../desktop-helper/src/computer/desktop.ts'
-import { DockApps } from '../../../desktop-helper/src/computer/dock.ts'
-import { MacControls } from '../../../desktop-helper/src/computer/macControls.ts'
-import { fakeMac } from '../../../desktop-helper/src/fake.ts'
 import { silentLogger } from '../../../desktop-helper/src/log.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { LocalStop } from '../../../desktop-helper/src/stop.ts'
+import { createPlatform } from '../platform/index.ts'
+import { stopShortcut } from '../platform/shortcut.ts'
+import type { Built, PlatformChoice } from '../platform/index.ts'
 import { FileAudit } from './audit.ts'
 import { Broker } from './broker.ts'
-import type { Machine, PresenceGate } from './broker.ts'
+import type { PresenceGate } from './broker.ts'
 import { auditPath, callersPath, executorSocket, identityPath } from './paths.ts'
 import { Enrollment, ExecutorServer } from './server.ts'
 
 /**
- * The executor put together: this computer's machine (the Mac backend ported from the desktop helper, or the fake
- * Mac), its broker with the local stop, the audit file and the caller enrollment in the data folder, and the socket
- * other harnesses reach it on. The app and the headless runner both start it this way.
+ * The executor put together: this computer's platform (platform/: macOS, Linux, Windows, or the fake Notes app), its
+ * broker with the local stop, the audit file and the caller enrollment in the data folder, and the socket other
+ * harnesses reach it on. The app and the headless runner both start it this way. The policy, approvals, budgets,
+ * audit and stop are the same on every OS; only the platform differs.
  */
-export type MachineKind = 'mac' | 'fake'
+export type MachineKind = PlatformChoice
 
-export type Access = { accessibility: boolean; screen_recording: boolean }
-
-export type Built = { machine: Machine; access: () => Promise<Access>; pointer: (() => Promise<{ x: number; y: number }>) | null; fake: ReturnType<typeof fakeMac> | null }
-
-export function buildMachine(kind: MachineKind): Built {
-  if (kind === 'fake') {
-    const mac = fakeMac()
-    return { machine: { desktop: mac.desktop, tabs: null, dock: mac.dock, apps: mac.apps, controls: mac.controls }, access: mac.access, pointer: () => mac.desktop.pointer(), fake: mac }
-  }
-  const controls = new MacControls()
-  const desktop = new DesktopBackend()
-  return {
-    machine: { desktop, tabs: new ChromeTabs(), dock: new DockApps(), apps: { running: () => controls.running(), activate: (name) => controls.activate(name) }, controls },
-    access: async () => {
-      const a = await macAccess()
-      return { accessibility: a.accessibility, screen_recording: a.screenRecording }
-    },
-    pointer: () => desktop.pointer(),
-    fake: null,
-  }
-}
+export type { Built }
 
 /** This installation's stable id and the computer's name, kept in the data folder. */
 export function identity(dir: string, name: string): { executor: string; name: string } {
@@ -75,14 +54,17 @@ export type Executor = { broker: Broker; enrollment: Enrollment; server: Executo
 
 export async function startExecutor(o: ExecutorOptions): Promise<Executor> {
   const id = identity(o.dir, o.name)
-  const built = buildMachine(o.machine)
+  const built = await createPlatform(o.machine, { dataDir: o.dir })
+  const platform = built.platform
   const log = o.log ?? silentLogger
-  const desktop = built.machine.desktop
-  const stop = built.pointer ? new LocalStop({ pointer: built.pointer, ...(desktop?.displays ? { displays: () => desktop.displays!() } : {}), log }) : null
+  const pointer = platform.pointer
+  const displays = platform.displays
+  const stop = pointer ? new LocalStop({ pointer, ...(displays ? { displays } : {}), log }) : null
   const broker = new Broker({
     executorId: id.executor,
     name: id.name,
-    machine: built.machine,
+    machine: platform,
+    stopHint: pointer ? 'Move the pointer to the top-left corner to stop.' : `Press ${stopShortcut(platform.os).words}, or use LocalRouter’s tray menu, to stop.`,
     decider: o.decider,
     audit: new FileAudit(auditPath(o.dir)),
     gate: o.gate,

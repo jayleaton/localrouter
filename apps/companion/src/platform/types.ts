@@ -11,7 +11,7 @@ import type { BrowserTabs, PointerReading, Rect, ScreenBackend } from '../../../
  *   Windows  UI Automation and SendInput through a PowerShell worker       (platform/windows/)
  *   fake     the scripted Notes app, for tests and headless smokes         (platform/fake.ts)
  */
-export type PlatformOs = 'darwin' | 'linux' | 'win32' | 'fake'
+export type PlatformOs = 'darwin' | 'linux' | 'win32' | 'fake' | 'other'
 
 /** A fixed control this platform cannot run, refused before the policy with the reason for the person. */
 export type ControlSupport = Partial<Record<ComputerControl['kind'], string>>

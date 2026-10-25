@@ -112,11 +112,17 @@
             </div>
             <p class="note" id="resetResult" hidden></p>
           </div>
+          <div id="macPerms">
           <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows).</p>
           <div class="perm" id="perm-microphone"><span class="pname">Microphone<small>for calls</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="microphone">Allow</button></div>
           <div class="perm" id="perm-accessibility"><span class="pname">Accessibility<small>to control this Mac</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="accessibility">Open System Settings</button></div>
           <div class="perm" id="perm-screen"><span class="pname">Screen Recording<small>for apps that hide their windows</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="screen">Open System Settings</button></div>
           <div class="perm"><span class="pname">Automation<small>System Events, Chrome, Music…</small></span><span class="pill"><span class="dot"></span><span>asked on first use</span></span><button class="btn" data-perm="automation">Open System Settings</button></div>
+          </div>
+          <div id="osPerms" hidden>
+            <p class="note">Computer control here uses <b id="osBackend"></b>. What it needs on this computer:</p>
+            <div id="osReqs"></div>
+          </div>
           <div class="actions"><button class="btn" id="recheck">Check again</button><span class="note">After granting Accessibility or Screen Recording, quit and reopen LocalRouter.</span></div>
         </div>
       </div>
@@ -126,7 +132,7 @@
   <h2 class="group">This computer</h2>
   <section class="card">
     <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
-    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner.</p>
+    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
   </section>
 
   <section class="card">
