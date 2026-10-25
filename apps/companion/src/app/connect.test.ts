@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import type { Server as HttpServer, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AddressError, capabilitiesOf, classify, CodeError, connectionOf, connectView, normalizeCode, parsePairLink, tailnetPeers } from './connect.ts'
+import { AddressError, capabilitiesOf, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, tailnetPeers, tailscaleCandidates } from './connect.ts'
 import type { ConnectInput, Connection } from './connect.ts'
 import { pair, Spark } from '../harness/spark.ts'
 import type { Capabilities } from '../harness/spark.ts'
@@ -219,3 +219,21 @@ describe('what went wrong, from real failures', () => {
     expect(classify(new AddressError('the Spark address must not carry credentials'), 'address', 8)).toMatchObject({ kind: 'invalid_address', hint: expect.stringContaining('credentials') })
   })
 })
+
+describe('Windows paths (Windows run, 2026-10-25)', () => {
+  it('finds tailscale.exe under Program Files and on PATH, not only the Mac and Unix paths', () => {
+    const win = tailscaleCandidates('win32', { ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)', Path: 'C:\\Windows\\system32;C:\\Tools\\' })
+    expect(win.slice(0, 2)).toEqual(['C:\\Program Files\\Tailscale\\tailscale.exe', 'C:\\Program Files (x86)\\Tailscale\\tailscale.exe'])
+    expect(win).toContain('C:\\Tools\\tailscale.exe')
+    expect(win.some((p) => p.startsWith('/'))).toBe(false)
+    expect(tailscaleCandidates('darwin', { PATH: '/usr/bin' })[0]).toBe('/Applications/Tailscale.app/Contents/MacOS/Tailscale')
+    expect(tailscaleCandidates('linux', { PATH: '/usr/bin:/home/x/bin' })).toEqual(['/usr/bin/tailscale', '/usr/local/bin/tailscale', '/usr/sbin/tailscale', '/snap/bin/tailscale', '/home/x/bin/tailscale'])
+  })
+
+  it('names the MCP launcher the packaged app ships: the .cmd on Windows', () => {
+    expect(mcpLauncher('C:\\Users\\jj\\LocalRouter\\resources', 'win32')).toBe('C:\\Users\\jj\\LocalRouter\\resources\\localrouter-executor-mcp.cmd')
+    expect(mcpLauncher('/opt/LocalRouter/resources/', 'linux')).toBe('/opt/LocalRouter/resources/localrouter-executor-mcp')
+    expect(mcpLauncher('/Applications/LocalRouter.app/Contents/Resources', 'darwin')).toBe('/Applications/LocalRouter.app/Contents/Resources/localrouter-executor-mcp')
+  })
+})
+

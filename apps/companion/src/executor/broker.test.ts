@@ -26,6 +26,35 @@ function nextCard(broker: ReturnType<typeof fakeBroker>['broker']): Promise<Card
 }
 
 describe('the executor broker: final authority on this computer', () => {
+  it('says before Approve that the OS will ask, and does not let the card run out while it does (Windows run, 2026-10-25)', async () => {
+    // Windows Hello opened Windows Security after Approve; the 60 s card ran out meanwhile and typing was denied.
+    const hello = { method: 'Windows Hello', asked: 0, verify: async () => { hello.asked += 1; await new Promise((r) => setTimeout(r, 250)); return true } }
+    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { gate: hello, limits: { approvalTimeoutMs: 100 } })
+    const card = nextCard(broker)
+    const started = broker.startUse(app, 'send the Groceries note', null)
+    if (!started.ok) throw new Error(started.error)
+    const c = await card
+    expect(c.confirm).toBe('After Approve, Windows asks for your PIN, face or fingerprint (Windows Hello).')
+    expect(await broker.answer(c.id, 'approve', 'app window')).toEqual({ ok: true })
+    expect((await started.finished).status).toBe('done')
+    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
+    expect(hello.asked).toBe(1)
+  })
+
+  it('a card held open for the OS check still runs out when nobody completes it', async () => {
+    const never = { method: 'Windows Hello', verify: async () => false }
+    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { gate: never, limits: { approvalTimeoutMs: 100 }, presenceMs: 300 })
+    const card = nextCard(broker)
+    const started = broker.startUse(app, 'send the Groceries note', null)
+    if (!started.ok) throw new Error(started.error)
+    const c = await card
+    expect(await broker.answer(c.id, 'approve', 'app window')).toMatchObject({ ok: false, status: 403 })
+    // Held for the check past the card's 100 ms, then it runs out by itself: the step is refused, nothing is sent.
+    expect(broker.approvals().find((x) => x.id === c.id)?.state).toBe('pending')
+    expect(await started.finished).toMatchObject({ status: 'blocked', reason: 'Nobody approved it in time.' })
+    expect(mac.desktop.sent).toEqual([])
+  })
+
   it('runs benign steps at once and waits for a present person on a consequential one', async () => {
     const { broker, mac, gate, audit } = fakeBroker([...SEND_GROCERIES])
     const card = nextCard(broker)

@@ -1390,6 +1390,7 @@ function ccRender(st, cards) {
     card.append(ccEl('p', 'where', [c.app, c.title, c.url].filter(Boolean).join(' · ')));
     if (c.kind === 'type') card.append(ccEl('pre', null, c.text));
     card.append(ccEl('p', 'why', `Why it asks: ${c.why}. For: ${c.goal}`));
+    if (c.confirm) card.append(ccEl('p', 'why', c.confirm));
     const row = ccEl('div', 'cc-row');
     const left = ccEl('span', 'cc-left', `${c.expires_in_s} s left`); left.dataset.left = c.id;
     const deny = ccEl('button', 'btn deny', 'Deny'), ok = ccEl('button', 'btn primary', 'Approve');

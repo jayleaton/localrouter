@@ -39,14 +39,34 @@ export function decisionRequest(state: unknown, questions: Record<string, Questi
 
 const confidenceOf = (c: unknown) => (c === 'high' ? 0.9 : c === 'medium' ? 0.6 : 0.3)
 
+/**
+ * The first whole JSON object in a reply: past a preamble, code fences or an empty thinking block, and before anything
+ * the model wrote after it. Braces inside strings do not count. Null when there is none.
+ */
+export function firstObject(text: string): string | null {
+  const start = text.indexOf('{')
+  if (start < 0) return null
+  let depth = 0
+  let inString = false
+  for (let i = start; i < text.length; i += 1) {
+    const c = text[i]
+    if (inString) {
+      if (c === '\\') i += 1
+      else if (c === '"') inString = false
+    } else if (c === '"') inString = true
+    else if (c === '{') depth += 1
+    else if (c === '}' && --depth === 0) return text.slice(start, i + 1)
+  }
+  return null
+}
+
 /** The model's reply as answers; anything not offered is left out (an unanswered question). */
 export function parseDecision(content: string, questions: Record<string, Question>): Answers {
-  const trimmed = content.trim().replace(/^`+|`+$/g, '')
-  const start = trimmed.indexOf('{')
-  if (start < 0) throw new Error('the decision was not the JSON asked for')
+  const found = firstObject(content)
+  if (!found) throw new Error('the decision was not the JSON asked for')
   let v: unknown
   try {
-    v = JSON.parse(trimmed.slice(start))
+    v = JSON.parse(found)
   } catch {
     throw new Error('the decision was not the JSON asked for')
   }
@@ -64,6 +84,66 @@ export function parseDecision(content: string, questions: Record<string, Questio
   return out
 }
 
-export function chatDecider(complete: Complete, extra: Record<string, unknown> = {}): Decider {
-  return { ask: async (state, questions) => parseDecision(await complete(decisionRequest(state, questions, extra)), questions) }
+export const NOT_JSON = 'the decision was not the JSON asked for'
+
+/**
+ * Whether a failed request is the decision service being briefly away, worth waiting for: the box unreachable or
+ * restarting (a deploy restarts it, and the chat model is back about 15 s later), 502/503/504/429, or a 5xx saying the
+ * model's server is gone or loading. Anything else (a refused token, a bad request) is not.
+ */
+export function transient(error: unknown): boolean {
+  const status = typeof error === 'object' && error !== null && typeof (error as { status?: unknown }).status === 'number' ? (error as { status: number }).status : 0
+  const message = error instanceof Error ? error.message : String(error)
+  if ([429, 502, 503, 504].includes(status)) return true
+  if (status >= 500) return /gone|loading|restart|unavailable|closed|starting/i.test(message)
+  if (status === 0) return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket|network|terminated|closed|other side/i.test(message)
+  return false
+}
+
+export type DeciderOptions = {
+  /** How long to keep waiting for a decision service that is briefly away (30 s: a restart reloads chat in ~15 s). */
+  waitMs?: number
+  sleep?: (ms: number) => Promise<void>
+}
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Decisions from the chat model, tolerant of the two ways a decision goes missing without anything being wrong with
+ * the task: a reply that is not the JSON asked for is asked again once, and a decision service that is briefly gone
+ * (restarting) is waited for, with growing pauses, for up to `waitMs`. The answers are checked as before.
+ */
+export function chatDecider(complete: Complete, extra: Record<string, unknown> = {}, options: DeciderOptions = {}): Decider {
+  const waitMs = options.waitMs ?? 30_000
+  const sleep = options.sleep ?? pause
+  return {
+    ask: async (state, questions) => {
+      const body = decisionRequest(state, questions, extra)
+      let reasked = false
+      let waited = 0
+      let delay = 1_000
+      for (;;) {
+        let content: string
+        try {
+          content = await complete(body)
+        } catch (error) {
+          if (!transient(error) || waited >= waitMs) {
+            if (waited > 0) throw new Error(`the decision service on the Spark did not come back within ${Math.round(waited / 1000)} s (${error instanceof Error ? error.message : String(error)})`)
+            throw error
+          }
+          const step = Math.min(delay, waitMs - waited)
+          await sleep(step)
+          waited += step
+          delay = Math.min(delay * 2, 8_000)
+          continue
+        }
+        try {
+          return parseDecision(content, questions)
+        } catch (error) {
+          if (reasked) throw error
+          reasked = true
+        }
+      }
+    },
+  }
 }

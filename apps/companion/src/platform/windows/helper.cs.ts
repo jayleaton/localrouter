@@ -301,6 +301,9 @@ namespace LocalRouterWin
 
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint to, bool on);
+        [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
@@ -1151,19 +1154,67 @@ namespace LocalRouterWin
         // ---- pointer and keyboard (SendInput) ----
 
         /**
-         * Brings the window to the front for pointer or key input, without tricks: Windows lets a process take the
-         * foreground only under its foreground lock rules (it is the foreground process, was started by it, received
-         * the last input, and so on). When it says no, the action fails with a sentence instead of typing into
-         * whatever is in front.
+         * Brings the window to the front for pointer or key input. Windows lets a process take the foreground only
+         * under its foreground lock rules, so this tries the usual ways in order, least invasive first, each checked by
+         * reading the foreground back: SetForegroundWindow; UI Automation (WindowPattern restores it, SetFocus asks the
+         * window itself); AttachThreadInput to the foreground thread for one SetForegroundWindow; and last, giving this
+         * process the last input with a key no layout uses (0xE8, unassigned; Alt would open menus) and asking again.
+         * When all of them fail it says so with a sentence, rather than typing into whatever is in front.
          */
         private static void Front(IntPtr hwnd)
         {
             hwnd = Root(hwnd);
-            if (Root(Native.GetForegroundWindow()) == hwnd) return;
+            if (IsFront(hwnd)) return;
             if (Native.IsIconic(hwnd)) Native.ShowWindow(hwnd, 9);
             Native.SetForegroundWindow(hwnd);
-            for (int n = 0; n < 10 && Root(Native.GetForegroundWindow()) != hwnd; n++) Thread.Sleep(40);
-            if (Root(Native.GetForegroundWindow()) != hwnd) throw new LrError("NOT_FRONT", AppName(OwnerPid(hwnd)));
+            if (WaitFront(hwnd)) return;
+            try
+            {
+                AutomationElement el = AutomationElement.FromHandle(hwnd);
+                object pattern;
+                if (el.TryGetCurrentPattern(WindowPattern.Pattern, out pattern))
+                {
+                    WindowPattern window = (WindowPattern)pattern;
+                    if (window.Current.WindowVisualState == WindowVisualState.Minimized) window.SetWindowVisualState(WindowVisualState.Normal);
+                }
+                el.SetFocus();
+            }
+            catch (Exception) { }
+            if (WaitFront(hwnd)) return;
+            uint ignored;
+            uint them = Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out ignored);
+            uint me = Native.GetCurrentThreadId();
+            if (them != 0 && them != me && Native.AttachThreadInput(me, them, true))
+            {
+                try
+                {
+                    Native.BringWindowToTop(hwnd);
+                    Native.SetForegroundWindow(hwnd);
+                }
+                finally
+                {
+                    Native.AttachThreadInput(me, them, false);
+                }
+                if (WaitFront(hwnd)) return;
+            }
+            List<Native.INPUT> nudge = new List<Native.INPUT>();
+            nudge.Add(KeyInput(0xE8, 0, 0));
+            nudge.Add(KeyInput(0xE8, 0, 0x0002));
+            try { Send(nudge); } catch (LrError) { }
+            Native.SetForegroundWindow(hwnd);
+            if (WaitFront(hwnd)) return;
+            throw new LrError("NOT_FRONT", AppName(OwnerPid(hwnd)));
+        }
+
+        private static bool IsFront(IntPtr hwnd)
+        {
+            return Root(Native.GetForegroundWindow()) == hwnd;
+        }
+
+        private static bool WaitFront(IntPtr hwnd)
+        {
+            for (int n = 0; n < 10 && !IsFront(hwnd); n++) Thread.Sleep(40);
+            return IsFront(hwnd);
         }
 
         /** Before any synthetic input: the user's desktop, the same window still in front, and not an elevated one. */

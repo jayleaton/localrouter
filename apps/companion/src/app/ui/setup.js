@@ -179,7 +179,7 @@ function renderFound() {
     note.textContent = 'Looking for LocalRouter on your tailnet…';
     return;
   }
-  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this Mac (or not signed in): start it to find your Spark here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
+  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this computer (or not signed in): start it to find your Spark here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
   box.hidden = discovered.found.length === 0;
   box.replaceChildren(...discovered.found.map((f) => {
     const b = document.createElement('button');
@@ -203,7 +203,7 @@ function render(s) {
   $('version').textContent = s.version;
   if (!$('name').value) $('name').value = s.name;
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
-  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted with the OS keychain' : 'for this run only (no keychain here)';
+  $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted by the operating system (the Keychain, Windows DPAPI or the Secret Service)' : 'for this run only (no keychain here)';
   if (s.stop_words) $('stopWords').textContent = s.stop_words;
   renderSteps(s);
   renderPermissions(s);

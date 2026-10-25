@@ -29,7 +29,7 @@
           </div>
           <div class="found" id="found" hidden></div>
           <p class="note" id="tailnetNote"></p>
-          <p class="note">The <code>https://</code> address <code>tailscale serve</code> gives your Spark; this Mac must be on the same tailnet. Pasting the <code>localrouter://pair</code> link <code>pair.sh add</code> prints fills in the code too.</p>
+          <p class="note">The <code>https://</code> address <code>tailscale serve</code> gives your Spark; this computer must be on the same tailnet. Pasting the <code>localrouter://pair</code> link <code>pair.sh add</code> prints fills in the code too.</p>
           <div class="alert" id="err-address" role="alert" hidden></div>
         </div>
       </div>
@@ -46,7 +46,7 @@
           <ul class="explain">
             <li><code>pair.sh add</code> makes a <b>one-time code</b> for the name you give it. It lasts <b>10 minutes</b> and works once.</li>
             <li><code>--scopes</code> is what this computer may use: <b>inference</b> (chat and calls), <b>media</b> (pictures, video, speech) and <b>read</b> (models and voices).</li>
-            <li>The token it gives this computer is kept <span id="secrets"></span>. Nothing else leaves this Mac.</li>
+            <li>The token it gives this computer is kept <span id="secrets"></span>. Nothing else leaves this computer.</li>
           </ul>
           <div class="grid2">
             <label>This computer’s name <input id="name" autocomplete="off" spellcheck="false"></label>
@@ -94,11 +94,11 @@
       </div>
     </li>
 
-    <!-- 4. macOS permissions -->
+    <!-- 4. permissions (macOS's TCC grants, or the platform's requirements on Linux and Windows) -->
     <li class="step" id="step-permissions" data-s="todo">
       <div class="badge"><span>4</span></div>
       <div class="body">
-        <div class="head"><b>Permissions on this Mac</b><span class="sum" id="sum-permissions"></span></div>
+        <div class="head"><b>Permissions on this computer</b><span class="sum" id="sum-permissions"></span></div>
         <div class="open" id="open-permissions">
           <div class="alert warn" id="stale" role="alert" hidden>
             <p><b id="staleText"></b></p>

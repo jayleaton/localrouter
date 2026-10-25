@@ -128,9 +128,9 @@ export function createWindowsPlatform(options: WindowsPlatformOptions = {}): Pla
     }
     const front = found.windows[0]
     if (!front) throw new ControlError('not_found', `${name} has no window to bring forward.`)
-    // Restore + SetForegroundWindow, within Windows' foreground lock rules: LocalRouter may take the foreground
-    // while it (or a process it started, such as this worker) is in front or got the last input. When Windows
-    // refuses, this fails with a sentence; it never forces the foreground (no AttachThreadInput, no key tricks).
+    // Windows' foreground lock rules decide whether LocalRouter may bring a window forward: the helper's Front()
+    // tries SetForegroundWindow, UI Automation focus, AttachThreadInput and an unassigned-key nudge, in that order,
+    // and only when all of them fail says to click the app in the taskbar.
     await ask(workers.system, 'foreground', { hwnd: front.hwnd })
   }
 

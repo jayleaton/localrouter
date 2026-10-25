@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fitScale } from '../../../../desktop-helper/src/computer/types.ts'
 import { chunks, displaysShape, explain, NEWLINE_REFUSED, screenshotShape, WindowsScreen } from './screen.ts'
 import type { CallOptions, WindowsCall } from './worker.ts'
+import { HELPER_CS } from './helper.cs.ts'
 
 type Call = { op: string; args: Record<string, unknown>; options: CallOptions }
 
@@ -222,3 +223,17 @@ describe('screenshots and displays', () => {
     expect(await new WindowsScreen(worker).pointer()).toEqual({ x: -100, y: 50 })
   })
 })
+
+describe('bringing a window to the front (Windows run, 2026-10-25: "Windows did not let LocalRouter bring Google Chrome to the front")', () => {
+  it('tries the usual ways in order, least invasive first, before saying to click the taskbar', () => {
+    const front = HELPER_CS.slice(HELPER_CS.indexOf('private static void Front(IntPtr hwnd)'), HELPER_CS.indexOf('private static bool IsFront'))
+    const steps = ['Native.SetForegroundWindow(hwnd);', 'el.SetFocus();', 'Native.AttachThreadInput(me, them, true)', 'KeyInput(0xE8, 0, 0)', 'throw new LrError("NOT_FRONT"']
+    const at = steps.map((step) => front.indexOf(step))
+    expect(at.every((i) => i >= 0)).toBe(true)
+    expect([...at].sort((x, y) => x - y)).toEqual(at)
+    // The thread input is always detached again, and no Alt key (it opens the window's menu) is pressed.
+    expect(front).toContain('Native.AttachThreadInput(me, them, false);')
+    expect(front).not.toMatch(/0x12\b|VK_MENU/)
+  })
+})
+

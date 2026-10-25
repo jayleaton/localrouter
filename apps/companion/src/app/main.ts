@@ -9,7 +9,7 @@ import { hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
-import { AddressError, classify, CodeError, connectionOf, connectView, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tooOld } from './connect.ts'
+import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
 import { EMPTY, HELPER, KeychainHelper, loadSecrets as loadStoredSecrets } from './secrets.ts'
 import type { Secrets } from './secrets.ts'
@@ -524,7 +524,7 @@ function registerIpc() {
   setup('setup:enroll', async (name) => {
     if (!executor) throw new Error('LocalRouter’s executor is starting: try again in a moment')
     const { caller, token } = executor.enrollment.add(String(name))
-    return { caller: { id: caller.id, name: caller.name }, token, socket: executorSocket(dir), command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), state: await state() }
+    return { caller: { id: caller.id, name: caller.name }, token, socket: executorSocket(dir), command: mcpLauncher(process.resourcesPath ?? '', process.platform), state: await state() }
   })
   setup('setup:revoke', (id) => {
     executor?.enrollment.revoke(String(id))
@@ -675,7 +675,7 @@ async function checkConnection() {
   log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
 }
 
-const TAILSCALE = ['/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', '/usr/bin/tailscale']
+const TAILSCALE = tailscaleCandidates(process.platform, process.env)
 
 function tailscaleStatus(): Promise<unknown> {
   const tryAt = (i: number): Promise<unknown> =>
@@ -696,7 +696,7 @@ function tailscaleStatus(): Promise<unknown> {
 }
 
 /**
- * LocalRouter boxes on this Mac's tailnet: each online peer's MagicDNS name, asked for `/v1/capabilities` (open, no
+ * LocalRouter boxes on this computer's tailnet: each online peer's MagicDNS name, asked for `/v1/capabilities` (open, no
  * secrets) at `tailscale serve`'s ports. `tailnet`: whether Tailscale runs here, so the page can say so.
  */
 async function discoverSparks(): Promise<{ tailnet: 'running' | 'off'; found: Array<{ base: string; host: string; version: string; machine: string }> }> {
@@ -734,7 +734,7 @@ async function state() {
     connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
-    mcp: { command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), socket: executorSocket(dir) },
+    mcp: { command: mcpLauncher(process.resourcesPath ?? '', process.platform), socket: executorSocket(dir) },
   }
 }
 
