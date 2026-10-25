@@ -14,12 +14,13 @@ pub const Capability = enum {
     speech_to_text,
     chat_completion,
     typed_decision,
+    voice_clone, // a speech model that encodes recorded clips into a voice of its own (`Speech.clone`)
 
     pub fn kind(c: Capability) Kind {
         return switch (c) {
             .text_to_image, .image_edit => .image,
             .text_to_video, .image_to_video => .video,
-            .text_to_speech => .speech,
+            .text_to_speech, .voice_clone => .speech,
             .speech_to_text => .transcription,
             .chat_completion => .chat,
             .typed_decision => .decision,
@@ -65,6 +66,19 @@ pub const Speech = struct {
     seed: u64 = 0,
     stream: bool = false, // the tool writes `speech.wav` as it goes (header first, sizes fixed at the end), for a streamed reply
     references: []const u8 = "", // "references.json" in the job directory: the voice references the request sent; "": none
+    // "voice.json" in the job directory: a cloned voice's references (`voices.zig`), spoken after `references`; `voice`
+    // then names the cloned voice and the tool speaks it with nothing but these references. "": a voice of its own.
+    voice_references: []const u8 = "",
+    // "clone.json" in the job directory: `{name, references: [{audio, text}]}`, prepared clips (`media/voiceprep.zig`)
+    // to encode into a voice, not text to speak (`input` is empty). The tool writes `voice.json` (`ClonedCodes`).
+    clone: []const u8 = "",
+};
+
+/// What a voice_clone tool writes for a `Speech.clone` request: each reference's transcript and codec codes, in order.
+pub const ClonedCodes = struct {
+    references: []const Reference,
+
+    pub const Reference = struct { text: []const u8, vq_codes: std.json.Value, frames: u32 = 0 };
 };
 
 pub const Timestamps = enum { none, segment, word };
@@ -132,7 +146,7 @@ pub const Request = union(Kind) {
         return switch (r) {
             .image => |v| if (v.references.len > 0) .image_edit else .text_to_image,
             .video => |v| if (v.first_frame != null) .image_to_video else .text_to_video,
-            .speech => .text_to_speech,
+            .speech => |v| if (v.clone.len > 0) .voice_clone else .text_to_speech,
             .transcription => .speech_to_text,
             .chat => .chat_completion,
             .decision => .typed_decision,
@@ -186,7 +200,10 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (v.seconds == 0 or v.seconds > l.max_seconds) return fail(why, "seconds must be 1 to 20");
             if (v.fps == 0 or v.fps > l.max_fps) return fail(why, "fps must be 1 to 30");
         },
-        .speech => |v| {
+        .speech => |v| if (v.clone.len > 0) {
+            if (!token(v.clone)) return fail(why, "clone must name a file in the job directory");
+            if (v.input.len > 0 or v.references.len > 0 or v.voice_references.len > 0 or v.stream) return fail(why, "a voice to encode takes no input, references or stream");
+        } else {
             if (std.mem.trim(u8, v.input, " \t\r\n").len == 0) return fail(why, "input is required");
             if (!std.unicode.utf8ValidateSlice(v.input)) return fail(why, "input must be UTF-8 text");
             if ((std.unicode.utf8CountCodepoints(v.input) catch v.input.len) > l.max_speech_input) return fail(why, "input must be at most 4096 characters");
@@ -194,6 +211,7 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
             if (v.voice.len > 64 or !token(v.voice)) return fail(why, "voice must be a voice id (letters, digits, '-', '_' and '.')");
             if (v.preset.len > 32 or !token(v.preset)) return fail(why, "preset must be a preset id (letters, digits, '-', '_' and '.')");
             if (v.references.len > 0 and !token(v.references)) return fail(why, "references must name a file in the job directory");
+            if (v.voice_references.len > 0 and !token(v.voice_references)) return fail(why, "voice_references must name a file in the job directory");
         },
         .transcription => |v| {
             if (v.audio.len == 0 or !token(v.audio)) return fail(why, "audio must name a file in the job directory");

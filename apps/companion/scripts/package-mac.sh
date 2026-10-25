@@ -40,7 +40,7 @@ const paths = await packager({
   prune: false,
   overwrite: true,
   extendInfo: {
-    NSMicrophoneUsageDescription: 'LocalRouter listens to you during a voice call.',
+    NSMicrophoneUsageDescription: 'LocalRouter listens to you during a voice call, and records a sample when you clone your voice.',
     NSAppleEventsUsageDescription:
       'LocalRouter controls apps on this Mac when you ask it to, after your approval for anything consequential.',
     LSMinimumSystemVersion: '13.0',

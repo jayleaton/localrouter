@@ -361,6 +361,36 @@
   .play[data-playing="1"] { background: var(--amber); color: var(--amber-ink); }
   .play svg { width: 18px; height: 18px; }
   .note-s { color: var(--muted); font-size: 12.5px; }
+  .note-s.err { color: var(--red); }
+  .note-s:empty { display: none; }
+  .vline .grow { flex: 1; }
+  /* voice cloning: consent, record or upload, preview, name */
+  .check { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; font-size: 14px; cursor: pointer; }
+  .check input { width: 22px; height: 22px; margin: 1px 0 0; flex: none; accent-color: var(--amber); }
+  .seg button[aria-selected="true"] { background: var(--raised); color: var(--text); }
+  .clone-pan { display: flex; flex-direction: column; gap: 10px; }
+  .clone-script { max-height: 210px; overflow-y: auto; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border);
+                  background: var(--bg); font-size: 15px; line-height: 1.65; overscroll-behavior: contain; }
+  .clone-script p { margin: 0 0 .7em; } .clone-script p:last-child { margin: 0; }
+  .meter { position: relative; height: 10px; border-radius: 5px; background: var(--raised); overflow: hidden; }
+  .meter i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--green); transition: width 60ms linear; }
+  .meter[data-s="quiet"] i { background: var(--dim); }
+  .meter[data-s="loud"] i { background: var(--red); }
+  .rec-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .rec-row .grow { flex: 1; }
+  .rec-time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .btn.rec { background: var(--red); color: #fff; }
+  .field input[type=file] { font-size: 14px; max-width: 100%; }
+  .clips { display: flex; flex-direction: column; gap: 8px; }
+  .clip { display: flex; flex-direction: column; gap: 6px; padding: 6px 6px 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg); }
+  .clip-h { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .clip-h span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .clip-h em { font-style: normal; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .clip input { min-height: 40px; margin-right: 6px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); padding: 6px 10px; font-size: 14px; }
+  .clone-out { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .clone-out:empty { display: none; }
+  .clone-out q { color: var(--text); }
+  #cloneStatus .dots { padding: 0 6px 0 0; vertical-align: middle; }
   #lightbox .lb { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
   #toast { position: fixed; left: 50%; bottom: calc(110px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
            background: var(--text); color: var(--bg); border-radius: 14px; padding: 8px 8px 8px 16px; display: flex; align-items: center;
@@ -498,6 +528,7 @@
         <input class="search" id="vsearch" type="search" placeholder="Search voices" aria-label="Search voices" hidden>
         <div id="voices" role="radiogroup" aria-labelledby="voicesLbl"></div>
         <span class="note-s" id="vsource"></span></div>
+      <div class="vline" id="cloneRow" hidden><button class="btn" id="cloneOpen" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>Clone my voice</button></div>
     </section>
     <section class="sect" aria-labelledby="hFree">
       <h3 id="hFree">Hands-free</h3>
@@ -518,6 +549,65 @@
       <label class="field"><span>API key or device token (a proxy in front, or a paired device; computer approvals need a token allowed to approve)</span><input type="password" id="key" autocomplete="off" placeholder="none"></label>
       <label class="field"><span>Debug log lines to copy</span><input type="number" id="logn" min="20" max="2000" step="10"></label>
       <div class="vline"><button class="btn" id="copylog2">Copy debug log</button><span class="grow"></span><button class="btn" id="wipeAll">Delete all chats</button></div>
+    </section>
+  </div>
+</dialog>
+
+<dialog class="drawer" id="clone" aria-labelledby="cloneTitle">
+  <div class="dh"><h2 id="cloneTitle">Clone my voice</h2><button class="icon-btn" id="cloneClose" aria-label="Close voice cloning"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+  <div class="db">
+    <section class="sect" aria-labelledby="hConsent">
+      <h3 id="hConsent">Consent</h3>
+      <label class="check"><input type="checkbox" id="cloneConsent" required><span>This is my own voice (or I have the speaker's recorded consent)</span></label>
+      <p class="note-s">Voices and recordings stay on this box; delete them any time. Nothing is recorded or sent until this is ticked.</p>
+    </section>
+    <section class="sect" aria-labelledby="hSample">
+      <h3 id="hSample">Your voice</h3>
+      <div class="seg" role="tablist" aria-label="How to give your voice">
+        <button role="tab" id="tabRec" data-tab="rec" aria-controls="panRec" aria-selected="true">Record</button>
+        <button role="tab" id="tabUp" data-tab="up" aria-controls="panUp" aria-selected="false" tabindex="-1">Upload</button>
+      </div>
+      <div class="clone-pan" id="panRec" role="tabpanel" aria-labelledby="tabRec">
+        <p class="note-s">Somewhere quiet, a hand's width from the mic. Press Start and stay silent for a second, then read this aloud at your usual pace. 10 s is enough; a minute is better.</p>
+        <div class="clone-script" tabindex="0" role="document" aria-label="Text to read aloud">
+          <p>The morning train was already twelve minutes late when Maya reached the platform. She checked her phone: seven new messages, a reminder about the dentist at half past three, and a photo of her brother's new puppy. Was it really worth rushing? Probably not.</p>
+          <p>She bought a coffee for two dollars and forty cents, found a seat by the window, and watched the fields slide past: green, then gold, then grey with rain.</p>
+          <p>At the next station an old man sat down opposite her. "Excuse me, do you know if this train stops at Oakfield?" She told him it did, at about ten past nine, and he smiled as if she had solved a great puzzle.</p>
+          <p>They talked about gardens, the price of tomatoes, and the winter of 1995, when the river froze solid for three whole weeks. Honestly, who remembers the weather that well? He did. By the time they arrived, the sun was out, and the day felt a little lighter than it had an hour before.</p>
+        </div>
+        <div class="meter" id="recMeter" role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+        <div class="rec-row">
+          <button class="btn rec" id="recStart" disabled>Start</button><button class="btn" id="recStop" disabled>Stop</button>
+          <span class="grow"></span><span class="rec-time" id="recTime">0:00 / 1:00</span>
+        </div>
+        <p class="note-s" id="recPhase" aria-live="polite"></p>
+        <p class="note-s" id="recHint" aria-live="polite"></p>
+      </div>
+      <div class="clone-pan" id="panUp" role="tabpanel" aria-labelledby="tabUp" hidden>
+        <label class="field"><span>Audio files<small>WAV, MP3, WebM, Ogg, FLAC or M4A: up to 8 clips, 10 to 60 s of speech in all, each starting with a moment of silence.</small></span>
+          <input type="file" id="cloneFiles" multiple accept="audio/*" disabled></label>
+        <div class="clips" id="cloneClips"></div>
+      </div>
+      <p class="note-s" id="cloneSampleNote" aria-live="polite"></p>
+    </section>
+    <section class="sect" aria-labelledby="hTry">
+      <h3 id="hTry">Preview</h3>
+      <div class="vline"><button class="btn primary" id="cloneMake" disabled>Make a preview</button><span class="grow"></span><button class="btn" id="cloneAgain" hidden>Try again</button></div>
+      <p class="note-s" id="cloneStatus" role="status" aria-live="polite"></p>
+      <div class="vline" id="clonePlayRow" hidden><button class="play" id="clonePlay" aria-label="Preview your new voice"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button><span class="note-s">Hear your new voice</span></div>
+      <div class="clone-out" id="cloneOut"></div>
+    </section>
+    <form class="sect" id="cloneSaveSect" aria-labelledby="hSave" hidden novalidate>
+      <h3 id="hSave">Name and save</h3>
+      <label class="field"><span>Name<small>1 to 64 letters, digits, dots, dashes or underscores</small></span>
+        <input type="text" id="cloneName" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. JJ" aria-describedby="cloneNameNote"></label>
+      <p class="note-s" id="cloneNameNote" aria-live="polite"></p>
+      <div class="vline"><span class="grow"></span><button class="btn primary" id="cloneSave" type="submit">Save</button></div>
+    </form>
+    <section class="sect" aria-labelledby="hMine">
+      <h3 id="hMine">Cloned voices</h3>
+      <div class="engines" id="cloneVoices"></div>
+      <p class="note-s" id="cloneVoicesNote" aria-live="polite"></p>
     </section>
   </div>
 </dialog>
@@ -1228,7 +1318,7 @@ async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
   if (S.key) headers.authorization = 'Bearer ' + S.key;
   if (opts.json !== undefined) { headers['content-type'] = 'application/json'; opts.body = JSON.stringify(opts.json); }
-  const r = await fetch(path, { method: opts.method || (opts.body ? 'POST' : 'GET'), headers, body: opts.body, signal: opts.signal });
+  const r = await fetch(path, { method: opts.method || (opts.body ? 'POST' : 'GET'), headers, body: opts.body, signal: opts.signal, cache: opts.cache });
   if (r.status === 401 && !opts.retried) {
     const k = prompt('This LocalRouter needs an API key:', S.key || '');
     if (k) { S.key = k.trim(); saveSettings(); return api(path, Object.assign({}, opts, { retried: true })); }
@@ -1826,6 +1916,7 @@ async function renderVoices() {
     b.onclick = () => { S.speechModel = m.id; saveSettings(); sessionUpdate(); renderVoices(); renderVoiceName(); };
     return b;
   }));
+  $('cloneRow').hidden = !canClone(id);
   const vs = await loadVoices(id);
   const chosen = voiceOf(id) || vs.def;
   const q = $('vsearch').value.trim().toLowerCase();
@@ -1866,7 +1957,7 @@ async function preview(id, v, btn) {
         // The speech model may be loading (after a restart, or back from an eviction): a 503 is waited out, up to 90 s.
         let r;
         for (let tries = 0; ; tries++) {
-          r = await api('/v1/audio/speech', { json: { model: id, voice: v.id, input: `Hi, I'm ${v.name}. This is how I sound.`, response_format: 'wav' } });
+          r = await api('/v1/audio/speech', { json: { model: id, voice: v.id, input: v.line || `Hi, I'm ${v.name}. This is how I sound.`, response_format: 'wav' } });
           if (r.status !== 503 || tries >= 45) break;
           if (tries === 0) toast('The voice model is loading; the preview plays when it is ready');
           dbg('voice.preview.wait', { model: id, voice: v.id, status: r.status });
@@ -1893,9 +1984,382 @@ async function preview(id, v, btn) {
   } catch (e) {
     dbg('voice.preview', { model: id, voice: v.id, error: e.message });
     toast(`Preview failed: ${e.message.slice(0, 120)}`);
+    return e.message; // for a caller in a dialog, where the toast is hidden
   } finally {
     btn.dataset.busy = '';
   }
+}
+
+// ---------------------------------------------------------------- voice cloning (/v1/voices): record or upload, preview a draft, name it
+// A take or the chosen files stay in memory until they are uploaded, then are dropped; nothing of a voice is kept in
+// this browser. The microphone is raw (no echo cancellation, noise suppression or gain control: they colour the timbre).
+const CLONE_MIN = 10, CLONE_MAX = 60, CLONE_CLIPS = 8;
+const CLONE_LINE = 'Hello! This is my new voice. Does it sound like me? I hope so, because I read a whole page for it.';
+const CLONE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const C = { model: '', tab: 'rec', stream: null, ctx: null, an: null, buf: null, rec: null, chunks: [], keep: false, secs: 0,
+  t0: 0, raf: 0, vis: 0, loud: 0, clipAt: -1e9, clipped: false, phase: '', hint: '', take: null, files: [], draft: null, ctl: null };
+const canClone = id => { const m = models.find(x => x.id === id); return !!m && (m.capabilities || []).includes('voice_clone'); };
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function cloneSay(id, text, error) { $(id).textContent = text; $(id).classList.toggle('err', !!error); }
+async function cloneError(r) {
+  if (r.status === 403) return 'Cloning needs a device paired with the manage scope';
+  return errorText(r);
+}
+function openClone() {
+  C.model = engine();
+  $('cloneConsent').checked = false;
+  $('cloneName').value = '';
+  ['cloneStatus', 'cloneNameNote', 'cloneSampleNote', 'recPhase', 'recHint', 'cloneVoicesNote'].forEach(id => cloneSay(id, ''));
+  $('cloneOut').replaceChildren();
+  cloneTab('rec');
+  renderClips();
+  cloneRender();
+  $('clone').showModal();
+  $('cloneConsent').focus();
+  cloneList();
+}
+function cloneRender() {
+  const ok = $('cloneConsent').checked, recording = !!C.rec, busy = !!C.ctl;
+  $('recStart').disabled = !ok || recording || busy;
+  $('recStart').textContent = recording ? 'Recording…' : C.take ? 'Re-record' : 'Start';
+  $('recStop').disabled = !recording;
+  $('cloneFiles').disabled = !ok || busy || C.files.length >= CLONE_CLIPS;
+  for (const t of document.querySelectorAll('#clone [role=tab]')) t.disabled = recording || busy;
+  const s = cloneSample();
+  cloneSay('cloneSampleNote', s.note, s.bad);
+  $('cloneMake').disabled = !ok || recording || busy || !s.ok;
+  $('cloneMake').textContent = busy ? 'Making…' : 'Make a preview';
+  $('cloneAgain').hidden = !C.draft || busy;
+  $('clonePlayRow').hidden = !C.draft;
+  $('cloneSaveSect').hidden = !C.draft;
+}
+// What would be uploaded, and whether it is enough.
+function cloneSample() {
+  if (C.tab === 'rec') {
+    if (!C.take) return { ok: false, note: '' };
+    const read = C.take.seconds - 1; // the first second is the silence before reading
+    if (read < CLONE_MIN) return { ok: false, bad: true, note: `That take has ${Math.max(0, read).toFixed(1)} s of reading: read for at least ${CLONE_MIN} s, then Stop.` };
+    return { ok: true, note: `A ${Math.round(C.take.seconds)} s take is ready${C.clipped ? '. It clipped in places: a little further from the mic sounds better' : ''}.` };
+  }
+  const n = C.files.length;
+  if (!n) return { ok: false, note: '' };
+  if (C.files.some(f => f.seconds == null)) return { ok: false, note: 'Reading the files…' };
+  const named = C.files.filter(f => f.transcript.trim()).length;
+  if (named && named < n) return { ok: false, bad: true, note: 'Give a transcript for every clip, or for none (the box then writes them).' };
+  const total = C.files.reduce((a, f) => a + f.seconds, 0), known = C.files.every(f => f.seconds > 0);
+  if (known && total < CLONE_MIN) return { ok: false, bad: true, note: `${total.toFixed(1)} s in all: a voice needs at least ${CLONE_MIN} s of speech.` };
+  return { ok: true, note: `${n} clip${n > 1 ? 's' : ''}${known ? `, ${Math.round(total)} s in all` : ''}${total > CLONE_MAX ? ` (more than ${CLONE_MAX} s adds little)` : ''}.` };
+}
+function cloneTab(tab) {
+  C.tab = tab;
+  for (const t of document.querySelectorAll('#clone [role=tab]')) {
+    const on = t.dataset.tab === tab;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute('aria-controls')).hidden = !on;
+  }
+  cloneRender();
+}
+
+// Recording: the level meter, a second of silence first (the box refuses a clip that starts inside speech), 60 s at most.
+async function recStart() {
+  if (V.ws) { cloneSay('recHint', 'End the voice call first: it is using the microphone.', true); return; }
+  recStop(false);
+  C.take = null;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC(); // made in the tap, so it may start
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+  } catch (e) {
+    ctx.close();
+    dbg('voice.clone.mic', { error: e.name });
+    cloneSay('recHint', e.name === 'NotAllowedError' ? 'The microphone is blocked: allow it for this page, then press Start again.' : `No microphone: ${e.message}`, true);
+    cloneRender();
+    return;
+  }
+  if (!$('clone').open) { stream.getTracks().forEach(t => t.stop()); ctx.close(); return; }
+  const type = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+  let rec;
+  try { rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined); } catch (e) {
+    stream.getTracks().forEach(t => t.stop()); ctx.close();
+    cloneSay('recHint', `This browser cannot record audio: ${e.message}`, true);
+    return;
+  }
+  Object.assign(C, { stream, ctx, rec, chunks: [], keep: false, clipped: false, vis: 0, loud: 0, clipAt: -1e9, phase: '', hint: '' });
+  C.an = Object.assign(ctx.createAnalyser(), { fftSize: 2048 });
+  C.buf = new Float32Array(C.an.fftSize);
+  ctx.createMediaStreamSource(stream).connect(C.an);
+  rec.ondataavailable = e => { if (e.data && e.data.size) C.chunks.push(e.data); };
+  rec.onstop = () => {
+    if (C.keep && C.chunks.length) C.take = { blob: new Blob(C.chunks, { type: rec.mimeType || type || 'audio/webm' }), seconds: C.secs };
+    C.chunks = [];
+    if (C.take) dbg('voice.clone.take', { seconds: Math.round(C.take.seconds * 10) / 10, bytes: C.take.blob.size, type: C.take.blob.type, clipped: C.clipped });
+    cloneRender();
+  };
+  rec.start(500);
+  C.t0 = performance.now();
+  cloneSay('recHint', '');
+  cloneRender();
+  $('recStop').focus();
+  recTick();
+}
+function recTick() {
+  if (!C.rec) return;
+  const t = (performance.now() - C.t0) / 1000;
+  C.an.getFloatTimeDomainData(C.buf);
+  let sum = 0, peak = 0;
+  for (const x of C.buf) { sum += x * x; const a = Math.abs(x); if (a > peak) peak = a; }
+  const rms = Math.sqrt(sum / C.buf.length);
+  C.vis = Math.max(rms, C.vis * 0.85);
+  C.loud = Math.max(rms, C.loud * 0.985); // the loudest of about the last second and a half
+  if (peak > 0.98) { C.clipAt = t; if (t >= 1) C.clipped = true; }
+  const pct = Math.round(Math.max(0, Math.min(1, (20 * Math.log10(Math.max(C.vis, 1e-5)) + 60) / 60)) * 100);
+  const hint = t - C.clipAt < 1.5 ? 'loud' : t > 3 && C.loud < 0.01 ? 'quiet' : 'ok';
+  const meter = $('recMeter');
+  meter.firstElementChild.style.width = pct + '%';
+  meter.setAttribute('aria-valuenow', String(pct));
+  meter.dataset.s = hint === 'ok' ? '' : hint;
+  if (hint !== C.hint) {
+    C.hint = hint;
+    cloneSay('recHint', hint === 'loud' ? 'Too loud (clipping): move back a little or speak softer.' : hint === 'quiet' ? 'Too quiet: move closer to the mic.' : '', hint === 'loud');
+  }
+  const phase = t < 1 ? 'ready' : 'read';
+  if (phase !== C.phase) { C.phase = phase; $('recPhase').textContent = phase === 'ready' ? 'Recording. Stay quiet for a second…' : 'Now read the text aloud.'; }
+  $('recTime').textContent = `${mmss(t)} / ${mmss(CLONE_MAX)}${t < CLONE_MIN + 1 ? ` · at least ${CLONE_MIN} s` : ''}`;
+  if (t >= CLONE_MAX) { recStop(true); $('recPhase').textContent = `Stopped at ${CLONE_MAX} s.`; return; }
+  C.raf = requestAnimationFrame(recTick);
+}
+// Ends the take (kept or not) and lets go of the microphone.
+function recStop(keep) {
+  cancelAnimationFrame(C.raf);
+  if (C.rec) {
+    C.secs = (performance.now() - C.t0) / 1000;
+    C.keep = keep;
+    if (C.rec.state !== 'inactive') C.rec.stop();
+    if (keep) $('recPhase').textContent = `Stopped at ${Math.floor(C.secs)} s.`;
+  }
+  if (C.stream) C.stream.getTracks().forEach(t => t.stop());
+  if (C.ctx) C.ctx.close().catch(() => {});
+  Object.assign(C, { rec: null, stream: null, ctx: null, an: null, buf: null });
+  const meter = $('recMeter');
+  meter.firstElementChild.style.width = '0';
+  meter.setAttribute('aria-valuenow', '0');
+  meter.dataset.s = '';
+  if ($('clone').open) cloneRender();
+}
+
+// Uploading files: their lengths (as this browser decodes them) and an optional transcript each.
+async function fileSeconds(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const d = await new Promise(ok => { const a = new Audio(); a.preload = 'metadata'; a.onloadedmetadata = () => ok(a.duration); a.onerror = () => ok(NaN); a.src = url; });
+    if (Number.isFinite(d) && d > 0) return d;
+  } finally { URL.revokeObjectURL(url); }
+  try { // WebM from a recorder often has no duration in its header
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    return (await new OAC(1, 1, 44100).decodeAudioData(await file.arrayBuffer())).duration;
+  } catch { return 0; } // the box may still read it
+}
+function addFiles(list) {
+  const room = CLONE_CLIPS - C.files.length;
+  const add = [...list].slice(0, Math.max(0, room)).map(file => ({ file, seconds: null, transcript: '' }));
+  cloneSay('cloneStatus', list.length > room ? `A voice takes up to ${CLONE_CLIPS} clips: ${list.length - add.length} left out.` : '', true);
+  C.files.push(...add);
+  $('cloneFiles').value = '';
+  renderClips();
+  cloneRender();
+  for (const f of add) fileSeconds(f.file).then(s => { f.seconds = s; renderClips(); cloneRender(); });
+}
+function renderClips() {
+  $('cloneClips').replaceChildren(...C.files.map((f, i) => {
+    const row = ccEl('div', 'clip'), head = ccEl('div', 'clip-h');
+    const len = f.seconds == null ? '…' : f.seconds > 0 ? `${f.seconds.toFixed(1)} s` : 'length unknown';
+    const del = Object.assign(ccEl('button', 'icon-btn'), { innerHTML: I.trash });
+    del.setAttribute('aria-label', `Remove ${f.file.name}`);
+    del.onclick = () => { C.files.splice(i, 1); renderClips(); cloneRender(); $('cloneFiles').focus(); };
+    head.append(ccEl('span', null, f.file.name), ccEl('em', null, len), del);
+    const tr = Object.assign(document.createElement('input'), { type: 'text', value: f.transcript, placeholder: 'Transcript (optional)', autocomplete: 'off' });
+    tr.setAttribute('aria-label', `Transcript of ${f.file.name} (optional)`);
+    tr.addEventListener('input', () => { f.transcript = tr.value; cloneRender(); });
+    row.append(head, tr);
+    return row;
+  }));
+}
+
+// The draft: uploaded without a name, previewed, then named (PATCH) or deleted.
+function forgetPreview(model, id) {
+  const k = model + '\u0000' + id, u = previews.get(k);
+  if (u && u.startsWith('blob:')) URL.revokeObjectURL(u);
+  previews.delete(k);
+}
+async function dropDraft() {
+  const d = C.draft;
+  C.draft = null;
+  if (!d) return;
+  if (previewAudio) previewAudio.pause();
+  forgetPreview(C.model, d.id);
+  const r = await api('/v1/voices/' + encodeURIComponent(d.id), { method: 'DELETE' }).catch(() => null);
+  dbg('voice.clone.drop', { id: d.id, status: r ? r.status : 0 });
+}
+async function cloneMake() {
+  const s = cloneSample();
+  if (!$('cloneConsent').checked || !s.ok || C.ctl) return;
+  const fd = new FormData();
+  if (C.tab === 'rec') {
+    const ext = /ogg/.test(C.take.blob.type) ? 'ogg' : /mp4|aac/.test(C.take.blob.type) ? 'm4a' : 'webm';
+    fd.append('file', C.take.blob, `take.${ext}`);
+    fd.append('language', 'en'); // the script is English; Whisper writes the transcript (a speaker rarely reads it word for word)
+  } else {
+    for (const f of C.files) fd.append('file', f.file, f.file.name);
+    if (C.files.every(f => f.transcript.trim())) for (const f of C.files) fd.append('transcript', f.transcript.trim());
+  }
+  fd.append('consent', 'true');
+  fd.append('model', C.model);
+  const ctl = C.ctl = new AbortController();
+  const status = $('cloneStatus');
+  status.classList.remove('err');
+  status.innerHTML = '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>Making a preview voice: transcribing and encoding takes up to half a minute…';
+  $('cloneOut').replaceChildren();
+  cloneRender();
+  const t0 = performance.now();
+  try {
+    await dropDraft();
+    const r = await api('/v1/voices', { method: 'POST', body: fd, signal: ctl.signal });
+    if (!r.ok) throw new Error(await cloneError(r));
+    const v = await r.json();
+    C.draft = v;
+    if (ctl.signal.aborted) { await dropDraft(); return; } // closed while it was made
+    dbg('voice.clone.draft', { model: C.model, id: v.id, seconds: v.seconds, clips: (v.clips || []).length, transcribed: v.transcribed, ms: Math.round(performance.now() - t0) });
+    C.take = null; C.files = []; renderClips(); // on the box now: dropped here
+    $('recPhase').textContent = '';
+    cloneResult(v);
+    cloneSay('cloneStatus', 'Your preview voice is ready: listen, then name it to keep it, or try again.');
+    C.ctl = null;
+    cloneRender();
+    const err = await preview(C.model, { id: v.id, name: 'your new voice', line: CLONE_LINE }, $('clonePlay'));
+    if (err) cloneSay('cloneStatus', `The voice is made, but its preview failed: ${err}`, true);
+  } catch (e) {
+    dbg('voice.clone.draft', { model: C.model, error: e.message });
+    cloneSay('cloneStatus', e.name === 'AbortError' ? 'Stopped.' : `No voice made: ${e.message}`, true);
+  } finally {
+    if (C.ctl === ctl) C.ctl = null;
+    if ($('clone').open) cloneRender();
+  }
+}
+function cloneResult(v) {
+  const out = [];
+  (v.clips || []).forEach((c, i) => {
+    const bits = [`${(c.seconds_kept || 0).toFixed(1)} s kept of ${(c.seconds_in || 0).toFixed(1)} s`];
+    if (c.snr_db != null) bits.push(`background ${Math.round(c.snr_db)} dB under the speech`);
+    out.push(ccEl('span', null, `Clip ${i + 1}: ${bits.join(', ')}`));
+  });
+  if (v.seconds) out.push(ccEl('span', null, `${v.seconds.toFixed(1)} s of speech in the voice${v.transcribed ? ', transcribed on the box' : ''}. What it heard:`));
+  for (const ref of v.references || []) { const p = ccEl('span'); p.append(ccEl('q', null, ref.text)); out.push(p); }
+  $('cloneOut').replaceChildren(...out);
+}
+async function cloneAgain() {
+  await dropDraft();
+  $('cloneOut').replaceChildren();
+  cloneSay('cloneStatus', '');
+  cloneSay('cloneNameNote', '');
+  cloneRender();
+  (C.tab === 'rec' ? $('recStart') : $('cloneFiles')).focus();
+}
+function nameProblem(n) {
+  if (!CLONE_NAME.test(n)) return 'A name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit.';
+  if (n.toLowerCase() === 'default' || n.toLowerCase().startsWith('draft-')) return `“${n}” is reserved: choose another name.`;
+  if (voiceListed(C.model, n)) return `“${n}” is taken: choose another name.`;
+  return '';
+}
+async function cloneSave(e) {
+  e.preventDefault();
+  const name = $('cloneName').value.trim();
+  const bad = nameProblem(name);
+  if (bad) { cloneSay('cloneNameNote', bad, true); $('cloneName').focus(); return; }
+  if (!C.draft) return;
+  $('cloneSave').disabled = true;
+  try {
+    const r = await api('/v1/voices/' + encodeURIComponent(C.draft.id), { method: 'PATCH', json: { name } });
+    if (!r.ok) throw new Error(r.status === 409 ? `“${name}” is taken: choose another name.` : await cloneError(r));
+    const v = await r.json();
+    dbg('voice.clone.saved', { model: C.model, id: v.id });
+    forgetPreview(C.model, C.draft.id);
+    C.draft = null;
+    await loadModels();
+    S.voices = Object.assign({}, S.voices, { [C.model]: v.id });
+    saveSettings(); sessionUpdate(); renderVoices(); renderVoiceName();
+    $('cloneName').value = '';
+    $('cloneOut').replaceChildren();
+    cloneSay('cloneNameNote', '');
+    cloneSay('cloneStatus', `Saved “${v.name || v.id}”: Jarvis speaks with it now.`);
+    cloneList();
+  } catch (err) {
+    cloneSay('cloneNameNote', err.message, true);
+    $('cloneName').focus();
+  } finally {
+    $('cloneSave').disabled = false;
+    cloneRender();
+  }
+}
+
+// The model's cloned voices, each with a preview and Delete.
+async function cloneList() {
+  let list;
+  try {
+    const r = await api('/v1/voices?model=' + encodeURIComponent(C.model), { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status === 403 ? 'listing them needs a device paired with the read scope' : await errorText(r));
+    list = ((await r.json()).data || []).filter(v => v.kind === 'cloned');
+  } catch (e) {
+    $('cloneVoices').replaceChildren();
+    cloneSay('cloneVoicesNote', `Could not list the voices: ${e.message}`, true);
+    return;
+  }
+  cloneSay('cloneVoicesNote', list.length ? '' : 'None yet.');
+  $('cloneVoices').replaceChildren(...list.map(v => {
+    const line = ccEl('div', 'vline'), row = ccEl('div', 'vrow'), txt = ccEl('span');
+    const name = v.name || v.id;
+    const when = v.created_at ? new Date(v.created_at * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+    txt.append(ccEl('b', null, name + (voiceOf(C.model) === v.id ? ' · in use' : '')), ccEl('small', null, [v.seconds ? `${Math.round(v.seconds)} s of speech` : '', when && `made ${when}`].filter(Boolean).join(' · ')));
+    row.append(txt);
+    const p = Object.assign(ccEl('button', 'play'), { innerHTML: I.play });
+    p.setAttribute('aria-label', `Preview ${name}`);
+    p.onclick = () => preview(C.model, { id: v.id, name }, p).then(err => err && cloneSay('cloneVoicesNote', `Preview failed: ${err}`, true));
+    const del = Object.assign(ccEl('button', 'icon-btn'), { innerHTML: I.trash });
+    del.setAttribute('aria-label', `Delete ${name}`);
+    del.onclick = () => cloneDelete(v, del);
+    line.append(row, p, del);
+    return line;
+  }));
+}
+async function cloneDelete(v, btn) {
+  const name = v.name || v.id;
+  if (!confirm(`Delete the voice “${name}”? It is removed from this box for good.`)) return;
+  btn.disabled = true;
+  const r = await api('/v1/voices/' + encodeURIComponent(v.id), { method: 'DELETE' }).catch(() => null);
+  if (!r || !r.ok) { btn.disabled = false; cloneSay('cloneVoicesNote', r ? await cloneError(r) : 'Could not reach LocalRouter', true); return; }
+  dbg('voice.clone.deleted', { model: C.model, id: v.id });
+  if (previewAudio) previewAudio.pause();
+  forgetPreview(C.model, v.id);
+  const was = voiceOf(C.model) === v.id;
+  await loadModels();
+  if (was) { // back to the model's default, said to a live session too
+    const def = (await loadVoices(C.model)).def;
+    if (def && def !== v.id && voiceListed(C.model, def)) S.voices = Object.assign({}, S.voices, { [C.model]: def });
+    else delete S.voices[C.model];
+    saveSettings();
+  }
+  sessionUpdate(); renderVoices(); renderVoiceName();
+  cloneList().then(() => cloneSay('cloneVoicesNote', `Deleted “${name}”.`));
+}
+// Closing lets go of everything: the microphone, an upload under way, the take and files, and an unsaved draft.
+function cloneClosed() {
+  if (C.ctl) C.ctl.abort();
+  C.ctl = null;
+  recStop(false);
+  C.take = null; C.files = []; renderClips();
+  if (previewAudio) previewAudio.pause();
+  dropDraft();
 }
 
 // ---------------------------------------------------------------- voice over /v1/realtime
@@ -2913,6 +3377,25 @@ live('logn', e => { S.logN = Number(e.value) || 300; });
 $('sens').addEventListener('change', sessionUpdate);
 $('wait').addEventListener('change', () => { S.wait = Number($('wait').value) || 800; saveSettings(); sessionUpdate(); dbg('settings.wait', { ms: S.wait }); });
 $('vsearch').addEventListener('input', renderVoices);
+$('cloneOpen').onclick = openClone;
+$('cloneClose').onclick = () => $('clone').close();
+$('clone').addEventListener('close', cloneClosed);
+$('cloneConsent').addEventListener('change', cloneRender);
+$('recStart').onclick = recStart;
+$('recStop').onclick = () => recStop(true);
+$('cloneFiles').addEventListener('change', () => addFiles($('cloneFiles').files));
+$('cloneMake').onclick = cloneMake;
+$('cloneAgain').onclick = cloneAgain;
+$('cloneSaveSect').addEventListener('submit', cloneSave);
+for (const t of document.querySelectorAll('#clone [role=tab]')) {
+  t.onclick = () => cloneTab(t.dataset.tab);
+  t.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const next = t.dataset.tab === 'rec' ? 'up' : 'rec';
+    cloneTab(next);
+    $(next === 'rec' ? 'tabRec' : 'tabUp').focus();
+  });
+}
 $('drawerClose').onclick = () => $('drawer').close();
 $('drawer').addEventListener('click', e => { if (e.target === $('drawer')) $('drawer').close(); });
 $('copylog2').onclick = copyLog;

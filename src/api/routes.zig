@@ -23,6 +23,7 @@ const decide = @import("decide.zig");
 const realtime = @import("realtime.zig");
 const pair = @import("pair.zig");
 const desktop = @import("desktop.zig");
+const voices = @import("voices.zig");
 const Need = @import("../pair.zig").Need;
 
 pub const App = struct {
@@ -37,6 +38,7 @@ pub const App = struct {
     voice: realtime.Registry = .{}, // open voice sessions, closed at shutdown
     pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
     computer: ?*desktop.Service = null, // computer control (desktop.zig); null when the config switches it off
+    cloned: @import("../voices.zig").Store = .{}, // cloned voices (`voices.zig`, `api/voices.zig`)
     plan: ?*const @import("../topology.zig").Plan = null, // where each tool runs (a multi-node topology); null: here
 
     /// Why tool `c` is refused on this machine until it is qualified here (`engine.unqualified`), or null; a tool that
@@ -95,6 +97,8 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..], caller);
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..], caller);
     if (m == .GET and eql(p, "/v1/skills/model-manager")) return h.jsonValue(req, a, .ok, .{ .enabled = app.cfg.voice.tools and app.cfg.voice.manage_models, .text = @import("../voice/skill.zig").model_skill });
+    if (eql(p, "/v1/voices")) return voices.route(app, req, a, host, ctype, "", caller);
+    if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
     if (std.mem.startsWith(u8, p, "/v1/node/")) return @import("node.zig").route(app, req, a, p["/v1/node/".len..], caller);
@@ -114,6 +118,7 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
     if (eql(p, "/mcp")) return .mcp;
     if (eql(p, "/v1/realtime")) return .realtime;
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/skills/model-manager"))) return .read;
+    if (m == .GET and (eql(p, "/v1/voices") or starts(u8, p, "/v1/voices/"))) return .read; // creating, renaming and deleting a voice: manage
     if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
     if (eql(p, "/v1/systemone")) return .decisions;
     if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or starts(u8, p, "/v1/audio/")) return .media;
@@ -139,7 +144,10 @@ test "every route class needs its scope; only the open routes need none; an unna
         .{ .GET, "/v1/videos/v_1/content", .owned }, .{ .DELETE, "/v1/videos/v_1", .owned },
         .{ .GET, "/v1/jobs/img_1", .owned },         .{ .GET, "/v1/files/img_1/0.png", .owned },
         .{ .POST, "/v1/models", .manage },           .{ .GET, "/v1/something-new", .manage },
-        .{ .GET, "/v1/node/status", .manage },       .{ .POST, "/v1/node/jobs", .manage },
+        .{ .GET, "/v1/voices", .read },              .{ .GET, "/v1/voices/JJ", .read },
+        .{ .POST, "/v1/voices", .manage },           .{ .PATCH, "/v1/voices/draft-1", .manage },
+        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/node/status", .manage },
+        .{ .POST, "/v1/node/jobs", .manage },
     };
     for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));
 }
@@ -157,7 +165,8 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         const c = slot.tool.config();
         const st = slot.tool.state();
         e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i), .license = engine.license(c) };
-        const info = engine.audioInfo(c);
+        var info = engine.audioInfo(c);
+        if (c.kind == .speech) info.voices = try speechVoices(app, a, c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
         var buf: [512]u8 = undefined;
         if (c.qualification.len > 0 and slot.tool.local()) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way; a remote tool's node lists its own
@@ -166,6 +175,23 @@ fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
         if (c.kind == .chat) e.min_thinking_tokens = c.min_thinking_tokens; // a smaller limit answers without thinking
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
+}
+
+/// A speech model's voices as listed: its configured `voices`, then the voices cloned for it (null: it lists none and
+/// has none cloned).
+pub fn speechVoices(app: *App, a: std.mem.Allocator, c: *const @import("../config.zig").ToolConfig) !?[]const std.json.Value {
+    const own = engine.voices(c);
+    const cloned = try app.cloned.names(app.io, a, c.id);
+    if (cloned.len == 0) return own;
+    var out: std.ArrayList(std.json.Value) = .empty;
+    try out.appendSlice(a, own orelse &.{});
+    for (cloned) |n| try out.append(a, .{ .string = n });
+    return out.items;
+}
+
+/// Whether speech model `c` has `voice`: configured, or cloned for it (a draft included).
+pub fn hasVoice(app: *App, c: *const @import("../config.zig").ToolConfig, voice: []const u8) bool {
+    return engine.hasVoice(c, voice) or app.cloned.has(app.io, c.id, voice);
 }
 
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
@@ -236,10 +262,10 @@ pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Ref
 /// offer every model's).
 pub fn resolveSpeech(app: *App, model: ?[]const u8, voice: []const u8, why: *Refusal) ?usize {
     const i = resolve(app, model, .text_to_speech, why) orelse return null;
-    if (model != null or voice.len == 0 or engine.hasVoice(app.scheduler.slots[i].tool.config(), voice)) return i;
+    if (model != null or voice.len == 0 or hasVoice(app, app.scheduler.slots[i].tool.config(), voice)) return i;
     for (app.scheduler.slots, 0..) |slot, k| {
         const c = slot.tool.config();
-        if (engine.supports(c, .text_to_speech) and engine.hasVoice(c, voice)) return k;
+        if (engine.supports(c, .text_to_speech) and hasVoice(app, c, voice)) return k;
     }
     return i;
 }

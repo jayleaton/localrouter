@@ -13,8 +13,8 @@ DRAMA_ROOT=${DRAMA_ROOT:-$J/qualify-drama3/root}
 # stays beside the quant's, so DRAMA_VARIANT=full and install.sh is the whole rollback.
 DRAMA_VARIANT=${DRAMA_VARIANT:-nvfp4}
 case $DRAMA_VARIANT in
-  full) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-42144366592} ;;
-  nvfp4) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-nvfp4-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-22075092992} ;;
+  full) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-42378776576} ;;
+  nvfp4) DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-nvfp4-qualification.json} DRAMA_RESIDENT=${DRAMA_RESIDENT:-22309502976} ;;
   *) echo "env.sh: DRAMA_VARIANT must be nvfp4 or full, not '$DRAMA_VARIANT'" >&2; exit 2 ;;
 esac
 DRAMA_PORT=${DRAMA_PORT:-$((PORT + 10603))}   # the Drama 3 server, on 127.0.0.1 (18793 beside the default PORT)

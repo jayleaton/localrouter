@@ -36,8 +36,9 @@ Service without a separate licence, so this tool stays on loopback.
 | Finish | `x-finish-reason`: `stop`, `length` (clipped at the frame limit) or `silence` (10 s below -40 dBFS, which also ends a collapse into a steady hum); long form adds `x-long-form-segments: N;S2,S3,...` |
 | Markup | point tags in the text, such as `[sighs]` and `[laughs]`, where the event should land; the model card lists no full vocabulary |
 | Instructions | no native control: the system prompt is the fixed `convert the provided text to speech` (`drama_prompt.zig`), and SGLang-Omni's server refuses `instructions`. The tool's `"instructions": "[{s}] "` option has the daemon write them as a bracketed direction before the line (after a leading speaker tag): `[whispering, nervous] I'm fine.` |
+| Cloning | `POST /v1/voices` (the tool lists `voice_clone`): recordings of one person become a voice of their own, spoken with the references the engine's `voice encode` wrote ([Cloned voices](#cloned-voices)) |
 | Refused (400) | `speed` other than 1, `preset`, `instructions` holding `[`, `]`, a line break or a tag (the daemon, before loading); an unknown voice, references the model refuses, a prompt longer than the model takes (the server, in its own words) |
-| Not offered | audio upload for cloning (voice files are encoded offline, below); SSE streams; `seed` (the engine seeds each synthesis from its prompt, so the reply's seed is 0) |
+| Not offered | audio in `references` (send codes, or clone a voice); SSE streams; `seed` (the engine seeds each synthesis from its prompt, so the reply's seed is 0) |
 
 A streamed reply ends with the plain last chunk when the audio ended by itself, with the `x-finish-reason` trailer
 when it was cut short (and both trailers for long form), and without a last chunk when the synthesis failed after the
@@ -149,7 +150,8 @@ create it with `touch` and have the other GPU jobs take it too).
 | `max_frames` | the engine's 1024 | frames one synthesis may make (`--max-frames`) |
 | `long_form`, `long_form_chars`, `long_form_history` | off, 500, 1 | `--long-form` and its settings |
 | `voices_dir` | none | an absolute directory of voice files (`--voices`) |
-| `voices`, `default_voice` | `["default"]`, `default` | what `/v1/models` lists and the daemon checks; a `default_voice` other than `default` becomes `--default-voice`. The example config lists the six shipped voices, `Mae` by default ([Voices](#voices)) |
+| `voices`, `default_voice` | `["default"]`, `default` | what `/v1/models` lists and the daemon checks. The worker names a `default_voice` other than `default` in every request that names none (or `default`), as the server's `--default-voice` did, so a cloned voice can be spoken with its references alone; it must be one the server loaded. The example config lists the six shipped voices, `Mae` by default ([Voices](#voices)) |
+| `clone_working_bytes` | 8 GiB | what the scheduler books for an encode beside the loaded model (`capabilities` must list `voice_clone`): the encoder's measured peak ([Cloned voices](#cloned-voices)) |
 | `verify` | `size` | at load, each pinned checkpoint file's size, or its `sha256` (minutes), or `none` |
 | `pilot`, `native_bin`, `checkpoint`, `runtime_dir` | under `weights` | where fetch.sh and build.sh put them |
 | `ready_timeout_s` | 900 | the launcher's readiness deadline |
@@ -194,10 +196,75 @@ A prompt without references runs exactly as before. With references, the cached 
 chunks, so a resumed reply equals one prefilled whole, byte for byte.
 
 Clone only a voice the model invented, your own, or one whose owner has consented on record: the model licence's
-Section IV(b) forbids imitating an identifiable person without consent. Voice files are made offline with upstream's
-tools (`drama_voice_clip.py` prepares a 10 to 30 s take, `drama_voice.py` encodes it under the GPU lock and records its
-`source`, which the server requires), as its README describes. A clip of a person's voice, and its voice file, hold
-that voice: keep them out of source control. The six shipped files hold only voices the model invented.
+Section IV(b) forbids imitating an identifiable person without consent. The six shipped files hold only voices the model
+invented, made offline with upstream's tools (`drama_voice_clip.py`, `drama_voice.py`); a person's voice is cloned on
+the box itself ([Cloned voices](#cloned-voices)), and its clips and voice stay out of source control.
+
+### Cloned voices
+
+`POST /v1/voices` ([AGENTS.md](../AGENTS.md#voices-cloning)) makes a voice from recordings of one person, as
+plotarmordev's drama-tensorfold does: a voice is reference passages (each a clip's exact transcript and its codec
+codes) spoken into the prompt before the text, not a speaker embedding. Nothing new is downloaded: the codes come
+from the pinned engine's own `tensorfold-native voice encode` (patches 0051 and 0052; the NVFP4 build carries it too),
+which reads `codec.pth`, the same file in both checkpoints, and encodes in BF16 on the GPU.
+
+1. **Prepared by the daemon** (`src/media/voiceprep.zig`, upstream's `drama_voice_clip.py` gates and numbers on 10 ms
+   frames at 44.1 kHz): each clip decoded with ffmpeg; refused when silent, clipped, starting inside a word, or with a
+   background less than 30 dB under the speech (on the whole clip and on what is kept); trimmed to 0.25 s before its
+   first and after its last loud frame; cut inside pauses into references of at most 30 s; each levelled to -20 dBFS
+   speech, peaks under -1 dBFS. All clips together: 10 to 60 s, at most 8 references. Not checked, unlike upstream:
+   a steady tone or hum in the pauses, and a second speaker (both need spectra this port does not compute).
+2. **Transcribed** by the transcription model where the caller gave no transcript (a clip with one is never cut).
+3. **Encoded** by the worker: one `voice encode` per reference, a job of its own on the realtime lane, booked at
+   `clone_working_bytes` beside the loaded model. The job directory, clips included, is deleted once the codes are read,
+   and so are the transcription jobs.
+4. **Kept** in `data_dir/voices/NAME.json` (0600): the transcripts, codes, `source` and the consent statement (who, when);
+   a draft (no name yet) lives in memory for an hour. `DELETE` removes the file.
+5. **Spoken** with its references inline (`references` in the server request, after any the caller sent) and no
+   `voice`, so the server needs no restart and no `--voices` file, and the prefix cache keys on the same rows. The
+   worker names the default voice in other requests itself, as `--default-voice` did, so the built-in voice plus a
+   clone's references is the clone and nothing else.
+
+**Measured on a GB10 (DGX-02, 2026-10-25),** the NVFP4 build and checkpoint copied from DGX-01, chat not loaded:
+LibriSpeech dev-clean speaker 1272 (a LibriVox recording, CC-BY-4.0) cloned through the API from four clips, 43.8 s kept,
+no transcripts (Whisper's were word-perfect), then the 24 sentences of `compare-texts.txt` in each voice
+(`compare.py`, streamed, Whisper large-v3-turbo):
+
+| | First audio p50 | First audio, first sentence | RTF p50 | WER | CAM++ cosine to the real speaker, mean (min) |
+| --- | --- | --- | --- | --- | --- |
+| Mae (named) | 0.324 s | 0.81 s | 0.748 | 0.0 % | 0.22 (0.10) |
+| Arlo (named) | 0.323 s | 0.79 s | 0.746 | 0.0 % | 0.27 (0.14) |
+| LS1272 (cloned) | 0.344 s | 2.0 s | 0.758 | 0.9 % | **0.68** (0.48) |
+| Speaker 1272, real | | | | | 0.85 (0.73) |
+
+- **Similarity** is CAM++ (chatterbox-turbo's encoder, as used to pick the named voices) between each reply and five
+  held-out 13 to 17 s passages of the same reader that the clone never heard; the real passages against each other
+  score 0.85, the ceiling. Median F0: clone 117 Hz, reader 111 Hz. The clone's own replies agree at 0.79 (the named
+  voices 0.86 to 0.88).
+- **Latency.** A clone's references are longer than a named voice's (945 frames against 280 to 431), so its first
+  sentence after a load, or after the cache dropped it, prefills them whole (2.0 s to first audio); every sentence
+  after resumes from the cache, 20 ms slower than a named voice.
+- **Making one** took 21.6 s through the API (four transcriptions and four encodes; about 4.7 s an encode of 30 s).
+- **Refusals seen:** a fifth LibriSpeech clip (1272-135031-0001) measures 28.9 dB from its speech to its quietest
+  frames (30.0 dB to its pause frames' median), and is refused for its background; 60.2 s of clips is refused as more
+  than 60 s.
+
+**Memory.** The encoder, for a 30 s reference (the longest): 1,064 MiB GPU + 519 MiB host, `MemAvailable` down at most
+1,717 MiB over three runs, so `clone_working_bytes` is 2 GiB (the peak and 256 MiB, rounded up). A clone's longer
+references also make its prefix-cache entry larger (152 MiB and 46 KiB a row): with two clones of 56 s cached (1,212
+and 1,216 frames) the server held 20,375 MiB GPU + 0.62 GiB host, 20.52 GiB, against 19.69 + 0.62 qualified with the
+named voices. Two clones of 60 s add 7 MiB more, so the NVFP4 tool's `resident_bytes` is now 22,309,502,976
+(20.78 GiB: that peak and 256 MiB) instead of 20.56 GiB. The full weights' figure gets the same 224 MiB (the same
+cache code), not measured on them.
+
+**Several nodes.** When Drama 3 runs on another node (`docs/dev/TWO-SPARK.md`), the front prepares the clips, keeps the
+voices and sends each encode and speech job to that node with its files, as for any job; the node's copy of an encode
+job's directory (the prepared clips) stays there until its `keep_outputs_s` expiry, not deleted at once as the front's
+is. Not run on two nodes.
+
+**Not verified:** a real person's own recordings (no recording of JJ yet); a clone in a voice call on DGX-01 beyond the
+smoke; voices of other languages or accents; the encoder's codes against the reference encoder's (upstream measured
+2.5 to 3 % of semantic codes different, with equal similarity); the full weights.
 
 ## Pins
 

@@ -791,7 +791,8 @@ def bench(args):
         private, environ = worker_environ(args.out, lock)
         env["private_lock"] = private
         before = mem_available()
-        w = kw.Worker(dict(tool), require_qualification=False, environ=environ)
+        # The benchmark client asks the server for "default": --default-voice keeps that the tool's default voice.
+        w = kw.Worker(dict(tool), require_qualification=False, environ=environ, server_default_voice=True)
         t = time.monotonic()
         loaded = w.load()
         if not rep.add("load", loaded.get("ok") is True, reply=loaded, ready_s=time.monotonic() - t,

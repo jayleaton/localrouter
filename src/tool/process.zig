@@ -77,9 +77,14 @@ pub const ProcessTool = struct {
         return self(ptr).cfg;
     }
 
+    /// What an encode whose peak the config does not give is booked at: 8 GiB, the box's rule for an unmeasured process.
+    const unmeasured_working: u64 = 8 << 30;
+
     fn needs(ptr: *anyopaque, req: *const Request) tool.Needs {
         const p = self(ptr);
         if (engine.find(p.cfg.engine)) |e| return e.needs(p.cfg, req);
+        // encoding a voice runs the model's encoder beside the loaded model: its measured peak, else the unmeasured rule
+        if (req.* == .speech and req.speech.clone.len > 0) return .{ .resident = p.cfg.resident_bytes, .working = engine.optionInt(p.cfg, "clone_working_bytes", unmeasured_working) };
         return .{ .resident = p.cfg.resident_bytes, .working = p.cfg.working_bytes };
     }
 

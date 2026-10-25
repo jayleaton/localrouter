@@ -154,7 +154,11 @@ pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Write
         if (lo == hi) why.print("model '{s}' takes only speed {d}", .{ cfg.id, lo }) catch {} else why.print("model '{s}' takes speed {d} to {d}", .{ cfg.id, lo, hi }) catch {};
         return false;
     }
-    if (v.voice.len > 0) if (voices(cfg)) |list| if (!listed(list, v.voice)) {
+    if (v.voice_references.len > 0 and !supports(cfg, .voice_clone)) {
+        why.print("model '{s}' has no cloned voices", .{cfg.id}) catch {};
+        return false;
+    }
+    if (v.voice.len > 0 and v.voice_references.len == 0) if (voices(cfg)) |list| if (!listed(list, v.voice)) {
         why.print("model '{s}' has no voice '{s}'; its voices: ", .{ cfg.id, v.voice }) catch {};
         printList(list, why);
         return false;
@@ -212,7 +216,7 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
 /// `v` with the tool's `default_voice` for an empty voice: the worker always gets the voice it will use.
 pub fn speechDefaults(cfg: *const ToolConfig, v: request.Speech) request.Speech {
     var out = v;
-    if (out.voice.len == 0) out.voice = optionString(cfg, "default_voice", "");
+    if (out.voice.len == 0 and out.clone.len == 0) out.voice = optionString(cfg, "default_voice", "");
     return out;
 }
 

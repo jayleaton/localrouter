@@ -14,11 +14,21 @@ cut short, and X-Long-Form-Segments too for a long-form reply; GET /v1/voices; 4
 The audio is a constant level, 441 samples (10 ms) a character of input: 1000 for the default voice, 2000 for a named
 one, plus 300 a reference. Test hooks in the input: [length] and [silence] end the audio with that finish reason,
 [busy] is a 503, [fault] a 500, [slow] streams a chunk every 0.1 s, [break] a stream (or reply) that stops after its
-first chunk, [crash] ends the launcher and its server at once.
+first chunk, [crash] ends the launcher and its server at once. Every speech request's body is written, before the
+reply, to RUNTIME_DIR/last_speech_request.json (the launcher's --runtime-dir), so a test can see what the worker sent.
+
+Run as `drama3_pilot.py voice encode CLIP.wav --model M --text T --name N --out N.json` (the test's native_bin a
+shell script that execs it so), it stands in for the engine's `tensorfold-native voice encode`: it writes a
+drama3-voice/1 file for a PCM WAV, frames = ceil(samples / 2048), a 10 x frames grid of codes derived from the samples
+(row 0 in [0, 4096), the rest in [0, 1024)), the trimmed text, codes_sha256, audio_sha256 (the clip file's) and
+encoder {"name": "test-stand-in"}, and prints its summary. Like the engine, it refuses (exit 1, "tensorfold: …" on
+stderr) a clip over 60 s or one that is not a PCM WAV, and its usage errors exit 2. Test hooks in the text: REFUSE-ME
+is refused as a transcript the voice file loader would not take, CRASH-ME aborts, SLOW-ME takes 5 s first.
 """
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -26,14 +36,107 @@ import struct
 import sys
 import threading
 import time
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 RATE = 44100
 MODEL = "fishaudio/drama-3"
 FIELDS = {"model", "input", "voice", "speaker", "response_format", "stream", "stream_format", "references"}
+REFERENCE_FIELDS = {"text", "vq_codes", "audio", "audio_path", "audio_base64"}
+LAST_REQUEST = "last_speech_request.json"  # in the launcher's --runtime-dir
+FRAME = 2048  # samples a codec frame at 44.1 kHz
+MAX_CLIP_S = 60
+VOICE_USAGE = "usage: tensorfold-native voice encode CLIP.wav --model MODEL --text TRANSCRIPT --name NAME --out NAME.json\n"
+
+
+def voice_encode(argv):
+    """`tensorfold-native voice encode`'s stand-in (see the module docstring); returns the exit code."""
+    def usage(why):
+        sys.stderr.write(f"{VOICE_USAGE}tensorfold-native voice: error: {why}\n")
+        return 2
+
+    def fail(why):
+        sys.stderr.write(f"tensorfold: {why}\n")
+        return 1
+
+    if not argv or argv[0] != "encode":
+        return usage("the voice command is encode")
+    clip, flags, it = None, {}, iter(argv[1:])
+    for arg in it:
+        if not arg.startswith("--"):
+            if clip is not None:
+                return usage("one clip at a time")
+            clip = arg
+            continue
+        name, eq, value = arg.partition("=")
+        if name not in ("--model", "--text", "--name", "--out"):
+            return usage("unknown flag; the flags are --model, --text, --name and --out")
+        if not eq:
+            value = next(it, None)
+            if value is None:
+                return usage("a flag without its value")
+        flags[name] = value
+    for need, why in ((clip, "no clip"), (flags.get("--model"), "no --model (the Drama 3 checkpoint holding codec.pth)"),
+                      (flags.get("--text"), "no --text (the clip's exact transcript)"), (flags.get("--name"), "no --name"),
+                      (flags.get("--out"), "no --out")):
+        if need is None:
+            return usage(why)
+    text, name, out = flags["--text"].strip(), flags["--name"], flags["--out"]
+    if not text:
+        return usage("--text is empty")
+    if os.path.basename(out) != name + ".json":
+        return usage("--out must be NAME.json: --voices names a voice by its file's stem")
+    if not os.path.isfile(os.path.join(flags["--model"], "codec.pth")):
+        return fail(f"{os.path.join(flags['--model'], 'codec.pth')}: FileNotFound")
+    if "SLOW-ME" in text:
+        time.sleep(5)
+    if "CRASH-ME" in text:
+        sys.stderr.write("CUDA error: an illegal memory access was encountered\n")
+        sys.stderr.flush()
+        os.abort()
+    try:
+        audio = open(clip, "rb").read()
+    except OSError as e:
+        return fail(f"{clip}: {type(e).__name__}")
+    try:
+        with wave.open(clip, "rb") as w:
+            rate, channels, width, n = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
+            pcm = w.readframes(n)
+    except (wave.Error, EOFError):
+        return fail("the clip is not a RIFF/WAVE file")
+    if n == 0:
+        return fail("the clip holds no samples")
+    seconds = n / rate
+    if seconds > MAX_CLIP_S:
+        return fail(f"reference audio lasts {seconds:.1f} s, longer than the {MAX_CLIP_S} s limit; shorten it")
+    if "REFUSE-ME" in text:
+        return fail("the voice file would not load: Drama 3 request: text: REFUSE-ME is refused by the test stand-in")
+    frames = -(-(n * 44100 // rate) // FRAME)
+    seed = hashlib.sha256(pcm + bytes([channels, width])).digest()
+    codes = []
+    for k in range(10):
+        row = []
+        for j in range(frames):
+            v = int.from_bytes(hashlib.sha256(seed + bytes([k]) + j.to_bytes(4, "little")).digest()[:4], "little")
+            row.append(v % (4096 if k == 0 else 1024))
+        codes.append(row)
+    doc = {"format": "drama3-voice/1", "text": text,
+           "codes_sha256": hashlib.sha256(json.dumps(codes).encode()).hexdigest(),
+           "audio_sha256": hashlib.sha256(audio).hexdigest(), "frames": frames,
+           "encoder": {"name": "test-stand-in"}, "vq_codes": codes}
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False)
+        f.write("\n")
+    summary = dict(doc)
+    del summary["vq_codes"]
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
+    sys.stderr.write(f"tensorfold-native voice: {frames} frames encoded in 0.001 s\n")
+    return 0
 
 
 def main():
+    if sys.argv[1:2] == ["voice"]:
+        raise SystemExit(voice_encode(sys.argv[2:]))
     p = argparse.ArgumentParser()
     p.add_argument("--native-bin", required=True)
     p.add_argument("--runtime-dir", required=True)
@@ -65,6 +168,7 @@ def main():
         print(json.dumps({"backend": "native", "unit": unit}), flush=True)
         server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
         server.serve = serve
+        server.last_request = os.path.join(args.runtime_dir, LAST_REQUEST)
         stop = threading.Event()
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -138,6 +242,10 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path != "/v1/audio/speech":
             return self.error(404, "no such route")
+        tmp = self.server.last_request + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        os.replace(tmp, self.server.last_request)
         try:
             b = json.loads(raw)
         except ValueError:
@@ -167,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
             level = 2000
         refs = b.get("references") or []
         for i, ref in enumerate(refs):
+            for k in (ref if isinstance(ref, dict) else {}):
+                if k not in REFERENCE_FIELDS:
+                    return self.error(400, f"unknown speech reference field: references.{i}.{k}")
             codes = ref.get("vq_codes") if isinstance(ref, dict) else None
             if not isinstance(codes, list) or len(codes) != 10 or len({len(row) for row in codes}) != 1:
                 return self.error(400, f"Drama 3 request: references[{i}].vq_codes must be 10 rows of equal length")

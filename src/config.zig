@@ -176,6 +176,7 @@ pub const Defaults = struct {
     speech_to_text: ?[]const u8 = null,
     chat_completion: ?[]const u8 = null,
     typed_decision: ?[]const u8 = null,
+    voice_clone: ?[]const u8 = null,
 
     pub fn get(d: Defaults, cap: Capability) ?[]const u8 {
         return switch (cap) {

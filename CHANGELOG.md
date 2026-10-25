@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Voice cloning for Drama 3: `POST /v1/voices` makes a voice from recordings of one person (10 to 60 s, uploaded or
+  recorded in the `/voice` page and the companion, with a "this is my voice" confirmation), `GET /v1/voices` lists
+  every voice, `PATCH`/`DELETE /v1/voices/{id}` name and remove one. Clips are trimmed, cut at pauses, levelled and
+  refused with a reason when silent, clipped, cut inside a word or noisy (drama-tensorfold's gates); the transcription
+  model writes missing transcripts; the engine's own `voice encode` (the pinned build, `codec.pth` already installed:
+  no new weights) makes the codes. A cloned voice is spoken like a named one (speech, voice calls, MCP), with its
+  references sent inline, so it hits the prefix cache and needs no restart. Voices are kept only in
+  `data_dir/voices/` on the box; the clips are deleted once encoded. Creating and deleting need `manage`.
+- The Drama 3 worker names the default voice in each request itself instead of starting the server with
+  `--default-voice` (the same prompt rows, so the same audio), and checks at load that the server loaded it.
 - The companion app's Connect window is a step flow in the `/voice` page's look: the Spark address (offered from the
   Mac's tailnet when Tailscale runs there, checked before a code is spent; a `localrouter://pair` link fills in both),
   the pairing code with what `pair.sh add` does, the connection (the box, the token's scopes, what it can use from

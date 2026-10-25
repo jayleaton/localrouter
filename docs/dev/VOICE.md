@@ -395,6 +395,12 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   preview_url}`). The engine choice appears only when more than one speech model is listed.
 - Each voice has a preview button. It plays `preview_url`, or speaks a short line through `/v1/audio/speech` with
   that voice's model. While the model is loading (a 503), the preview waits up to 90 s.
+- **Clone my voice**, for a speech model that lists `voice_clone`: a dialog that asks the speaker to confirm the voice
+  is theirs (nothing records or uploads before), then records them reading a script (echo cancellation, noise
+  suppression and gain control off; a level meter; a quiet second first, 10 to 60 s) or takes up to 8 files, makes a
+  draft with `POST /v1/voices`, plays a line in it, and saves it under a name (`PATCH`). Its list deletes cloned
+  voices. Recordings stay in the page's memory until they are uploaded and are never stored by the page; closing the
+  dialog deletes an unsaved draft ([DRAMA3.md](DRAMA3.md#cloned-voices)).
 - The choice is kept per engine and sent as the session's `voice`. Settings the daemon no longer lists, such as a
   removed engine or Drama 3's single "default" voice from before its named voices, are dropped when the models
   load. Every sentence would otherwise fail with "has no voice". A session that refuses a voice anyway (an `error`

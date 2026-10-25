@@ -122,6 +122,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     defer app.voice.deinit(gpa);
+    try app.cloned.init(io, gpa, try std.fs.path.join(arena, &.{ cfg.data_dir, "voices" })); // cloned voices (voices.zig)
+    defer app.cloned.deinit();
     app.plan = &plan;
     if (plan.multi and plan.front) {
         cluster.refresh = .{ .ctx = &scheduler, .f = refreshSlot };
