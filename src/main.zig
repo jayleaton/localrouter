@@ -104,6 +104,9 @@ test {
     _ = @import("api/node.zig");
     _ = @import("engines/openai_server.zig");
     _ = @import("media/audio.zig");
+    _ = @import("media/voiceprep.zig");
+    _ = @import("voices.zig");
+    _ = @import("api/voices.zig");
     _ = @import("api/realtime.zig");
     _ = @import("api/voice_local.zig");
     _ = @import("voice/ws.zig");

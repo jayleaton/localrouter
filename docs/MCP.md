@@ -39,8 +39,8 @@ Issue a harness the least it needs (`--scopes LIST` on `token` or `add`; `GET /v
 | `inference` | `POST /v1/chat/completions` | `chat` | opens the socket (its speech in and out is part of it) |
 | `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
 | `decisions` | `POST /v1/systemone` | `decide` | |
-| `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager` | `list_models`, `list_voices` | `list_models` |
-| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release` | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
+| `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager`, `/v1/voices` | `list_models`, `list_voices` | `list_models` |
+| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice) | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
 
 Any of these opens `/mcp`, whose `tools/list` then shows only the tools the token may call; a tool outside its scopes
 is a tool error naming the scope. Changing which models are loaded always needs `manage`: no other scope implies it.
@@ -126,7 +126,7 @@ full machine says `insufficient_memory`.
 | Tool | Arguments (required in bold) | Returns |
 | --- | --- | --- |
 | `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes`, `lane`, priority, `keep_loaded`, `qualified`; speech models' voices; the machine's `memory` |
-| `list_voices` | | each speech model's `voices`, `default_voice`, `state` and whether it is the default |
+| `list_voices` | | each speech model's `voices` (voices cloned for it on this machine included), `default_voice`, `state` and whether it is the default |
 | `reserve_for` | **`model`**, `seconds`, `size`, `dry_run`, `hold_s` (180), `wait_s` | what it unloads (or would) to fit the model's job, the bytes needed and free; the model loaded and held for its job. What it unloads comes back by itself after the job. Never a chat model |
 | `unload_model` | **`model`**, `hold_s` (120) | one model unloaded now, back by itself after `hold_s`. A chat model is refused |
 | `load_model` | **`model`**, `wait_s` | loads it (refused if it would need the chat model's memory) |

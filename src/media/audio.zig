@@ -146,6 +146,30 @@ pub fn normalize(io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator, tmp_dir: 
     return .{ .wav = try wav(a, input_rate, 1, even), .ms = @as(u64, even.len / 2) * 1000 / input_rate };
 }
 
+/// An upload as mono 16-bit samples at `rate` (a voice clip at a speech model's own rate: `media/voiceprep.zig`), in
+/// `a`, decoded by ffmpeg whatever it was; refusals as `normalize`'s.
+pub fn decodeMono(io: Io, gpa: std.mem.Allocator, a: std.mem.Allocator, tmp_dir: []const u8, upload: []const u8, rate: u32, l: Limits, why: *[]const u8) (Invalid || error{ OutOfMemory, DecoderFailed })![]const i16 {
+    if (upload.len == 0) return fail(why, "the audio file is empty");
+    if (cutShort(upload) != null) return fail(why, "the WAV file is cut short");
+    const max_bytes = l.max_ms * rate * 2 / 1000;
+    var limit_buf: [24]u8 = undefined;
+    const limit = std.fmt.bufPrint(&limit_buf, "{d}.{d:0>3}", .{ (l.max_ms + 1000) / 1000, (l.max_ms + 1000) % 1000 }) catch unreachable;
+    var rate_buf: [12]u8 = undefined;
+    const rate_text = std.fmt.bufPrint(&rate_buf, "{d}", .{rate}) catch unreachable;
+    const pcm = ffmpeg(io, gpa, a, tmp_dir, upload, &.{ "-protocol_whitelist", "file", "-format_whitelist", demuxers }, &.{ "-vn", "-sn", "-dn", "-t", limit, "-ac", "1", "-ar", rate_text, "-c:a", "pcm_s16le", "-f", "s16le" }, max_bytes + rate * 2 * 2, l.timeout_ms) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Failed => return fail(why, "the audio could not be decoded (send WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC)"),
+        error.TooLarge => return fail(why, tooLong(l)),
+        error.Timeout => return fail(why, "decoding the audio took too long"),
+        error.Spawn => return error.DecoderFailed,
+    };
+    if (pcm.len > max_bytes) return fail(why, tooLong(l));
+    const samples = try a.alloc(i16, pcm.len / 2);
+    for (samples, 0..) |*s, i| s.* = std.mem.readInt(i16, pcm[i * 2 ..][0..2], .little);
+    if (samples.len == 0) return fail(why, "the audio has no samples");
+    return samples;
+}
+
 fn tooLong(l: Limits) []const u8 {
     return if (l.max_ms == 30 * 60 * 1000) "the audio is longer than 30 minutes" else "the audio is longer than this model takes";
 }

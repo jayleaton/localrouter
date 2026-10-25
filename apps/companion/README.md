@@ -29,7 +29,9 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
   (`src/voice/voice.html`), bundled with a small shim (`src/app/ui/voice-shim.js`): the page's realtime socket goes
   through the harness in client tool mode, its `/v1/computer/*` calls are answered by this computer's executor (so its
   approval and task cards are this computer's), and its other `/v1/...` calls go to the Spark with the device token,
-  which the page never sees. Approving needs Touch ID where the Mac has it.
+  which the page never sees. Approving needs Touch ID where the Mac has it. Settings › Voice › **Clone my voice**
+  (a speech model with `voice_clone`) records or uploads through the same proxy (`src/app/passthrough.ts`: multipart,
+  PATCH, DELETE); the clips and voices stay on the Spark, the app keeps none, and cloning needs a pairing with `manage`.
 
 ## Install on a Mac (unsigned build)
 

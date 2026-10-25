@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
@@ -11,6 +12,7 @@ import { AddressError, classify, CodeError, connectionOf, connectView, normalize
 import type { ConnectError, Connection, Draft } from './connect.ts'
 import { grantStates, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
+import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
@@ -45,7 +47,6 @@ const VERSION = app.getVersion()
 const log = createLogger()
 const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
-const ORIGIN = 'lr://app'
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
 type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>> }
@@ -225,9 +226,6 @@ const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.j
 // The page may talk only to this app; media it shows comes through it too.
 const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-const failure = (status: number, message: string) => json({ error: { message, type: 'companion_error' } }, status)
-
 async function staticFile(path: string): Promise<Response> {
   const rel = path === '/' || path === '/voice' ? 'voice.html' : path.slice(1)
   const file = normalize(join(UI_DIR, rel))
@@ -258,37 +256,13 @@ async function computerRoute(req: Request, path: string, url: URL): Promise<Resp
   return failure(404, 'not a computer route of this app')
 }
 
-const PASS_REQUEST = ['content-type', 'accept', 'range']
-const PASS_RESPONSE = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control', 'x-sample-rate', 'x-channels', 'x-sample-format', 'last-modified', 'etag']
-
-async function proxy(req: Request, pathAndQuery: string): Promise<Response> {
-  if (!runtime) return failure(503, 'LocalRouter is not paired with a Spark yet: open Settings')
-  const headers: Record<string, string> = {}
-  for (const h of PASS_REQUEST) {
-    const v = req.headers.get(h)
-    if (v) headers[h] = v
-  }
-  const body = req.method === 'GET' || req.method === 'HEAD' ? null : await req.arrayBuffer()
-  try {
-    const r = await runtime.spark.request(pathAndQuery, { method: req.method, headers, body, signal: req.signal })
-    const out = new Headers()
-    for (const h of PASS_RESPONSE) {
-      const v = r.headers.get(h)
-      if (v) out.set(h, v)
-    }
-    return new Response(r.body, { status: r.status, headers: out })
-  } catch (error) {
-    return failure(502, `the Spark did not answer: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
 function registerProtocol() {
   protocol.handle('lr', async (req) => {
     const url = new URL(req.url)
     if (url.host !== 'app') return new Response('not found', { status: 404 })
     const path = decodeURIComponent(url.pathname)
     if (path.startsWith('/v1/computer/')) return computerRoute(req, path, url)
-    if (path.startsWith('/v1/') || path === '/mcp' || path === '/health') return proxy(req, url.pathname + url.search)
+    if (path.startsWith('/v1/') || path === '/mcp' || path === '/health') return proxy(runtime?.spark ?? null, req, url.pathname + url.search)
     return staticFile(path)
   })
 }
@@ -798,13 +772,15 @@ function buildMenu() {
 }
 
 function permissionHandlers() {
-  const allowed = (origin: string, permission: string, mediaTypes?: string[]) =>
-    origin.startsWith(ORIGIN) && ((permission === 'media' && (mediaTypes ?? ['audio']).every((t) => t === 'audio')) || permission === 'clipboard-sanitized-write')
   session.defaultSession.setPermissionRequestHandler((wc, permission, done, details) => {
     const d = details as { requestingUrl?: string; mediaTypes?: string[] }
-    done(allowed(d.requestingUrl ?? wc.getURL(), permission, d.mediaTypes))
+    const ok = mediaAllowed(d.requestingUrl ?? wc.getURL(), permission, d.mediaTypes)
+    // The page's own microphone (recording a voice to clone, not only a call's rt:open): macOS asks the person once,
+    // and its answer is the answer.
+    if (ok && permission === 'media' && process.platform === 'darwin') void systemPreferences.askForMediaAccess('microphone').then(done, () => done(false))
+    else done(ok)
   })
-  session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => allowed(origin, permission))
+  session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => mediaAllowed(origin, permission))
 }
 
 // ------------------------------------------------------------------ smoke (CI): starts headless, checks, exits
@@ -812,7 +788,19 @@ function permissionHandlers() {
 async function smoke() {
   const result: Record<string, unknown> = { version: VERSION, platform: process.platform, arch: process.arch }
   let ok = false
+  // A stand-in Spark that says what reached it: the page's calls must arrive whole through lr://app (a voice clone's
+  // multipart clips from a Blob, PATCH, DELETE, a query).
+  const echo = createHttpServer((req, res) => {
+    const parts: Buffer[] = []
+    req.on('data', (c: Buffer) => parts.push(c))
+    req.on('end', () => {
+      const body = Buffer.concat(parts)
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ method: req.method, url: req.url, type: req.headers['content-type'] ?? '', bytes: body.length, clip: body.includes('RIFFclip'), auth: req.headers.authorization ?? '' }))
+    })
+  })
   try {
+    await new Promise<void>((resolve) => echo.listen(0, '127.0.0.1', resolve))
     dir = mkdtempSync(join(tmpdir(), 'lr-smoke-'))
     app.setPath('userData', dir)
     await app.whenReady()
@@ -829,12 +817,21 @@ async function smoke() {
     const before = await client.request('capabilities')
     const unpairedCaps = (before.ok ? before.result : {}) as { computer_use?: boolean; computer_use_unavailable?: string }
     result.unpaired = { answered: before.ok, computer_use: unpairedCaps.computer_use ?? null, says: unpairedCaps.computer_use_unavailable === UNPAIRED ? 'not paired' : (unpairedCaps.computer_use_unavailable ?? (before.ok ? '' : before.error)) }
-    runtime = await startRuntime({ base: 'http://127.0.0.1:9', token: '', dir, name: 'smoke', machine: 'fake', gate: { method: 'none (smoke)', verify: async () => false }, shared: () => [], executor: local })
+    runtime = await startRuntime({ base: `http://127.0.0.1:${(echo.address() as AddressInfo).port}`, token: 'smoke-token', dir, name: 'smoke', machine: 'fake', gate: { method: 'none (smoke)', verify: async () => false }, shared: () => [], executor: local })
     const win = new BrowserWindow({ show: false, webPreferences })
     await win.loadURL(`${ORIGIN}/voice.html`)
     result.page = await win.webContents.executeJavaScript('({ shim: window.__companionShim === true, bridge: typeof (window.companion && window.companion.realtime && window.companion.realtime.open) === "function", title: document.title, socket: String(WebSocket.name) })')
     result.status = await win.webContents.executeJavaScript('fetch("/v1/computer/status").then(r => r.json()).then(s => ({ computers: s.computers.length, placement: s.computers[0] && s.computers[0].placement }))')
     result.proxy = await win.webContents.executeJavaScript('fetch("/v1/models").then(r => r.status)')
+    result.voices = await win.webContents.executeJavaScript(`(async () => {
+      const fd = new FormData();
+      fd.append('file', new Blob([new TextEncoder().encode('RIFFclip'), new Uint8Array(4096)], { type: 'audio/wav' }), 'take.wav');
+      fd.append('consent', 'true');
+      const go = (path, init) => fetch(path, init).then(r => r.json());
+      return { post: await go('/v1/voices', { method: 'POST', body: fd }),
+        patch: await go('/v1/voices/draft-1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'JJ' }) }),
+        del: await go('/v1/voices/JJ', { method: 'DELETE' }), list: await go('/v1/voices?model=m', { headers: { authorization: 'Bearer page' } }) };
+    })()`)
     const caps = await client.request('capabilities')
     client.close()
     result.executor = caps.ok ? caps.result : caps.error
@@ -854,8 +851,12 @@ async function smoke() {
     const page = result.page as { shim: boolean; bridge: boolean }
     const status = result.status as { computers: number; placement: string }
     const setupPage = result.setup as { version: string; error: string }
+    type Echo = { method: string; url: string; type: string; bytes: number; clip: boolean; auth: string }
+    const v = result.voices as { post: Echo; patch: Echo; del: Echo; list: Echo }
+    const voices = v.post.method === 'POST' && v.post.url === '/v1/voices' && v.post.type.startsWith('multipart/form-data; boundary=') && v.post.clip && v.post.bytes > 4104 &&
+      v.patch.method === 'PATCH' && v.patch.bytes === 13 && v.del.method === 'DELETE' && v.del.bytes === 0 && v.list.url === '/v1/voices?model=m' && v.list.auth === 'Bearer smoke-token'
     const unpaired = result.unpaired as { answered: boolean; computer_use: boolean | null; says: string }
-    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && (caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true) && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502 && setupPage.version === VERSION && setupPage.error === 'refused'
+    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused'
     // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
     const native = await createPlatform('native', { dataDir: dir })
     result.native = await native.platform.access().then(
@@ -869,6 +870,7 @@ async function smoke() {
     result.error = error instanceof Error ? error.stack ?? error.message : String(error)
   }
   process.stdout.write(`COMPANION_SMOKE ${JSON.stringify({ ok, ...result })}\n`)
+  echo.close()
   await runtime?.close().catch(() => undefined)
   await executor?.close().catch(() => undefined)
   app.exit(ok ? 0 : 1)

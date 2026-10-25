@@ -1,7 +1,8 @@
 //! Integration tests of the Drama 3 adapter (tools/speech/drama3/drama3_worker.py) on a real daemon, against a stand-in
 //! for drama-tensorfold's launcher and server (tests/fixtures/drama3_pilot.py): the refused-until-qualified gate, routing
 //! by model id, request validation, error mapping (400, 503, 500), whole and streamed replies with their finish
-//! reasons, voices, references and long form, the shared GPU lock, a crashed server, and unloading on the idle TTL.
+//! reasons, voices, references and long form, the shared GPU lock, a crashed server, and unloading on the idle TTL; and
+//! cloning a voice from recorded clips (`api/voices.zig`) with the stand-in's `voice encode`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -112,7 +113,8 @@ fn makeRoot(io: Io) !void {
     try cwd.createDirPath(io, root ++ "/build/tensorfold/zig-out/native/bin");
     try cwd.createDirPath(io, root ++ "/drama-3");
     try cwd.createDirPath(io, root ++ "/voices");
-    try cwd.writeFile(io, .{ .sub_path = native, .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = .executable_file } });
+    // the engine's `voice encode` is the stand-in's (it serves nothing else)
+    try cwd.writeFile(io, .{ .sub_path = native, .data = "#!/bin/sh\nexec python3 " ++ opts.drama3_pilot ++ " \"$@\"\n", .flags = .{ .permissions = .executable_file } });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/drama-3/codec.pth", .data = "" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/voices/narrator.json", .data = "{\"format\": \"drama3-voice/1\"}" });
     try cwd.writeFile(io, .{ .sub_path = lock, .data = "" });
@@ -418,4 +420,144 @@ test "Jarvis box: chat, Drama 3 and Whisper warm together under LocalRouter's ad
     // Once the scheduler is idle and they fit, chat, Drama 3 and Whisper load again by themselves, and serve.
     for (warm) |id| try waitState(&d, a, id, "ready");
     try converse(&d, a);
+}
+
+/// A 44.1 kHz mono WAV: `parts` of (seconds, speech), speech a 180 Hz tone at -26 dBFS (pauses between parts), the
+/// rest digital silence.
+const Part = struct { f64, bool };
+
+fn clip(a: std.mem.Allocator, parts: []const Part) ![]const u8 {
+    var pcm: std.ArrayList(u8) = .empty;
+    var t: usize = 0;
+    for (parts) |p| for (0..@as(usize, @intFromFloat(p[0] * 44100))) |_| {
+        const v: i16 = if (p[1]) @intFromFloat(@round(@sin(@as(f64, @floatFromInt(t)) * 2 * std.math.pi * 180 / 44100) * 2300)) else 0;
+        var b: [2]u8 = undefined;
+        std.mem.writeInt(i16, &b, v, .little);
+        try pcm.appendSlice(a, &b);
+        t += 1;
+    };
+    var head: [44]u8 = undefined;
+    @memcpy(head[0..4], "RIFF");
+    std.mem.writeInt(u32, head[4..8], @intCast(36 + pcm.items.len), .little);
+    @memcpy(head[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, head[16..20], 16, .little);
+    std.mem.writeInt(u16, head[20..22], 1, .little);
+    std.mem.writeInt(u16, head[22..24], 1, .little);
+    std.mem.writeInt(u32, head[24..28], 44100, .little);
+    std.mem.writeInt(u32, head[28..32], 88200, .little);
+    std.mem.writeInt(u16, head[32..34], 2, .little);
+    std.mem.writeInt(u16, head[34..36], 16, .little);
+    @memcpy(head[36..40], "data");
+    std.mem.writeInt(u32, head[40..44], @intCast(pcm.items.len), .little);
+    return std.mem.concat(a, u8, &.{ &head, pcm.items });
+}
+
+const boundary = "voiceclonetestboundary";
+
+/// A multipart body: plain `fields` (name, value) and `files` (name, bytes) under `boundary`.
+fn form(a: std.mem.Allocator, fields: []const [2][]const u8, files: []const [2][]const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (fields) |f| try out.print(a, "--" ++ boundary ++ "\r\nContent-Disposition: form-data; name=\"{s}\"\r\n\r\n{s}\r\n", .{ f[0], f[1] });
+    for (files) |f| try out.print(a, "--" ++ boundary ++ "\r\nContent-Disposition: form-data; name=\"{s}\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n{s}\r\n", .{ f[0], f[1] });
+    try out.appendSlice(a, "--" ++ boundary ++ "--\r\n");
+    return out.items;
+}
+
+fn clone(d: *Daemon, a: std.mem.Allocator, fields: []const [2][]const u8, files: []const [2][]const u8) !Daemon.Resp {
+    return d.callAs(a, .POST, "/v1/voices", try form(a, fields, files), "multipart/form-data; boundary=" ++ boundary);
+}
+
+fn expectResp(r: Daemon.Resp, status: std.http.Status, needles: []const []const u8) !void {
+    if (r.status != status) std.debug.print("expected {d}, got {d}: {s}\n", .{ @backingInt(status), @backingInt(r.status), r.body });
+    try testing.expectEqual(status, r.status);
+    try expectHas(r.body, needles);
+}
+
+/// Files under `dir` (recursively) whose name ends in `suffix`, but for the speech jobs' own `speech.wav`.
+fn countFiles(io: Io, a: std.mem.Allocator, dir: []const u8, suffix: []const u8) !usize {
+    var d = Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+    defer d.close(io);
+    var walker = try d.walk(a);
+    defer walker.deinit();
+    var n: usize = 0;
+    while (try walker.next(io)) |e| n += @intFromBool(e.kind == .file and std.mem.endsWith(u8, e.basename, suffix) and !std.mem.eql(u8, e.basename, "speech.wav"));
+    return n;
+}
+
+test "Drama 3: a voice cloned from clips is listed, spoken with its references alone, saved from a draft and deleted" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try makeRoot(io);
+    defer Io.Dir.cwd().deleteTree(io, root) catch {};
+    try qualify(io, a);
+    const cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", \"gpu_lock\": \"{s}\", \"tools\": [" ++
+        "{{\"id\": \"fishaudio/drama-3\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"weights\": \"{s}\", \"qualification\": \"{s}\"," ++
+        " \"capabilities\": [\"text_to_speech\", \"voice_clone\"], \"resident_bytes\": 8388608, \"load_timeout_s\": 60, \"generate_timeout_s\": 60, \"options\": {{" ++
+        "\"voices\": [\"narrator\"], \"default_voice\": \"narrator\", \"min_speed\": 1, \"max_speed\": 1, \"references\": true, \"port\": {d}," ++
+        " \"voices_dir\": \"{s}/voices\", \"verify\": \"none\", \"pilot\": \"{s}\", \"clone_working_bytes\": 1048576}}}}," ++
+        "{{\"id\": \"tone\", \"kind\": \"speech\", \"engine\": \"testpattern\"}}," ++
+        "{{\"id\": \"hear\", \"kind\": \"transcription\", \"engine\": \"testpattern\"}}]}}", .{ lock, opts.drama3_worker, root, marker, try freePort(io), root, opts.drama3_pilot });
+    var d = try Daemon.start(testing.allocator, io, "drama3-clone", cfg);
+    defer d.stop();
+    const voices_dir = try std.fmt.allocPrint(a, "{s}/data/voices", .{d.dir});
+    const jobs_dir = try std.fmt.allocPrint(a, "{s}/data/jobs", .{d.dir});
+    const last = root ++ "/runtime/last_speech_request.json";
+
+    try expectHas((try d.call(a, .GET, "/v1/models", null)).body, &.{"\"capabilities\":[\"text_to_speech\",\"voice_clone\"]"});
+    // 12 s of speech in sentences; 4 s alone is too little
+    var parts: std.ArrayList(Part) = .empty;
+    try parts.append(a, .{ 0.5, false });
+    for (0..4) |_| try parts.appendSlice(a, &.{ .{ 3.0, true }, .{ 0.5, false } });
+    const take = try clip(a, parts.items);
+    const short = try clip(a, &[_]Part{ .{ 0.5, false }, .{ 4.0, true }, .{ 0.5, false } });
+
+    // Refused: no consent, too little speech, a model that cannot clone, a name taken by a configured voice.
+    try expectResp(try clone(&d, a, &.{.{ "name", "Sam" }}, &.{.{ "file", take }}), .bad_request, &.{"consent is required"});
+    try expectResp(try clone(&d, a, &.{.{ "consent", "true" }}, &.{.{ "file", short }}), .bad_request, &.{"4.5 s of speech in all; a voice needs at least 10 s"});
+    try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "model", "tone" } }, &.{.{ "file", take }}), .bad_request, &.{"model 'tone' cannot clone a voice"});
+    try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "name", "Narrator" } }, &.{.{ "file", take }}), .conflict, &.{"own voices"});
+    // The encoder's own refusal comes back as a 400 naming the reference.
+    try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "transcript", "REFUSE-ME please" } }, &.{.{ "file", take }}), .bad_request, &.{"reference 0:"});
+
+    // Saved at once with its transcript: listed beside the configured voice, in /v1/models and MCP list_voices.
+    const sam = try clone(&d, a, &.{ .{ "consent", "true" }, .{ "name", "Sam" }, .{ "transcript", "One two three four." } }, &.{.{ "file", take }});
+    try expectResp(sam, .ok, &.{ "\"id\":\"Sam\"", "\"status\":\"ready\"", "\"kind\":\"cloned\"", "\"transcribed\":false", "\"text\":\"One two three four.\"" });
+    try expectResp(try d.call(a, .GET, "/v1/voices", null), .ok, &.{ "\"id\":\"narrator\",\"name\":\"narrator\",\"model\":\"fishaudio/drama-3\",\"kind\":\"named\",\"default\":true", "\"id\":\"Sam\"" });
+    try expectHas((try d.call(a, .GET, "/v1/models", null)).body, &.{"\"voices\":[\"narrator\",\"Sam\"]"});
+    try expectHas(try std.json.Stringify.valueAlloc(a, try mcpText(a, try mcpCall(&d, a, "list_voices", "{}")), .{}), &.{"\"Sam\""});
+    try testing.expectEqual(@as(usize, 1), try countFiles(io, a, voices_dir, ".json"));
+    try testing.expectEqual(@as(usize, 0), try countFiles(io, a, jobs_dir, ".wav")); // the clips (and Whisper's audio.wav) are gone with their jobs
+
+    // Spoken with its own references and no voice: the stand-in's level for one reference.
+    const said = try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"voice\":\"Sam\",\"response_format\":\"pcm\"}");
+    try expectLevel(said.body, 441 * 3, 1300);
+    const sent = try Io.Dir.cwd().readFileAlloc(io, last, a, .limited(1 << 20));
+    try expectHas(sent, &.{ "\"references\"", "One two three four.", "\"vq_codes\"" });
+    try testing.expect(std.mem.indexOf(u8, sent, "\"voice\"") == null);
+    // A voice without a name goes to the model it was cloned for.
+    try expectLevel((try speak(&d, a, "{\"input\":\"Hi.\",\"voice\":\"Sam\",\"response_format\":\"pcm\"}")).body, 441 * 3, 1300);
+    // The default voice is named by the worker, as the server's --default-voice used to.
+    try expectLevel((try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"response_format\":\"pcm\"}")).body, 441 * 3, 2000);
+
+    // A draft, transcribed (blank transcript), previewed, then saved under a name; names are checked.
+    const draft = try clone(&d, a, &.{ .{ "consent", "true" }, .{ "transcript", "" } }, &.{.{ "file", take }});
+    try expectResp(draft, .ok, &.{ "\"status\":\"draft\"", "\"transcribed\":true", "testpattern heard" });
+    const id = (try std.json.parseFromSliceLeaky(struct { id: []const u8 }, a, draft.body, .{ .ignore_unknown_fields = true })).id;
+    try testing.expect(std.mem.startsWith(u8, id, "draft-"));
+    try expectLevel((try speak(&d, a, try std.fmt.allocPrint(a, "{{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"voice\":\"{s}\",\"response_format\":\"pcm\"}}", .{id}))).body, 441 * 3, 1300);
+    try testing.expect(std.mem.indexOf(u8, (try d.call(a, .GET, "/v1/voices", null)).body, id) == null); // drafts are not listed
+    const at = try std.fmt.allocPrint(a, "/v1/voices/{s}", .{id});
+    try expectResp(try d.call(a, .PATCH, at, "{\"name\":\"sam\"}"), .conflict, &.{"a voice of that name exists"});
+    try expectResp(try d.call(a, .PATCH, at, "{\"name\":\"default\"}"), .bad_request, &.{"name must be"});
+    try expectResp(try d.call(a, .PATCH, at, "{\"name\":\"Kay\"}"), .ok, &.{ "\"id\":\"Kay\"", "\"status\":\"ready\"" });
+    try testing.expectEqual(@as(usize, 2), try countFiles(io, a, voices_dir, ".json"));
+
+    // Deleted: its file goes, and it is no longer a voice.
+    try expectResp(try d.call(a, .DELETE, "/v1/voices/Sam", null), .ok, &.{"\"deleted\":true"});
+    try expectResp(try d.call(a, .DELETE, "/v1/voices/Sam", null), .not_found, &.{"no such voice"});
+    try expectStatus(try speak(&d, a, "{\"model\":\"fishaudio/drama-3\",\"input\":\"Hi.\",\"voice\":\"Sam\"}"), 400, &.{"has no voice 'Sam'"});
+    try testing.expectEqual(@as(usize, 1), try countFiles(io, a, voices_dir, ".json"));
+    try testing.expectEqual(@as(usize, 0), try countFiles(io, a, jobs_dir, ".wav"));
 }

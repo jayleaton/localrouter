@@ -75,6 +75,8 @@ const routed = [_]Route{
     .{ .method = .POST, .path = "/v1/audio/speech", .route = "/v1/audio/*" },
     .{ .method = .GET, .path = "/v1/models", .route = "GET /v1/models, /v1/tools, /v1/skills/*" },
     .{ .method = .POST, .path = "/v1/tools/release", .route = "POST /v1/tools/*" },
+    .{ .method = .GET, .path = "/v1/voices", .route = "GET /v1/voices" },
+    .{ .method = .POST, .path = "/v1/voices", .route = "POST, PATCH, DELETE /v1/voices/*" },
     .{ .method = .GET, .path = "/v1/jobs/x", .route = "/v1/jobs/*, /v1/files/*, /v1/videos/*" },
 };
 const always = [_]Guard{
@@ -244,6 +246,8 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .videos = "/v1/videos",
             .speech = "/v1/audio/speech",
             .transcriptions = "/v1/audio/transcriptions",
+            .voices = "/v1/voices", // GET lists every voice; POST clones one from recordings (manage)
+            .voice_clone = has(caps.items, .voice_clone),
             .jobs = "/v1/jobs/{id}",
             .files = "/v1/files/{job}/{name}",
         },
