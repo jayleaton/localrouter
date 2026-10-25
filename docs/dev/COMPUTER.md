@@ -229,3 +229,48 @@ person enrolls them in the app.
 
 Not yet run on a real Mac: AX observation, OCR fallback, CGEvent clicks and keys, the corner stop and the TCC grants
 need JJ's MacBook. The helper's tests use a fake backend; the box's policy and approvals have Zig unit tests.
+
+## Linux
+
+`apps/companion/src/platform/linux/` (`createLinuxPlatform`). The tree is AT-SPI on every session, read by one python3
+script (python3-gi, Atspi 2.0) run per call, its payload on stdin so typed text never shows in a process list. Refs are
+child-index paths from the active window, re-resolved at act time; the walk is breadth first and bounded (2,500 nodes,
+150 controls, 3 s: `truncated`). Actions are AT-SPI first and need no pointer (`background: true`): click = the
+element's Action (`click`, `press`, `activate`, `jump`…) or `Selection` on its parent for tabs and rows; type =
+`EditableText.set_text_contents`, read back, else focus + delete + insert, read back; scroll = the nearest vertical
+scroll bar's `Value`. Only a control with none of these falls back to the injector at its centre; typing that way is
+Ctrl+A then keys, read back, and refuses text with line breaks (they would be Enter). Password fields are listed
+without a value and never read back. The URL is the browser address bar's text as shown (Chromium hides the scheme).
+
+| | X11 | GNOME Wayland | KDE Wayland | Hyprland | sway / wlroots |
+| --- | --- | --- | --- | --- | --- |
+| Tree | AT-SPI; extents are global | AT-SPI; extents are window-relative and the origin is unknown: no `bounds` | as GNOME | AT-SPI + `hyprctl activewindow -j` (`at`, matched by pid): global bounds | AT-SPI + `swaymsg -t get_tree` (`rect` + `window_rect`, pid): global bounds |
+| Keys, text | xdotool (XTest); without it AT-SPI key events | ydotool (needs ydotoold + uinput), else the RemoteDesktop portal (asks once; restore token in the data dir) | as GNOME | wtype, else ydotool | wtype, else ydotool |
+| Pointer fallback | xdotool | none: refused with the reason | none | `hyprctl dispatch movecursor` + `ydotool click` (needs ydotoold) | `swaymsg seat - cursor set/press/release` (no setup) |
+| Screenshot | ImageMagick `import -window` (else `xwd` + `convert`), the window | Screenshot portal (may ask once), the whole desktop: no window position to crop to | as GNOME | `grim -g` of the window | `grim -g` of the window |
+| Pointer for the local stop | `xdotool getmouselocation` | null: the stop is the keyboard shortcut and the tray | null | `hyprctl cursorpos` | null (sway's IPC has no cursor) |
+| App focus | `xdotool search --pid` + `windowactivate` | AT-SPI `grab_focus`, else `gtk-launch` again (single-instance apps raise) | as GNOME | `hyprctl dispatch focuswindow pid:` | `swaymsg [pid=…] focus` |
+| Quit an app | `wmctrl -i -c` (a close request) | unsupported | unsupported | `hyprctl dispatch closewindow` | `swaymsg [con_id=…] kill` (a close request) |
+| Impossible | | reading the pointer, raising another app's window, placing the pointer, window positions | as GNOME | | reading the pointer |
+
+| Fixed control | How |
+| --- | --- |
+| `open_app` | `.desktop` entries in `$XDG_DATA_HOME/applications`, `$XDG_DATA_DIRS/*/applications`, flatpak exports; Name, id, aliases (Chrome, VS Code, Settings, Files…), GenericName/Keywords, word prefix; equal matches are a question. `gtk-launch <id>`, else `gio launch <path>`; never a shell |
+| `volume` | `wpctl` (PipeWire), else `pactl`, else `amixer`; Spotify `playerctl -p spotify volume`, Music the default MPRIS player |
+| `media` | `playerctl [-p spotify] play/pause/next/previous` |
+| `dark_mode` | KDE `plasma-apply-colorscheme BreezeDark/BreezeLight`; elsewhere `gsettings … color-scheme prefer-dark/default` (+ Adwaita gtk-theme), which GTK/libadwaita apps follow on Hyprland and sway too |
+| `lock_screen` | `loginctl lock-session [$XDG_SESSION_ID]`, else `xdg-screensaver lock` (the desktop's locker must answer logind's Lock) |
+| notice | `notify-send` |
+
+Setup the access report names: python3-gi + Atspi typelib + at-spi2-core (Debian/Ubuntu `python3-gi gir1.2-atspi-2.0
+at-spi2-core xdotool`, Fedora `python3-gobject at-spi2-core xdotool`, Arch `python-gobject at-spi2-core xdotool`);
+accessibility on (`gsettings set org.gnome.desktop.interface toolkit-accessibility true`; Qt apps
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`/`ACCESSIBILITY_ENABLED=1`; Electron apps `--force-renderer-accessibility`; Chrome and
+Chromium build their web tree only with accessibility on, by the setting above or the same flag). AT-SPI actions work on every compositor for GTK, Qt and Chromium
+with accessibility on. ydotool needs ydotoold with `/dev/uinput` (the user in `input` or a udev rule); its "absolute"
+move is relative from a corner and bent by acceleration, so it is used for clicks only where the compositor places the
+pointer (Hyprland). The RemoteDesktop portal is used for keys only: a button would land wherever the person's pointer
+is, and absolute motion needs a ScreenCast stream.
+
+Not yet run on a real Linux desktop: everything above is unit tested with fake runners, and the AT-SPI script against
+a fake `gi.repository.Atspi`.
