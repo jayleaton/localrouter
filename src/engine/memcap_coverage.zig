@@ -50,20 +50,28 @@ test "coverage: the pinned TensorFold CUDA package reaches allocation entry poin
     const gpa = std.testing.allocator;
     var hits: std.ArrayList(u8) = .empty;
     defer hits.deinit(gpa);
-    // an extern declaration or a symbol lookup outside abi.zig's table would bypass the patched entries
+    // an extern declaration or a symbol lookup outside abi.zig's table would bypass the patched entries. arena.zig is
+    // the one exception, by name: its VMM sub-allocator (cuMemCreate) serves DeviceBuffer.alloc only once installed as
+    // the `memory.setHook` allocator, so LocalRouter's sources must never reach it (`cuda.arena`, `cuda.pack`, setHook)
+    const vmm = [_][]const u8{"arena.zig"};
+    const reach = [_][]const u8{ "setHook(", "cuda.arena", "cuda.pack" };
     const bypass = [_][]const u8{ "extern \"c\" fn cuMem", "extern fn cuMem", "lookup(\"cuMem", "cuGetProcAddress", "cudaMalloc", "cuMemCreate", "cuMemAllocManaged", "cuMemAllocAsync" };
-    var it = std.Io.Dir.cwd().openDir(io, "zig-pkg", .{ .iterate = true }) catch |err| return err;
-    defer it.close(io);
-    var found = false;
-    var di = it.iterate();
-    while (try di.next(io)) |e| {
-        if (!std.mem.startsWith(u8, e.name, "tensorfold-1.0.7-")) continue;
-        found = true;
-        const root = try std.fmt.allocPrint(gpa, "zig-pkg/{s}/zig/src/cuda", .{e.name});
-        defer gpa.free(root);
-        _ = try scanTree(io, gpa, root, &.{}, &bypass, &hits);
-    }
+    // the package build.zig.zon pins, by its hash: a bump scans the new package, never a stale one left in zig-pkg
+    const zon = try std.Io.Dir.cwd().readFileAlloc(io, "build.zig.zon", gpa, .limited(1 << 16));
+    defer gpa.free(zon);
+    const key = ".hash = \"";
+    const at = (std.mem.indexOf(u8, zon, key) orelse return error.TestUnexpectedResult) + key.len;
+    const hash = zon[at .. std.mem.indexOfScalarPos(u8, zon, at, '"') orelse return error.TestUnexpectedResult];
+    try std.testing.expect(std.mem.startsWith(u8, hash, "tensorfold-"));
+    const root = try std.fmt.allocPrint(gpa, "zig-pkg/{s}/zig/src/cuda", .{hash});
+    defer gpa.free(root);
+    const files = try scanTree(io, gpa, root, &vmm, &bypass, &hits);
+    var own: std.ArrayList(u8) = .empty;
+    defer own.deinit(gpa);
+    _ = try scanTree(io, gpa, "src", &.{"engine/memcap_coverage.zig"}, &reach, &own);
     if (hits.items.len > 0) std.debug.print("allocation bypasses in TensorFold:\n{s}", .{hits.items});
-    try std.testing.expect(found);
+    if (own.items.len > 0) std.debug.print("TensorFold's VMM sub-allocator reached from LocalRouter:\n{s}", .{own.items});
+    try std.testing.expect(files > 10);
     try std.testing.expectEqualStrings("", hits.items);
+    try std.testing.expectEqualStrings("", own.items);
 }

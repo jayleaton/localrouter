@@ -472,7 +472,10 @@ pub const Dit = struct {
             x.stepKernels(lat, h, w, vel) catch |err| break :blk err;
             break :blk {};
         };
-        var g = try cuda.graph.endCapture(x.s);
+        var g = cuda.graph.endCapture(x.s) catch |err| {
+            cuda.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later capture
+            return err;
+        };
         defer g.deinit();
         try captured;
         var exec = try g.instantiate();

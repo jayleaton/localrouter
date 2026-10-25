@@ -13,13 +13,13 @@
   "partial_interval_ms": 0, "tool_wait_s": 900, "manage_models": true, "shadow_decisions": true
  },
  "tools": [
-  {"id": "qwen3.8-27b", "kind": "chat", "name": "Qwen3.8 27B (TensorFold 1.1.1, MLX 4-bit + DFlash2 drafter)",
+  {"id": "qwen3.8-27b", "kind": "chat", "name": "Qwen3.8 27B (TensorFold 1.1.4, MLX 4-bit + DFlash2 drafter)",
    "engine": "openai_server", "weights": "@CHAT_ROOT@/hf", "qualification": "@CHAT_MARKER@",
    "resident_bytes": 23756537856, "working_bytes": 0, "keep_loaded": true, "priority": 100, "idle_ttl_s": 600,
    "license": {"name": "Apache-2.0", "url": "https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit",
                "use": "the checkpoint (base Qwen/Qwen3.8-27B) and the z-lab DFlash2 drafter", "commercial": true},
    "load_timeout_s": 900, "generate_timeout_s": 600,
-   "options": {"server": ["@CHAT_ROOT@/tensorfold-1.1.1/bin/tensorfold-native", "serve", "TensorFold/Qwen3.8-27B-MLX-4bit",
+   "options": {"server": ["@CHAT_ROOT@/tensorfold-1.1.4/bin/tensorfold-native", "serve", "TensorFold/Qwen3.8-27B-MLX-4bit",
                           "--drafter", "z-lab/Qwen3.8-27B-DFlash2", "--host", "127.0.0.1", "--port", "{port}",
                           "--name", "{id}", "--context", "32768", "--prompt-cache-gib", "3", "--parallel", "1",
                           "--no-update-check"],

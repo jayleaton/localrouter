@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .tensorfold = .{
-            .url = "git+https://github.com/ashhart/TensorFold.git#e7c523ebfa16b8094cf9e35e3773a7d25befcc5b",
-            .hash = "tensorfold-1.0.7-CphTLULywQAUe2LxgT29-AserW8gMmK9C-ltOxIaw1pG",
+            .url = "git+https://github.com/ashhart/TensorFold.git#eab8582819688325e371907e4706e1c602b8a273",
+            .hash = "tensorfold-1.1.4-CphTLduviwLsoiZR_ltHyW5xZtYz0ZnoMMJIxn1J6X13",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
