@@ -161,6 +161,11 @@ describe('what went wrong, from real failures', () => {
     expect(classify(e, 'address', 8)).toMatchObject({ kind: 'refused', detail: 'ECONNREFUSED' })
   })
 
+  it('a port fetch never connects to: named, not "no answer"', async () => {
+    const e = await caught(new Spark('http://127.0.0.1:6000', '').capabilities())
+    expect(classify(e, 'address', 8)).toMatchObject({ kind: 'invalid_address', title: 'This app cannot use that port' })
+  })
+
   it('a host that never answers: timeout, naming the limit', async () => {
     const port = await serve(() => undefined) // accepts, never replies
     const e = await caught(new Spark(`http://127.0.0.1:${port}`, '', timed(200)).capabilities())

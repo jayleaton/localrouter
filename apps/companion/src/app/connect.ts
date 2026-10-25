@@ -217,6 +217,9 @@ export function classify(error: unknown, stage: Stage, timeoutS: number): Connec
     if (status === 404 || status === 405) return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'Check the port: a Jarvis Spark answers on the https:// address `tailscale serve` gives it, usually :10443.', detail: `HTTP ${status}` }
     return { kind: 'server', title: `The Spark answered with an error (HTTP ${status})`, hint: messageOf(error), detail: `HTTP ${status}` }
   }
+  // fetch refuses the Fetch standard's blocked ports (9, 25, 6000...) before connecting.
+  if (all.some((e) => e.message === 'bad port'))
+    return { kind: 'invalid_address', title: 'This app cannot use that port', hint: 'Some ports (like 25 or 6000) are blocked for web requests. Use the port `tailscale serve` gives the Spark, usually :10443.', detail: 'bad port' }
   if (all.some((e) => e.name === 'TimeoutError' || (e.code !== undefined && TIMEOUT_CODES.has(e.code))))
     return { kind: 'timeout', title: `No answer within ${timeoutS} s`, hint: 'The Spark may be off or asleep, or this Mac is not on the tailnet right now. Check Tailscale on both, then try again.', detail }
   if (codes.some((c) => UNREACHABLE_CODES.has(c)))
