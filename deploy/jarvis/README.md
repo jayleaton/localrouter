@@ -4,7 +4,7 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 
 | | |
 | --- | --- |
-| Chat | `qwen3.8-27b`: TensorFold 1.1.4, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
+| Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
 | Text to speech | `fishaudio/drama-3` on the NVFP4 pruned weights (`DRAMA_VARIANT=nvfp4`, lossy, approved by JJ 2026-10-24; [measured against the full model](../../docs/dev/DRAMA3.md#the-nvfp4-pruned-weights)): 20.56 GiB (qualified), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
 | Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load. Text to image and edits (`edit_refs` 2: one or two input images, optionally a mask) once the edit pack is installed (`tools/spark/prepare.sh` adds it beside the packs) |

@@ -77,7 +77,7 @@
  },
  "models": [
   {"key": "chat", "id": "qwen3.8-27b", "warm": true,
-   "title": "Qwen3.8 27B chat: TensorFold 1.1.4's native server, MLX 4-bit weights with the DFlash2 drafter",
+   "title": "Qwen3.8 27B chat: TensorFold 1.1.1's native server, MLX 4-bit weights with the DFlash2 drafter",
    "licence": {"name": "Apache-2.0 (checkpoint and drafter)", "url": "https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit"},
    "pins": "tools/chat/qwen38-27b/pins.json",
    "reuse": {"paths": ["qualify-chat/root/hf", "qualify-chat/root/downloads"]},
@@ -86,7 +86,7 @@
    "steps": [
     {"id": "fetch", "download_bytes": 19953629028, "reused": true, "disk_bytes": 21000000000, "title": "the TensorFold archive, the checkpoint and the drafter (~20 GB), every file against pins.json",
      "run": "bash $REPO/tools/chat/qwen38-27b/fetch.sh $CHAT_ROOT && $STEPS stamp chat-fetch $REPO/tools/chat/qwen38-27b/pins.json",
-     "done": "$STEPS stamped chat-fetch $REPO/tools/chat/qwen38-27b/pins.json && [ -x $CHAT_ROOT/tensorfold-1.1.4/bin/tensorfold-native ]",
+     "done": "$STEPS stamped chat-fetch $REPO/tools/chat/qwen38-27b/pins.json && [ -x $CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native ]",
      "fix": "network: run again (partial files resume). 'differs, move it away first': delete the named file and run again. HF_TOKEN, if huggingface.co asks for one"},
     {"id": "setup", "title": "the binary runs here and sees the checkpoint; the tool config for qualify",
      "run": "bash $REPO/tools/chat/qwen38-27b/setup.sh $CHAT_ROOT --marker $CHAT_MARKER --gpu-lock '' && $STEPS stamp chat-setup $REPO/tools/chat/qwen38-27b/pins.json",
