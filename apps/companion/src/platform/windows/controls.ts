@@ -5,7 +5,7 @@ import type { ComputerControl, InstalledApp } from '../../../../desktop-helper/s
 import { execRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
 import { array, boolean, integerIn, number, object, string } from '../../../../desktop-helper/src/validate.ts'
-import type { PlatformControls } from '../types.ts'
+import type { ControlSupport, PlatformControls } from '../types.ts'
 import { ask } from './screen.ts'
 import type { WindowsCall } from './worker.ts'
 
@@ -154,6 +154,8 @@ export type WindowsControlsOptions = {
  * shortcuts. No user text reaches a command line except as one argv entry naming something from those lists.
  */
 export class WindowsControls implements PlatformControls {
+  /** Every control kind runs on Windows; Music volume alone is refused when asked (MUSIC_VOLUME), with the reason. */
+  readonly unsupported: ControlSupport = {}
   private readonly worker: WindowsCall
   private readonly runner: CommandRunner
   private readonly env: NodeJS.ProcessEnv

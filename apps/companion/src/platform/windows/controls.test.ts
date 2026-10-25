@@ -169,6 +169,8 @@ describe('WindowsControls volume, media, dark mode, lock', () => {
     expect((error as ControlError).code).toBe('unavailable')
     expect((error as ControlError).message).toBe(MUSIC_VOLUME)
     expect(calls.filter((call) => call.op.startsWith('volume'))).toHaveLength(0)
+    // Volume as a control works (the system's, Spotify's): nothing is listed as unsupported.
+    expect(c.unsupported).toEqual({})
   })
 
   it('controls the media session, naming the app that played, and falls back to the media keys', async () => {

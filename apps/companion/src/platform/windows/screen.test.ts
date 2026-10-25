@@ -73,6 +73,12 @@ describe('WindowsScreen act', () => {
     expect(calls[0]!.args).toEqual({ kind: 'click', ref: REF })
   })
 
+  it('counts a pattern click still running (a modal dialog it opened holds Invoke) as done, without a pointer fallback', async () => {
+    const { worker, calls } = fakeWorker(() => ({ done: true, how: 'invoke', pending: true }))
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ background: true })
+    expect(calls.map((c) => c.op)).toEqual(['semantic'])
+  })
+
   it('falls back to a real click at the control when it has no pattern, and reports where the pointer was left', async () => {
     const { worker, calls } = fakeWorker((call) => {
       if (call.op === 'semantic') return { done: false, how: '' }

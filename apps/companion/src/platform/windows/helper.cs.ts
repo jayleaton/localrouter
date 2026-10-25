@@ -1021,19 +1021,59 @@ namespace LocalRouterWin
             throw new LrError("UNKNOWN_OP", kind);
         }
 
+        /** How long a click's pattern call may take before it counts as done and still running. */
+        private const int PatternWaitMs = 2500;
+
+        /**
+         * Runs a pattern call on its own thread and waits up to PatternWaitMs. A button that opens a modal dialog can
+         * keep Invoke (and Toggle, Select, Expand) from returning until the dialog closes: the click did happen, so it
+         * is reported done with "pending", and the thread finishes on its own when the dialog goes, without holding up
+         * the worker or getting it killed. An exception thrown within the wait is rethrown, so the step still fails.
+         */
+        private static Dictionary<string, object> Pattern(ThreadStart work, string how)
+        {
+            Exception failure = null;
+            Thread thread = new Thread(delegate ()
+            {
+                try { work(); }
+                catch (Exception error) { failure = error; }
+            });
+            thread.IsBackground = true;
+            thread.Start();
+            bool finished = thread.Join(PatternWaitMs);
+            if (finished && failure != null) throw failure;
+            Dictionary<string, object> done = Done(true, how);
+            if (!finished) done["pending"] = true;
+            return done;
+        }
+
         private static Dictionary<string, object> SemanticClick(AutomationElement el)
         {
             object p;
             try
             {
-                if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return Done(true, "invoke"); }
-                if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return Done(true, "select"); }
-                if (el.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return Done(true, "toggle"); }
+                if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p))
+                {
+                    InvokePattern invoke = (InvokePattern)p;
+                    return Pattern(delegate () { invoke.Invoke(); }, "invoke");
+                }
+                if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p))
+                {
+                    SelectionItemPattern select = (SelectionItemPattern)p;
+                    return Pattern(delegate () { select.Select(); }, "select");
+                }
+                if (el.TryGetCurrentPattern(TogglePattern.Pattern, out p))
+                {
+                    TogglePattern toggle = (TogglePattern)p;
+                    return Pattern(delegate () { toggle.Toggle(); }, "toggle");
+                }
                 if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p))
                 {
                     ExpandCollapsePattern ec = (ExpandCollapsePattern)p;
-                    if (ec.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) ec.Expand(); else ec.Collapse();
-                    return Done(true, "expand");
+                    return Pattern(delegate ()
+                    {
+                        if (ec.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) ec.Expand(); else ec.Collapse();
+                    }, "expand");
                 }
                 ControlType type = el.Current.ControlType;
                 if (type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox)
