@@ -93,8 +93,23 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
   # A self-signed certificate is trusted for code signing on a CI runner (passwordless sudo); not needed elsewhere.
   if [ -n "${CI:-}" ]; then perl -e 'alarm shift; exec @ARGV' 60 sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$sign_dir/cert.pem" || echo "package-mac: could not mark the certificate trusted (signing goes on)"; fi
   requirement="designated => identifier \"$bundle_id\" and certificate leaf = H\"$sha1\""
-  # Every nested helper and framework first, then the app with its pinned requirement.
+  # The keychain helper (native/keychain-helper.c): installed once outside the bundle by the app and kept across
+  # updates, so the Spark token never brings a keychain prompt after an update. It answers only a parent that meets
+  # this app's requirement, compiled in; its own requirement pins it to the same certificate.
+  kh_id="$bundle_id.keychain"
+  kh_build="$sign_dir/keychain"
+  mkdir -p "$kh_build"
+  printf '#define LR_APP_REQUIREMENT "identifier \\"%s\\" and certificate leaf = H\\"%s\\""\n' "$bundle_id" "$sha1" > "$kh_build/requirement.h"
+  xcrun --sdk macosx clang -O2 -Wall -Werror -mmacosx-version-min=13.0 -arch arm64 -I "$kh_build" \
+    ${LR_KEYCHAIN_CFLAGS:-} -framework Security -framework CoreFoundation -o "$kh_build/localrouter-keychain" "$root/native/keychain-helper.c"
+  kh="$app/Contents/Resources/localrouter-keychain"
+  cp "$kh_build/localrouter-keychain" "$kh"
+  # Every nested helper and framework first, then the keychain helper and the app, each with its pinned requirement.
   codesign --force --deep --sign "$sha1" --keychain "$kc" --timestamp=none "$app"
+  codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$kh_id" \
+    -r="designated => identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
+  codesign --verify --strict -R="identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
+  echo "package-mac: keychain helper $(codesign -dvvv "$kh" 2>&1 | grep -E '^CDHash=' || true), requirement: $(codesign -d -r- "$kh" 2>&1 | sed -n 's/^designated => //p')"
   codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$bundle_id" -r="$requirement" "$app"
   # What TCC checks on every launch: this build satisfies the requirement every build has.
   codesign --verify --deep --strict -R="identifier \"$bundle_id\" and certificate leaf = H\"$sha1\"" "$app"
@@ -105,6 +120,7 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
   fi
 else
   echo "::warning::package-mac: no signing identity (MACOS_SIGNING_P12): this build is ad-hoc signed, and Accessibility and Screen Recording will not survive the next update"
+  echo "::warning::package-mac: no keychain helper without a signing identity: the token is kept with safeStorage, which asks again after every update"
   codesign --force --deep --sign - --timestamp=none "$app"
 fi
 codesign --verify --deep --strict --verbose=2 "$app"

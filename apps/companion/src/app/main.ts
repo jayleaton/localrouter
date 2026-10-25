@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -10,6 +11,8 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
+import { EMPTY, HELPER, KeychainHelper, loadSecrets as loadStoredSecrets } from './secrets.ts'
+import type { Secrets } from './secrets.ts'
 import { grantStates, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
@@ -50,7 +53,6 @@ const PRELOAD = join(__dirname, 'preload.cjs')
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
 type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>> }
-type Secrets = { token: string; legacy_token: string }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -59,7 +61,10 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: tr
 let dir = dataDir()
 const settingsPath = () => join(dir, 'settings.json')
 const secretsPath = () => join(dir, 'secrets.bin')
-let memorySecrets: Secrets = { token: '', legacy_token: '' }
+let memorySecrets: Secrets = { ...EMPTY }
+/** Where the tokens are kept: the keychain helper (macOS), Electron safeStorage (elsewhere), or only in memory. */
+let secretsStore: 'keychain' | 'legacy' | 'none' = 'none'
+let keychain: KeychainHelper | null = null
 
 function loadSettings(): Settings {
   const dflt: Settings = { base: '', device: null, name: computerName(), shared: [], legacy: false }
@@ -75,21 +80,57 @@ function saveSettings(s: Settings) {
   writeFileSync(settingsPath(), `${JSON.stringify(s, null, 1)}\n`, { mode: 0o600 })
 }
 
-/** Tokens live in the OS keychain's protection (safeStorage); without it, only for this run. */
-function loadSecrets(): Secrets {
-  if (!safeStorage.isEncryptionAvailable() || !existsSync(secretsPath())) return memorySecrets
+/**
+ * Tokens: on macOS in the login keychain through the keychain helper (src/app/secrets.ts: no prompt after an update),
+ * elsewhere Electron safeStorage; without either, only for this run. Read once at start; saved on each change.
+ */
+async function initSecrets() {
+  keychain = process.platform === 'darwin' ? new KeychainHelper({ bundled: join(process.resourcesPath ?? '', HELPER), dataDir: dir }) : null
+  const helper = keychain && (await keychain.path()) ? keychain : null
+  if (keychain && !helper) log.warn('secrets.no_keychain_helper', { why: keychain.problem })
   try {
-    return { ...memorySecrets, ...(JSON.parse(safeStorage.decryptString(readFileSync(secretsPath()))) as Partial<Secrets>) }
-  } catch {
-    return memorySecrets
+    const r = await loadStoredSecrets({ helper, legacyPath: secretsPath(), legacyDecrypt })
+    memorySecrets = r.secrets
+    secretsStore = r.store
+    if (r.migrated) log.info('secrets.migrated', { to: 'keychain helper' })
+  } catch (error) {
+    log.error('secrets.load_failed', { error: error instanceof Error ? error.message : String(error) })
   }
+}
+
+/** An older build's (or a non-Mac's) safeStorage file; only read when the file exists. */
+function legacyDecrypt(data: Buffer): string | null {
+  try {
+    return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(data) : null
+  } catch {
+    return null
+  }
+}
+
+function loadSecrets(): Secrets {
+  return memorySecrets
 }
 
 function saveSecrets(s: Secrets) {
   memorySecrets = s
+  void persistSecrets(s).catch((error: unknown) => log.error('secrets.save_failed', { error: error instanceof Error ? error.message : String(error) }))
+}
+
+async function persistSecrets(s: Secrets) {
+  if (keychain && (await keychain.path())) {
+    await keychain.set(s)
+    secretsStore = 'keychain'
+    return
+  }
   if (!safeStorage.isEncryptionAvailable()) return log.warn('secrets.session_only', { why: 'no OS encryption available' })
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   writeFileSync(secretsPath(), safeStorage.encryptString(JSON.stringify(s)), { mode: 0o600 })
+  secretsStore = 'legacy'
+}
+
+/** For the state: never asks safeStorage on macOS (that alone can bring the keychain prompt). */
+function secretsWhere() {
+  return secretsStore === 'keychain' ? 'keychain' : secretsStore === 'legacy' ? 'keychain (safeStorage)' : 'this run only'
 }
 
 function computerName() {
@@ -685,7 +726,7 @@ async function state() {
     shared: settings.shared,
     legacy: { enabled: settings.legacy, connected: legacy?.status.connected ?? false },
     presence: gate.method,
-    secrets: safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only',
+    secrets: secretsWhere(),
     control: executor ? !executor.broker.disabled : false,
     machine: machineKind(),
     permissions: permissionState,
@@ -835,7 +876,7 @@ async function smoke() {
     const caps = await client.request('capabilities')
     client.close()
     result.executor = caps.ok ? caps.result : caps.error
-    result.secrets = safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only'
+    result.secrets = process.platform === 'darwin' ? 'keychain helper (see --secrets-selftest)' : safeStorage.isEncryptionAvailable() ? 'safeStorage' : 'this run only'
     result.presence = gate.method
     // The settings window: its page draws the steps, and a closed port is named as refused through the IPC.
     const setupWin = new BrowserWindow({ show: false, webPreferences })
@@ -876,6 +917,51 @@ async function smoke() {
   app.exit(ok ? 0 : 1)
 }
 
+// ------------------------------------------------------------------ secrets self-test (CI: install over, read back)
+
+/**
+ * `--secrets-selftest OP [VALUE]` with LOCALROUTER_COMPANION_HOME: the app's own secret store, headless, for the
+ * update test (build A stores, build B installed over it reads). Prints `COMPANION_SECRETS {json}`; the token only as
+ * a SHA-256 prefix. OPs: `write-legacy V` (an older build's safeStorage file), `load` (as the app starts, migrating),
+ * `save V`, `load-legacy` (safeStorage directly: the control, which an update makes ask again).
+ */
+async function secretsSelftest() {
+  const at = process.argv.indexOf('--secrets-selftest')
+  const op = process.argv[at + 1] ?? ''
+  const value = process.argv[at + 2] ?? ''
+  const digest = (t: string) => (t ? createHash('sha256').update(t).digest('hex').slice(0, 12) : '')
+  const out: Record<string, unknown> = { op }
+  try {
+    await app.whenReady()
+    if (op === 'write-legacy') {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      writeFileSync(secretsPath(), safeStorage.encryptString(JSON.stringify({ token: value, legacy_token: '' })), { mode: 0o600 })
+      out.ok = true
+    } else if (op === 'load-legacy') {
+      const text = legacyDecrypt(readFileSync(secretsPath()))
+      out.ok = text !== null
+      out.token = text ? digest((JSON.parse(text) as Secrets).token) : ''
+    } else if (op === 'load' || op === 'save') {
+      await initSecrets()
+      if (op === 'save') {
+        await persistSecrets({ token: value, legacy_token: '' })
+        await initSecrets()
+      }
+      out.ok = true
+      out.store = secretsStore
+      out.token = digest(memorySecrets.token)
+      out.helper = keychain ? await keychain.path() : null
+      out.problem = keychain?.problem || undefined
+      out.legacy_file = existsSync(secretsPath())
+    } else throw new Error(`unknown op ${op}`)
+  } catch (error) {
+    out.ok = false
+    out.error = error instanceof Error ? error.message : String(error)
+  }
+  process.stdout.write(`COMPANION_SECRETS ${JSON.stringify(out)}\n`)
+  app.exit(out.ok ? 0 : 1)
+}
+
 // ------------------------------------------------------------------ start
 
 if (process.argv.includes('--version')) {
@@ -883,6 +969,8 @@ if (process.argv.includes('--version')) {
   process.exit(0)
 } else if (process.argv.includes('--smoke')) {
   void smoke()
+} else if (process.argv.includes('--secrets-selftest')) {
+  void secretsSelftest()
 } else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -902,6 +990,7 @@ if (process.argv.includes('--version')) {
     permissionHandlers()
     buildMenu()
     settings = loadSettings()
+    await initSecrets()
     tray = new Tray(process.platform === 'darwin' ? nativeImage.createEmpty() : nativeImage.createFromDataURL(TRAY_ICON))
     tray.setToolTip('LocalRouter')
     if (!globalShortcut.register(STOP.accelerator, () => stopAll('the keyboard'))) log.warn('stop_shortcut.unavailable', { accelerator: STOP.accelerator })
