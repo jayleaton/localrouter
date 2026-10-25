@@ -23,7 +23,14 @@ export type Connection =
   | { ok: true; at: number; server: Server; scopes: Array<{ name: string; label: string }>; pairing_required: boolean; capabilities: Capability[]; warning?: string }
   | { ok: false; at: number; error: ConnectError }
 
-export type Permissions = { microphone: string; accessibility: string; screen: string; stale: { accessibility: boolean; screen: boolean } }
+/** One thing a platform needs (platform/types.ts Requirement), as the page shows it. */
+export type Need = { id: string; label: string; granted: boolean | null; for: string; fix?: string }
+
+/**
+ * What the permissions step shows: macOS's TCC grants (microphone, accessibility, screen), or on Linux and Windows the
+ * platform's own `requirements` (with `backend` naming it), where the Mac's three are 'n/a'.
+ */
+export type Permissions = { microphone: string; accessibility: string; screen: string; stale: { accessibility: boolean; screen: boolean; microphone?: boolean }; backend?: string; requirements?: Need[] }
 
 export type ConnectInput = {
   paired: boolean
@@ -56,7 +63,13 @@ export function describeServer(s: Server): string {
 const PERMISSIONS = ['microphone', 'accessibility', 'screen'] as const
 
 function permissionStep(p: Permissions): { status: StepStatus; summary: string } {
-  if (p.microphone === 'n/a') return { status: 'done', summary: 'Not a Mac: nothing to grant here' }
+  if (p.requirements) {
+    // Linux and Windows: what this computer's platform says it needs, in its own words; no macOS grants to ask for.
+    const missing = p.requirements.filter((r) => r.granted === false)
+    if (missing.length) return { status: 'warn', summary: `Missing: ${missing.map((r) => r.label).join(', ')}` }
+    return { status: 'done', summary: p.backend ? `Nothing to grant: ${p.backend} is ready` : 'Nothing to grant on this computer' }
+  }
+  if (p.microphone === 'n/a') return { status: 'done', summary: 'Nothing to grant on this computer' }
   if (p.stale.accessibility || p.stale.screen) return { status: 'warn', summary: 'macOS kept a permission from an older LocalRouter' }
   const granted = PERMISSIONS.filter((k) => p[k] === 'granted').length
   return granted === PERMISSIONS.length ? { status: 'done', summary: 'Microphone, Accessibility and Screen Recording granted' } : { status: 'todo', summary: `${granted} of ${PERMISSIONS.length} granted` }

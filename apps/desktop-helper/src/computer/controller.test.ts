@@ -355,6 +355,38 @@ describe('ComputerUse', () => {
       expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', controls: [] })).toBe(false)
     })
 
+    it('types the address again when an Enter went elsewhere and the bar put the old page back (Windows run, 2026-10-25: stuck after 15 steps)', async () => {
+      const old = 'github.com/jayleaton/localrouter'
+      let bar = old
+      let focused = false
+      let loaded = false
+      let typedOnce = false
+      const page: ScreenBackend = {
+        kind: 'desktop',
+        observe: async () => ({ backend: 'desktop', app: 'Google Chrome', title: loaded ? 'Example Domain' : 'LocalRouter', url: loaded ? 'example.com' : old, controls: [control('0.7', 'textbox', 'Address and search bar', { value: bar, focused })] }),
+        act: async (action) => {
+          if (action.kind === 'type') {
+            // The first time the value is set without the focus (as ValuePattern did); the second time with it.
+            bar = action.text
+            if (!focused) focused = typedOnce
+            typedOnce = true
+          }
+          if (action.kind === 'press' && action.key === 'enter') {
+            if (focused) loaded = true
+            else bar = old // Enter went to the page; the bar reverts to the page's address
+          }
+          return { background: action.kind === 'type' }
+        },
+      }
+      const { authorize, requests } = allowAll()
+      const replies: Answers[] = [{ surface: choice('current') }, { next: choice('type_text'), type_into: choice('c0') }, { next: choice('press_enter') }, { next: choice('type_text'), type_into: choice('c0') }, { next: choice('press_enter') }, { next: choice('done') }]
+      const { computer, asked } = computerWith(replies, { page, tabs: null }, authorize)
+      expect(await computer.run({ goal: 'go to example.com', text: null })).toMatchObject({ status: 'done' })
+      expect(requests.map((r) => r.action.kind)).toEqual(['type', 'press', 'type', 'press'])
+      // After the bar reverted, typing was offered again.
+      expect(Object.keys((asked[3].questions.next as { criteria: Record<string, string> }).criteria)).toContain('type_text')
+    })
+
     it('"go to example.com" in Chrome with the address bar focused: types the address and presses Enter, never clicks the bar again (JJ’s MacBook, 2026-10-25)', async () => {
       let typed = ''
       let loaded = false

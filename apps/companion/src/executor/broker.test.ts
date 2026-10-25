@@ -41,6 +41,35 @@ describe('the executor broker: final authority on this computer', () => {
     expect(hello.asked).toBe(1)
   })
 
+  it('while the OS check waits behind other windows, the card says where to look, and the note goes when it returns', async () => {
+    let release: () => void = () => undefined
+    const seenDuring: string[] = []
+    const hello = {
+      method: 'Windows Hello',
+      verify: async (_card: unknown, waiting?: (text: string) => void) => {
+        waiting?.('Windows Hello is waiting: look for the Windows Security window.')
+        await new Promise<void>((resolve) => (release = resolve))
+        return true
+      },
+    }
+    const { broker } = fakeBroker([...SEND_GROCERIES], { gate: hello })
+    const updates: string[] = []
+    broker.on((e) => void (e.type === 'approval.update' && updates.push(e.card.waiting)))
+    const card = nextCard(broker)
+    const started = broker.startUse(app, 'send the Groceries note', null)
+    if (!started.ok) throw new Error(started.error)
+    const c = await card
+    expect(c.waiting).toBe('')
+    const answered = broker.answer(c.id, 'approve', 'app window')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    seenDuring.push(broker.approvals().find((x) => x.id === c.id)?.waiting ?? '')
+    release()
+    expect(await answered).toEqual({ ok: true })
+    expect(seenDuring).toEqual(['Windows Hello is waiting: look for the Windows Security window.'])
+    expect(updates).toEqual(['Windows Hello is waiting: look for the Windows Security window.'])
+    expect((await started.finished).status).toBe('done')
+  })
+
   it('a card held open for the OS check still runs out when nobody completes it', async () => {
     const never = { method: 'Windows Hello', verify: async () => false }
     const { broker, mac } = fakeBroker([...SEND_GROCERIES], { gate: never, limits: { approvalTimeoutMs: 100 }, presenceMs: 300 })

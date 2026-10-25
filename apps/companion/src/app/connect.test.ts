@@ -237,3 +237,22 @@ describe('Windows paths (Windows run, 2026-10-25)', () => {
   })
 })
 
+describe('the permissions step off macOS (Windows run, 2026-10-25: "Not a Mac: nothing to grant here")', () => {
+  const offMac = (requirements: NonNullable<ConnectInput['permissions']['requirements']>, backend: string) =>
+    input({ paired: true, connection: ok, permissions: { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false }, backend, requirements } })
+  const step = (i: ConnectInput) => connectView(i).steps.find((x) => x.id === 'permissions')!
+
+  it('says nothing is needed when the platform has all it needs, in its own words', () => {
+    const windows = step(offMac([{ id: 'microphone', label: 'Microphone', granted: true, for: 'calls' }, { id: 'uia', label: 'UI Automation', granted: true, for: 'reading windows' }], 'Windows (UI Automation, SendInput)'))
+    expect(windows).toMatchObject({ status: 'done', summary: 'Nothing to grant: Windows (UI Automation, SendInput) is ready' })
+    expect(windows.summary).not.toMatch(/Mac/)
+  })
+
+  it('names what is missing (the Windows microphone switch, AT-SPI on Linux) instead of calling it done', () => {
+    expect(step(offMac([{ id: 'microphone', label: 'Microphone', granted: false, for: 'calls', fix: 'Settings › Privacy & security › Microphone' }], 'Windows (UI Automation, SendInput)'))).toMatchObject({ status: 'warn', summary: 'Missing: Microphone' })
+    expect(step(offMac([{ id: 'atspi', label: 'AT-SPI accessibility bus', granted: false, for: 'reading windows' }, { id: 'keys', label: 'Input (xdotool)', granted: false, for: 'keys' }], 'Linux X11 (AT-SPI, none)'))).toMatchObject({ status: 'warn', summary: 'Missing: AT-SPI accessibility bus, Input (xdotool)' })
+    // Asked on first use (null) is not missing.
+    expect(step(offMac([{ id: 'portal', label: 'Screen capture portal', granted: null, for: 'screenshots' }], 'Linux Wayland/GNOME (AT-SPI, portal)')).status).toBe('done')
+  })
+})
+

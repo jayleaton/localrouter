@@ -464,6 +464,14 @@ export class ComputerUse {
   private async decide(run: Run, screen: Observation, avoid: Map<string, string> = new Map()): Promise<Decision> {
     const { task } = run
     const controls = screen.controls
+    // Going to an address whose page is not there yet, and the field typed into no longer holds the address (an app put
+    // its own text back after an Enter that went elsewhere): it may be typed again. Only for addresses, where typing
+    // again is harmless; a message box emptied by sending never re-offers its text.
+    if (run.typedInto && task.text && navigationUnmet(task.goal, screen)) {
+      const field = run.typedInto
+      const now = controls.find((c) => c.role === field.role && c.label === field.label)
+      if (now?.value !== undefined && !now.value.replace(/\s+/g, '').includes(task.text.replace(/\s+/g, ''))) run.typedInto = null
+    }
     const typed = run.typedInto !== null
     const textboxes = controls.map((control, index) => ({ control, index })).filter(({ control }) => control.role === 'textbox')
     const canType = Boolean(task.text) && !typed && textboxes.length > 0

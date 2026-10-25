@@ -111,4 +111,14 @@ Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:LR_CS)) -Language CSharp -
     const tabs = (await worker.call('tabs')) as { tabs: unknown[] }
     expect(Array.isArray(tabs.tabs)).toBe(true)
   })
+
+  it('asks Windows Hello for a window through IUserConsentVerifierInterop, and reads its answer', { timeout: 180_000 }, async () => {
+    // A runner has no Hello set up: the request answers at once (no prompt) with a result, which is what this checks.
+    const hello = (await worker.call('hello_available', {}, { timeoutMs: 60_000 })) as { availability: string }
+    if (hello.availability === 'Available') return
+    const start = (await worker.call('hello_start', { prompt: 'LocalRouter CI', hwnd: 0 }, { timeoutMs: 60_000 })) as { front: boolean; seen: boolean }
+    expect(typeof start.front).toBe('boolean')
+    const done = (await worker.call('hello_wait', { ms: 30_000 }, { timeoutMs: 60_000 })) as { result: string }
+    expect(['DeviceNotPresent', 'NotConfiguredForUser', 'DisabledByPolicy', 'DeviceBusy', 'Canceled']).toContain(done.result)
+  })
 })

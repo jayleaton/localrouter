@@ -285,6 +285,8 @@ def type_text(el, win, app, text):
         raise Fail('LOCALROUTER_MULTILINE')
     editable = safe(el.get_editable_text_iface) if has(states, S.EDITABLE) else None
     if editable is not None:
+        # Focus first, as a click would: an Enter after this goes to the field, not to whatever had the focus.
+        safe(el.grab_focus)
         if safe(lambda: editable.set_text_contents(text), False) and (secret or landed(el, text)):
             return {'done': True}
         safe(el.grab_focus)

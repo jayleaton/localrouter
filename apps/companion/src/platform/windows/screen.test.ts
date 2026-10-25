@@ -237,3 +237,11 @@ describe('bringing a window to the front (Windows run, 2026-10-25: "Windows did 
   })
 })
 
+describe('setting a field’s value gives it the focus first (Windows run, 2026-10-25: an Enter went to the page)', () => {
+  it('SetFocus comes before ValuePattern.SetValue, so the Enter that follows reaches the field', () => {
+    const typing = HELPER_CS.slice(HELPER_CS.indexOf('private static Dictionary<string, object> SemanticType'), HELPER_CS.indexOf('private static ScrollPattern Scrollable'))
+    expect(typing.indexOf('el.SetFocus();')).toBeGreaterThan(0)
+    expect(typing.indexOf('el.SetFocus();')).toBeLessThan(typing.indexOf('vp.SetValue(text);'))
+  })
+})
+

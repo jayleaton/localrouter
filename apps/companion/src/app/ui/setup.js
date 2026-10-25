@@ -7,7 +7,7 @@ let last = null;
 let confirming = false;
 let discovered = null;
 
-const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not a Mac' };
+const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not needed here' };
 const PERM_DOT = { granted: 'ready', stale: 'failed', denied: 'failed' };
 
 const ipcMessage = (error) => String((error && error.message) || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -127,6 +127,7 @@ function renderPermissions(s) {
   // Linux and Windows: the platform's own list of what it needs, each with how to get it.
   const reqs = p.requirements || null;
   $('macPerms').hidden = Boolean(reqs);
+  $('macRestart').hidden = Boolean(reqs);
   $('osPerms').hidden = !reqs;
   if (reqs) {
     $('osBackend').textContent = p.backend || 'this computer';

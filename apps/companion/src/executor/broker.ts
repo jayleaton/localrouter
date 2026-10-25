@@ -51,6 +51,8 @@ export type Card = {
   requester: string
   /** What happens after Approve, said before it happens: "After Approve, Windows asks for your PIN, face or fingerprint (Windows Hello)." */
   confirm: string
+  /** While Approve's OS check is open and could not come to the front: where to find it. Empty otherwise. */
+  waiting: string
   expires_in_s: number
   state: Approval['state']
 }
@@ -58,7 +60,8 @@ export type Card = {
 /** A person's presence, checked by the OS where it can be (Touch ID), for one approval. */
 export interface PresenceGate {
   readonly method: string
-  verify(card: Card): Promise<boolean>
+  /** `waiting`: a sentence for the card while the OS check is open but not in front ("look for the Windows Security window"). */
+  verify(card: Card, waiting?: (text: string) => void): Promise<boolean>
 }
 
 export type Limits = { maxSteps: number; timeoutMs: number; approvalTimeoutMs: number }
@@ -114,6 +117,8 @@ export type TaskView = {
 export type BrokerEvent =
   | { type: 'approval'; card: Card }
   | { type: 'approval.end'; id: string; outcome: Taken }
+  /** The card changed while it waits (the OS check is open behind other windows). */
+  | { type: 'approval.update'; card: Card }
   | { type: 'task'; task: TaskView }
 
 export type Started = { ok: true; task_id: string; finished: Promise<ComputerOutcome> } | { ok: false; error: string }
@@ -158,6 +163,7 @@ export class Broker {
   private readonly minDwellMs: number
   private readonly listeners = new Set<(event: BrokerEvent) => void>()
   private readonly waiters = new Map<string, () => void>()
+  private readonly waitingNotes = new Map<string, string>()
   private readonly tasks: Task[] = []
   private active: Task | null = null
   private injecting = 0
@@ -435,9 +441,15 @@ export class Broker {
     this.store.hold(id, now + (this.options.presenceMs ?? PRESENCE_MS), now)
     let present = false
     try {
-      present = await this.options.gate.verify(this.card(x, now))
+      present = await this.options.gate.verify(this.card(x, now), (text) => {
+        this.waitingNotes.set(id, text)
+        const held = this.store.get(id, this.now())
+        if (held) this.emit({ type: 'approval.update', card: this.card(held, this.now()) })
+      })
     } catch (error) {
       this.log.warn('approval.gate_failed', { error: messageOf(error) })
+    } finally {
+      this.waitingNotes.delete(id)
     }
     if (!present) return this.refuseAnswer(id, by, `Not approved: ${this.options.gate.method} did not confirm it was you.`)
     if (this.inputActive) return this.refuseAnswer(id, by, 'LocalRouter moved the pointer or typed while you approved, so it did not count.')
@@ -688,7 +700,7 @@ export class Broker {
 
   private card(x: Approval, now: number): Card {
     const b = x.binding
-    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method), expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
+    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method), waiting: this.waitingNotes.get(x.id) ?? '', expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
   }
 
   private emit(event: BrokerEvent) {

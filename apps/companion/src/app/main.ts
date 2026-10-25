@@ -143,6 +143,13 @@ function computerName() {
  * The person's presence for an approval: Touch ID where the Mac has it, the platform's own check where it has one
  * (Windows Hello), otherwise a native confirmation dialog (weaker: documented in the README).
  */
+/** A window's native handle as a number (an HWND on Windows), for an OS prompt it should own; undefined without one. */
+function windowHandle(win: BrowserWindow | null): number | undefined {
+  if (!win || win.isDestroyed()) return undefined
+  const handle = win.getNativeWindowHandle()
+  return handle.length >= 8 ? Number(handle.readBigUInt64LE(0)) : handle.length >= 4 ? handle.readUInt32LE(0) : undefined
+}
+
 class AppPresenceGate implements PresenceGate {
   private os: PlatformPresence | null = null
   private osReady = false
@@ -159,7 +166,7 @@ class AppPresenceGate implements PresenceGate {
     return 'a confirmation on this computer'
   }
 
-  async verify(card: Card): Promise<boolean> {
+  async verify(card: Card, waiting?: (text: string) => void): Promise<boolean> {
     if (process.platform === 'darwin' && systemPreferences.canPromptTouchID()) {
       try {
         await systemPreferences.promptTouchID(`let Jarvis ${card.action}`.slice(0, 200))
@@ -168,7 +175,11 @@ class AppPresenceGate implements PresenceGate {
         return false
       }
     }
-    if (this.os && this.osReady) return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200)).catch(() => false)
+    if (this.os && this.osReady) {
+      // The app's window owns the OS prompt (Windows Hello opens over it, not behind it).
+      const window = windowHandle(mainWindow)
+      return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200), { ...(window !== undefined ? { window } : {}), ...(waiting ? { waiting } : {}) }).catch(() => false)
+    }
     const where = [card.app, card.title, card.url].filter(Boolean).join(' · ')
     const options = {
       type: 'warning' as const,
@@ -225,6 +236,8 @@ async function startLocalExecutor(): Promise<void> {
     }
     // A card nobody answered: say so, since the task ended while the person may have been away from the window.
     if (e.type === 'approval.end' && e.outcome === 'expired' && Notification.isSupported()) new Notification({ title: 'Jarvis stopped', body: 'Nobody approved the step in time, so nothing was done.' }).show()
+    // The OS check is open behind other windows: say where it is, in a notification as well as on the card.
+    if (e.type === 'approval.update' && e.card.waiting && Notification.isSupported()) new Notification({ title: 'Windows Hello is waiting', body: e.card.waiting }).show()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })
@@ -472,7 +485,7 @@ function registerIpc() {
   })
   setup('setup:discover', () => discoverSparks())
   setup('setup:resetGrant', async (kind) => {
-    if (process.platform !== 'darwin') return { ok: false, text: 'not a Mac', state: await state() }
+    if (process.platform !== 'darwin') return { ok: false, text: 'only macOS keeps these grants', state: await state() }
     const which = kind === 'screen' ? 'screen' : kind === 'microphone' ? 'microphone' : 'accessibility'
     const r = await resetGrant(which === 'screen' ? 'ScreenCapture' : which === 'microphone' ? 'Microphone' : 'Accessibility')
     if (r.ok) {
@@ -606,7 +619,10 @@ async function permissions() {
   if (process.platform !== 'darwin') {
     // Linux and Windows have no TCC grants to go stale: the platform says what it needs and how to get it.
     const report = executor ? await executor.built.platform.access().catch(() => null) : null
-    return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false, microphone: false }, backend: report?.backend ?? '', requirements: report?.requirements ?? [] }
+    // Windows asks about the microphone too (Settings › Privacy & security › Microphone); Linux has no such switch.
+    const mic = process.platform === 'win32' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a'
+    const microphone = mic === 'n/a' ? [] : [{ id: 'microphone', label: 'Microphone', granted: mic === 'granted' ? true : mic === 'denied' || mic === 'restricted' ? false : null, for: 'calls', fix: 'Settings › Privacy & security › Microphone: turn on “Let desktop apps access your microphone”.' }]
+    return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false, microphone: false }, backend: report?.backend ?? '', requirements: [...microphone, ...(report?.requirements ?? [])] }
   }
   const microphone = systemPreferences.getMediaAccessStatus('microphone')
   const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted', microphone: microphone === 'granted' }
