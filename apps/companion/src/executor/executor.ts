@@ -86,6 +86,7 @@ export async function startExecutor(o: ExecutorOptions): Promise<Executor> {
     close: async () => {
       broker.stop(undefined, 'shutdown', 'LocalRouter is quitting.')
       await server?.close()
+      platform.close?.()
     },
   }
 }

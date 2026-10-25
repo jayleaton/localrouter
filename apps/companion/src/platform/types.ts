@@ -80,4 +80,6 @@ export type Platform = {
   /** An OS presence check for approvals; null: the app's own confirmation dialog. */
   readonly presence: PlatformPresence | null
   access(): Promise<AccessReport>
+  /** Ends what the platform keeps running (Windows' PowerShell workers), when the executor stops. */
+  close?(): void
 }
