@@ -8,8 +8,15 @@
  * (controller.ts) asks the box and acts.
  */
 
-/** A point in global, top-left-origin screen points (the space AX positions and CGEvent locations use). */
+/**
+ * A point in global, top-left-origin screen coordinates: the space the platform's accessibility positions and
+ * input events share (points on macOS, physical pixels on Windows with per-monitor DPI awareness, X11/compositor
+ * pixels on Linux). Every Point and Rect a backend reports or takes is in this one space.
+ */
 export type Point = { x: number; y: number }
+
+/** A rectangle in the same global space as Point. */
+export type Rect = { x: number; y: number; w: number; h: number }
 
 /** The pointer as the local stop reads it: where it is, and how long ago the left button last went down, if known. */
 export type PointerReading = Point & { sinceClickS?: number }
@@ -25,6 +32,8 @@ export type ScreenControl = {
   /** A text box's current text, clipped. */
   value?: string
   focused?: boolean
+  /** Where it is on screen, when the backend knows (for a caller that reads the tree next to a screenshot). */
+  bounds?: Rect
 }
 
 export const CONTROL_ROLES = ['button', 'link', 'textbox', 'tab', 'row', 'menuitem', 'checkbox', 'option', 'text', 'other'] as const
@@ -42,6 +51,10 @@ export type Observation = {
   text?: string
   /** Read from a screenshot: only text is listed, not icons such as a play button. */
   visual?: boolean
+  /** The window observed, in global coordinates, when the backend knows. */
+  window?: Rect
+  /** The walk stopped early (its node, control or time budget ran out): more may be on screen than is listed. */
+  truncated?: boolean
 }
 
 export type ScreenAction =
@@ -49,19 +62,50 @@ export type ScreenAction =
   /** Focus the control and replace its text with `text`. */
   | { kind: 'type'; ref: string; text: string }
   | { kind: 'press'; key: 'enter' | 'escape' | 'tab' | 'space' }
-  | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom' }
+  /** `ref`: the list or area to scroll (a control of this observation); the window's middle when absent. */
+  | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom'; ref?: string }
 
-/** What an action did to the pointer: where it left it, when it moved it. */
-export type ActResult = { pointer?: Point }
+/**
+ * What an action did: where it left the pointer when it moved it, and `background` when it acted without the
+ * pointer or global key events at all (an accessibility action such as AXPress, UIA Invoke or AT-SPI doAction), so
+ * the person's own pointer and keyboard were never touched.
+ */
+export type ActResult = { pointer?: Point; background?: boolean }
+
+export type ObserveOptions = { signal?: AbortSignal }
+
+/** `signal` aborts an action under way (a stop): long typing stops between chunks, a running script is killed. */
+export type ActOptions = { signal?: AbortSignal }
+
+/**
+ * The front window as an image. `region` is the part of the screen it shows (global coordinates) and `scale` the
+ * image pixels per global unit, so image pixel (px, py) is the global point (region.x + px / scale, region.y + py / scale).
+ */
+export type Screenshot = { png: Uint8Array; width: number; height: number; region: Rect; scale: number; app: string; title: string }
+
+export type ScreenshotOptions = { maxEdge?: number; signal?: AbortSignal }
+
+/** The longest image edge a screenshot is scaled to by default (what vision models read without resizing again). */
+export const SCREENSHOT_MAX_EDGE = 1568
 
 /** Reads and drives one surface. Errors are thrown with a message a person can act on. */
 export interface ScreenBackend {
   readonly kind: 'browser' | 'desktop'
-  observe(): Promise<Observation>
+  observe(options?: ObserveOptions): Promise<Observation>
   /** Resolves with where the pointer was left when the action moved it (clicks, typing, scrolling). */
-  act(action: ScreenAction): Promise<ActResult | void>
+  act(action: ScreenAction, options?: ActOptions): Promise<ActResult | void>
   /** Where the pointer is now, for the local stop. */
-  pointer?(): Promise<Point>
+  pointer?(): Promise<PointerReading>
+  /** Every display's bounds, in global coordinates (the local stop's corners are worked out from them). */
+  displays?(): Promise<Rect[]>
+  /** The front window as an image, scaled down so its longer edge is at most `maxEdge` (SCREENSHOT_MAX_EDGE). */
+  screenshot?(options?: ScreenshotOptions): Promise<Screenshot>
+}
+
+/** The scale a capture of `w`×`h` image pixels needs so its longer edge is at most `maxEdge` (never above 1). */
+export function fitScale(w: number, h: number, maxEdge: number = SCREENSHOT_MAX_EDGE): number {
+  const edge = Math.max(w, h)
+  return edge > maxEdge && edge > 0 ? maxEdge / edge : 1
 }
 
 /** One open browser tab. */
