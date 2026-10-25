@@ -85,6 +85,28 @@ step_env() {
   while IFS=$'\t' read -r k v; do export "$k=$(eval "echo \"$v\"")"; done < <(jq -r '.env | to_entries[] | [.key, .value] | @tsv' "$1")
 }
 
+# ---- several Sparks (--topology FILE --node ID; deploy/jarvis/topology.sh)
+source "$repo/deploy/jarvis/topology.sh"
+# use_topology: checks $topology and $node, narrows $list (the --models keys) to the profile's models the node runs
+# (its own, and on the front its fallback ones), sets $PORT to the node's port (unless $port_set: given, then it must
+# match) and $listen to where its service listens (loopback on the front, else the node's first address)
+use_topology() {
+  [ -n "$topology" ] && [ -n "$node" ] || die "--topology and --node go together"
+  topology=$(realpath -m "$topology")
+  local why nk k
+  why=$(topo_check "$topology" "$node")
+  [ -z "$why" ] || die "--topology $topology: ${why//$'\n'/; }"
+  nk=$(jq -r --arg m " $(topo_local "$topology" "$node") " '.models[] | select(.id as $i | $m | contains(" " + $i + " ")) | .key' "$p" | paste -sd ,)
+  [ -n "$nk" ] || die "node $node runs none of $(basename "$p")'s models"
+  if [ "$list" = all ]; then list=$nk; else
+    for k in ${list//,/ }; do [[ ",$nk," == *",$k,"* ]] || die "--models has '$k'; node $node runs: $nk"; done
+  fi
+  if [ "$port_set" = 0 ]; then PORT=$(topo_port "$topology" "$node")
+  elif [ "$PORT" != "$(topo_port "$topology" "$node")" ]; then die "--port $PORT; the topology gives node $node port $(topo_port "$topology" "$node")"; fi
+  listen=127.0.0.1
+  [ "$(topo_role "$topology" "$node")" = front ] || listen=$(topo_addr "$topology" "$node")
+}
+
 is_done() { bash -c "$(jq -r .done <<< "$1")" > /dev/null 2>&1; }
 ok_test() { bash -c "$(jq -r .test <<< "$1")" > /dev/null 2>&1; }
 step_id() { jq -r '.model + "/" + .id' <<< "$1"; }

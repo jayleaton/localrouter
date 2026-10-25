@@ -81,6 +81,29 @@ Settings live in `env.sh`: the paths of the qualified installs, `PORT` (8190) an
 marker and its own booking, so going back to the full model is `DRAMA_VARIANT=full deploy/jarvis/install.sh` (its
 marker must still match `pins.json`, which the NVFP4 pins leave alone).
 
+## Several Sparks
+
+One box is the default: without `TOPOLOGY`, every script and the generated config are as above. With several GB10s,
+each node runs its own daemon and the front serves the API for all of them ([docs/dev/MULTI-SPARK.md](../../docs/dev/MULTI-SPARK.md#configuration)).
+
+```sh
+deploy/jarvis/kits.sh topology.json kits/      # kits/NODE/: topology.json and node.env (NODE, TOPOLOGY, TOOLS, PORT)
+# on each node, the nodes that are not the front first, from a checkout of the same commit:
+set -a; . kits/spark-1/node.env; set +a; deploy/jarvis/install.sh && deploy/jarvis/start.sh
+```
+
+- **What install.sh does with `TOPOLOGY` and `NODE`.** It checks the topology (mode `multi`, the node in it, one front,
+  every model a tool of `config.json.in`). It preflights only the node's tools (`TOOLS`: its own, and on the front its
+  `fallback` ones). The config lists every node's tools and keeps `defaults` (a node that is not the front drops the
+  ones it does not serve). It adds the `topology` block with `self` set to the node, and sets `machine` to the node id.
+- **Where it listens.** A node that is not the front listens on its first address, a ConnectX-7 link, where the front
+  reaches it (`HOST` overrides it). It gets no `tailscale serve`, and `start.sh` waits for its own models only. The
+  front listens on `127.0.0.1` as before: `/v1/realtime` serves loopback peers only.
+- **The front's token.** Turn on pairing on every node (`PAIRING_REQUIRED=1`). On each node that is not the front,
+  make a token with `deploy/jarvis/pair.sh token front --scopes manage`, and put it in the front's `token_file`.
+- **Checks.** `tools/install/doctor.sh --profile jarvis-gb10 --topology FILE --node ID` checks the link and the other
+  nodes ([INSTALL.md](../../INSTALL.md#several-sparks)).
+
 ## Reaching it
 
 The daemon listens on `127.0.0.1:8190` only. Browsers allow the microphone only in a secure context, so remote use
