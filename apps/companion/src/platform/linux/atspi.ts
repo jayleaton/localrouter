@@ -110,7 +110,8 @@ def text_of(acc, limit):
     if t is None:
         return ''
     n = safe(t.get_character_count, 0)
-    return safe(lambda: t.get_text(0, min(n, limit)), '') or ''
+    # Atspi.Text.get_text, not t.get_text: on an Accessible, get_text() is the one-argument alias for the interface.
+    return safe(lambda: Atspi.Text.get_text(t, 0, min(n, limit)), '') or ''
 
 def children(acc):
     n = safe(acc.get_child_count, 0)
