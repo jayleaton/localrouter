@@ -4,14 +4,14 @@ LocalRouter is one "Jarvis box" on a single GB10: a chat model that is always wa
 image and video generation and speech to text and text to speech beside it. The chat model is
 [TensorFold/Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) with the
 [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) drafter, served by
-[TensorFold](https://github.com/ashhart/TensorFold) 1.1.4's own OpenAI-compatible server (`tensorfold serve`, the
+[TensorFold](https://github.com/ashhart/TensorFold) 1.1.1's own OpenAI-compatible server (`tensorfold serve`, the
 release binary `bin/tensorfold-native`). LocalRouter does not reimplement the model: it runs TensorFold's server as the
 tool's worker and proxies requests to it.
 
 **Status: qualified on DGX-01 (GB10)** by `tools/chat/qwen38-27b/qualify.sh`: TensorFold 1.1.1 by run2 at commit
 685f517 on 2026-10-21, and 1.1.4 by the run at commit 37755e0 on 2026-10-25, each 273 of 273 checks with one named
-exception (see [Exceptions](#exceptions)). TensorFold's 1.1.4 release testing includes the 27B on a DGX Spark; these
-runs establish it on this host, and the deployed marker comes from the run on the deployed commit. Every
+exception (see [Exceptions](#exceptions)). The pin is 1.1.1: 1.1.4 was deployed on 2026-10-25 and taken back the same
+day (see [Why not 1.1.4](#why-not-114-yet)). The deployed marker comes from the run on the deployed commit. Every
 other machine runs qualify.sh itself: the tool is refused (503) on a host until its own marker says qualified.
 
 | Run | Commit | Checks | Result |
@@ -109,6 +109,16 @@ Both versions answer every fixed prompt of the qualification with the same bytes
 TensorFold's cache of measured decode-window costs (keyed by the executable) and measures them once, which is the
 likely cause of 1.1.4's slow first start; later starts took 14 s.
 
+### Why not 1.1.4 yet
+
+The table above has only fresh prompts. A conversation's next turn is the voice loop's every turn, and there 1.1.4 is
+slower: its prompt cache resumes only at its 4,096-row prompt chunks, so a conversation shorter than 4,096 tokens is
+prefilled again from the start each turn. On DGX-01 (1.1.4 deployed, `chat_bench.py turn`): a 1,569-token
+conversation's next turn had `cached_tokens` 0 and took 1.46 s to its first token (1.1.1 cut prompts in 128-row chunks, per
+upstream's c50b59a2); at 5,084 tokens, `cached_tokens` was exactly 4,096. In the voice smoke the chat's first token came
+1.45 to 1.70 s after each turn's request, against 0.1 to 0.3 s on 1.1.1, and every voice latency check failed (first
+audio 2.3 to 2.5 s). The pin went back to 1.1.1 the same day. Before a later TensorFold moves it, `chat_bench.py turn`
+(a cached next turn) must stay at 1.1.1's speed as well as the fresh prompts.
 
 Measured on DGX-01 (GB10) on 2026-10-22 against the live Jarvis service, with `tools/spark/jarvis/chat_speed.py`.
 It sends the web client's request shape (its system prompt, the image and video tools, thinking off, no temperature)
@@ -231,7 +241,7 @@ other mismatch, including any difference inside the reasoning text, fails the ru
 
 | What | Pin |
 | --- | --- |
-| TensorFold | v1.1.4, tag `585df8ba`, commit `eab8582819688325e371907e4706e1c602b8a273`; `tensorfold-1.1.4-linux-aarch64.tar.gz` sha256 `2c77ff01…8d53d7a4ec`, `-linux-x86_64` `878a23f0…ae18ce2b0` (before: v1.1.1, `b10231b9`) |
+| TensorFold | v1.1.1, tag `92d71a3c`, commit `b10231b94f8adf3d4132acebdc0a1ac87e53a838`; `tensorfold-1.1.1-linux-aarch64.tar.gz` sha256 `2e0103a5…f9139cb39`, `-linux-x86_64` `e1785e32…6185fbdf` |
 | Checkpoint | TensorFold/Qwen3.8-27B-MLX-4bit @ `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c` (4-bit affine, group 64; three shards, 16,054,541,349 B) |
 | Drafter | z-lab/Qwen3.8-27B-DFlash2 @ `50307d4c4cde6860d4eee73e2547cd786fe8e8a4` (BF16, 3,848,817,896 B; served in 4 bits, `--drafter-bits` default) |
 
@@ -248,7 +258,7 @@ other mismatch, including any difference inside the reasoning text, fails the ru
 
 | Part | Licence |
 | --- | --- |
-| TensorFold 1.1.4 (binary, fetched) | Apache 2.0 |
+| TensorFold 1.1.1 (binary, fetched) | Apache 2.0 |
 | Qwen3.8-27B-MLX-4bit (TensorFold; base Qwen/Qwen3.8-27B) | Apache 2.0 |
 | Qwen3.8-27B-DFlash2 (z-lab) | Apache 2.0 |
 
