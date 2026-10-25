@@ -34,6 +34,7 @@ test {
     _ = @import("pairing.zig");
     _ = @import("contract.zig");
     _ = @import("nodes.zig");
+    _ = @import("ranks.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;

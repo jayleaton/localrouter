@@ -100,6 +100,7 @@ test {
     _ = @import("tool/systemone.zig");
     _ = @import("tool/upstream.zig");
     _ = @import("tool/node.zig");
+    _ = @import("tool/ranks.zig");
     _ = @import("topology.zig");
     _ = @import("api/node.zig");
     _ = @import("engines/openai_server.zig");

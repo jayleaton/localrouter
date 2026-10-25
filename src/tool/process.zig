@@ -27,6 +27,15 @@ pub const Setup = struct {
     log_dir: []const u8,
     gpu_lock: []const u8 = "",
     speech_gate: []const u8 = "", // the file workers wait on while speech is made (sched/speech_gate.zig); "": none
+    rank: ?Rank = null, // this node's rank of a tensor-parallel group (`topology.Group`); null: not one
+};
+
+/// A tensor-parallel rank, as the worker learns it: LOCALROUTER_RANK, LOCALROUTER_WORLD and LOCALROUTER_MASTER (rank 0's
+/// address on the link between the hosts), which `openai_server` puts in its `options.rank_env`.
+pub const Rank = struct {
+    rank: usize,
+    world: usize,
+    master: []const u8,
 };
 
 pub const ProcessTool = struct {
@@ -289,6 +298,12 @@ pub const ProcessTool = struct {
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
         try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
         if (p.setup.speech_gate.len > 0) try env.put(speech_gate.env_name, p.setup.speech_gate);
+        var rank_buf: [2][24]u8 = undefined;
+        if (p.setup.rank) |r| {
+            try env.put("LOCALROUTER_RANK", try std.fmt.bufPrint(&rank_buf[0], "{d}", .{r.rank}));
+            try env.put("LOCALROUTER_WORLD", try std.fmt.bufPrint(&rank_buf[1], "{d}", .{r.world}));
+            try env.put("LOCALROUTER_MASTER", r.master);
+        }
         const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);

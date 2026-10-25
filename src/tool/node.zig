@@ -162,6 +162,20 @@ pub const Cluster = struct {
         return last;
     }
 
+    pub const Reply = struct { status: u16, body: []const u8 };
+
+    /// One request to node `node`'s daemon, its whole reply in `a` (at most 16 MiB).
+    pub fn request(c: *Cluster, a: std.mem.Allocator, node: usize, method: []const u8, path: []const u8, body: ?[]const u8, timeout_s: u32) upstream.Error!Reply {
+        const p = &c.peers[node];
+        const fd = try c.connect(p, 3000);
+        defer _ = std.c.close(fd);
+        try upstream.sendWith(fd, method, path, body, c.head(p, null));
+        const buf = a.alloc(u8, 64 << 10) catch return error.TooLarge;
+        var r: upstream.Reader = .{ .fd = fd, .buf = buf, .timeout_ms = timeoutMs(timeout_s) };
+        const status = try r.head();
+        return .{ .status = status, .body = try r.rest(a, 16 << 20) };
+    }
+
     pub fn head(c: *const Cluster, p: *const Peer, calls: ?usize) upstream.Head {
         return .{ .host = p.node.addresses[p.preferred.load(.acquire)], .bearer = c.bearer, .calls = calls };
     }
@@ -410,17 +424,8 @@ pub const NodeTool = struct {
         };
     }
 
-    const Reply = struct { status: u16, body: []const u8 };
-
-    /// One request to the node, its whole reply in `a` (at most 16 MiB).
-    fn call(t: *NodeTool, a: std.mem.Allocator, method: []const u8, path: []const u8, body: ?[]const u8, timeout_s: u32) upstream.Error!Reply {
-        const fd = try t.cluster.connect(t.peer(), 3000);
-        defer _ = std.c.close(fd);
-        try upstream.sendWith(fd, method, path, body, t.cluster.head(t.peer(), null));
-        const buf = a.alloc(u8, 64 << 10) catch return error.TooLarge;
-        var r: upstream.Reader = .{ .fd = fd, .buf = buf, .timeout_ms = timeoutMs(timeout_s) };
-        const status = try r.head();
-        return .{ .status = status, .body = try r.rest(a, 16 << 20) };
+    fn call(t: *NodeTool, a: std.mem.Allocator, method: []const u8, path: []const u8, body: ?[]const u8, timeout_s: u32) upstream.Error!Cluster.Reply {
+        return t.cluster.request(a, t.node, method, path, body, timeout_s);
     }
 
     /// An output file of the node's job, streamed into the job directory.
