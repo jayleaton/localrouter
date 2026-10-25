@@ -1,0 +1,41 @@
+# Linux (AppImage, deb) and Windows (NSIS installer, zip) builds of the companion, from dist/ (`npm run build`).
+# macOS keeps its own script (scripts/package-mac.sh: the stable signing identity TCC grants depend on).
+appId: com.localrouter.companion
+productName: LocalRouter
+directories:
+  app: dist
+  output: out
+# Unpacked, like the Mac build: the MCP launcher runs resources/app/mcp.cjs with the app's own Node.
+asar: false
+artifactName: LocalRouter-${version}-${os}-${arch}.${ext}
+publish: null
+extraResources:
+  - from: scripts/launchers
+    to: .
+    filter:
+      - localrouter-executor-mcp*
+linux:
+  executableName: localrouter
+  category: Utility
+  maintainer: LocalRouter <noreply@localrouter.invalid>
+  synopsis: Jarvis on your own computer, with the models on your LocalRouter box
+  target:
+    - AppImage
+    - deb
+deb:
+  # Computer control: AT-SPI through python3-gi for the tree and actions; xdotool for X11 input; playerctl for media.
+  recommends:
+    - python3-gi
+    - gir1.2-atspi-2.0
+    - at-spi2-core
+    - xdotool
+    - playerctl
+win:
+  executableName: LocalRouter
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

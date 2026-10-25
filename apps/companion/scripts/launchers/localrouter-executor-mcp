@@ -1,0 +1,6 @@
+#!/bin/sh
+# LocalRouter's executor over MCP stdio (see the app's README), Linux: runs dist/mcp.cjs with the app's bundled Node.
+# Installed next to the app's resources (/opt/LocalRouter/resources with the .deb).
+set -e
+here=$(dirname "$(readlink -f "$0")")
+ELECTRON_RUN_AS_NODE=1 exec "$here/../localrouter" "$here/app/mcp.cjs" "$@"

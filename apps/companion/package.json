@@ -17,13 +17,16 @@
     "test": "vitest run",
     "check": "npm run type-check && npm run lint && npm test",
     "build": "node scripts/build.mjs",
-    "package:mac": "node scripts/build.mjs && bash scripts/package-mac.sh"
+    "package:mac": "node scripts/build.mjs && bash scripts/package-mac.sh",
+    "package:linux": "node scripts/build.mjs && electron-builder --linux --config electron-builder.yml --publish never",
+    "package:win": "node scripts/build.mjs && electron-builder --win --config electron-builder.yml --publish never"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
     "@eslint/js": "^9.36.0",
     "@types/node": "^24.3.0",
     "electron": "45.0.0",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "eslint": "^9.36.0",
     "typescript": "^5.9.3",

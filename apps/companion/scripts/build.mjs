@@ -63,7 +63,7 @@ await writeFile(join(dist, 'ui', 'voice.html'), patched)
 
 await writeFile(
   join(dist, 'package.json'),
-  `${JSON.stringify({ name: 'localrouter-companion', productName: 'LocalRouter', version: pkg.version, main: 'main.cjs' }, null, 2)}\n`,
+  `${JSON.stringify({ name: 'localrouter-companion', productName: 'LocalRouter', version: pkg.version, description: pkg.description, author: 'LocalRouter', license: pkg.license, main: 'main.cjs' }, null, 2)}\n`,
 )
 
 process.stdout.write(`build: dist/ (main.cjs, preload.cjs, mcp.cjs, ui/, package.json) for ${pkg.version}\n`)

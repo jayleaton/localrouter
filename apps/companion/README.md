@@ -104,6 +104,27 @@ Spark's own web page keep using this Mac through the same local rules (pair a se
 If the old LaunchAgent helper (`apps/desktop-helper`, `com.localrouter.desktop`) is installed, remove it first
 (`node src/main.ts uninstall-agent` in its checkout), so two programs never drive the same Mac.
 
+## Install on Linux or Windows (unsigned builds)
+
+Download `LocalRouter-linux-x64` or `LocalRouter-windows-x64` from the latest green **Companion (Linux, Windows)** run
+in GitHub Actions. Pair and use it as on the Mac (steps 3, 4 and 6 above); Settings lists what computer control needs on
+this computer, each with its fix. Approvals use Windows Hello where it is set up, otherwise a confirmation dialog.
+**Stop**: the card's Stop button, Ctrl+Shift+Alt+Esc, the tray icon's menu, or (where the OS lets an app read the
+pointer: X11, Hyprland, Windows) the pointer in the top-left corner.
+
+- **Linux**: `sudo apt install ./LocalRouter-<version>-linux-amd64.deb` (it recommends `python3-gi gir1.2-atspi-2.0
+  at-spi2-core xdotool playerctl`), or the AppImage (`chmod +x`, run it). Accessibility must be on for apps to show
+  their controls (GNOME: `gsettings set org.gnome.desktop.interface toolkit-accessibility true`; Qt apps:
+  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`; Electron apps: `--force-renderer-accessibility`). On Wayland, what works depends
+  on the compositor: [COMPUTER.md › Linux](../../docs/dev/COMPUTER.md#linux).
+- **Windows**: run `LocalRouter-<version>-win-x64.exe` (SmartScreen: More info › Run anyway), or unzip the zip. Run it as
+  the signed-in user, not as administrator; apps running as administrator cannot be controlled
+  ([COMPUTER.md › Windows](../../docs/dev/COMPUTER.md#windows)).
+
+The MCP launcher for other harnesses is `/opt/LocalRouter/resources/localrouter-executor-mcp` with the .deb, and
+`<install folder>\resources\localrouter-executor-mcp.cmd` on Windows. An AppImage mounts at a new path each run, so use
+the .deb (or `--appimage-extract`) for MCP.
+
 ## Other harnesses: the executor over MCP
 
 With the app running, enroll the harness in the app (Settings › Harnesses gives a token once), then:
@@ -129,9 +150,15 @@ npm test             # vitest: policy parity with the box (src/computer/policy_g
 
 npm run build        # dist/: main.cjs, preload.cjs, mcp.cjs, ui/ (voice.html built from src/voice/voice.html)
 npm run package:mac  # macOS only: the .app (ad-hoc signed), .dmg and .zip in out/
+npm run package:linux  # Linux: AppImage and .deb in out/ (electron-builder.yml)
+npm run package:win    # Windows: NSIS installer and .zip in out/
 ```
 
 CI runs the checks (`.github/workflows/ci.yml`, job `companion`), and on a macOS 14 runner builds, packages and
 smoke-starts the app (`--version`, `--smoke`: headless window, UI loaded with its shim, the executor answering on its
-socket) and the MCP launcher, then uploads the artifact (`.github/workflows/companion-mac.yml`). The box's half of the parity check is
+socket) and the MCP launcher, then uploads the artifact (`.github/workflows/companion-mac.yml`). The same runs on
+ubuntu-24.04 (under Xvfb) and windows-latest (`.github/workflows/companion-desktop.yml`), whose smoke line also reports
+what this OS's real platform detects; on Windows the tests start the real UI Automation worker read-only, and a
+`linux-real` job drives a GTK window through the real Linux backend in a virtual X session (Xvfb, openbox, at-spi). The
+box's half of the parity check is
 `src/computer/policy.zig`'s golden test under `zig build test`.

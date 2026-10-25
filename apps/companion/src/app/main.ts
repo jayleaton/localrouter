@@ -21,6 +21,7 @@ import { prepareVideo, restoreVoice } from '../harness/models.ts'
 import { pageView } from '../harness/realtime.ts'
 import type { ClientToolsSession } from '../harness/realtime.ts'
 import { startRuntime } from '../harness/runtime.ts'
+import { createPlatform } from '../platform/index.ts'
 import { stopShortcut } from '../platform/shortcut.ts'
 import type { PlatformPresence } from '../platform/types.ts'
 import type { Runtime } from '../harness/runtime.ts'
@@ -807,6 +808,13 @@ async function smoke() {
     const status = result.status as { computers: number; placement: string }
     const setupPage = result.setup as { version: string; error: string }
     ok = page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502 && setupPage.version === VERSION && setupPage.error === 'refused'
+    // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
+    const native = await createPlatform('native', { dataDir: dir })
+    result.native = await native.platform.access().then(
+      (a) => ({ os: native.platform.os, backend: a.backend, accessibility: a.accessibility, screen_recording: a.screen_recording, input: a.input, missing: a.requirements.filter((r) => r.granted === false).map((r) => r.id) }),
+      (error: unknown) => ({ os: native.platform.os, error: error instanceof Error ? error.message : String(error) }),
+    )
+    native.platform.close?.()
     setupWin.destroy()
     win.destroy()
   } catch (error) {
