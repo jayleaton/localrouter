@@ -35,6 +35,43 @@ using Microsoft.Win32;
 
 namespace LocalRouterWin
 {
+    // Windows Hello for a window (userconsentverifierinterop.h): the consent prompt is owned by LocalRouter's window, so
+    // it opens over it instead of behind it. IUnknown interfaces with IInspectable's three slots written out, so nothing
+    // here needs the .NET WinRT projection.
+    [ComImport, Guid("39E050C3-4E74-441A-8DC0-B81104DF949C"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IUserConsentVerifierInterop
+    {
+        [PreserveSig] int GetIids(out int count, out IntPtr iids);
+        [PreserveSig] int GetRuntimeClassName(out IntPtr name);
+        [PreserveSig] int GetTrustLevel(out int level);
+        [PreserveSig] int RequestVerificationForWindowAsync(IntPtr appWindow, IntPtr message, [In] ref Guid riid, out IntPtr operation);
+    }
+
+    [ComImport, Guid("00000036-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAsyncInfoRaw
+    {
+        [PreserveSig] int GetIids(out int count, out IntPtr iids);
+        [PreserveSig] int GetRuntimeClassName(out IntPtr name);
+        [PreserveSig] int GetTrustLevel(out int level);
+        [PreserveSig] int GetId(out uint id);
+        [PreserveSig] int GetStatus(out int status);
+        [PreserveSig] int GetErrorCode(out int code);
+        [PreserveSig] int Cancel();
+        [PreserveSig] int Close();
+    }
+
+    // IAsyncOperation<UserConsentVerificationResult>: its parameterized IID, worked out from the type's signature.
+    [ComImport, Guid("FD596FFD-2318-558F-9DBE-D21DF43764A5"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IConsentOperation
+    {
+        [PreserveSig] int GetIids(out int count, out IntPtr iids);
+        [PreserveSig] int GetRuntimeClassName(out IntPtr name);
+        [PreserveSig] int GetTrustLevel(out int level);
+        [PreserveSig] int PutCompleted(IntPtr handler);
+        [PreserveSig] int GetCompleted(out IntPtr handler);
+        [PreserveSig] int GetResults(out int result);
+    }
+
     public sealed class LrError : Exception
     {
         public LrError(string code, string detail) : base("LR_" + code + "|" + (detail ?? "").Replace("|", "/") + "|") { }
@@ -304,6 +341,10 @@ namespace LocalRouterWin
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint to, bool on);
         [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
         [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("combase.dll", CharSet = CharSet.Unicode)] public static extern int WindowsCreateString(string text, int length, out IntPtr hstring);
+        [DllImport("combase.dll")] public static extern int WindowsDeleteString(IntPtr hstring);
+        [DllImport("combase.dll")] public static extern int RoGetActivationFactory(IntPtr classId, [In] ref Guid iid, out IntPtr factory);
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
@@ -520,8 +561,112 @@ namespace LocalRouterWin
                 case "lock": return Json.Write(Lock());
                 case "media_key": return Json.Write(MediaKey(a));
                 case "access": return Json.Write(Access());
+                case "hello_start": return Json.Write(HelloStart(a));
+                case "hello_wait": return Json.Write(HelloWait(a));
                 default: throw new LrError("UNKNOWN_OP", op);
             }
+        }
+
+        // ---- Windows Hello for LocalRouter's window ----
+
+        private static readonly string[] ConsentResults = { "Verified", "DeviceNotPresent", "NotConfiguredForUser", "DisabledByPolicy", "DeviceBusy", "RetriesExhausted", "Canceled" };
+        private static IConsentOperation helloOp;
+        private static IAsyncInfoRaw helloInfo;
+
+        /**
+         * Starts Windows Hello for the window hwnd (LocalRouter's; 0: the window in front) with the prompt, then brings
+         * the Windows Security window forward (the foreground ladder) and says whether it is in front, so the app can
+         * tell the person where to look when it is not. hello_wait gives the result.
+         */
+        private static Dictionary<string, object> HelloStart(Dictionary<string, object> a)
+        {
+            NotSecure();
+            IntPtr owner = new IntPtr((long)Num(a, "hwnd", 0));
+            if (owner == IntPtr.Zero) owner = Root(Native.GetForegroundWindow());
+            string prompt = Str(a, "prompt") ?? "Approve this action";
+            Guid factoryIid = typeof(IUserConsentVerifierInterop).GUID;
+            Guid operationIid = typeof(IConsentOperation).GUID;
+            IntPtr cls = IntPtr.Zero, message = IntPtr.Zero, factory = IntPtr.Zero, operation = IntPtr.Zero;
+            string name = "Windows.Security.Credentials.UI.UserConsentVerifier";
+            try
+            {
+                Check(Native.WindowsCreateString(name, name.Length, out cls), "class name");
+                Check(Native.RoGetActivationFactory(cls, ref factoryIid, out factory), "activation factory");
+                IUserConsentVerifierInterop interop = (IUserConsentVerifierInterop)Marshal.GetObjectForIUnknown(factory);
+                Check(Native.WindowsCreateString(prompt, prompt.Length, out message), "prompt");
+                Check(interop.RequestVerificationForWindowAsync(owner, message, ref operationIid, out operation), "RequestVerificationForWindowAsync");
+                object op = Marshal.GetObjectForIUnknown(operation);
+                helloOp = (IConsentOperation)op;
+                helloInfo = (IAsyncInfoRaw)op;
+            }
+            finally
+            {
+                if (cls != IntPtr.Zero) Native.WindowsDeleteString(cls);
+                if (message != IntPtr.Zero) Native.WindowsDeleteString(message);
+                if (factory != IntPtr.Zero) Marshal.Release(factory);
+                if (operation != IntPtr.Zero) Marshal.Release(operation);
+            }
+            // The prompt's own window (Windows Security): forward, through the ladder, for up to 3 s while it appears.
+            bool front = false, seen = false;
+            for (int n = 0; n < 30 && !front; n++)
+            {
+                int status;
+                if (helloInfo.GetStatus(out status) == 0 && status != 0) break; // already answered (no Hello set up)
+                IntPtr dialog = Native.FindWindow("Credential Dialog Xaml Host", null);
+                if (dialog != IntPtr.Zero)
+                {
+                    seen = true;
+                    try { Front(dialog); front = true; } catch (LrError) { front = IsFront(dialog); }
+                }
+                if (!front) Thread.Sleep(100);
+            }
+            Dictionary<string, object> d = D();
+            d["front"] = front;
+            d["seen"] = seen;
+            return d;
+        }
+
+        /** Waits (up to ms) for the started prompt's answer: one of UserConsentVerificationResult's names. */
+        private static Dictionary<string, object> HelloWait(Dictionary<string, object> a)
+        {
+            if (helloOp == null || helloInfo == null) throw new LrError("UNKNOWN_OP", "hello_wait without hello_start");
+            int limit = (int)Num(a, "ms", 120000);
+            int status = 0;
+            Stopwatch clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < limit)
+            {
+                Check(helloInfo.GetStatus(out status), "status");
+                if (status != 0) break;
+                Thread.Sleep(100);
+            }
+            Dictionary<string, object> d = D();
+            if (status == 0)
+            {
+                helloInfo.Cancel();
+                d["result"] = "Canceled";
+            }
+            else if (status == 1)
+            {
+                int result;
+                Check(helloOp.GetResults(out result), "results");
+                d["result"] = result >= 0 && result < ConsentResults.Length ? ConsentResults[result] : "Unknown";
+            }
+            else
+            {
+                int code;
+                helloInfo.GetErrorCode(out code);
+                d["result"] = status == 2 ? "Canceled" : "Error";
+                d["code"] = string.Format("0x{0:X8}", code);
+            }
+            helloInfo.Close();
+            helloOp = null;
+            helloInfo = null;
+            return d;
+        }
+
+        private static void Check(int hr, string what)
+        {
+            if (hr < 0) throw new LrError("HELLO", string.Format("{0} failed (0x{1:X8})", what, hr));
         }
 
         // ---- small helpers ----

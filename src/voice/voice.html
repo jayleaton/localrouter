@@ -1375,7 +1375,7 @@ function ccRender(st, cards) {
   const running = st ? (st.tasks || []).filter(t => t.status === 'running') : [];
   $('ccSect').hidden = !st;
   if (st) $('ccComputers').textContent = st.computers.length ? 'Connected: ' + st.computers.map(c => c.name + (c.accessibility ? '' : ' (no Accessibility access)')).join(', ') : 'No computer connected. Start the LocalRouter desktop helper on your Mac (apps/desktop-helper).';
-  const sig = JSON.stringify([cards.map(c => c.id), running.map(t => [t.task_id, t.steps.length, t.waiting_for_approval || ''])]);
+  const sig = JSON.stringify([cards.map(c => [c.id, c.waiting || '']), running.map(t => [t.task_id, t.steps.length, t.waiting_for_approval || ''])]);
   if (sig === CC.sig) { // only the countdowns move: keep focus where it is
     for (const c of cards) { const left = document.querySelector(`[data-left="${CSS.escape(c.id)}"]`); if (left) left.textContent = `${c.expires_in_s} s left`; }
     return;
@@ -1391,6 +1391,7 @@ function ccRender(st, cards) {
     if (c.kind === 'type') card.append(ccEl('pre', null, c.text));
     card.append(ccEl('p', 'why', `Why it asks: ${c.why}. For: ${c.goal}`));
     if (c.confirm) card.append(ccEl('p', 'why', c.confirm));
+    if (c.waiting) card.append(ccEl('p', 'what', c.waiting));
     const row = ccEl('div', 'cc-row');
     const left = ccEl('span', 'cc-left', `${c.expires_in_s} s left`); left.dataset.left = c.id;
     const deny = ccEl('button', 'btn deny', 'Deny'), ok = ccEl('button', 'btn primary', 'Approve');
