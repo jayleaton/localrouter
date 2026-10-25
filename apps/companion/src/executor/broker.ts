@@ -489,7 +489,15 @@ export class Broker {
     if (task.decided >= MAX_DECISIONS_PER_STEP * this.limits.maxSteps + 4) throw new Error('the task used up its decisions')
     if (this.worked(task) > this.limits.timeoutMs) throw new Error('It was taking too long.')
     task.decided += 1
-    const answers = await decider.ask(state, questions)
+    let answers: Answers
+    try {
+      answers = await decider.ask(state, questions)
+    } catch (error) {
+      // What came back, redacted, and how many times it was asked: why a step could not be decided, answerable later.
+      const e = error as { attempts?: unknown; replies?: unknown }
+      this.options.audit.record('decide.failed', { task_id: task.id, error: clip(messageOf(error)), ...(typeof e.attempts === 'number' ? { attempts: e.attempts } : {}), ...(Array.isArray(e.replies) ? { replies: e.replies } : {}) })
+      throw error
+    }
     this.options.audit.record('decide', { task_id: task.id, answers: Object.fromEntries(Object.entries(answers).map(([k, a]) => [k, a.type === 'choice' ? { choice: a.choice, p: a.probability } : { p: a.probability }])) })
     return answers
   }
@@ -735,7 +743,15 @@ export class Broker {
         ? {
             kind: screen.kind,
             observe: (o) => screen.observe(o),
-            act: (a, o) => during(() => screen.act(a, o)),
+            act: (a, o) =>
+              during(async () => {
+                const result = await screen.act(a, o)
+                // How each action was done (background or pointer, a field focused before its value was set): the audit
+                // answers "did it focus the box first" without the screen's text or the typed text.
+                const r = result && typeof result === 'object' ? result : {}
+                this.options.audit.record('act', { task_id: this.active?.id ?? '', kind: a.kind, background: r.background === true, ...(r.how ? { how: r.how } : {}) })
+                return result
+              }),
             ...(screen.pointer ? { pointer: () => screen.pointer!() } : {}),
             ...(screen.displays ? { displays: () => screen.displays!() } : {}),
             ...(screen.screenshot ? { screenshot: (o) => screen.screenshot!(o) } : {}),

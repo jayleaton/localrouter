@@ -1248,13 +1248,18 @@ namespace LocalRouterWin
             // The field gets the keyboard focus first, as a click would give it: an Enter after this goes to it. (Chrome's
             // address bar took a value without focus, the Enter went to the page, and the bar put the old URL back.)
             try { el.SetFocus(); } catch (InvalidOperationException) { } catch (ElementNotAvailableException) { }
+            bool focused = false;
+            try { focused = el.Current.HasKeyboardFocus; } catch (ElementNotAvailableException) { }
             try { vp.SetValue(text); }
             // InvalidOperationException covers ElementNotEnabledException and a provider that refuses the value.
             catch (InvalidOperationException) { return Done(false, ""); }
             catch (COMException) { return Done(false, ""); }
             string now = ReadValue(el);
             if (Lines(now) != Lines(text)) throw new LrError("DID_NOT_TAKE", label);
-            return Done(true, "value");
+            // Whether the field had the keyboard focus when its value was set: the audit says so for every typed step.
+            Dictionary<string, object> typed = Done(true, "value");
+            typed["focused"] = focused;
+            return typed;
         }
 
         private static ScrollPattern Scrollable(AutomationElement el, bool whole)

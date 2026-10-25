@@ -161,7 +161,7 @@ describe('DesktopBackend', () => {
     })
     const desktop = new DesktopBackend(runner, { sleep: async () => {} })
     const long = 'a'.repeat(120)
-    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long })).toEqual({ pointer: { x: 10, y: 20 } })
+    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long })).toEqual({ pointer: { x: 10, y: 20 }, how: 'clicked into the field, focus checked, typed keys' })
     expect(calls.filter((call) => call.argv[0] === 'keys').map((call) => (JSON.parse(call.argv[1]) as { text: string }).text.length)).toEqual([50, 50, 20])
     // Line breaks (a typed Return could send), other scripts and emoji go through the pasteboard, whole.
     for (const text of ['line one\nline two', 'Grüße, 你好 👋']) {

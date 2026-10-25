@@ -347,8 +347,8 @@ describe('ComputerUse', () => {
       const { computer, asked } = computerWith([{ surface: choice('browser'), tab: choice('t0') }, { next: choice('type_text'), type_into: choice('c0') }, { next: choice('press_enter') }, { next: choice('done') }], { page, tabs })
       expect(await computer.run({ goal: 'open Chrome and go to example.com', text: null })).toMatchObject({ status: 'done' })
       const offered = asked.slice(1).map((a) => Object.keys((a.questions.next as { criteria: Record<string, string> }).criteria).includes('done'))
-      // On the blank tab "done" is not an option; once example.com is in the address bar it is.
-      expect(offered).toEqual([false, false, true])
+      // On the blank tab "done" is not an option; once example.com is on screen the task ends by itself (only going there).
+      expect(offered).toEqual([false, false])
       expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'https://www.example.com/path', controls: [] })).toBe(false)
       expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'docs.example.com', controls: [] })).toBe(false)
       expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'https://notexample.com/', controls: [] })).toBe(true)
