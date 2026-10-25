@@ -118,17 +118,19 @@ jobs:
             printf '%s' "$line" > "$RUNNER_TEMP/$name.json"
           }
           ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"
-          echo "previous: $(codesign -dv "$app" 2>&1 | grep '^CDHash=')"
+          echo "previous: $(codesign -dvvv "$app" 2>&1 | grep '^CDHash=')"
           step a-write-legacy "$home" write-legacy tok-from-an-old-build
           step a-load "$home" load
           step a-control "$control" write-legacy control-token
           rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"
-          echo "this build: $(codesign -dv "$app" 2>&1 | grep '^CDHash=')"
+          echo "this build: $(codesign -dvvv "$app" 2>&1 | grep '^CDHash=')"
+          echo "--- the keychain's items and their partitions (no secrets)"
+          security dump-keychain -a "$kc" 2>&1 | grep -E '"svce"|"acct"|PartitionID|partition|cdhash|teamid|applications|description:' | sed -E 's/"<blob>"=.*//' | head -60 || true
           step b-load "$home" load
           step b-save "$home" save tok-saved-after-update
           step b-control "$control" load-legacy
-          echo "installed helper: $(codesign -dv "$home/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
-          echo "bundled helper:   $(codesign -dv "$app/Contents/Resources/localrouter-keychain" 2>&1 | grep '^CDHash=')"
+          echo "installed helper: $(codesign -dvvv "$home/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
+          echo "bundled helper:   $(codesign -dvvv "$app/Contents/Resources/localrouter-keychain" 2>&1 | grep '^CDHash=')"
           set +e; "$home/bin/localrouter-keychain" get LocalRouter spark-tokens > /dev/null 2>&1; direct=$?; set -e
           echo "the helper run from a shell: exit $direct (3 = refused)"
           j() { jq -r "$2" "$RUNNER_TEMP/$1.json"; }

@@ -109,7 +109,7 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
   codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$kh_id" \
     -r="designated => identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
   codesign --verify --strict -R="identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
-  echo "package-mac: keychain helper $(codesign -dv "$kh" 2>&1 | grep -E '^CDHash=' || true), requirement: $(codesign -d -r- "$kh" 2>&1 | sed -n 's/^designated => //p')"
+  echo "package-mac: keychain helper $(codesign -dvvv "$kh" 2>&1 | grep -E '^CDHash=' || true), requirement: $(codesign -d -r- "$kh" 2>&1 | sed -n 's/^designated => //p')"
   codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$bundle_id" -r="$requirement" "$app"
   # What TCC checks on every launch: this build satisfies the requirement every build has.
   codesign --verify --deep --strict -R="identifier \"$bundle_id\" and certificate leaf = H\"$sha1\"" "$app"
