@@ -2,7 +2,7 @@
 import type { Logger } from '../log.ts'
 import { choiceProbability } from './decisions.ts'
 import type { Answers, Decider, Question } from './decisions.ts'
-import type { BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
+import type { ActResult, BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
  * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this computer (macOS, Linux or Windows) toward a goal.
@@ -185,6 +185,9 @@ export class ComputerUse {
       if (quoted.length && quoted.every((name) => clicked.has(name)) && plainClickGoal(task)) return end('done', '')
       let previous = ''
       let repeats = 0
+      // The signature of an action done in the background (an accessibility action, no pointer), so the same action
+      // on a screen it left unchanged is tried once more with the real pointer before it counts as a repeat.
+      let backgroundAt = ''
       for (let step = 0; step < run.maxSteps; step += 1) {
         this.checkpoint(run)
         const screen = await backend.observe({ signal: run.signal })
@@ -206,10 +209,13 @@ export class ComputerUse {
         const { action, step: said } = decision
         // The same action on the same screen: what is on it, not only how many controls (a scrolled list keeps its count).
         const signature = `${JSON.stringify(action)}|${screenKey(screen)}`
-        repeats = signature === previous ? repeats + 1 : 0
+        const same = signature === previous
+        const viaPointer = same && backgroundAt === signature
+        repeats = same ? repeats + (viaPointer ? 0 : 1) : 0
         previous = signature
         if (repeats >= 2) return end('stuck', `It kept doing the same thing (${said}) without the screen changing.`)
-        await this.act(run, backend, screen, action, said)
+        const result = await this.act(run, backend, screen, action, said, viaPointer)
+        backgroundAt = result?.background && !viaPointer ? signature : ''
         await this.sleep(this.settleMs)
       }
       return end('stuck', `It did not finish within ${run.maxSteps} steps.`)
@@ -294,7 +300,7 @@ export class ComputerUse {
    * One action on screen: the control it names must be on the screen it was chosen from, the box must
    * grant it, and after a tap (time has passed) the same control must still be there, or nothing happens.
    */
-  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string) {
+  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string, pointer = false): Promise<ActResult | void> {
     const request = this.request(run, screen, action)
     const grant = await this.authorize(run, summary(screen), request)
     if (grant === 'approved' && (action.kind === 'click' || action.kind === 'type')) {
@@ -309,14 +315,15 @@ export class ComputerUse {
     run.watch?.moving()
     let left: Awaited<ReturnType<ScreenBackend['act']>>
     try {
-      left = await backend.act(action, { signal: run.signal })
+      left = await backend.act(action, { signal: run.signal, ...(pointer ? { pointer: true } : {}) })
     } catch (error) {
       run.watch?.left(null)
       throw error
     }
     run.watch?.left(typeof left === 'object' && left !== null ? left.pointer : undefined)
     if (action.kind === 'type') run.typedInto = this.control(screen, action.ref)
-    this.record(run, said)
+    this.record(run, pointer ? `${said} (again, with the pointer)` : said)
+    return left
   }
 
   /** The control a ref names on this screen; a ref that is not on it is never acted on. */

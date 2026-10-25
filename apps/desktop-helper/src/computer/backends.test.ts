@@ -175,6 +175,15 @@ describe('DesktopBackend', () => {
     await expect(desktop.act({ kind: 'type', ref: '0.1', text: long }, { signal: stop.signal })).rejects.toThrow('You stopped it on the Mac.')
   })
 
+  it('presses a button through accessibility, leaving the pointer alone, unless the pointer is asked for', async () => {
+    const { runner, calls } = fakeRunner((call) => (JSON.parse(call.argv[1] ?? '{}').pointer ? '{"x":5,"y":6}' : '{"background":true}'))
+    const desktop = new DesktopBackend(runner)
+    expect(await desktop.act({ kind: 'click', ref: '0.1' })).toEqual({ background: true })
+    expect(await desktop.act({ kind: 'click', ref: '0.1' }, { pointer: true })).toEqual({ pointer: { x: 5, y: 6 } })
+    expect(calls.map((call) => call.argv[1])).toEqual([JSON.stringify({ ref: '0.1' }), JSON.stringify({ ref: '0.1', pointer: true })])
+    expect(SCRIPTS.act).toContain("AXUIElementPerformAction(el, $('AXPress'))")
+  })
+
   it('fails a typing step whose text did not land, without repeating the text', async () => {
     const { runner } = fakeRunner((call) => (call.argv[0] === 'value' ? '{"value":"something else"}' : 'ok'))
     const error = await new DesktopBackend(runner, { sleep: async () => {} }).act({ kind: 'type', ref: '0.1', text: 'groceries' }).catch((e: unknown) => e as Error)

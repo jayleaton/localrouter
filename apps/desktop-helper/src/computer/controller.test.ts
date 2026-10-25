@@ -290,6 +290,26 @@ describe('ComputerUse', () => {
       expect(actions).toHaveLength(2)
     })
 
+    it('tries a background click that changed nothing once more with the pointer, then counts repeats', async () => {
+      const calls: Array<{ action: ScreenAction; pointer: boolean }> = []
+      let pressed = false
+      const page: ScreenBackend = {
+        kind: 'desktop',
+        observe: async () => ({ backend: 'desktop', app: 'Mail', title: pressed ? 'Sent' : 'Draft', controls: [control('0.1', 'button', 'Archive')] }),
+        // The accessibility press does nothing in this app; the pointer's click works.
+        act: async (action, options) => {
+          calls.push({ action, pointer: options?.pointer === true })
+          if (options?.pointer) pressed = true
+          return options?.pointer ? { pointer: { x: 1, y: 1 } } : { background: true }
+        },
+      }
+      const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('done') }], { page, tabs: null })
+      const outcome = await computer.run({ goal: 'archive the draft', text: null })
+      expect(outcome).toMatchObject({ status: 'done' })
+      expect(calls.map((c) => c.pointer)).toEqual([false, true])
+      expect(outcome.steps.at(-1)).toBe('clicked the button “Archive” (again, with the pointer)')
+    })
+
     it('keeps scrolling a list whose rows change even when as many are visible each time', async () => {
       const actions: ScreenAction[] = []
       let first = 0

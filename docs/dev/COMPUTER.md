@@ -225,6 +225,28 @@ an allow does not replace the local rules or approval. New harnesses need none o
 `approve`. Other harnesses on the computer use the executor through `localrouter-executor-mcp` (MCP stdio), after the
 person enrolls them in the app.
 
+## Background control (the "virtual cursor")
+
+Where the OS lets an app act on a control through accessibility, the executor does that instead of moving the
+person's pointer or sending global keys: the action reports `background`, the pointer stays where the person left it,
+and the local stop sees no movement of its own. When a background action leaves the screen exactly as it was and the
+next step is the same action, it is done once more with the real pointer (`ActOptions.pointer`), so an app whose
+accessible action does nothing still works; only then do repeats count toward "stuck".
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Click | `AXPress` on buttons, links, checkboxes, radio buttons, menu items and pop-up buttons; rows, text and screenshot spots use the pointer | AT-SPI Action (`click`/`press`/`activate`) or Selection on the parent (tabs, list items), every session | `Invoke`, `SelectionItem.Select`, `Toggle`, `ExpandCollapse` (a modal that holds the call past 2.5 s counts as done) |
+| Type | the keyboard (focus checked, Select All through the Edit menu, read back) | `EditableText.set_text_contents` (or delete + insert), read back; else the injector | `ValuePattern.SetValue`, read back; else SendInput |
+| Scroll | wheel events over the scroll area (moves the pointer) | `Component.scroll_to` / the scroll bar's value | `ScrollPattern` |
+| Keys (Enter, Tab…) | global key events | global key events (injector) | global key events (SendInput) |
+| Surface (tab, app forward) | Dock click / tab-strip click (pointer) | AT-SPI Selection on the tab strip; compositor focus | `SelectionItem.Select` on the tab strip; `SetForegroundWindow` |
+
+How far this goes today: actions still target the window in front. Working in an app behind the one the person uses
+(observing and acting on a named app's window without bringing it forward) is the next step: AX and UI Automation
+both read and act on background windows, AT-SPI too where the app exposes them, but keys, typing through the keyboard
+and anything the pointer does still need the window in front, and approvals bind to what is on screen. Until then the
+person moving the pointer during a task still counts as taking over, since both would use the same window.
+
 ## Status
 
 Not yet run on a real Mac: AX observation, OCR fallback, CGEvent clicks and keys, the corner stop and the TCC grants
