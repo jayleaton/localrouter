@@ -85,8 +85,13 @@ fn cudaRuntime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const options = b.addOptions();
     options.addOption(bool, "with_kernels", false);
     const stagger = b.createModule(.{ .root_source_file = tf.path("zig/src/core/stagger.zig"), .target = target, .optimize = optimize });
+    // `sys` (dlopen, env, clocks) and `gpu_memory` (fit checks) as TensorFold's own zig/build/cuda_runtime.zig wires them.
+    const sys = b.createModule(.{ .root_source_file = tf.path("zig/src/platform/sys.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const gpu_memory = b.createModule(.{ .root_source_file = tf.path("zig/src/gpu_memory.zig"), .target = target, .optimize = optimize });
     const cuda = b.createModule(.{ .root_source_file = tf.path("zig/src/cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     cuda.addOptions("kernel_options", options);
     cuda.addImport("stagger", stagger);
+    cuda.addImport("sys", sys);
+    cuda.addImport("gpu_memory", gpu_memory);
     return cuda;
 }

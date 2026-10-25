@@ -484,7 +484,10 @@ pub const Dit = struct {
         x.stepBody(bd) catch |err| {
             failed = err;
         };
-        var g = cuda.graph.endCapture(x.s) catch |err| return x.graphFallback(failed orelse err, bd);
+        var g = cuda.graph.endCapture(x.s) catch |err| {
+            cuda.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later copy
+            return x.graphFallback(failed orelse err, bd);
+        };
         defer g.deinit();
         if (failed) |err| return x.graphFallback(err, bd);
         const exec = g.instantiate() catch |err| return x.graphFallback(err, bd);

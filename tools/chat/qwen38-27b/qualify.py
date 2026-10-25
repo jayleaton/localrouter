@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.8-27B (TensorFold 1.1.1) qualification roles; qualify.sh runs them in order. Standard library only.
+"""Qwen3.8-27B (TensorFold 1.1.4) qualification roles; qualify.sh runs them in order. Standard library only.
 
     python3 -I qualify.py ROLE --root ROOT --config CONFIG --out OUT [--tool ID] [--bin LOCALROUTER] [--marker PATH]
 
@@ -312,23 +312,24 @@ def expectation(kind, want, rec):
 
 # Named, narrow exceptions to exact equality, each admitted on recorded evidence; nothing else is relaxed. A check
 # passed under one names it, and the marker lists every exception the run used.
-STREAM_REASONING_TRAILING_WS = "tensorfold-1.1.1-stream-reasoning-trailing-newline"
+STREAM_REASONING_TRAILING_WS = "tensorfold-stream-reasoning-trailing-newline"
 EXCEPTIONS = {
     STREAM_REASONING_TRAILING_WS: {
-        "tensorfold": "1.1.1",
+        "tensorfold": ["1.1.1", "1.1.4"],
         "scope": "reasoning_content only, a stream against the whole reply of the same server only: the stream may "
                  "end with whitespace the whole reply lacks; everything else in both must be equal",
-        "evidence": "DGX-01 qualify run1 (commit 6e83844): P1 stream reasoning_content 599 B vs whole 598 B, P2 352 B "
-                    "vs 351 B; the stream's last reasoning delta ends with \\n that the whole reply strips; the same "
-                    "bytes direct and through LocalRouter",
+        "evidence": "DGX-01 qualify run1 (commit 6e83844, TensorFold 1.1.1) and the 1.1.4 run (commit 37755e0): P1 "
+                    "stream reasoning_content 599 B vs whole 598 B, P2 352 B vs 351 B, on both versions; the stream's "
+                    "last reasoning delta ends with \\n that the whole reply strips; the same bytes direct and through "
+                    "LocalRouter",
         "upstream": "tools/chat/qwen38-27b/upstream-issue-stream-reasoning-newline.md",
     },
 }
 
 
 def stream_reasoning_tail(stream, whole, tensorfold):
-    """True when `stream` is `whole` plus whitespace only, on the TensorFold version the exception names."""
-    if tensorfold != EXCEPTIONS[STREAM_REASONING_TRAILING_WS]["tensorfold"]:
+    """True when `stream` is `whole` plus whitespace only, on a TensorFold version the exception names."""
+    if tensorfold not in EXCEPTIONS[STREAM_REASONING_TRAILING_WS]["tensorfold"]:
         return False
     if not isinstance(stream, str) or not isinstance(whole, str) or len(stream) <= len(whole):
         return False

@@ -198,7 +198,7 @@ step's `done` test.
 
 ### chat: `qwen3.8-27b`
 
-- **What it is.** Qwen3.8 27B, served by TensorFold 1.1.1's native server: MLX 4-bit weights with the DFlash2
+- **What it is.** Qwen3.8 27B, served by TensorFold 1.1.4's native server: MLX 4-bit weights with the DFlash2
   drafter. Licence Apache-2.0. Kept warm.
 - **Size.** About 20 GB to download and 21 GB on disk. 24 GiB in memory.
 - **Steps.** `tools/chat/qwen38-27b/fetch.sh $J/qualify-chat/root`, then `setup.sh`, then `qualify.sh`. Every file

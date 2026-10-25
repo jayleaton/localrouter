@@ -6,27 +6,27 @@
     "Small files are pinned by git blob sha1 (sha1 of \"blob SIZE\\0\" + bytes), LFS files by sha256, as the Hugging Face API reports them. README files and images are not fetched."
   ],
   "tensorfold": {
-    "version": "1.1.1",
+    "version": "1.1.4",
     "repo": "https://github.com/ashhart/TensorFold",
     "licence": "Apache-2.0",
-    "tag": "v1.1.1",
-    "tag_object": "92d71a3cf4fd1d566d71f443874cf5345a226aba",
-    "commit": "b10231b94f8adf3d4132acebdc0a1ac87e53a838",
-    "dir": "tensorfold-1.1.1",
+    "tag": "v1.1.4",
+    "tag_object": "585df8ba3e307d9e4bcea1d6c28a58c8dc1b5682",
+    "commit": "eab8582819688325e371907e4706e1c602b8a273",
+    "dir": "tensorfold-1.1.4",
     "binary": "bin/tensorfold-native",
     "grammar_lib": "lib/libtfgrammar.so",
     "archives": {
       "linux-aarch64": {
-        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-linux-aarch64.tar.gz",
-        "size": 23309618,
-        "sha256": "2e0103a544e64354bfec65bd8a052ede17aa9be1f6a56d8e37c868af9139cb39",
-        "top_dir": "tensorfold-1.1.1-linux-aarch64"
+        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.4/tensorfold-1.1.4-linux-aarch64.tar.gz",
+        "size": 33281782,
+        "sha256": "2c77ff0179dbfb9ae1c6ac647f85210194c151243f49eb93f0e34a8d53d7a4ec",
+        "top_dir": "tensorfold-1.1.4-linux-aarch64"
       },
       "linux-x86_64": {
-        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-linux-x86_64.tar.gz",
-        "size": 23665043,
-        "sha256": "e1785e32119a3869765b712be30daaa4ef7be2297054838e79f81f766185fbdf",
-        "top_dir": "tensorfold-1.1.1-linux-x86_64"
+        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.4/tensorfold-1.1.4-linux-x86_64.tar.gz",
+        "size": 33664171,
+        "sha256": "878a23f0eddc1e0750e49c5e279e57479c48be3d7c3de0a1d1eed81ae18ce2b0",
+        "top_dir": "tensorfold-1.1.4-linux-x86_64"
       }
     }
   },
