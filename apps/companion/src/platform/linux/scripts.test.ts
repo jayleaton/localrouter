@@ -63,6 +63,10 @@ def log(entry):
     with open(os.environ['FAKE_ATSPI_LOG'], 'a') as f:
         f.write(json.dumps(entry) + '\n')
 
+class Text:
+    @staticmethod
+    def get_text(obj, start, end): return obj.spec['text'][start:end]
+
 class Rect:
     def __init__(self, box):
         self.x, self.y, self.width, self.height = box
@@ -93,7 +97,9 @@ class Node:
     def grab_focus(self): return False
     def get_text_iface(self): return self if 'text' in self.spec else None
     def get_character_count(self): return len(self.spec['text'])
-    def get_text(self, start, end): return self.spec['text'][start:end]
+    # As in PyGObject: Accessible.get_text() is the one-argument alias for the Text interface, so the interface's
+    # get_text(start, end) is reached only as Atspi.Text.get_text(obj, start, end).
+    def get_text(self): return self.get_text_iface()
     def get_editable_text_iface(self): return self if self.spec.get('editable') else None
     def set_text_contents(self, text):
         log({'set_text': self.get_name()})
