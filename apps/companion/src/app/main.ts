@@ -765,7 +765,9 @@ async function smoke() {
     // The settings window: its page draws the steps, and an address that refuses is named as such through the IPC.
     const setupWin = new BrowserWindow({ show: false, webPreferences })
     await setupWin.loadURL(`${ORIGIN}/setup.html`)
-    result.setup = await setupWin.webContents.executeJavaScript('new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:9")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind }))')
+    result.setup = await setupWin.webContents.executeJavaScript('new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:9")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind, title: s.connect.errors.address && s.connect.errors.address.title, detail: s.connect.errors.address && s.connect.errors.address.detail }))')
+    // What this Electron's fetch throws for a refused port, cause by cause (the classifier reads these).
+    result.refused = await fetch('http://127.0.0.1:9/').then(() => 'answered', (e: unknown) => { const out: unknown[] = []; for (let x = e as { name?: string; code?: string; message?: string; cause?: unknown; errors?: unknown[] } | undefined; x && out.length < 6; x = (x.cause ?? x.errors?.[0]) as typeof x) out.push({ name: x.name, code: x.code, message: x.message, errors: Array.isArray(x.errors) ? x.errors.length : undefined }); return out })
     const page = result.page as { shim: boolean; bridge: boolean }
     const status = result.status as { computers: number; placement: string }
     const setupPage = result.setup as { version: string; error: string }
