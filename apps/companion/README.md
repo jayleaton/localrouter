@@ -92,6 +92,19 @@ signed with the same self-signed certificate (`scripts/make-signing-identity.sh`
 the grants carry over. The first signed build still needs one more grant after an ad-hoc one. Without the secrets,
 CI signs with a throwaway certificate and says so in the job summary: such builds lose the grants on update.
 
+**The Spark token across updates.** Keychain items made by an app without an Apple Team ID are tied to the code hash
+of the process that made them, so with Electron's safeStorage every update asked for the keychain again ("Always
+Allow" lasts one build). The app keeps its tokens through `localrouter-keychain` (`native/keychain-helper.c`), which it
+copies once to `~/Library/Application Support/LocalRouter/bin` and keeps across updates: the process that touches the
+keychain keeps its code hash, so updates never ask. The helper answers only a parent that meets LocalRouter's
+designated requirement (this bundle id and the signing certificate); before each use the app checks the installed
+helper is signed like the one it ships, and replaces it otherwise (one last prompt). The first start of this build
+moves the token from the older safeStorage file once (that read may ask one last time) and deletes the file. Limits:
+same-user code that can run as LocalRouter itself (for example `ELECTRON_RUN_AS_NODE` with the app binary, which the
+MCP launcher uses) passes the helper's check, as it would pass any keychain ACL naming this app. CI proves the update
+path on every macOS build: it installs a previous build, stores a token, installs the new build over it and reads the
+token back with keychain prompts disallowed, while the old safeStorage store, as a control, cannot.
+
 If macOS kept a grant from an older build (System Settings shows LocalRouter on, but computer control says it needs
 Accessibility), Settings shows *macOS kept a permission from an older LocalRouter* with buttons that open the right
 pane, reset LocalRouter's entry (`tccutil reset Accessibility com.localrouter.companion`, as you, no admin), and quit
