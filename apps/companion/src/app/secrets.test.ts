@@ -177,7 +177,8 @@ describe('commands finish on their output, not only on an exit event', () => {
     expect(statusOf('denied\nLR_STATUS 3\n')).toEqual({ code: 3, stderr: 'denied' })
     expect(statusOf('no status')).toEqual({ code: null, stderr: 'no status' })
   })
-  it('runs a real command: output, code, input; and through sh with a status line', async () => {
+  // The keychain path is macOS only; these run real POSIX commands (no /bin/sh on Windows).
+  it.skipIf(process.platform === 'win32')('runs a real command: output, code, input; and through sh with a status line', async () => {
     const { run } = await import('./secrets.ts')
     expect(await run('/bin/sh', ['-c', 'cat; echo out; exit 4'], 'in-')).toEqual({ code: 4, stdout: 'in-out\n', stderr: '' })
     expect(await run('/bin/sh', ['-c', 'false; echo "LR_STATUS $?" >&2'])).toMatchObject({ code: 0, stderr: '' })
