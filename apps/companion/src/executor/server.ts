@@ -201,6 +201,14 @@ export class ExecutorServer {
   }
 }
 
+/**
+ * Why the executor's socket did not answer. The app starts its executor at launch, paired or not, so no socket means
+ * the app is not running; builds before that started it only after pairing, which is the other case named.
+ */
+export function notRunning(code: string): string {
+  return `LocalRouter is not running on this computer (${code}): open the LocalRouter app. If it is open, it is an older build that starts computer control only once paired with a Spark: update it, or pair it on its Connect page.`
+}
+
 /** A caller's side of the socket: one request, its reply. */
 export class ExecutorClient {
   private socket: Socket | null = null
@@ -239,7 +247,7 @@ export class ExecutorClient {
         resolve(socket)
       })
       socket.once('error', (error) => {
-        reject(new Error(`LocalRouter is not running on this computer (${(error as NodeJS.ErrnoException).code ?? error.message}): open the LocalRouter app`))
+        reject(new Error(notRunning((error as NodeJS.ErrnoException).code ?? error.message)))
       })
       socket.on('close', () => {
         for (const [, done] of this.pending) done({ ok: false, error: 'LocalRouter closed the connection' })

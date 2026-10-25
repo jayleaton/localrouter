@@ -15,12 +15,14 @@ import { createLogger } from '../../../desktop-helper/src/log.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
 import { dataDir, executorSocket } from '../executor/paths.ts'
+import { startExecutor } from '../executor/executor.ts'
+import type { Executor } from '../executor/executor.ts'
 import { ExecutorClient } from '../executor/server.ts'
 import type { PageItem } from '../harness/journal.ts'
 import { prepareVideo, restoreVoice } from '../harness/models.ts'
 import { pageView } from '../harness/realtime.ts'
 import type { ClientToolsSession } from '../harness/realtime.ts'
-import { startRuntime } from '../harness/runtime.ts'
+import { startRuntime, UNPAIRED } from '../harness/runtime.ts'
 import { createPlatform } from '../platform/index.ts'
 import { stopShortcut } from '../platform/shortcut.ts'
 import type { PlatformPresence } from '../platform/types.ts'
@@ -159,13 +161,22 @@ function machineKind(): 'native' | 'fake' {
   return process.env.LOCALROUTER_COMPANION_FAKE === '1' ? 'fake' : 'native'
 }
 
-async function startRuntimeFromSettings(): Promise<void> {
-  await stopRuntime()
-  const secrets = loadSecrets()
-  if (!settings.base || !secrets.token) return
-  runtime = await startRuntime({ base: settings.base, token: secrets.token, dir, name: settings.name, machine: machineKind(), gate, shared: () => settings.shared, listen: true, ownApps: ['LocalRouter', 'Electron'], log })
-  await gate.use(runtime.executor.built.platform.presence)
-  runtime.executor.broker.on((e) => {
+/**
+ * This computer's executor, started at launch whether or not LocalRouter is paired: its lease, policy, approvals,
+ * audit, stop and caller enrollment are all local. Pairing only gives it the Spark's decisions (computer use);
+ * before that, other harnesses enrolled in Settings › Harnesses can run fixed controls and read the screen, and a step
+ * that needs an approval is refused (the window that shows approval cards opens once paired).
+ */
+let executor: Executor | null = null
+
+export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark: pair it on the Connect page.'
+
+async function startLocalExecutor(): Promise<void> {
+  if (executor) return
+  executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
+  executor.broker.setDecider(null, UNPAIRED)
+  await gate.use(executor.built.platform.presence)
+  executor.broker.on((e) => {
     if (e.type === 'approval') {
       showMain()
       if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
@@ -175,8 +186,17 @@ async function startRuntimeFromSettings(): Promise<void> {
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })
+}
+
+async function startRuntimeFromSettings(): Promise<void> {
+  await stopRuntime()
+  await startLocalExecutor()
+  const secrets = loadSecrets()
+  if (!settings.base || !secrets.token || !executor) return
+  runtime = await startRuntime({ base: settings.base, token: secrets.token, dir, name: settings.name, machine: machineKind(), gate, shared: () => settings.shared, executor, log })
   if (settings.legacy && secrets.legacy_token) {
-    legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: runtime.executor.broker, access: () => runtime!.executor.built.platform.access(), log })
+    const local = executor
+    legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: local.broker, access: () => local.built.platform.access(), log })
     legacy.start()
   }
   refreshTray()
@@ -222,8 +242,8 @@ async function staticFile(path: string): Promise<Response> {
 }
 
 async function computerRoute(req: Request, path: string, url: URL): Promise<Response> {
-  if (!runtime) return failure(503, 'LocalRouter is not paired with a Spark yet')
-  const broker = runtime.executor.broker
+  if (!executor) return failure(503, 'LocalRouter’s executor is starting')
+  const broker = executor.broker
   if (req.method === 'GET' && path === '/v1/computer/status') return json(broker.status())
   if (req.method === 'GET' && path === '/v1/computer/approvals') return json({ data: broker.approvals() })
   if (req.method === 'GET' && path === '/v1/computer/audit') return json({ data: broker.audit(Number(url.searchParams.get('limit') ?? 100)) })
@@ -487,12 +507,12 @@ function registerIpc() {
     return state()
   })
   setup('setup:enroll', async (name) => {
-    if (!runtime) throw new Error('Pair with your Spark first')
-    const { caller, token } = runtime.executor.enrollment.add(String(name))
+    if (!executor) throw new Error('LocalRouter’s executor is starting: try again in a moment')
+    const { caller, token } = executor.enrollment.add(String(name))
     return { caller: { id: caller.id, name: caller.name }, token, socket: executorSocket(dir), command: join(process.resourcesPath ?? '', 'localrouter-executor-mcp'), state: await state() }
   })
   setup('setup:revoke', (id) => {
-    runtime?.executor.enrollment.revoke(String(id))
+    executor?.enrollment.revoke(String(id))
     return state()
   })
   setup('setup:legacy', async (enabled, code) => {
@@ -507,7 +527,7 @@ function registerIpc() {
     return state()
   })
   setup('setup:control', (on) => {
-    runtime?.executor.broker.setDisabled(!on)
+    executor?.broker.setDisabled(!on)
     refreshTray()
     return state()
   })
@@ -570,12 +590,12 @@ function signingIdentity(): Promise<string | null> {
 async function permissions() {
   if (process.platform !== 'darwin') {
     // Linux and Windows have no TCC grants to go stale: the platform says what it needs and how to get it.
-    const report = runtime ? await runtime.executor.built.platform.access().catch(() => null) : null
+    const report = executor ? await executor.built.platform.access().catch(() => null) : null
     return { microphone: 'n/a', accessibility: 'n/a', screen: 'n/a', stale: { accessibility: false, screen: false, microphone: false }, backend: report?.backend ?? '', requirements: report?.requirements ?? [] }
   }
   const microphone = systemPreferences.getMediaAccessStatus('microphone')
   const said = { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen: systemPreferences.getMediaAccessStatus('screen') === 'granted', microphone: microphone === 'granted' }
-  const works = runtime ? await runtime.executor.built.platform.access().then((a) => ({ accessibility: a.accessibility }), () => null) : null
+  const works = executor ? await executor.built.platform.access().then((a) => ({ accessibility: a.accessibility }), () => null) : null
   const { state: grant, grants } = grantStates(said, works, settings.grants ?? {}, await signingIdentity())
   if (JSON.stringify(grants) !== JSON.stringify(settings.grants ?? {})) {
     settings = { ...settings, grants }
@@ -681,7 +701,7 @@ async function discoverSparks(): Promise<{ tailnet: 'running' | 'off'; found: Ar
 
 async function state() {
   const permissionState = await permissions()
-  const callers = runtime?.executor.enrollment.list().map((c) => ({ id: c.id, name: c.name, created: c.created })) ?? []
+  const callers = executor?.enrollment.list().map((c) => ({ id: c.id, name: c.name, created: c.created })) ?? []
   return {
     version: VERSION,
     paired: Boolean(runtime),
@@ -692,10 +712,10 @@ async function state() {
     legacy: { enabled: settings.legacy, connected: legacy?.status.connected ?? false },
     presence: gate.method,
     secrets: safeStorage.isEncryptionAvailable() ? 'keychain' : 'this run only',
-    control: runtime ? !runtime.executor.broker.disabled : false,
+    control: executor ? !executor.broker.disabled : false,
     machine: machineKind(),
     permissions: permissionState,
-    stop_words: runtime?.executor.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
+    stop_words: executor?.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
     connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
@@ -746,13 +766,13 @@ function showSetup() {
 }
 
 function stopAll(by: string) {
-  const n = runtime?.executor.broker.stop(undefined, by, 'You stopped it.') ?? 0
+  const n = executor?.broker.stop(undefined, by, 'You stopped it.') ?? 0
   if (n && Notification.isSupported()) new Notification({ title: 'LocalRouter', body: 'Stopped what Jarvis was doing on this computer.' }).show()
 }
 
 function refreshTray() {
   if (!tray) return
-  const broker = runtime?.executor.broker
+  const broker = executor?.broker
   const busy = broker?.status().tasks.find((t) => t.status === 'running')
   tray.setTitle(busy ? 'LR ●' : 'LR')
   const items: MenuItemConstructorOptions[] = [
@@ -799,14 +819,22 @@ async function smoke() {
     registerProtocol()
     registerIpc()
     settings = loadSettings()
-    runtime = await startRuntime({ base: 'http://127.0.0.1:9', token: '', dir, name: 'smoke', machine: 'fake', gate: { method: 'none (smoke)', verify: async () => false }, shared: () => [], listen: true })
+    // The app's own path: the executor starts unpaired (the fake backend), answers an enrolled harness on its socket
+    // with the reason computer use waits, and then pairing gives it the Spark's decisions.
+    process.env.LOCALROUTER_COMPANION_FAKE = '1'
+    await startLocalExecutor()
+    const local = executor!
+    const { token } = local.enrollment.add('smoke')
+    const client = new ExecutorClient(executorSocket(dir), token)
+    const before = await client.request('capabilities')
+    const unpairedCaps = (before.ok ? before.result : {}) as { computer_use?: boolean; computer_use_unavailable?: string }
+    result.unpaired = { answered: before.ok, computer_use: unpairedCaps.computer_use ?? null, says: unpairedCaps.computer_use_unavailable === UNPAIRED ? 'not paired' : (unpairedCaps.computer_use_unavailable ?? (before.ok ? '' : before.error)) }
+    runtime = await startRuntime({ base: 'http://127.0.0.1:9', token: '', dir, name: 'smoke', machine: 'fake', gate: { method: 'none (smoke)', verify: async () => false }, shared: () => [], executor: local })
     const win = new BrowserWindow({ show: false, webPreferences })
     await win.loadURL(`${ORIGIN}/voice.html`)
     result.page = await win.webContents.executeJavaScript('({ shim: window.__companionShim === true, bridge: typeof (window.companion && window.companion.realtime && window.companion.realtime.open) === "function", title: document.title, socket: String(WebSocket.name) })')
     result.status = await win.webContents.executeJavaScript('fetch("/v1/computer/status").then(r => r.json()).then(s => ({ computers: s.computers.length, placement: s.computers[0] && s.computers[0].placement }))')
     result.proxy = await win.webContents.executeJavaScript('fetch("/v1/models").then(r => r.status)')
-    const { token } = runtime.executor.enrollment.add('smoke')
-    const client = new ExecutorClient(executorSocket(dir), token)
     const caps = await client.request('capabilities')
     client.close()
     result.executor = caps.ok ? caps.result : caps.error
@@ -826,7 +854,8 @@ async function smoke() {
     const page = result.page as { shim: boolean; bridge: boolean }
     const status = result.status as { computers: number; placement: string }
     const setupPage = result.setup as { version: string; error: string }
-    ok = page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502 && setupPage.version === VERSION && setupPage.error === 'refused'
+    const unpaired = result.unpaired as { answered: boolean; computer_use: boolean | null; says: string }
+    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && (caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true) && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 502 && setupPage.version === VERSION && setupPage.error === 'refused'
     // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
     const native = await createPlatform('native', { dataDir: dir })
     result.native = await native.platform.access().then(
@@ -841,6 +870,7 @@ async function smoke() {
   }
   process.stdout.write(`COMPANION_SMOKE ${JSON.stringify({ ok, ...result })}\n`)
   await runtime?.close().catch(() => undefined)
+  await executor?.close().catch(() => undefined)
   app.exit(ok ? 0 : 1)
 }
 
@@ -862,7 +892,7 @@ if (process.argv.includes('--version')) {
   app.on('activate', () => showMain())
   app.on('will-quit', () => {
     globalShortcut.unregisterAll()
-    void stopRuntime()
+    void stopRuntime().then(() => executor?.close())
   })
   void app.whenReady().then(async () => {
     registerProtocol()

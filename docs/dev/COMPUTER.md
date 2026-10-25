@@ -220,6 +220,12 @@ DPI awareness on Windows, compositor pixels on Linux), so the stop's corners, sc
 Manager on Windows, Ctrl+Alt+Esc xkill on KDE). The executor's socket is a Unix socket in the data folder, or a per-user
 named pipe on Windows. An OS with no platform yet reads nothing and refuses every control, saying so.
 
+The app starts the executor at launch, paired with a Spark or not: its lease, policy, approvals, audit, stop and caller
+enrollment are all local. Pairing gives it the Spark's decisions (computer use, and the click judgment, which without a
+provider fails closed to an approval); unpairing takes them back. Before pairing an enrolled harness can run the fixed
+controls and read the screen; computer use says it waits for pairing, and a step that needs an approval is refused
+with the reason, since the window that shows approval cards opens only once paired.
+
 The box's decisions (the chat model asked as `decide.Qwen` asks it) are advice: they choose steps and judge clicks, and
 a failed judgment asks. With the legacy bridge on, the box's `authorize` grant is one more input: a refusal there holds,
 an allow does not replace the local rules or approval. New harnesses need none of `desktop_helper`, `computer` or

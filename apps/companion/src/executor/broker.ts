@@ -69,6 +69,12 @@ export type BrokerOptions = {
   machine: Machine
   /** Advisory decisions (the Spark's System One); null: computer use is unavailable and judged clicks ask. */
   decider: Decider | null
+  /**
+   * Why a person cannot approve anything on this computer right now (the app's window that shows approval cards is
+   * not open: LocalRouter is not paired yet), or null when they can. A step that needs a tap is then refused with this
+   * reason instead of waiting for a card nobody can see.
+   */
+  approvalSurface?: () => string | null
   audit: Audit
   gate: PresenceGate
   /** The local stop for one task (the pointer corner / takeover watch). */
@@ -109,6 +115,7 @@ export type BrokerEvent =
 export type Started = { ok: true; task_id: string; finished: Promise<ComputerOutcome> } | { ok: false; error: string }
 
 export const DISABLED_MESSAGE = 'Computer control is switched off on this computer'
+export const NO_DECIDER = 'computer use needs the decision service on the Spark, which is not connected'
 export const OWN_TARGET = 'LocalRouter’s own windows are never a target.'
 export const OWN_READ = 'LocalRouter’s own window is in front, and it is never read: bring the app you mean forward first.'
 const ACCESS_HINT = 'give LocalRouter the accessibility access it asks for in Settings'
@@ -152,6 +159,8 @@ export class Broker {
   private injecting = 0
   private disabledFlag = false
   private readonly machine: Machine
+  private decider: Decider | null
+  private noDecider = NO_DECIDER
 
   constructor(options: BrokerOptions) {
     this.options = options
@@ -168,11 +177,21 @@ export class Broker {
     this.ownApps = (options.ownApps ?? ['LocalRouter']).map((n) => n.toLowerCase())
     this.minDwellMs = options.minDwellMs ?? 800
     this.machine = this.guarded(options.machine)
+    this.decider = options.decider
   }
 
   on(listener: (event: BrokerEvent) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  /**
+   * The decision provider, set when the computer pairs with a Spark and cleared when it unpairs: the executor itself
+   * (lease, policy, approvals, audit, stop) runs either way. `why` is what computer use says while there is none.
+   */
+  setDecider(decider: Decider | null, why = NO_DECIDER) {
+    this.decider = decider
+    this.noDecider = why
   }
 
   get disabled() {
@@ -203,7 +222,8 @@ export class Broker {
       os: this.options.machine.os ?? process.platform,
       backend: this.options.machine.backend ?? '',
       controls: this.controlKinds(),
-      computer_use: Boolean(this.options.machine.screen) && this.options.decider !== null,
+      computer_use: Boolean(this.options.machine.screen) && this.decider !== null,
+      ...(this.decider ? {} : { computer_use_unavailable: this.noDecider }),
       reads: { observe: Boolean(this.options.machine.screen), screenshot: Boolean(this.options.machine.screen?.screenshot) },
       presence: this.options.gate.method,
       limits: { max_steps: this.limits.maxSteps, timeout_ms: this.limits.timeoutMs, approval_timeout_ms: this.limits.approvalTimeoutMs },
@@ -253,8 +273,8 @@ export class Broker {
     const g = goal.trim()
     if (!g || g.length > 1000) return { ok: false, error: 'goal is required (at most 1000 characters)' }
     if (text !== null && (!text || Buffer.byteLength(text, 'utf8') > policy.MAX_TEXT)) return { ok: false, error: 'text is at most 4000 characters' }
-    const decider = extra.decider ?? this.options.decider
-    if (!decider) return { ok: false, error: 'computer use needs the decision service on the Spark, which is not connected' }
+    const decider = extra.decider ?? this.decider
+    if (!decider) return { ok: false, error: this.noDecider }
     if (!this.machine.screen) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
     if (this.active) return { ok: false, error: `${this.name} is busy with another task; stop it first` }
     const task = this.newTask('use', who, g, extra.taskId)
@@ -510,7 +530,7 @@ export class Broker {
 
   /** Could this step send, buy, delete, post or submit? The provider's yes probability, or null when it cannot say. */
   private async judge(task: Task, request: AuthorizeRequest): Promise<number | null> {
-    const decider = this.options.decider
+    const decider = this.decider
     if (!decider || request.action.kind !== 'click') return null
     try {
       const state = { goal: task.goal, screen: request.observation, action: { kind: 'click', role: request.action.role, label: request.action.label } }
@@ -566,6 +586,11 @@ export class Broker {
 
   private async awaitApproval(task: Task, b: Omit<Binding, 'executor' | 'task_id' | 'goal' | 'requester'>): Promise<Grant> {
     if (task.stopping) return { ok: false, denied: 'It was stopped.' }
+    const nowhere = this.options.approvalSurface?.() ?? null
+    if (nowhere) {
+      this.options.audit.record('deny', { task_id: task.id, step: b.step, action: { kind: b.action.kind }, reason: nowhere })
+      return { ok: false, denied: nowhere }
+    }
     const binding: Binding = { executor: this.executorId, task_id: task.id, goal: task.goal, requester: task.requester.caller.name, ...b }
     const id = `appr_${randomBytes(12).toString('hex')}`
     const start = this.now()

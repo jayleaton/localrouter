@@ -45,6 +45,8 @@ export type ExecutorOptions = {
   gate: PresenceGate
   /** The app's own process and window names, never targets. */
   ownApps?: string[]
+  /** Why nobody can approve right now (no window shows approval cards), or null: see BrokerOptions.approvalSurface. */
+  approvalSurface?: () => string | null
   /** Listen on the socket for other harnesses (MCP). */
   listen?: boolean
   log?: Logger
@@ -70,6 +72,7 @@ export async function startExecutor(o: ExecutorOptions): Promise<Executor> {
     gate: o.gate,
     ...(stop ? { watch: (abort: (reason: string) => void) => stop.watch(abort) } : {}),
     ownApps: o.ownApps ?? ['LocalRouter', 'Electron'],
+    ...(o.approvalSurface ? { approvalSurface: o.approvalSurface } : {}),
     log,
   })
   const enrollment = new Enrollment(callersPath(o.dir))
