@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `tools/jarvis/smoke.sh`'s `stt` check finds its pinned LibriSpeech fixture in `fetch.py`'s cache
+  (`~/.cache/localrouter-speech/fixtures`) as well as under `~/jarvis`, and builds it with `fetch.py` (pinned, checked
+  download) when it is nowhere. A cleanup of scratch directories under `~/jarvis` had removed the only copy, and every
+  smoke failed `stt` with "no fixture" while speech to text worked.
 - Job outputs no longer outlive a restart: on start the daemon removes job directories under `data_dir/jobs` older than
   `keep_outputs_s` (24 h). Expiry only knew the jobs of the running process, so every restart left the earlier ones on
   disk for good (on DGX-01: 6,483 job directories, 1.2 GiB, from three days of deploys).
