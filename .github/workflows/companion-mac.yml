@@ -112,13 +112,16 @@ jobs:
               sleep 0.1; waited=$((waited + 1))
               if [ $waited -eq 350 ]; then
                 echo "  $name still running at 35 s; processes:"
-                ps -axo pid,ppid,etime,stat,%cpu,command | grep -E 'LocalRouter|localrouter-keychain|SecurityAgent|securityd|codesign|trustd' | grep -v grep | cut -c1-200 | sed 's/^/    /'
+                ps -axo pid,ppid,etime,stat,%cpu,command | grep -E 'LocalRouter|localrouter-keychain|SecurityAgent|codesign' | grep -v grep | cut -c1-200 | sed 's/^/    /'
+                # Where its main thread is (the call graph's heaviest stack, top 45 frames).
+                sample "$pid" 2 -file "$RUNNER_TEMP/sample.txt" > /dev/null 2>&1 || true
+                awk '/^Call graph:/{p=1} p' "$RUNNER_TEMP/sample.txt" 2>/dev/null | head -45 | cut -c1-200 | sed 's/^/    sample: /'
               fi
             done
             if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid"; wait "$pid" 2>/dev/null || true; code=killed; else wait "$pid" && code=0 || code=$?; fi
             local line; line=$(grep -m1 '^COMPANION_SECRETS ' "$RUNNER_TEMP/s.txt" | sed 's/^COMPANION_SECRETS //' || true)
             echo "$name ($code, $(( $(ms) - t0 )) ms): ${line:-no answer after 40 s}"
-            sed 's/^/    trace: /' "$trace"
+            sed "s/^/    trace[$name]: /" "$trace"
             if [ -z "$line" ]; then sed 's/^/    stderr: /' "$RUNNER_TEMP/s.err" | grep -v 'XPC error' | tail -15; line='{"ok":false,"timeout":true}'; fi
             printf '%s' "$line" > "$RUNNER_TEMP/$name.json"
           }
