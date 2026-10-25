@@ -90,6 +90,12 @@ describe('WindowsScreen act', () => {
     expect(calls[2]!.args).toEqual({ hwnd: 1311234, x: 240, y: 80 })
   })
 
+  it('clicks with the real pointer, skipping the pattern, when the pointer is asked for', async () => {
+    const { worker, calls } = fakeWorker((call) => (call.op === 'point' ? { hwnd: 1311234, x: 240, y: 80 } : { x: 240, y: 80 }))
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF }, { pointer: true })).toEqual({ pointer: { x: 240, y: 80 } })
+    expect(calls.map((c) => c.op)).toEqual(['point', 'click'])
+  })
+
   it('sets a value semantically; a value that did not land is an error, not a retry with keys', async () => {
     const set = fakeWorker(() => ({ done: true, how: 'value' }))
     expect(await new WindowsScreen(set.worker).act({ kind: 'type', ref: REF, text: 'line one\nline two' })).toEqual({ background: true })

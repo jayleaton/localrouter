@@ -33,6 +33,7 @@ jobs:
             files: |
               apps/companion/out/*.exe
               apps/companion/out/*.zip
+              !apps/companion/out/*__uninstaller*
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:

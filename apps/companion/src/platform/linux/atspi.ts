@@ -335,6 +335,8 @@ def act(req):
     if op == 'scroll':
         return scroll(resolve(win, req['ref']) if req.get('ref') else None, win, app, req.get('direction', 'down'))
     el = resolve(win, req.get('ref'))
+    if op == 'click' and req.get('pointer'):
+        return fallback(el, win, app)
     if op == 'click':
         return click(el, win, app)
     if op == 'type':
@@ -560,7 +562,8 @@ export class LinuxScreen implements ScreenBackend {
   async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
     if (action.kind === 'press') return this.press(action.key, options)
     const win = await this.compositorWindow()
-    const result = actShape(json((await this.call('act', { ...action, hint: hint(win) }, options.signal, win)).trim(), 'action result'))
+    // `pointer`: the click goes straight to the pointer fallback (a background action left the screen as it was).
+    const result = actShape(json((await this.call('act', { ...action, ...(options.pointer && action.kind === 'click' ? { pointer: true } : {}), hint: hint(win) }, options.signal, win)).trim(), 'action result'))
     if (result.done) return { background: true }
     // Line breaks through the keyboard would be Enter: refused before the pointer or keyboard is touched.
     if (action.kind === 'type') plainText(action.text)

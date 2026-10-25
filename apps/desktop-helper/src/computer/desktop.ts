@@ -272,6 +272,17 @@ function middleOfWindow() {
   }
 }
 var TEXT_ROLES = { AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1 };
+// Controls whose AXPress is the click a person makes: pressed through accessibility, the pointer and the app in front
+// stay as they are (the "virtual cursor"). Rows, text and screenshot spots are clicked with the pointer.
+var PRESS_ROLES = { AXButton: 1, AXLink: 1, AXCheckBox: 1, AXRadioButton: 1, AXMenuItem: 1, AXMenuButton: 1, AXPopUpButton: 1 };
+function pressable(el) {
+  if (!PRESS_ROLES[plain(el, 'AXRole')]) return false;
+  var ref = Ref();
+  if ($.AXUIElementCopyActionNames(el, ref) !== 0) return false;
+  var names = ObjC.castRefToObject(ref[0]);
+  for (var i = 0; names && i < names.count; i++) if (ObjC.unwrap(names.objectAtIndex(i)) === 'AXPress') return true;
+  return false;
+}
 // The scroll view a person would scroll: the largest scroll or web area inside the window (not a sidebar), else null.
 function scrollArea(win) {
   var queue = [{ el: win, depth: 0 }], seen = 0, best = null, bestArea = 0;
@@ -401,6 +412,9 @@ function run(argv) {
   if (op === 'paste') {
     if (!dryrun) paste(ax || front().app, payload.text, events);
     return 'ok';
+  }
+  if (op === 'click' && el && payload.pointer !== true && pressable(el)) {
+    if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ background: true });
   }
   if (!point) throw new Error('LOCALROUTER_GONE');
   clickAt(point, dryrun);
@@ -684,7 +698,8 @@ export class DesktopBackend implements ScreenBackend {
     const signal = options.signal
     if (signal?.aborted) throw stopped(signal)
     if (action.kind === 'type') return this.type(action.ref, action.text, signal)
-    return pointerOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(actionPayload(action))], signal))
+    const payload = { ...actionPayload(action), ...(options.pointer && action.kind === 'click' ? { pointer: true } : {}) }
+    return pointerOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(payload)], signal))
   }
 
   /**
@@ -762,7 +777,9 @@ function pointerOf(output: string): ActResult {
   const text = output.trim()
   if (!text.startsWith('{')) return {}
   try {
-    return { pointer: pointShape(JSON.parse(text)) }
+    const value = JSON.parse(text) as { background?: unknown }
+    if (value.background === true) return { background: true }
+    return { pointer: pointShape(value) }
   } catch {
     return {}
   }

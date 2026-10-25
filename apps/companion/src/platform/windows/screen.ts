@@ -200,7 +200,8 @@ export class WindowsScreen implements ScreenBackend {
         return {}
       case 'click': {
         const ref = checkRef(action.ref)
-        if (done(await call('semantic', { kind: 'click', ref }), 'click')) return { background: true }
+        // `pointer`: straight to SendInput (a pattern click left the screen as it was).
+        if (!options.pointer && done(await call('semantic', { kind: 'click', ref }), 'click')) return { background: true }
         const at = target(await call('point', { ref }))
         return { pointer: pointShape(await call('click', at), 'pointer') }
       }

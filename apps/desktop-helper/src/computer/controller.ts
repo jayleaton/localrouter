@@ -2,7 +2,7 @@
 import type { Logger } from '../log.ts'
 import { choiceProbability } from './decisions.ts'
 import type { Answers, Decider, Question } from './decisions.ts'
-import type { BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
+import type { ActResult, BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
  * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this computer (macOS, Linux or Windows) toward a goal.
@@ -190,6 +190,9 @@ export class ComputerUse {
       // with the decider told so, until the screen changes. Steering instead of retrying.
       let avoid = new Map<string, string>()
       let avoidOn = ''
+      // The signature of an action done in the background (an accessibility action, no pointer): the same action on a
+      // screen it left unchanged is first tried once more with the real pointer, and only then steered away from.
+      let backgroundAt = ''
       for (let step = 0; step < run.maxSteps; step += 1) {
         this.checkpoint(run)
         const screen = await backend.observe({ signal: run.signal })
@@ -218,13 +221,17 @@ export class ComputerUse {
         const { action, step: said } = decision
         // The same action on the same screen: what is on it, not only how many controls (a scrolled list keeps its count).
         const signature = `${JSON.stringify(action)}|${key}`
-        if (signature === previous) {
+        const same = signature === previous
+        const viaPointer = same && backgroundAt === signature
+        if (same && !viaPointer) {
           avoid.set(actionKey(action), said)
           previous = ''
+          backgroundAt = ''
           continue
         }
         previous = signature
-        await this.act(run, backend, screen, action, said)
+        const result = await this.act(run, backend, screen, action, said, viaPointer)
+        backgroundAt = result?.background && !viaPointer ? signature : ''
         await this.sleep(this.settleMs)
       }
       return end('stuck', `It did not finish within ${run.maxSteps} steps.`)
@@ -309,7 +316,7 @@ export class ComputerUse {
    * One action on screen: the control it names must be on the screen it was chosen from, the box must
    * grant it, and after a tap (time has passed) the same control must still be there, or nothing happens.
    */
-  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string) {
+  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string, pointer = false): Promise<ActResult | void> {
     const request = this.request(run, screen, action)
     const grant = await this.authorize(run, summary(screen), request)
     if (grant === 'approved' && (action.kind === 'click' || action.kind === 'type')) {
@@ -324,14 +331,15 @@ export class ComputerUse {
     run.watch?.moving()
     let left: Awaited<ReturnType<ScreenBackend['act']>>
     try {
-      left = await backend.act(action, { signal: run.signal })
+      left = await backend.act(action, { signal: run.signal, ...(pointer ? { pointer: true } : {}) })
     } catch (error) {
       run.watch?.left(null)
       throw error
     }
     run.watch?.left(typeof left === 'object' && left !== null ? left.pointer : undefined)
     if (action.kind === 'type') run.typedInto = this.control(screen, action.ref)
-    this.record(run, said)
+    this.record(run, pointer ? `${said} (again, with the pointer)` : said)
+    return left
   }
 
   /** The control a ref names on this screen; a ref that is not on it is never acted on. */
