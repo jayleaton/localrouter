@@ -93,6 +93,19 @@ export class Store {
     return 'ok'
   }
 
+  /**
+   * The person pressed Approve and the OS is checking it is them (Windows Hello, Touch ID): a pending approval stays
+   * open until `untilMs` so that check's own time does not run the card out. Never shortens it; nothing else changes.
+   */
+  hold(id: string, untilMs: number, nowMs: number): boolean {
+    const x = this.find(id)
+    if (!x) return false
+    expire(x, nowMs)
+    if (x.state !== 'pending') return false
+    x.expires_ms = Math.max(x.expires_ms, untilMs)
+    return true
+  }
+
   /** The waiting step's check: `approved` once, for the same binding only (then the approval is used up). */
   take(id: string, d: string, nowMs: number): Taken {
     const x = this.find(id)

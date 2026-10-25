@@ -485,7 +485,7 @@ export class ComputerUse {
           ...(canType ? { type_text: 'Type the prepared text (`textToType`) into a text box.' } : {}),
           ...(typed && !avoid.has('press:enter') ? { press_enter: 'Press Enter, for example to send what was just typed or to run a search.' } : {}),
           ...(avoid.has('press:space') ? {} : { press_space: 'Press Space, which plays or pauses the video or audio on this page.' }),
-          done: 'The goal is already done on this screen.',
+          ...(navigationUnmet(task.goal, screen) ? {} : { done: 'The goal is already done on this screen.' }),
           stuck: 'None of these moves toward the goal.',
         },
       },
@@ -494,7 +494,7 @@ export class ComputerUse {
     const answers = await this.ask(state, questions)
     const next = this.confident(answers, 'next')
     if (!next || next === 'stuck') return { stop: 'stuck', reason: `It could not tell what to do next on ${screen.app}.` }
-    if (next === 'done') return { stop: 'done', reason: '' }
+    if (next === 'done' && !navigationUnmet(task.goal, screen)) return { stop: 'done', reason: '' }
     if (next === 'scroll_down' || next === 'scroll_up') return { action: { kind: 'scroll', direction: next === 'scroll_down' ? 'down' : 'up' }, step: `scrolled ${next === 'scroll_down' ? 'down' : 'up'}` }
     if (next === 'press_space') return { action: { kind: 'press', key: 'space' }, step: 'pressed Space' }
     if (next === 'press_enter') return { action: { kind: 'press', key: 'enter' }, step: 'pressed Enter' }
@@ -585,6 +585,22 @@ function actionKey(action: ScreenAction): string {
     case 'scroll':
       return `scroll:${action.direction}`
   }
+}
+
+/** A host as people write it and browsers show it: no scheme, no "www.", no path, lower case. */
+const hostOf = (address: string) => address.toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').split(/[/?#:]/)[0]
+
+/**
+ * Whether a navigation goal's page is not on screen yet: the goal names an address, the screen says which page it
+ * shows, and that page is on another host. When the backend cannot read the page (no `url`), it cannot be told, and
+ * the decider's word stands.
+ */
+export function navigationUnmet(goal: string, screen: Observation): boolean {
+  const target = navigationText(goal)
+  if (!target || !screen.url) return false
+  const want = hostOf(target)
+  const have = hostOf(screen.url)
+  return !(have === want || have.endsWith(`.${want}`))
 }
 
 /**
@@ -689,7 +705,8 @@ function matchControl(controls: ScreenControl[], name: string): ScreenControl | 
 
 /** A goal that is only clicking named things ("click the tab X", "select Y"), so clicking them finishes it. */
 function plainClickGoal(task: ComputerTask) {
-  if (task.text) return false
+  // Going to a site is done when the page is there, not when a tab is clicked (a blank tab once counted as done).
+  if (task.text || navigationText(task.goal)) return false
   const unquoted = task.goal.replace(/[“"‘'][^“”"‘’']{3,120}[”"’']/g, ' ')
   return !/\b(then|scroll|type|write|send|message|search|find|fill|enter|reply|draft|play|pause|press|watch|mute)\b/i.test(unquoted)
 }

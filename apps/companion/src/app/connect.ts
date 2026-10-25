@@ -291,3 +291,27 @@ export function tailnetPeers(status: unknown): TailnetPeer[] | null {
 export function peerBases(p: TailnetPeer): string[] {
   return [`https://${p.dns}:10443`, `https://${p.dns}`]
 }
+
+/**
+ * Where the Tailscale CLI may be on this computer, in order: the app bundle or package paths for the OS, then every
+ * folder on PATH. Windows installs `tailscale.exe` under Program Files (the GUI is `tailscale-ipn.exe`), so the Mac and
+ * Unix paths alone said Tailscale was off on every Windows PC.
+ */
+export function tailscaleCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
+  const win = platform === 'win32'
+  const join = (dir: string, file: string) => `${dir.replace(/[\\/]+$/, '')}${win ? '\\' : '/'}${file}`
+  const fixed = win
+    ? [env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramW6432, env.LOCALAPPDATA].filter((d): d is string => Boolean(d)).map((d) => join(join(d, 'Tailscale'), 'tailscale.exe'))
+    : platform === 'darwin'
+      ? ['/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale']
+      : ['/usr/bin/tailscale', '/usr/local/bin/tailscale', '/usr/sbin/tailscale', '/snap/bin/tailscale']
+  const path = (env.PATH ?? env.Path ?? '').split(win ? ';' : ':').filter(Boolean).map((d) => join(d, win ? 'tailscale.exe' : 'tailscale'))
+  return [...new Set([...fixed, ...path])]
+}
+
+/** The executor's MCP launcher next to the app's resources: a shell script, or on Windows its .cmd. */
+export function mcpLauncher(resources: string, platform: NodeJS.Platform): string {
+  const win = platform === 'win32'
+  return `${resources.replace(/[\\/]+$/, '')}${win ? '\\' : '/'}localrouter-executor-mcp${win ? '.cmd' : ''}`
+}
+

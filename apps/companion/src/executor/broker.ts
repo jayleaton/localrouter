@@ -49,6 +49,8 @@ export type Card = {
   why: string
   goal: string
   requester: string
+  /** What happens after Approve, said before it happens: "After Approve, Windows asks for your PIN, face or fingerprint (Windows Hello)." */
+  confirm: string
   expires_in_s: number
   state: Approval['state']
 }
@@ -85,6 +87,8 @@ export type BrokerOptions = {
   ownApps?: string[]
   limits?: Partial<Limits>
   minDwellMs?: number
+  /** How long Approve holds the card open for the OS check (PRESENCE_MS). */
+  presenceMs?: number
   /** Time for the screen to settle after an action (the controller's 600 ms by default). */
   settleMs?: number
   /** Time for the approved app to come back to the front after the approval card (400 ms). */
@@ -427,6 +431,8 @@ export class Broker {
     }
     if (this.inputActive) return this.refuseAnswer(id, by, 'LocalRouter is moving the pointer or typing right now, so an approval cannot come from this computer at this moment.')
     if (now - x.created_ms < this.minDwellMs) return this.refuseAnswer(id, by, 'That was too quick to be a deliberate approval: read the card, then approve.')
+    // The OS check takes its own time (a PIN typed, a finger found): the card does not run out while it is open.
+    this.store.hold(id, now + (this.options.presenceMs ?? PRESENCE_MS), now)
     let present = false
     try {
       present = await this.options.gate.verify(this.card(x, now))
@@ -619,6 +625,10 @@ export class Broker {
           this.store.cancelTask(task.id)
           return settle('cancelled')
         }
+        // Still pending: it may have been held open for the OS check, so look again when it now runs out.
+        const until = this.store.get(id, this.now())?.expires_ms ?? this.now()
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(check, Math.max(5, until - this.now() + 5))
       }
       this.waiters.set(id, check)
       task.wake = check
@@ -678,7 +688,7 @@ export class Broker {
 
   private card(x: Approval, now: number): Card {
     const b = x.binding
-    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
+    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method), expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
   }
 
   private emit(event: BrokerEvent) {
@@ -746,6 +756,17 @@ export function flatten(a: AuthorizeAction): policy.Action {
 /** An action for the audit log: its kind and target, typed text as length and digest only. */
 function actionLog(a: policy.Action) {
   return { kind: a.kind, role: a.role ?? '', label: clip(a.label ?? ''), key: a.key ?? '', name: clip(a.name ?? ''), ...(a.text ? { text: textDigest(a.text) } : {}) }
+}
+
+/** How long an approval stays open once Approve is pressed, for the OS to check it is the person (Hello allows 2 min). */
+export const PRESENCE_MS = 120_000
+
+/** What follows Approve, on the card before it is pressed, so an OS prompt (Windows Security, Touch ID) is expected. */
+export function confirmWith(method: string): string {
+  if (method === 'Windows Hello') return 'After Approve, Windows asks for your PIN, face or fingerprint (Windows Hello).'
+  if (method === 'Touch ID') return 'After Approve, macOS asks for your fingerprint (Touch ID).'
+  if (method === 'a confirmation on this computer') return 'After Approve, LocalRouter asks you to confirm it once more.'
+  return `After Approve, ${method} confirms it is you.`
 }
 
 /** The card's sentence: what exactly would happen, where. */

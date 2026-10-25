@@ -1,7 +1,7 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/use/controller.test.ts), reused in LocalRouter with the owner's permission.
 import { describe, expect, it, vi } from 'vitest'
 import { silentLogger } from '../log.ts'
-import { ComputerUse, ComputerUseRuns, navigationText, quotedTargets, resolveTab, siteNamed, soundKey, textToType, unquotedTabName } from './controller.ts'
+import { ComputerUse, ComputerUseRuns, navigationText, navigationUnmet, quotedTargets, resolveTab, siteNamed, soundKey, textToType, unquotedTabName } from './controller.ts'
 import type { Authorize, AuthorizeRequest, ComputerTask, Deps, Grant, RunOptions, Session } from './controller.ts'
 import type { Answer, Answers, Question } from './decisions.ts'
 import type { BrowserTab, BrowserTabs, Observation, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
@@ -333,6 +333,26 @@ describe('ComputerUse', () => {
       const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('c1') }, { next: choice('done') }], { page, tabs: null })
       expect(await computer.run({ goal: 'archive the message', text: null })).toMatchObject({ status: 'done' })
       expect(actions).toEqual([{ kind: 'click', ref: '0.1' }, { kind: 'click', ref: '0.2' }])
+    })
+
+    it('a navigation goal is not done when a tab is clicked, nor until the page on screen is the one asked for (Windows run, 2026-10-25)', async () => {
+      const blank: BrowserTab = { window: 0, index: 1, title: 'New Tab', url: 'chrome://newtab/', active: false }
+      let url = 'chrome://newtab/'
+      const page: ScreenBackend = {
+        kind: 'desktop',
+        observe: async () => ({ backend: 'desktop', app: 'Google Chrome', title: url === 'chrome://newtab/' ? 'New Tab' : 'Example Domain', url, controls: [control('0.7', 'textbox', 'Address and search bar', { focused: true })] }),
+        act: async (action) => { if (action.kind === 'press') url = 'example.com' },
+      }
+      const tabs: BrowserTabs = { browser: 'Google Chrome', list: async () => [blank], activate: async () => undefined }
+      const { computer, asked } = computerWith([{ surface: choice('browser'), tab: choice('t0') }, { next: choice('type_text'), type_into: choice('c0') }, { next: choice('press_enter') }, { next: choice('done') }], { page, tabs })
+      expect(await computer.run({ goal: 'open Chrome and go to example.com', text: null })).toMatchObject({ status: 'done' })
+      const offered = asked.slice(1).map((a) => Object.keys((a.questions.next as { criteria: Record<string, string> }).criteria).includes('done'))
+      // On the blank tab "done" is not an option; once example.com is in the address bar it is.
+      expect(offered).toEqual([false, false, true])
+      expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'https://www.example.com/path', controls: [] })).toBe(false)
+      expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'docs.example.com', controls: [] })).toBe(false)
+      expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', url: 'https://notexample.com/', controls: [] })).toBe(true)
+      expect(navigationUnmet('go to example.com', { backend: 'desktop', app: 'Edge', title: 'x', controls: [] })).toBe(false)
     })
 
     it('"go to example.com" in Chrome with the address bar focused: types the address and presses Enter, never clicks the bar again (JJ’s MacBook, 2026-10-25)', async () => {
