@@ -359,6 +359,8 @@ namespace LocalRouterWin
         [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc proc, IntPtr lParam);
         [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc proc, IntPtr lParam);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+        [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public int flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
@@ -546,6 +548,7 @@ namespace LocalRouterWin
                 case "select_all": return Json.Write(SelectAll(a));
                 case "type": return Json.Write(TypeText(a));
                 case "key": return Json.Write(Key(a));
+                case "postkey": return Json.Write(PostKey(a));
                 case "wheel": return Json.Write(Wheel(a));
                 case "pointer": return Json.Write(Pointer());
                 case "displays": return Json.Write(Displays());
@@ -1530,6 +1533,37 @@ namespace LocalRouterWin
             keys.Add(KeyInput((ushort)vk, scan, 0x0002));
             Send(keys);
             return D();
+        }
+
+        /**
+         * A key posted to the foreground window's focused control (WM_KEYDOWN/WM_KEYUP, and WM_CHAR for Enter), without
+         * SendInput: the person's real keyboard is untouched. It is best-effort: many apps read raw input or key state
+         * and ignore posted keys, and Chromium/Electron render widgets often do; the caller falls back to the real
+         * keyboard (with the person's leave) when the posted key does nothing. Returns the window it went to.
+         */
+        private static Dictionary<string, object> PostKey(Dictionary<string, object> a)
+        {
+            NotSecure();
+            int vk = (int)Num(a, "vk", 0);
+            if (Array.IndexOf(AllowedKeys, vk) < 0) throw new LrError("UNKNOWN_OP", "postkey");
+            IntPtr fg = Native.GetForegroundWindow();
+            IntPtr hwnd = fg;
+            uint pid;
+            uint them = (fg != IntPtr.Zero) ? Native.GetWindowThreadProcessId(fg, out pid) : 0;
+            // The focused control within the foreground window (its own thread's focus), so the key lands in the field.
+            Native.GUITHREADINFO gti = new Native.GUITHREADINFO();
+            gti.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
+            if (them != 0 && Native.GetGUIThreadInfo(them, ref gti) && gti.hwndFocus != IntPtr.Zero) hwnd = gti.hwndFocus;
+            if (hwnd == IntPtr.Zero) throw new LrError("NO_APP", "");
+            uint scan = Native.MapVirtualKey((uint)vk, 0);
+            IntPtr down = new IntPtr(1 | (int)(scan << 16));
+            IntPtr up = new IntPtr(1 | (int)(scan << 16) | unchecked((int)0xC0000000));
+            Native.PostMessage(hwnd, 0x0100, new IntPtr(vk), down); // WM_KEYDOWN
+            if (vk == 0x0D) Native.PostMessage(hwnd, 0x0102, new IntPtr(13), down); // WM_CHAR for Enter
+            Native.PostMessage(hwnd, 0x0101, new IntPtr(vk), up); // WM_KEYUP
+            Dictionary<string, object> o = D();
+            o["hwnd"] = hwnd.ToInt64();
+            return o;
         }
 
         private static Dictionary<string, object> Wheel(Dictionary<string, object> a)

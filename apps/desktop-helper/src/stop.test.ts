@@ -149,21 +149,18 @@ describe('LocalStop', () => {
     expect(aborted).toEqual([])
   })
 
-  it('stops a running task on the fake Mac when the person takes the pointer, before the next action', async () => {
+  it('does NOT stop a background task when the person uses their own pointer while it works (JJ: virtual mouse)', async () => {
     const mac = fakeMac()
     const timer = manual()
     const stop = new LocalStop({ pointer: () => mac.desktop.pointer(), schedule: timer.schedule, log: silentLogger })
-    let nexts = 0
     const decider = {
       ask: async (_state: unknown, questions: Record<string, Question>): Promise<Answers> => {
         if ('surface' in questions) return { surface: { type: 'choice', choice: 'current', probability: 0.9 } }
-        nexts += 1
-        if (nexts === 1) return { next: { type: 'choice', choice: 'type_text', probability: 0.9 }, type_into: { type: 'choice', choice: 'c0', probability: 0.9 } }
-        // While the box decides, the person grabs the mouse; the next poll sees it.
+        // The person moves their own mouse across the screen mid-task; the fake acts in the background, so it is theirs.
         mac.desktop.movePointer({ x: 900, y: 700 })
         timer.tick()
         await new Promise((resolve) => setTimeout(resolve, 0))
-        return { next: { type: 'choice', choice: 'press_enter', probability: 0.9 } }
+        return { next: { type: 'choice', choice: 'type_text', probability: 0.9 }, type_into: { type: 'choice', choice: 'c0', probability: 0.9 } }
       },
     }
     const runs = new ComputerUseRuns({
@@ -173,8 +170,35 @@ describe('LocalStop', () => {
     })
     const started = runs.start('task_1', { goal: 'search my notes for groceries', text: 'groceries' }, { decider, authorize: async (): Promise<Grant> => ({ ok: true, grant: 'allow' }) })
     if (!started.ok) throw new Error('refused')
-    expect(await started.finished).toMatchObject({ status: 'stopped', reason: TAKEN_OVER })
-    expect(mac.desktop.actions).toEqual([{ kind: 'type', ref: 'search', text: 'groceries' }])
+    const outcome = await started.finished
+    // The task ran its background steps despite the pointer moving; it was not stopped as a takeover.
+    expect(outcome.status).not.toBe('stopped')
+    expect(mac.desktop.actions.some((a) => a.kind === 'type')).toBe(true)
+    expect(mac.desktop.modes.every((m) => m === 'background')).toBe(true)
+  })
+
+  it('the corner still stops a background task at once, with no real pointer involved', async () => {
+    const mac = fakeMac()
+    const timer = manual()
+    const stop = new LocalStop({ pointer: () => mac.desktop.pointer(), schedule: timer.schedule, log: silentLogger })
+    const decider = {
+      ask: async (_state: unknown, questions: Record<string, Question>): Promise<Answers> => {
+        if ('surface' in questions) return { surface: { type: 'choice', choice: 'current', probability: 0.9 } }
+        // The person drops the pointer into the top-left corner: the emergency stop, which always works.
+        mac.desktop.movePointer({ x: 1, y: 1 })
+        timer.tick()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return { next: { type: 'choice', choice: 'type_text', probability: 0.9 }, type_into: { type: 'choice', choice: 'c0', probability: 0.9 } }
+      },
+    }
+    const runs = new ComputerUseRuns({
+      create: (session) => new ComputerUse({ ...session, tabs: null, desktop: mac.desktop, dock: mac.dock, apps: mac.apps, log: silentLogger, settleMs: 0 }),
+      watch: (abort) => stop.watch(abort),
+      log: silentLogger,
+    })
+    const started = runs.start('task_1', { goal: 'search my notes for groceries', text: 'groceries' }, { decider, authorize: async (): Promise<Grant> => ({ ok: true, grant: 'allow' }) })
+    if (!started.ok) throw new Error('refused')
+    expect(await started.finished).toMatchObject({ status: 'stopped', reason: STOPPED_IN_CORNER })
     expect(timer.cancelled()).toBe(1)
   })
 })

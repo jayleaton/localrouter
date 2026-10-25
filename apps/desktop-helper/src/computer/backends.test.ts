@@ -127,8 +127,8 @@ describe('DesktopBackend', () => {
     await expect(new DesktopBackend(runner).observe()).rejects.toThrow(/role should be one of/)
   })
 
-  it('sends refs, text and key codes only as argv', async () => {
-    const { runner, calls } = fakeRunner((call) => (call.argv[0] === 'value' ? JSON.stringify({ value: "'); Application('Finder').delete(); ('" }) : 'ok'))
+  it('sends refs, text and key codes only as argv, acting in the background', async () => {
+    const { runner, calls } = fakeRunner((call) => (call.argv[0] === 'value' ? JSON.stringify({ value: "'); Application('Finder').delete(); ('" }) : JSON.stringify({ mode: 'background' })))
     const desktop = new DesktopBackend(runner, { sleep: async () => {} })
     const text = "'); Application('Finder').delete(); ('"
     await desktop.act({ kind: 'type', ref: '0.2.4', text })
@@ -136,51 +136,60 @@ describe('DesktopBackend', () => {
     await desktop.act({ kind: 'press', key: 'enter' })
     await desktop.act({ kind: 'scroll', direction: 'bottom' })
     await desktop.act({ kind: 'scroll', direction: 'down', ref: '0.3' })
-    await desktop.act({ kind: 'click', ref: 'v:1850,72' })
     await desktop.act({ kind: 'press', key: 'space' })
     expect(calls.map((call) => call.argv)).toEqual([
-      ['focus', JSON.stringify({ ref: '0.2.4' })],
-      ['keys', JSON.stringify({ text })],
+      ['setvalue', JSON.stringify({ ref: '0.2.4', text })],
       ['value', JSON.stringify({ ref: '0.2.4' })],
       ['click', JSON.stringify({ ref: '0.1' })],
       ['press', JSON.stringify({ code: 36 })],
       ['scroll', JSON.stringify({ direction: 'bottom' })],
       ['scroll', JSON.stringify({ direction: 'down', ref: '0.3' })],
-      ['click', JSON.stringify({ ref: 'v:1850,72' })],
       ['press', JSON.stringify({ code: 49 })],
     ])
-    expect(calls[1]?.script).not.toContain('Finder')
+    // The value and text travel as argv on stdin, never spliced into the script source.
+    expect(calls[0]?.script).not.toContain('Finder')
   })
 
-  it('types plain text in chunks a stop can come between, and pastes anything the keyboard cannot type as is', async () => {
+  it('types in the background by setting the field value, and types with keys only when the pointer is allowed', async () => {
     const typed: string[] = []
     const { runner, calls } = fakeRunner((call) => {
       const payload = JSON.parse(call.argv[1] ?? '{}') as { text?: string }
-      if (call.argv[0] === 'keys' || call.argv[0] === 'paste') typed.push(payload.text ?? '')
-      return call.argv[0] === 'value' ? JSON.stringify({ value: typed.join('') }) : '{"x":10,"y":20}'
+      if (call.argv[0] === 'keys' || call.argv[0] === 'paste' || call.argv[0] === 'setvalue') typed.push(payload.text ?? '')
+      return call.argv[0] === 'value' ? JSON.stringify({ value: typed.join('') }) : JSON.stringify({ mode: 'pointer', pointer: { x: 10, y: 20 }, at: { x: 10, y: 20 } })
     })
     const desktop = new DesktopBackend(runner, { sleep: async () => {} })
     const long = 'a'.repeat(120)
-    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long })).toEqual({ pointer: { x: 10, y: 20 }, how: 'clicked into the field, focus checked, typed keys' })
+    // Background (default): one AXValue set, then a read-back. No pointer, no keyboard.
+    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long })).toEqual({ mode: 'background', how: 'value set through accessibility' })
+    expect(calls.map((call) => call.argv[0])).toEqual(['setvalue', 'value'])
+    // With the person's leave, the field is clicked and the text typed in chunks a stop can come between.
+    typed.length = 0
+    calls.length = 0
+    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long }, { allowPointer: true })).toMatchObject({ mode: 'pointer', pointer: { x: 10, y: 20 } })
     expect(calls.filter((call) => call.argv[0] === 'keys').map((call) => (JSON.parse(call.argv[1]) as { text: string }).text.length)).toEqual([50, 50, 20])
-    // Line breaks (a typed Return could send), other scripts and emoji go through the pasteboard, whole.
+    // Line breaks, other scripts and emoji go through the pasteboard, whole.
     for (const text of ['line one\nline two', 'Grüße, 你好 👋']) {
       typed.length = 0
       calls.length = 0
-      await desktop.act({ kind: 'type', ref: '0.1', text })
+      await desktop.act({ kind: 'type', ref: '0.1', text }, { allowPointer: true })
       expect(calls.map((call) => call.argv[0])).toEqual(['focus', 'paste', 'value'])
     }
     const stop = new AbortController()
-    stop.abort('You stopped it on the Mac.')
-    await expect(desktop.act({ kind: 'type', ref: '0.1', text: long }, { signal: stop.signal })).rejects.toThrow('You stopped it on the Mac.')
+    stop.abort('You stopped it on this computer.')
+    await expect(desktop.act({ kind: 'type', ref: '0.1', text: long }, { signal: stop.signal })).rejects.toThrow('You stopped it on this computer.')
   })
 
-  it('presses a button through accessibility, leaving the pointer alone, unless the pointer is asked for', async () => {
-    const { runner, calls } = fakeRunner((call) => (JSON.parse(call.argv[1] ?? '{}').pointer ? '{"x":5,"y":6}' : '{"background":true}'))
-    const desktop = new DesktopBackend(runner)
-    expect(await desktop.act({ kind: 'click', ref: '0.1' })).toEqual({ background: true })
-    expect(await desktop.act({ kind: 'click', ref: '0.1' }, { pointer: true })).toEqual({ pointer: { x: 5, y: 6 } })
-    expect(calls.map((call) => call.argv[1])).toEqual([JSON.stringify({ ref: '0.1' }), JSON.stringify({ ref: '0.1', pointer: true })])
+  it('presses a button through accessibility (background), and asks for the mouse when there is no accessible action', async () => {
+    const press = fakeRunner(() => JSON.stringify({ mode: 'background', at: { x: 40, y: 50 } }))
+    expect(await new DesktopBackend(press.runner).act({ kind: 'click', ref: '0.1' })).toEqual({ mode: 'background', at: { x: 40, y: 50 } })
+    expect(press.calls[0]?.argv).toEqual(['click', JSON.stringify({ ref: '0.1' })])
+    // No accessible action and the pointer not allowed: NeedsPointer, so the controller asks the person for their mouse.
+    const noAction = fakeRunner(() => new Error('execution error: LOCALROUTER_NEEDS_POINTER:that control has no accessible action: (-2700)'))
+    await expect(new DesktopBackend(noAction.runner).act({ kind: 'click', ref: '0.1' })).rejects.toThrow(/needs your mouse for a moment/)
+    // With the mouse allowed, it clicks for real and reports pointer mode.
+    const allowed = fakeRunner(() => JSON.stringify({ mode: 'pointer', pointer: { x: 5, y: 6 }, at: { x: 5, y: 6 } }))
+    expect(await new DesktopBackend(allowed.runner).act({ kind: 'click', ref: '0.1' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 5, y: 6 }, at: { x: 5, y: 6 } })
+    expect(allowed.calls[0]?.argv).toEqual(['click', JSON.stringify({ ref: '0.1', allow: true })])
     expect(SCRIPTS.act).toContain("AXUIElementPerformAction(el, $('AXPress'))")
   })
 
@@ -255,11 +264,11 @@ describe('DesktopBackend', () => {
     await expect(new DesktopBackend(runner).screenshot()).rejects.toThrow(/Screen Recording/)
   })
 
-  it('reports where an action left the pointer, for the local stop', async () => {
-    const { runner } = fakeRunner((call) => (call.argv[0] === 'press' ? 'ok' : '{"x":640.5,"y":212}'))
-    const desktop = new DesktopBackend(runner)
-    expect(await desktop.act({ kind: 'click', ref: '0.1' })).toEqual({ pointer: { x: 640.5, y: 212 } })
-    expect(await desktop.act({ kind: 'press', key: 'enter' })).toEqual({})
+  it('reports the mode and where it acted, for the audit and the visible cursor', async () => {
+    const bg = fakeRunner(() => JSON.stringify({ mode: 'background', at: { x: 640, y: 212 } }))
+    expect(await new DesktopBackend(bg.runner).act({ kind: 'click', ref: '0.1' })).toEqual({ mode: 'background', at: { x: 640, y: 212 } })
+    const pressOk = fakeRunner(() => JSON.stringify({ mode: 'background' }))
+    expect(await new DesktopBackend(pressOk.runner).act({ kind: 'press', key: 'enter' })).toEqual({ mode: 'background' })
   })
 
   it('reads screenshot spots ("v:x,y") with a real digit class in the JXA source', async () => {

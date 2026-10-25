@@ -32,6 +32,7 @@ export type Action = {
   direction?: string
   what?: string
   name?: string
+  why?: string
 }
 
 export const MAX_LABEL = 400
@@ -49,6 +50,9 @@ export function screen(a: Action): Decision {
   switch (a.kind) {
     case 'scroll':
       return ['up', 'down', 'top', 'bottom'].includes(a.direction ?? '') ? auto : { verdict: 'refused', why: 'an unknown scroll direction' }
+    case 'pointer':
+      // The real pointer and keyboard for a step the background could not do: always the person's to allow.
+      return { verdict: 'tap', why: a.why ? `it needs your mouse for a moment: ${a.why}` : 'it needs your mouse for a moment' }
     case 'surface':
       if (a.what !== 'tab' && a.what !== 'app') return { verdict: 'refused', why: 'a surface that is neither a tab nor an app' }
       if (!a.name) return { verdict: 'refused', why: 'a surface with no name' }

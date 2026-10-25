@@ -7,7 +7,7 @@ import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
@@ -28,6 +28,8 @@ import { prepareVideo, restoreVoice } from '../harness/models.ts'
 import { pageView } from '../harness/realtime.ts'
 import type { ClientToolsSession } from '../harness/realtime.ts'
 import { startRuntime, UNPAIRED } from '../harness/runtime.ts'
+import { overlayHtml, VirtualCursor } from './overlay.ts'
+import type { Surface } from './overlay.ts'
 import { createPlatform } from '../platform/index.ts'
 import { stopShortcut } from '../platform/shortcut.ts'
 import type { PlatformPresence } from '../platform/types.ts'
@@ -207,6 +209,47 @@ let legacy: LegacyBridge | null = null
 let settings: Settings
 let mainWindow: BrowserWindow | null = null
 let setupWindow: BrowserWindow | null = null
+let virtualCursor: VirtualCursor | null = null
+
+/**
+ * The overlay cursor, built on first use over the whole virtual desktop: transparent, always on top, click-through and
+ * never focused, so it shows where the agent acts without touching anything. Rebuilt after `end()` closes its window.
+ */
+function cursor(): VirtualCursor {
+  if (virtualCursor) return virtualCursor
+  let win: BrowserWindow | null = null
+  const build = (): BrowserWindow => {
+    const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds
+    const bounds = screen.getAllDisplays().reduce((b, d) => ({ x: Math.min(b.x, d.bounds.x), y: Math.min(b.y, d.bounds.y), right: Math.max(b.right, d.bounds.x + d.bounds.width), bottom: Math.max(b.bottom, d.bounds.y + d.bounds.height) }), { x: area.x, y: area.y, right: area.x + area.width, bottom: area.y + area.height })
+    const w = new BrowserWindow({ x: bounds.x, y: bounds.y, width: bounds.right - bounds.x, height: bounds.bottom - bounds.y, frame: false, transparent: true, resizable: false, movable: false, focusable: false, skipTaskbar: true, hasShadow: false, show: false, webPreferences: { contextIsolation: true } })
+    w.setIgnoreMouseEvents(true)
+    w.setAlwaysOnTop(true, 'screen-saver')
+    if (process.platform === 'darwin') w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    void w.loadURL(`data:text/html,${encodeURIComponent(overlayHtml())}`)
+    return w
+  }
+  const run = (js: string) => {
+    if (win && !win.isDestroyed()) void win.webContents.executeJavaScript(js).catch(() => undefined)
+  }
+  const surface: Surface = {
+    showAt: (x, y, mode) => {
+      if (!win || win.isDestroyed()) win = build()
+      const b = win.getBounds()
+      win.showInactive()
+      run(`window.lrCursor(${x - b.x}, ${y - b.y}, ${JSON.stringify(mode)})`)
+    },
+    hide: () => {
+      run('window.lrHide && window.lrHide()')
+      if (win && !win.isDestroyed()) win.hide()
+    },
+    close: () => {
+      if (win && !win.isDestroyed()) win.destroy()
+      win = null
+    },
+  }
+  virtualCursor = new VirtualCursor(surface)
+  return virtualCursor
+}
 let tray: Tray | null = null
 const sessions = new Map<string, { session: ClientToolsSession; owner: WebContents }>()
 
@@ -238,6 +281,9 @@ async function startLocalExecutor(): Promise<void> {
     if (e.type === 'approval.end' && e.outcome === 'expired' && Notification.isSupported()) new Notification({ title: 'Jarvis stopped', body: 'Nobody approved the step in time, so nothing was done.' }).show()
     // The OS check is open behind other windows: say where it is, in a notification as well as on the card.
     if (e.type === 'approval.update' && e.card.waiting && Notification.isSupported()) new Notification({ title: 'Windows Hello is waiting', body: e.card.waiting }).show()
+    // The visible virtual cursor: show where the agent acted; let go of the overlay when the task ends.
+    if (e.type === 'cursor') cursor().show({ x: e.at.x, y: e.at.y, mode: e.mode })
+    if (e.type === 'task' && e.task.status !== 'running') cursor().end()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
   })

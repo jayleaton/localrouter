@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ATSPI_SCRIPT, LinuxScreen, NO_ORIGIN, addressUrl } from './atspi.ts'
+import { needsPointer } from '../../../../desktop-helper/src/computer/types.ts'
 import { MULTILINE, chooseInjector } from './input.ts'
 import type { Session } from './session.ts'
 import { atspiOp, fakeRunner, fakeSession, tool } from './testing.ts'
@@ -92,69 +93,72 @@ describe('LinuxScreen act', () => {
   it('acts through AT-SPI first and reports it as background (no pointer, no keys)', async () => {
     const { screen: x11, calls } = screen(X11, () => ({ done: true }))
     const text = "'); import os; os.system('rm -rf ~') #"
-    expect(await x11.act({ kind: 'click', ref: '0.1' })).toEqual({ background: true })
-    expect(await x11.act({ kind: 'type', ref: '0.2', text })).toEqual({ background: true })
-    expect(await x11.act({ kind: 'scroll', direction: 'down' })).toEqual({ background: true })
+    expect(await x11.act({ kind: 'click', ref: '0.1' })).toEqual({ mode: 'background' })
+    expect(await x11.act({ kind: 'type', ref: '0.2', text })).toEqual({ mode: 'background' })
+    expect(await x11.act({ kind: 'scroll', direction: 'down' })).toEqual({ mode: 'background' })
     expect(calls.every((call) => atspiOp(call) === 'act')).toBe(true)
     // The action travels on stdin; argv carries only the op.
     expect(JSON.parse(calls[1]?.input ?? '')).toEqual({ kind: 'type', ref: '0.2', text, hint: {} })
     expect(calls[1]?.args.join(' ')).not.toContain('rm -rf')
   })
 
-  it('falls back to the pointer at the element’s centre when it has no action, and reports where it was left', async () => {
+  it('asks the person for their mouse when a control has no accessible action, then clicks there once allowed', async () => {
     const { screen: x11, lines } = screen(X11, () => FALLBACK)
-    expect(await x11.act({ kind: 'click', ref: '0.4' })).toEqual({ pointer: { x: 140, y: 70 } })
-    expect(lines()).toEqual(['atspi act', 'xdotool mousemove --sync 140 70 click 1'])
-  })
-
-  it('asks the script for the pointer path when the pointer is asked for (a background click changed nothing)', async () => {
-    const { screen: x11, calls } = screen(X11, () => FALLBACK)
-    expect(await x11.act({ kind: 'click', ref: '0.4' }, { pointer: true })).toEqual({ pointer: { x: 140, y: 70 } })
-    expect(JSON.parse(calls[0]?.input ?? '')).toMatchObject({ kind: 'click', ref: '0.4', pointer: true })
-    expect(ATSPI_SCRIPT).toContain("if op == 'click' and req.get('pointer'):")
+    await expect(x11.act({ kind: 'click', ref: '0.4' })).rejects.toSatisfy(needsPointer)
+    expect(lines()).toEqual(['atspi act']) // nothing touched the pointer
+    const allowed = screen(X11, () => FALLBACK)
+    expect(await allowed.screen.act({ kind: 'click', ref: '0.4' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 140, y: 70 }, at: { x: 140, y: 70 } })
+    expect(allowed.lines()).toEqual(['atspi act', 'xdotool mousemove --sync 140 70 click 1'])
   })
 
   it('on Hyprland clicks at the window origin plus the element’s offset', async () => {
     const { screen: hypr, lines } = screen(HYPRLAND, () => FALLBACK, (call) => (tool(call) === 'hyprctl' && call.args[0] === 'activewindow' ? JSON.stringify(HYPR) : ''))
-    expect(await hypr.act({ kind: 'click', ref: '0.4' })).toEqual({ pointer: { x: 2070, y: 122 } })
+    expect(await hypr.act({ kind: 'click', ref: '0.4' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 2070, y: 122 }, at: { x: 2070, y: 122 } })
     expect(lines().slice(-2)).toEqual(['hyprctl dispatch movecursor 2070 122', 'ydotool click 0xC0'])
   })
 
   it('refuses a pointer fallback where the window’s global position is unknown, rather than clicking a guess', async () => {
     const unknown = screen(HYPRLAND, () => FALLBACK, () => new Error('Hyprland IPC: no socket'))
-    await expect(unknown.screen.act({ kind: 'click', ref: '0.4' })).rejects.toThrow(NO_ORIGIN)
+    await expect(unknown.screen.act({ kind: 'click', ref: '0.4' }, { allowPointer: true })).rejects.toThrow(NO_ORIGIN)
     expect(unknown.lines().filter((line) => line.startsWith('ydotool') || line.includes('movecursor'))).toEqual([])
+    // GNOME Wayland lets no app place the pointer: even without the mouse allowed, the reason names that.
     const gnome = screen(GNOME, () => FALLBACK)
     await expect(gnome.screen.act({ kind: 'click', ref: '0.4' })).rejects.toThrow(/does not let another app place the pointer/)
   })
 
   it('types through the keyboard when the box cannot be set directly, then reads it back', async () => {
-    const { screen: x11, lines } = screen(X11, (op) => (op === 'read' ? { text: 'milk' } : FALLBACK))
-    expect(await x11.act({ kind: 'type', ref: '0.2', text: 'milk' })).toEqual({ pointer: { x: 140, y: 70 } })
-    expect(lines()).toEqual(['atspi act', 'xdotool mousemove --sync 140 70 click 1', 'xdotool key --clearmodifiers ctrl+a', 'xdotool type --clearmodifiers --delay 12 -- milk', 'atspi read'])
+    const { screen: x11 } = screen(X11, (op) => (op === 'read' ? { text: 'milk' } : FALLBACK))
+    // Without the mouse allowed, a box that cannot be set directly asks for it rather than typing with the keyboard.
+    await expect(x11.act({ kind: 'type', ref: '0.2', text: 'milk' })).rejects.toSatisfy(needsPointer)
+    const ok = screen(X11, (op) => (op === 'read' ? { text: 'milk' } : FALLBACK))
+    expect(await ok.screen.act({ kind: 'type', ref: '0.2', text: 'milk' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 140, y: 70 }, at: { x: 140, y: 70 } })
+    expect(ok.lines()).toEqual(['atspi act', 'xdotool mousemove --sync 140 70 click 1', 'xdotool key --clearmodifiers ctrl+a', 'xdotool type --clearmodifiers --delay 12 -- milk', 'atspi read'])
     const wrong = screen(X11, (op) => (op === 'read' ? { text: 'mi' } : FALLBACK))
-    await expect(wrong.screen.act({ kind: 'type', ref: '0.2', text: 'milk' })).rejects.toThrow('The text did not land in that box as typed')
+    await expect(wrong.screen.act({ kind: 'type', ref: '0.2', text: 'milk' }, { allowPointer: true })).rejects.toThrow('The text did not land in that box as typed')
   })
 
   it('does not read a password box back', async () => {
     const { screen: x11 } = screen(X11, (op) => (op === 'read' ? new Error('read must not run') : { ...FALLBACK, secret: true }))
-    expect(await x11.act({ kind: 'type', ref: '0.3', text: 'hunter2' })).toEqual({ pointer: { x: 140, y: 70 } })
+    expect(await x11.act({ kind: 'type', ref: '0.3', text: 'hunter2' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 140, y: 70 }, at: { x: 140, y: 70 } })
   })
 
   it('refuses multi-line text on the keyboard path before touching the pointer', async () => {
     const { screen: x11, lines } = screen(X11, () => FALLBACK)
-    await expect(x11.act({ kind: 'type', ref: '0.2', text: 'Hi,\nsee you' })).rejects.toThrow(MULTILINE)
+    await expect(x11.act({ kind: 'type', ref: '0.2', text: 'Hi,\nsee you' }, { allowPointer: true })).rejects.toThrow(MULTILINE)
     expect(lines()).toEqual(['atspi act'])
   })
 
   it('presses keys through the injector; on X11 without xdotool through AT-SPI’s own key events', async () => {
+    // A key reaches the focused window on Linux, so it needs the real keyboard: refused until the person allows it.
     const withTool = screen(X11, () => ({ done: true }))
-    expect(await withTool.screen.act({ kind: 'press', key: 'enter' })).toEqual({})
+    await expect(withTool.screen.act({ kind: 'press', key: 'enter' })).rejects.toSatisfy(needsPointer)
+    expect(withTool.lines()).toEqual([])
+    expect(await withTool.screen.act({ kind: 'press', key: 'enter' }, { allowPointer: true })).toEqual({ mode: 'pointer' })
     expect(withTool.lines()).toEqual(['xdotool key --clearmodifiers Return'])
     const bare = screen(fakeSession({ server: 'x11', tools: ['python3'] }), () => ({ done: true }))
-    expect(await bare.screen.act({ kind: 'press', key: 'escape' })).toEqual({})
+    expect(await bare.screen.act({ kind: 'press', key: 'escape' }, { allowPointer: true })).toEqual({ mode: 'pointer' })
     expect(JSON.parse(bare.calls[0]?.input ?? '')).toEqual({ keysym: 0xff1b })
-    await expect(screen(GNOME, () => ({ done: true })).screen.act({ kind: 'press', key: 'tab' })).rejects.toThrow(/Pressing keys on this desktop needs/)
+    await expect(screen(GNOME, () => ({ done: true })).screen.act({ kind: 'press', key: 'tab' }, { allowPointer: true })).rejects.toThrow(/Pressing keys on this desktop needs/)
   })
 })
 

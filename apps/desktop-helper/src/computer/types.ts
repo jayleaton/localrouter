@@ -66,14 +66,22 @@ export type ScreenAction =
   | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom'; ref?: string }
 
 /**
- * What an action did: where it left the pointer when it moved it, and `background` when it acted without the
- * pointer or global key events at all (an accessibility action such as AXPress, UIA Invoke or AT-SPI doAction), so
- * the person's own pointer and keyboard were never touched.
+ * How an action reached the app. `background`: without the person's real pointer, focus or keyboard (an accessibility
+ * action such as AXPress, UIA Invoke or AT-SPI doAction; a value set through accessibility; input posted to the app's
+ * own window or process). `pointer`: the real pointer and global keyboard, only after the person allowed it for that
+ * step ("needs your mouse for a moment").
+ */
+export type InputMode = 'background' | 'pointer'
+
+/**
+ * What an action did. `mode` says how it reached the app (every action has one). `pointer`: where the real pointer was
+ * left, when the action moved it (pointer mode only). `at`: where on screen it acted, for the visible virtual cursor
+ * (it never moves the real one). `how`: how it was done, for the audit; never the typed text.
  */
 export type ActResult = {
+  mode: InputMode
   pointer?: Point
-  background?: boolean
-  /** How it was done, for the audit ("value set, field focused", "keys"): never the text itself. */
+  at?: Point
   how?: string
 }
 
@@ -81,10 +89,29 @@ export type ObserveOptions = { signal?: AbortSignal }
 
 /**
  * `signal` aborts an action under way (a stop): long typing stops between chunks, a running script is killed.
- * `pointer`: do it with the real pointer and keys even where an accessibility action exists (the controller asks for
- * this once, when a background action left the screen as it was).
+ * `allowPointer`: the person allowed the real pointer and keyboard for this one step. Without it a backend acts in the
+ * background or throws NeedsPointer, and never touches the real pointer or global keyboard.
  */
-export type ActOptions = { signal?: AbortSignal; pointer?: boolean }
+export type ActOptions = { signal?: AbortSignal; allowPointer?: boolean }
+
+/**
+ * Thrown by a backend when an action cannot be done in the background (a canvas or game with no accessible control, an
+ * app that ignores input posted to its window). The controller then asks the person for their mouse for a moment.
+ */
+export class NeedsPointer extends Error {
+  readonly why: string
+
+  constructor(why: string) {
+    super(`This step needs your mouse for a moment: ${why}`)
+    this.name = 'NeedsPointer'
+    this.why = why
+  }
+}
+
+/** Whether an error is NeedsPointer, across module copies (the bundle and the tests). */
+export function needsPointer(error: unknown): error is NeedsPointer {
+  return error instanceof NeedsPointer || (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'NeedsPointer')
+}
 
 /**
  * The front window as an image. `region` is the part of the screen it shows (global coordinates) and `scale` the
