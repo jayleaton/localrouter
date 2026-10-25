@@ -30,19 +30,40 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
       parameters: { type: 'object', properties: { goal: { type: 'string', description: 'what to do, in the user’s words', maxLength: 1000 }, text: { type: 'string', description: 'exact text to type, if any', maxLength: 4000 } }, required: ['goal'], additionalProperties: false },
       async run(args, ctx) {
         const started = broker.startUse({ caller, utterance: ctx.utterance }, String(args.goal), typeof args.text === 'string' ? args.text : null)
-        if (!started.ok) return { status: 'refused', reason: started.error }
+        if (!started.ok) return { done: false, tell_user: `I could not do that on your computer: ${started.error}`, status: 'refused', reason: started.error }
         const stop = () => broker.stop(started.task_id, 'the conversation', 'The conversation moved on, so it stopped.')
         ctx.signal.addEventListener('abort', stop, { once: true })
         try {
           const outcome = await Promise.race([started.finished, new Promise<null>((r) => setTimeout(() => r(null), waitMs))])
-          if (!outcome) return { status: 'running', task_id: started.task_id, note: 'still working on it' }
-          return { status: outcome.status, reason: outcome.reason, steps: outcome.steps, where: outcome.surface }
+          if (!outcome) return { done: false, tell_user: 'It is still working on that and has not finished: it is not done yet.', status: 'running', task_id: started.task_id }
+          return { done: outcome.status === 'done', tell_user: tellUser(String(args.goal), outcome), status: outcome.status, reason: outcome.reason, steps_taken: outcome.steps, where: outcome.surface }
         } finally {
           ctx.signal.removeEventListener('abort', stop)
         }
       },
     },
   ]
+}
+
+/**
+ * The sentence the reply gives the user about a computer task, from its real outcome: only `done` is a success.
+ * Blocked, stuck, stopped, failed and unavailable each say it did not happen and why (a model once reported text
+ * "typed" after the approval expired and nothing was typed), with what it did get done before that.
+ */
+export function tellUser(goal: string, outcome: { status: string; reason: string; steps: string[] }): string {
+  const did = outcome.steps.length ? ` What it did before that: ${outcome.steps.join('; ')}.` : ''
+  switch (outcome.status) {
+    case 'done':
+      return outcome.steps.length ? `Done: ${outcome.steps.join('; ')}.` : 'Done.'
+    case 'blocked':
+      return `It did not do it: ${outcome.reason || 'it was not allowed.'}${did}`
+    case 'stopped':
+      return `It stopped before finishing: ${outcome.reason || 'it was stopped.'}${did}`
+    case 'unavailable':
+      return `It could not do that on this computer: ${outcome.reason}`
+    default:
+      return `It did not manage to ${goal.replace(/[.\s]+$/, '')}: ${outcome.reason || 'it got stuck.'}${did}`
+  }
 }
 
 // ------------------------------------------------------------------ local files, inside shared folders only

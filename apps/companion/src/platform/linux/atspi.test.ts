@@ -157,3 +157,11 @@ describe('LinuxScreen act', () => {
     await expect(screen(GNOME, () => ({ done: true })).screen.act({ kind: 'press', key: 'tab' })).rejects.toThrow(/Pressing keys on this desktop needs/)
   })
 })
+
+describe('setting a field’s text gives it the focus first', () => {
+  it('grab_focus comes before set_text_contents in the AT-SPI script', () => {
+    const typing = ATSPI_SCRIPT.slice(ATSPI_SCRIPT.indexOf('def type_text'), ATSPI_SCRIPT.indexOf('def scroll_bar'))
+    expect(typing.indexOf('safe(el.grab_focus)')).toBeLessThan(typing.indexOf('set_text_contents'))
+  })
+})
+

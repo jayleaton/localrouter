@@ -1245,6 +1245,9 @@ namespace LocalRouterWin
             if (!el.TryGetCurrentPattern(ValuePattern.Pattern, out p)) return Done(false, "");
             ValuePattern vp = (ValuePattern)p;
             if (vp.Current.IsReadOnly) return Done(false, "read_only");
+            // The field gets the keyboard focus first, as a click would give it: an Enter after this goes to it. (Chrome's
+            // address bar took a value without focus, the Enter went to the page, and the bar put the old URL back.)
+            try { el.SetFocus(); } catch (InvalidOperationException) { } catch (ElementNotAvailableException) { }
             try { vp.SetValue(text); }
             // InvalidOperationException covers ElementNotEnabledException and a provider that refuses the value.
             catch (InvalidOperationException) { return Done(false, ""); }
