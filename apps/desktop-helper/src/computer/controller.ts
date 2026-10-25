@@ -187,7 +187,7 @@ export class ComputerUse {
       let repeats = 0
       for (let step = 0; step < run.maxSteps; step += 1) {
         this.checkpoint(run)
-        const screen = await backend.observe()
+        const screen = await backend.observe({ signal: run.signal })
         surface = `${screen.app}: ${clip(screen.title, 60)}`
         const match = quoted.find((name) => !clicked.has(name))
         const direct = match ? matchControl(screen.controls, match) : null
@@ -204,10 +204,11 @@ export class ComputerUse {
         if ('stop' in decision) return end(decision.stop, decision.reason)
         this.checkpoint(run)
         const { action, step: said } = decision
-        const signature = `${JSON.stringify(action)}|${screen.title}|${screen.controls.length}`
+        // The same action on the same screen: what is on it, not only how many controls (a scrolled list keeps its count).
+        const signature = `${JSON.stringify(action)}|${screenKey(screen)}`
         repeats = signature === previous ? repeats + 1 : 0
         previous = signature
-        if (repeats >= 2) return end('stuck', `It kept trying to ${said} without the screen changing.`)
+        if (repeats >= 2) return end('stuck', `It kept doing the same thing (${said}) without the screen changing.`)
         await this.act(run, backend, screen, action, said)
         await this.sleep(this.settleMs)
       }
@@ -298,7 +299,7 @@ export class ComputerUse {
     const grant = await this.authorize(run, summary(screen), request)
     if (grant === 'approved' && (action.kind === 'click' || action.kind === 'type')) {
       const chosen = this.control(screen, action.ref)
-      const now = await backend.observe()
+      const now = await backend.observe({ signal: run.signal })
       const same = now.controls.find((control) => control.ref === action.ref)
       if (now.app !== screen.app || !same || same.role !== chosen.role || same.label !== chosen.label) {
         throw new Halt('stuck', 'The screen changed while it waited for your OK, so it did not act.')
@@ -308,7 +309,7 @@ export class ComputerUse {
     run.watch?.moving()
     let left: Awaited<ReturnType<ScreenBackend['act']>>
     try {
-      left = await backend.act(action)
+      left = await backend.act(action, { signal: run.signal })
     } catch (error) {
       run.watch?.left(null)
       throw error
@@ -543,6 +544,11 @@ export class ComputerUseRuns {
     run.controller.abort(reason)
     return true
   }
+}
+
+/** What a screen shows, for telling whether an action changed it: title, page, controls and text. */
+export function screenKey(screen: Observation): string {
+  return [screen.app, screen.title, screen.url ?? '', screen.text ?? '', ...screen.controls.map((c) => `${c.role}:${c.label}:${c.value ?? ''}:${c.focused ? 1 : 0}`)].join('\u0001')
 }
 
 /** Names the goal quotes: "click the tab ‘Widget library review’" → that title. */

@@ -2,14 +2,15 @@ import { chmod, rm } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import type { Server } from 'node:net'
 import type { TaskWatch } from './computer/controller.ts'
-import type { Point, PointerReading } from './computer/types.ts'
+import type { Point, PointerReading, Rect } from './computer/types.ts'
 import { silentLogger } from './log.ts'
 import type { Logger } from './log.ts'
 
 /**
  * The local stop: the person at the Mac can always end a task without the box. While a task runs the
- * pointer is read every 250 ms and before each action. Moving it into the top-left corner of the main
- * display stops the task; so does a deliberate move away from where the helper last left it, or a click
+ * pointer is read every 250 ms and before each action. Moving it into a top-left corner the pointer stops in
+ * (the main display's, or with displays arranged around it, the top-left corner of any display that has no
+ * display to its left or above: a corner, not an edge the pointer passes through) stops the task; so does a deliberate move away from where the helper last left it, or a click
  * (the person took over). Movement the helper makes itself, and movement while it waits for the box (the
  * person may tap Approve on this Mac), is not a takeover; the corner always is.
  *
@@ -42,6 +43,8 @@ const every: Schedule = (tick, ms) => {
 export type LocalStopOptions = {
   /** Where the pointer is now, in global top-left-origin points. */
   pointer: () => Promise<PointerReading>
+  /** Every display's bounds, read once a task; without it the corner is (0, 0). */
+  displays?: () => Promise<Rect[]>
   schedule?: Schedule
   now?: () => number
   intervalMs?: number
@@ -59,6 +62,20 @@ export class LocalStop {
   watch(abort: (reason: string) => void): TaskWatch {
     return new PointerTaskWatch(this.options, abort)
   }
+}
+
+const inside = (d: Rect, x: number, y: number) => x >= d.x && x < d.x + d.w && y >= d.y && y < d.y + d.h
+
+/**
+ * The top-left corners the pointer stops in: a display's top-left point, unless another display lies just left of
+ * it, above it or diagonally (the pointer would move on into that display, so it is an edge). No displays: (0, 0).
+ */
+export function stopCorners(displays: Rect[]): Point[] {
+  const real = displays.filter((d) => d.w > 0 && d.h > 0)
+  if (!real.length) return [{ x: 0, y: 0 }]
+  return real
+    .filter((d) => !real.some((o) => o !== d && (inside(o, d.x - 1, d.y) || inside(o, d.x, d.y - 1) || inside(o, d.x - 1, d.y - 1))))
+    .map((d) => ({ x: d.x, y: d.y }))
 }
 
 class PointerTaskWatch implements TaskWatch {
@@ -81,9 +98,16 @@ class PointerTaskWatch implements TaskWatch {
   private polling = false
   private ended = false
   private warned = false
+  private corners: Point[] = [{ x: 0, y: 0 }]
 
   constructor(options: LocalStopOptions, abort: (reason: string) => void) {
     this.pointer = options.pointer
+    options.displays?.().then(
+      (displays) => {
+        this.corners = stopCorners(displays)
+      },
+      (error: unknown) => this.log.warn('local_stop.displays_unreadable', { error: error instanceof Error ? error.message : String(error) }),
+    )
     this.now = options.now ?? Date.now
     this.leftAt = this.now()
     this.abort = abort
@@ -147,7 +171,7 @@ class PointerTaskWatch implements TaskWatch {
   /** `needed`: readings in a row beyond the takeover distance before it stops (polls 2, the check before an action 1). */
   private judge(point: PointerReading, generation: number, needed: number) {
     if (this.ended) return
-    if (Math.hypot(point.x, point.y) <= CORNER_POINTS) return this.stop(STOPPED_IN_CORNER)
+    if (this.corners.some((c) => Math.hypot(point.x - c.x, point.y - c.y) <= CORNER_POINTS)) return this.stop(STOPPED_IN_CORNER)
     if (this.helperMoving || generation !== this.generation) return
     // A click since the helper last acted (its own clicks were before that) is the person taking over.
     if (point.sinceClickS !== undefined && this.now() - point.sinceClickS * 1000 > this.leftAt + CLICK_MARGIN_MS) return this.stop(TAKEN_OVER)

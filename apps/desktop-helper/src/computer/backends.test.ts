@@ -1,7 +1,10 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/use/backends.test.ts), reused in LocalRouter with the owner's permission.
 import { describe, expect, it } from 'vitest'
 import { ChromeTabs, chooseInstance } from './chromeTabs.ts'
-import { DesktopBackend, macAccess } from './desktop.ts'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { chunks, DesktopBackend, jxaRunner, landed, macAccess, SCRIPTS } from './desktop.ts'
 import { DockApps } from './dock.ts'
 import type { CommandRunner } from './macControls.ts'
 import type { BrowserTab } from './types.ts'
@@ -125,24 +128,122 @@ describe('DesktopBackend', () => {
   })
 
   it('sends refs, text and key codes only as argv', async () => {
-    const { runner, calls } = fakeRunner(() => 'ok')
-    const desktop = new DesktopBackend(runner)
+    const { runner, calls } = fakeRunner((call) => (call.argv[0] === 'value' ? JSON.stringify({ value: "'); Application('Finder').delete(); ('" }) : 'ok'))
+    const desktop = new DesktopBackend(runner, { sleep: async () => {} })
     const text = "'); Application('Finder').delete(); ('"
     await desktop.act({ kind: 'type', ref: '0.2.4', text })
     await desktop.act({ kind: 'click', ref: '0.1' })
     await desktop.act({ kind: 'press', key: 'enter' })
     await desktop.act({ kind: 'scroll', direction: 'bottom' })
+    await desktop.act({ kind: 'scroll', direction: 'down', ref: '0.3' })
     await desktop.act({ kind: 'click', ref: 'v:1850,72' })
     await desktop.act({ kind: 'press', key: 'space' })
     expect(calls.map((call) => call.argv)).toEqual([
-      ['type', JSON.stringify({ ref: '0.2.4', text })],
+      ['focus', JSON.stringify({ ref: '0.2.4' })],
+      ['keys', JSON.stringify({ text })],
+      ['value', JSON.stringify({ ref: '0.2.4' })],
       ['click', JSON.stringify({ ref: '0.1' })],
       ['press', JSON.stringify({ code: 36 })],
       ['scroll', JSON.stringify({ direction: 'bottom' })],
+      ['scroll', JSON.stringify({ direction: 'down', ref: '0.3' })],
       ['click', JSON.stringify({ ref: 'v:1850,72' })],
       ['press', JSON.stringify({ code: 49 })],
     ])
-    expect(calls[0]?.script).not.toContain('Finder')
+    expect(calls[1]?.script).not.toContain('Finder')
+  })
+
+  it('types plain text in chunks a stop can come between, and pastes anything the keyboard cannot type as is', async () => {
+    const typed: string[] = []
+    const { runner, calls } = fakeRunner((call) => {
+      const payload = JSON.parse(call.argv[1] ?? '{}') as { text?: string }
+      if (call.argv[0] === 'keys' || call.argv[0] === 'paste') typed.push(payload.text ?? '')
+      return call.argv[0] === 'value' ? JSON.stringify({ value: typed.join('') }) : '{"x":10,"y":20}'
+    })
+    const desktop = new DesktopBackend(runner, { sleep: async () => {} })
+    const long = 'a'.repeat(120)
+    expect(await desktop.act({ kind: 'type', ref: '0.1', text: long })).toEqual({ pointer: { x: 10, y: 20 } })
+    expect(calls.filter((call) => call.argv[0] === 'keys').map((call) => (JSON.parse(call.argv[1]) as { text: string }).text.length)).toEqual([50, 50, 20])
+    // Line breaks (a typed Return could send), other scripts and emoji go through the pasteboard, whole.
+    for (const text of ['line one\nline two', 'Grüße, 你好 👋']) {
+      typed.length = 0
+      calls.length = 0
+      await desktop.act({ kind: 'type', ref: '0.1', text })
+      expect(calls.map((call) => call.argv[0])).toEqual(['focus', 'paste', 'value'])
+    }
+    const stop = new AbortController()
+    stop.abort('You stopped it on the Mac.')
+    await expect(desktop.act({ kind: 'type', ref: '0.1', text: long }, { signal: stop.signal })).rejects.toThrow('You stopped it on the Mac.')
+  })
+
+  it('fails a typing step whose text did not land, without repeating the text', async () => {
+    const { runner } = fakeRunner((call) => (call.argv[0] === 'value' ? '{"value":"something else"}' : 'ok'))
+    const error = await new DesktopBackend(runner, { sleep: async () => {} }).act({ kind: 'type', ref: '0.1', text: 'groceries' }).catch((e: unknown) => e as Error)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('The text did not land in the text box, so it stopped.')
+    expect(landed(null, 'x')).toBe(true)
+    expect(landed('4111 1111 1111 1111', '4111111111111111')).toBe(true)
+    expect(landed('', 'x')).toBe(false)
+  })
+
+  it('never splits a surrogate pair between chunks', () => {
+    const text = `${'a'.repeat(49)}👋b`
+    expect(chunks(text, 50)).toEqual(['a'.repeat(49), '👋b'])
+    expect(chunks('', 50)).toEqual([])
+  })
+
+  it('explains a text box that would not take the focus, and a control off every display', async () => {
+    const focus = fakeRunner(() => new Error('execution error: Error: LOCALROUTER_NOT_FOCUSED (-2700)'))
+    await expect(new DesktopBackend(focus.runner).act({ kind: 'type', ref: '0.1', text: 'x' })).rejects.toThrow('The text box did not take the typing focus, so nothing was typed.')
+    const off = fakeRunner(() => new Error('execution error: Error: LOCALROUTER_OFFSCREEN (-2700)'))
+    await expect(new DesktopBackend(off.runner).act({ kind: 'click', ref: '0.1' })).rejects.toThrow('That control is off screen; scroll it into view first.')
+  })
+
+  it('selects a field’s text through the Edit menu by its character, never with key code 0 (⌘Q on AZERTY)', () => {
+    expect(SCRIPTS.act).toContain("menuCommand(app, letter)")
+    expect(SCRIPTS.act).not.toMatch(/keyCode\(0,/)
+  })
+
+  it('parses every script it runs as JavaScript, as osascript would', () => {
+    for (const [name, script] of Object.entries(SCRIPTS)) {
+      expect(() => new Function(script), name).not.toThrow()
+    }
+  })
+
+  it('reads the displays, and the page a browser shows, the window and whether the walk was cut short', async () => {
+    const displays = [{ x: 0, y: 0, w: 1512, h: 982 }, { x: -1920, y: -98, w: 1920, h: 1080 }]
+    expect(await new DesktopBackend(fakeRunner(() => JSON.stringify(displays)).runner).displays()).toEqual(displays)
+    const seen = { ...observation, url: 'https://mail.example.com/', window: { x: 0, y: 25, w: 1200, h: 800 }, truncated: true }
+    expect(await new DesktopBackend(fakeRunner(() => JSON.stringify(seen)).runner).observe()).toEqual({ backend: 'desktop', ...seen })
+  })
+
+  it('scales a Retina window capture to the longest edge asked for, and says how image pixels map to points', async () => {
+    const files: string[] = []
+    let resized = false
+    const { runner, calls } = fakeRunner((call) => {
+      if (call.script.includes('CGPreflightScreenCaptureAccess')) return '{"accessibility":true,"screenRecording":true,"host":""}'
+      if (call.script.includes('CGWindowListCopyWindowInfo')) return JSON.stringify({ app: 'Safari', window: { id: 7, x: 100, y: 50, w: 1440, h: 900, title: 'Docs' } })
+      if (call.file === 'screencapture') return ''
+      if (call.file === 'sips' && call.argv.includes('--resampleWidth')) { resized = true; return '' }
+      if (call.file === 'sips') return resized ? 'pixelWidth: 1568\n  pixelHeight: 980\n' : 'pixelWidth: 2880\n  pixelHeight: 1800\n'
+      return ''
+    })
+    const dir = mkdtempSync(join(tmpdir(), 'lr-shot-'))
+    const file = join(dir, 'shot.png')
+    writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    files.push(file)
+    const shot = await new DesktopBackend(runner, { tmp: () => file }).screenshot({ maxEdge: 1568 })
+    expect(shot).toMatchObject({ width: 1568, height: 980, region: { x: 100, y: 50, w: 1440, h: 900 }, app: 'Safari', title: 'Docs' })
+    expect(shot.scale).toBeCloseTo(1568 / 1440)
+    expect([...shot.png.slice(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47])
+    expect(calls.find((call) => call.argv.includes('--resampleWidth'))?.argv).toEqual(['--resampleWidth', '1568', file])
+    // The capture is deleted at once.
+    expect(existsSync(file)).toBe(false)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a screenshot without Screen Recording access instead of returning the desktop', async () => {
+    const { runner } = fakeRunner(() => '{"accessibility":true,"screenRecording":false,"host":""}')
+    await expect(new DesktopBackend(runner).screenshot()).rejects.toThrow(/Screen Recording/)
   })
 
   it('reports where an action left the pointer, for the local stop', async () => {
@@ -204,8 +305,8 @@ describe('DesktopBackend', () => {
   })
 
   it('passes other failures through unchanged', async () => {
-    const { runner } = fakeRunner(() => new Error('The Mac took too long to answer (osascript timed out)'))
-    await expect(new DesktopBackend(runner).observe()).rejects.toThrow('osascript timed out')
+    const { runner } = fakeRunner(() => new Error('The Mac (osascript) took too long to answer (timed out)'))
+    await expect(new DesktopBackend(runner).observe()).rejects.toThrow('took too long to answer')
   })
 })
 
@@ -235,5 +336,32 @@ describe('ChromeTabs.groups', () => {
   it("reads named tab groups from the tab strip's order", async () => {
     const tabs = new ChromeTabs(chromeRunner(() => JSON.stringify([{ name: 'Work', tabs: ['Sidebud · Computer', 'Internal testing | Sidebud'] }])).runner)
     expect(await tabs.groups()).toEqual([{ name: 'Work', tabs: ['Sidebud · Computer', 'Internal testing | Sidebud'] }])
+  })
+})
+
+/** On a Mac (the macOS CI runner): every script compiles as osascript compiles it, and the reads that need no permission run. */
+describe.runIf(process.platform === 'darwin')('on macOS', () => {
+  it('compiles every script with osacompile', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lr-jxa-'))
+    try {
+      for (const [name, script] of Object.entries(SCRIPTS)) {
+        const file = join(dir, `${name}.js`)
+        writeFileSync(file, script)
+        await expect(jxaRunner.run('osacompile', ['-l', 'JavaScript', '-o', join(dir, `${name}.scpt`), file]), name).resolves.toBeDefined()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reads the displays, the pointer and the grants for real', async () => {
+    const desktop = new DesktopBackend()
+    const displays = await desktop.displays()
+    expect(displays.length).toBeGreaterThan(0)
+    expect(displays[0]).toMatchObject({ x: 0, y: 0 })
+    const pointer = await desktop.pointer()
+    expect(Number.isFinite(pointer.x) && Number.isFinite(pointer.y)).toBe(true)
+    const access = await macAccess()
+    expect(typeof access.accessibility).toBe('boolean')
   })
 })

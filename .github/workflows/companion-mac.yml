@@ -28,7 +28,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/companion/package-lock.json
+          cache-dependency-path: |
+            apps/companion/package-lock.json
+            apps/desktop-helper/package-lock.json
       - run: npm ci
       - name: type-check (tsc --noEmit)
         run: npm run type-check
@@ -36,6 +38,11 @@ jobs:
         run: npm run lint
       - name: tests (vitest)
         run: npm test
+      - name: helper tests on macOS (every JXA script compiled by osacompile; displays, pointer and grants read for real)
+        working-directory: apps/desktop-helper
+        run: |
+          npm ci
+          npm test
       - name: build and package (esbuild, @electron/packager, ad-hoc codesign, dmg, zip)
         run: |
           if [ -z "$LR_SIGN_P12" ]; then

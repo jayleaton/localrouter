@@ -91,7 +91,7 @@ not node.
 While a task runs, a notification says what Jarvis is doing on the Mac. You can always stop it on the Mac itself,
 without the box:
 
-- move the pointer into the top-left corner of the main display;
+- move the pointer into the top-left corner of the main display (with displays arranged around it: the top-left corner of the screen arrangement, where the pointer stops);
 - move the pointer yourself while it works (more than a short distance from where the helper left it): you took
   over, and the task stops;
 - `node src/main.ts stop` stops the task running now;

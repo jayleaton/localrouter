@@ -37,6 +37,8 @@ function harness(respond: (script: string, argv: string[]) => string | Error = (
       if (!entries) throw new Error(`ENOENT: ${path}`)
       return entries
     },
+    // No real Info.plist is read (on a Mac, /Applications holds the machine's own apps).
+    readText: async () => '',
     now: () => now,
   })
   return { controls, calls, reads, advance: (ms: number) => (now += ms) }

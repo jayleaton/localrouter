@@ -149,7 +149,9 @@ whichever provider answers, and the policy, approvals and budgets do not change.
 
 While a task runs, the helper checks the pointer every 250 ms and before each action:
 
-- the pointer in the top-left corner of the main display (within 4 points): the task stops ("You stopped it on the Mac");
+- the pointer in a top-left corner (within 4 points): the main display's, or with displays arranged around it, the
+  top-left corner of each display with no display to its left, above it or diagonally (a corner the pointer is held
+  in, not an edge it passes through): the task stops ("You stopped it on the Mac");
 - a deliberate move: more than 24 points from where the helper last left it on two readings in a row (one stray
   reading is not a move), counting only steps of more than 6 points between readings, so a hand resting on a
   trackpad or a drifting mouse never adds up to one: the person took over, the task stops;
@@ -157,7 +159,26 @@ While a task runs, the helper checks the pointer every 250 ms and before each ac
   come before it reports where it left the pointer): the person took over, the task stops;
 - `localrouter-desktop stop` stops the task now; `localrouter-desktop disable` refuses every request until `enable`.
 
-A task start shows a macOS notification saying what Jarvis is doing and how to stop it.
+A task start shows a macOS notification saying what Jarvis is doing and how to stop it. A stop also ends the action
+under way: the running script is killed, and long typing stops between chunks.
+
+## Acting on the Mac: typing, scrolling, reading
+
+| Action | How | Why |
+| --- | --- | --- |
+| Type | Click the box; check the app's focused element is that box (else nothing is typed); select its text through the app's Edit › Select All item by its ⌘ character; printable one-line ASCII is typed in chunks of 50 (a stop comes between chunks), anything else (other scripts, emoji, line breaks) is pasted through a pasteboard item marked transient and concealed, and the pasteboard is put back; then the box is read back, and text that did not land fails the step | Key code 0 with ⌘ is ⌘A on a US layout and ⌘Q on AZERTY; System Events keystrokes mangle characters the layout lacks; a typed line break is a Return, which sends in a chat. The typed text is never in an error or the audit |
+| Scroll | The pointer goes over the window's largest scroll or web area (or the control `ref` names), then wheel events | The view under the window's middle is often a sidebar |
+| Click | Refused when the control's middle is off every display ("scroll it into view first") | CGEvent would clamp it to the nearest edge and click something else |
+| Unchanged screen | Three times the same action on a screen whose app, title, page, controls and text are all the same stops the task | A scrolled list keeps its count of rows, so counting controls called progress "stuck" |
+| Reading | One AX answer at most 1.5 s (`AXUIElementSetMessagingTimeout`), the walk 4 s, 2,500 elements, 150 controls; past any of them the observation says `truncated`. The page's URL comes from the web area's `AXURL`, so approvals in browsers bind to it; password fields are listed without their value | A hung app answered each call after 6 s |
+
+The executor also offers two reads to the harnesses the person enrolled (MCP `computer_observe` and
+`computer_screenshot`, socket ops `observe` and `screenshot`): the front window's controls with their bounds, and a PNG
+of it scaled so its longer edge is at most 1568 pixels (`max_edge`, 200 to 3136), with `region` and `scale` (screen
+point = region origin + pixel / scale). They need no approval and change nothing; they are refused while control is
+switched off, for the box's bridge and for a voice turn, and when LocalRouter itself is in front (its approval cards).
+Each read is audited (app, title, size; never the content). A screenshot needs Screen Recording and is refused, not
+blank, without it.
 
 ## On the device: the companion's executor (the new placement)
 

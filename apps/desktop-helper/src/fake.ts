@@ -1,6 +1,7 @@
 import { MacControls } from './computer/macControls.ts'
 import type { ComputerControl } from './computer/macControls.ts'
-import type { ActResult, Observation, Point, ScreenAction, ScreenBackend, ScreenControl } from './computer/types.ts'
+import { fitScale, SCREENSHOT_MAX_EDGE } from './computer/types.ts'
+import type { ActResult, Observation, Point, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './computer/types.ts'
 
 /**
  * A deterministic, in-memory Mac for tests and for `LOCALROUTER_DESKTOP_FAKE=1` smokes against a real
@@ -83,6 +84,23 @@ export class FakeNotes implements ScreenBackend {
 
   async pointer(): Promise<Point> {
     return { ...this.at }
+  }
+
+  /** One 1440×900 display, as on a 14-inch MacBook. */
+  async displays(): Promise<Rect[]> {
+    return [{ x: 0, y: 0, w: 1440, h: 900 }]
+  }
+
+  /**
+   * The Notes window (1200×800 points at 80, 50) captured at Retina scale and fitted to `maxEdge`. The image is a
+   * placeholder (a PNG signature only): the fake has no pixels, the size and mapping are what tests read.
+   */
+  async screenshot(options: ScreenshotOptions = {}): Promise<Screenshot> {
+    const region = { x: 80, y: 50, w: 1200, h: 800 }
+    const fit = fitScale(region.w * 2, region.h * 2, options.maxEdge ?? SCREENSHOT_MAX_EDGE)
+    const width = Math.round(region.w * 2 * fit)
+    const height = Math.round(region.h * 2 * fit)
+    return { png: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), width, height, region, scale: width / region.w, app: 'Notes', title: (await this.observe()).title }
   }
 
   /** The person moves the pointer (for tests of the local stop). */

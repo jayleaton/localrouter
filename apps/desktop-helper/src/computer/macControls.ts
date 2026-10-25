@@ -74,10 +74,8 @@ function readControl(value: unknown): ComputerControl {
   }
 }
 
-/** Runs one executable with argv (no shell); resolves stdout and rejects on a non-zero exit. */
-export interface CommandRunner {
-  run(file: string, args: string[]): Promise<string>
-}
+import type { CommandRunner } from './runner.ts'
+export type { CommandRunner } from './runner.ts'
 
 export type MacControlsOptions = {
   runner?: CommandRunner

@@ -5,10 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ComputerUse, ComputerUseRuns } from './computer/controller.ts'
 import type { Grant } from './computer/controller.ts'
 import type { Answers, Question } from './computer/decisions.ts'
-import type { Point, PointerReading } from './computer/types.ts'
+import type { Point, PointerReading, Rect } from './computer/types.ts'
 import { fakeMac } from './fake.ts'
 import { silentLogger } from './log.ts'
-import { ControlSocket, LocalStop, POLL_MS, STOPPED_IN_CORNER, TAKEN_OVER, TAKEOVER_POINTS, notRunning, sendControl } from './stop.ts'
+import { ControlSocket, LocalStop, POLL_MS, STOPPED_IN_CORNER, TAKEN_OVER, TAKEOVER_POINTS, notRunning, sendControl, stopCorners } from './stop.ts'
 import type { ControlCommand, Schedule } from './stop.ts'
 
 /** A schedule the test ticks by hand. */
@@ -43,6 +43,31 @@ describe('LocalStop', () => {
     await watch.check()
     expect(aborted).toEqual([STOPPED_IN_CORNER])
     expect(timer.cancelled()).toBe(1)
+  })
+
+  it('with displays around the main one, stops in the corners the pointer is held in, not at an edge it passes through', async () => {
+    // A 1920×1080 display to the left of a MacBook's, a little higher: (0, 0) is an edge between them now.
+    const layout: Rect[] = [{ x: 0, y: 0, w: 1512, h: 982 }, { x: -1920, y: -98, w: 1920, h: 1080 }]
+    expect(stopCorners(layout)).toEqual([{ x: -1920, y: -98 }])
+    // One above: the main display's corner is an edge too; side by side at the same top, only the left one's.
+    expect(stopCorners([{ x: 0, y: 0, w: 1512, h: 982 }, { x: -200, y: -1080, w: 1920, h: 1080 }])).toEqual([{ x: -200, y: -1080 }])
+    expect(stopCorners([{ x: 0, y: 0, w: 1512, h: 982 }, { x: 1512, y: 0, w: 1920, h: 1080 }])).toEqual([{ x: 0, y: 0 }])
+    // Diagonal only: the pointer can still slide on into the other display.
+    expect(stopCorners([{ x: 0, y: 0, w: 1512, h: 982 }, { x: -1920, y: -1080, w: 1920, h: 1080 }])).toEqual([{ x: -1920, y: -1080 }])
+    expect(stopCorners([])).toEqual([{ x: 0, y: 0 }])
+
+    let at: Point = { x: 1, y: 1 }
+    const aborted: string[] = []
+    const stop = new LocalStop({ pointer: async () => at, displays: async () => layout, schedule: manual().schedule, log: silentLogger })
+    const watch = stop.watch((reason) => aborted.push(reason))
+    await Promise.resolve()
+    watch.left({ x: 1, y: 1 })
+    await watch.check()
+    expect(aborted).toEqual([])
+    at = { x: -1918, y: -96 }
+    watch.left(at)
+    await watch.check()
+    expect(aborted).toEqual([STOPPED_IN_CORNER])
   })
 
   it('does not stop just outside the corner', async () => {
