@@ -1,7 +1,10 @@
 # Shared settings of the Jarvis deployment scripts (sourced). Every value can be overridden from the environment.
 J=${JARVIS:-$HOME/jarvis}                     # the root everything lives under
 DEPLOY=${DEPLOY:-$J/deploy}                   # the install: src/<commit>, current -> it, config.json, data/
-PORT=${PORT:-8190}                            # the daemon, on 127.0.0.1 only
+# Several Sparks (README.md): TOPOLOGY, a topology file (topology.sh), and NODE, this machine's node in it; unset: one box
+TOPOLOGY=${TOPOLOGY:-} NODE=${NODE:-}
+[ -z "$TOPOLOGY" ] || PORT=${PORT:-$(jq -r --arg n "$NODE" '.nodes[] | select(.id == $n) | .port // 8190' "$TOPOLOGY" 2> /dev/null)}
+PORT=${PORT:-8190}                            # the daemon, on 127.0.0.1 only (in a topology: its node's port)
 HTTPS_PORT=${HTTPS_PORT:-10443}               # tailscale serve's HTTPS port for the tailnet (0: none)
 UNIT=${UNIT:-localrouter-jarvis}
 # The qualified installs (their qualify scripts made them; their markers must match this tree's pins).
@@ -19,7 +22,15 @@ case $DRAMA_VARIANT in
 esac
 DRAMA_PORT=${DRAMA_PORT:-$((PORT + 10603))}   # the Drama 3 server, on 127.0.0.1 (18793 beside the default PORT)
 KNOWLINE_REV=779944d2cc8ffa19cef386aee83c83bcb967ade2   # PelaAI/KnowLine-4B-Gen5.5, the decision model (tools/decide/knowline)
-URL=http://127.0.0.1:$PORT
+# where the deployed daemon listens: 127.0.0.1, or in a topology its node's address (install.sh writes it as `host`)
+LISTEN=$(jq -r '.host // "127.0.0.1"' "$DEPLOY/config.json" 2> /dev/null) || LISTEN=127.0.0.1
+case $LISTEN in "" | localhost | all | 0.0.0.0 | tailscale) LISTEN=127.0.0.1 ;; esac
+URL=http://$LISTEN:$PORT
+# this daemon's node in the deployed config's topology, as JSON; null: one box
+lr_node() {
+  jq -c '.topology as $t | if ($t.mode // "single") == "multi" then (first($t.nodes[] | select(.id == $t.self)) // null) else null end' \
+    "$DEPLOY/config.json" 2> /dev/null || echo null
+}
 export PATH=$J/bin:$PATH XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
 # The deployment's own token (scope read: models and residency), for these scripts once pairing.required is on;
@@ -43,10 +54,13 @@ public_url() {
 # Waits until every keep_loaded tool is ready (or one failed), then until the box answers at warm speed: a ready
 # state is not a ready box (DGX-01, 2026-10-24: right after a restart every kept tool was ready while a transcription
 # took 1.7 s against 0.4 s warm, and the first voice turns missed their budget). $1 seconds at most, both together.
+# A node of a topology that is not the front waits for its own models only and leaves the warm-speed rounds to the front.
 wait_warm() {
-  local limit=${1:-1200} t0 ids state
+  local limit=${1:-1200} t0 ids state me
   t0=$(date +%s)
-  ids=$(jq -r '[.tools[] | select(.keep_loaded == true) | .id] | join(" ")' "$DEPLOY/config.json")
+  me=$(lr_node)
+  ids=$(jq -r --argjson me "$me" '[.tools[] | select(.keep_loaded == true) | .id
+    | select($me == null or $me.role == "front" or (. as $i | $me.models | index($i)))] | join(" ")' "$DEPLOY/config.json")
   while true; do
     state=$(lr_curl -fs -m 5 "$URL/v1/tools" | jq -r --arg ids "$ids" \
       '[.data[] | select(.id as $i | $ids | split(" ") | index($i)) | "\(.id)=\(.state)"] | join(" ")' 2> /dev/null || true)
@@ -56,6 +70,7 @@ wait_warm() {
     [ $(($(date +%s) - t0)) -lt "$limit" ] || { echo "not warm within $limit s: $state" >&2; return 1; }
     sleep 5
   done
+  if [ "$(jq -r '.role // "front"' <<< "$me")" = node ]; then echo "node $(jq -r .id <<< "$me"): the warm-speed rounds run on the front"; return 0; fi
   wait_ready $((limit - ($(date +%s) - t0)))
 }
 

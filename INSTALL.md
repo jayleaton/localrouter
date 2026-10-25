@@ -287,6 +287,9 @@ service's config lists only them.
 | `--models-dir DIR` | `~/jarvis` when `--prefix` is elsewhere | an existing install whose model files are reused instead of downloaded again. `none`: no reuse |
 | `--no-gpu` | | everything that needs no GPU, then stop |
 | `--dry-run` | | the plan only |
+| `--topology FILE --node ID` | | this box is node ID of several ([Several Sparks](#several-sparks)) |
+| `--peer-store NODE=USER@HOST:DIR` | | another node's install to copy model files from (repeatable) |
+| `--allow-download` | | with `--topology` or `--peer-store`: download weights no peer has (only with the user's yes) |
 
 A second install on the same box needs its own `--prefix`, `--port`, `--https-port 0` (or another port) and `--unit`.
 It also needs the memory for a second stack, which one GB10 does not have.
@@ -316,6 +319,33 @@ downloads nothing big:
 tools/install/bootstrap.sh --profile jarvis-gb10 --prefix ~/jarvis-check --port 8291 --https-port 0 \
   --unit localrouter-jarvis-check --models-dir ~/jarvis --accept --no-gpu
 ```
+
+## Several Sparks
+
+One box is the default, and nothing below changes it. To spread the models over several GB10s, write a topology file:
+the daemon's `topology` block without `self` ([docs/dev/MULTI-SPARK.md](docs/dev/MULTI-SPARK.md#configuration)).
+Then install each node with it, the nodes that are not the front first:
+
+```sh
+tools/install/doctor.sh --profile jarvis-gb10 --topology topology.json --node spark-1 --ssh-user spark-2=dgx01
+tools/install/bootstrap.sh --profile jarvis-gb10 --topology topology.json --node spark-1 \
+  --peer-store spark-2=dgx01@192.168.1.116:/home/dgx01/jarvis --dry-run
+```
+
+- **What a node installs.** Only the models it runs, and on the front its `fallback` ones too. `--models` can only
+  narrow that. Its port is the node's `port`.
+- **The checks.** With `--topology`, doctor.sh also checks the link: the RoCE devices are up, the interfaces that
+  carry this node's addresses have MTU 9000, every other node answers a ping on each address and ssh, and its daemon
+  answers `/health` (a warning only, until that node is installed).
+- **Weights come from a peer.** `--peer-store NODE=USER@HOST:DIR` names another node's install. A model whose files
+  are not here is copied from it with rsync, over the node's ConnectX-7 address when ssh answers there. The model's
+  steps then check every file against the pins, as for `--models-dir`. `--dry-run` shows these as `copy from NODE`.
+- **No downloads without a yes.** With `--topology` or `--peer-store`, weights that no peer and no store has stop the
+  run before anything downloads. The plan lists them under `needs approval`. Ask the user; with their yes, add
+  `--allow-download`.
+- **The service.** A node that is not the front listens on its first address, for the front only, and gets no
+  `tailscale serve`. The front listens on loopback and serves the API for every node. Turn on pairing on every node
+  and give the front a `manage` token for the others (`token_file`; [deploy/jarvis/README.md](deploy/jarvis/README.md#several-sparks)).
 
 ## Remove it
 

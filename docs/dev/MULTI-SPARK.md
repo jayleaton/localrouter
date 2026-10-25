@@ -465,14 +465,22 @@ server. A harness sees `node` only as an informational field ([HARNESS.md](../HA
 
 ### Install and deploy
 
-- **Per-node tool sets.** `deploy/jarvis/install.sh` already takes a `TOOLS` subset (lines 33–35), so each node
-  installs only its own models. A two-node profile (`deploy/profiles/jarvis-gb10x2.json`) names each node's role,
-  address and tools. Each node's config sets its own `machine`.
+- **Per-node installs (built).** A topology file (the `topology` block without `self`) and a node id drive
+  `tools/install/bootstrap.sh --topology FILE --node ID`, `tools/install/doctor.sh` (the same flags) and
+  `deploy/jarvis/install.sh` (`TOPOLOGY`, `NODE`). A node installs and preflights only its own tools, and the front
+  its `fallback` ones too. Every node's config lists every node's tools, the `topology` block with its `self`, and its
+  own `machine`. A node that is not the front listens on its first ConnectX-7 address; the front stays on loopback.
+  `deploy/jarvis/kits.sh FILE OUTDIR` writes one kit per node (`node.env` and `topology.json`). There is no separate
+  two-node profile: the topology file names the roles, addresses and tools. Without a topology, nothing changes.
 - **Qualification stays per host.** Markers are bound to their host. If DGX-01 becomes Spark 2, every voice, image,
   video and decision marker stays valid, and only the chat model qualifies on the new Spark 1. That makes **DGX-01 the
   front** and the new box the chat node. In (b), a TP model needs a marker that binds both hosts.
-- **Weights.** Never download them again. They move from DGX-01 over CX-7 (about 25 GB/s line rate, so 20 GB of 27B
-  files take seconds, E) into the new node's model store, checked against the same pins.
+- **Weights (built).** Never download them again. `bootstrap.sh --peer-store NODE=USER@HOST:DIR` copies a model's
+  files from another node's install with rsync, over that node's first CX-7 address when ssh answers there (about
+  25 GB/s line rate, so 20 GB of 27B files take seconds, E). The model's steps then check them against the same pins.
+  With a topology or a peer store, weights that no peer has stop the run unless `--allow-download`.
+- **Link checks (built).** `doctor.sh --topology` checks the RoCE devices, MTU 9000 on the interfaces that carry the
+  node's addresses, and for every other node a ping per address, ssh and its daemon's `/health`.
 - **Deploy order.** Peer first, then the front. The busy-box deploy guard applies to both nodes: no deploy while a
   smoke, qualify or check runs on either. The final smoke runs a voice turn whose chat crosses the link, plus
   `client_check`.

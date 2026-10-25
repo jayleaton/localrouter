@@ -19,10 +19,16 @@
 # config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: every route but /health and pairing needs a paired device with
 # the scope it needs, and the scripts get $DEPLOY/operator.token (scope read); 0: not; unset:
 # as the deployed config has it).
+# Several Sparks (README.md): TOPOLOGY (a topology file, topology.sh) and NODE (this machine's node in it). TOOLS then
+# defaults to the node's models (and on the front its fallback ones), and only those are checked; the config lists
+# every node's tools, the `topology` block with `self` NODE, `machine` NODE, and `host` HOST, where the unit listens:
+# on a node that is not the front, by default its first address (a ConnectX-7 link), where the front reaches it; on
+# the front 127.0.0.1, as on one box. PORT defaults to the node's port. Only the front gets tailscale serve.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 source "$here/env.sh"
+source "$here/topology.sh"
 
 # ---- 1. preflight
 [ "$(uname -m)" = aarch64 ] || die "not aarch64"
@@ -31,8 +37,28 @@ for t in jq curl python3 sha256sum systemctl systemd-run zig; do command -v $t >
 nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
 [ -x "$nvcc" ] || die "no nvcc at $nvcc"
 all=$(sed -e 's/@DRAMA_PORT@/0/' -e 's/@DRAMA_RESIDENT@/0/' "$here/config.json.in" | jq -r '[.tools[].id] | join(" ")')
+listen=127.0.0.1 topo=null front=1
+if [ -n "$TOPOLOGY" ]; then # one node of several: its tools checked, every node's in the config
+  [ -n "$NODE" ] || die "TOPOLOGY needs NODE, this machine's node in it"
+  TOPOLOGY=$(realpath -m "$TOPOLOGY")
+  why=$(topo_check "$TOPOLOGY" "$NODE")
+  [ -z "$why" ] || die "TOPOLOGY $TOPOLOGY: ${why//$'\n'/; }"
+  mine=$(topo_local "$TOPOLOGY" "$NODE")
+  TOOLS=${TOOLS:-$mine}
+  for t in $TOOLS; do [[ " $mine " == *" $t "* ]] || die "TOOLS has '$t'; node $NODE runs: $mine"; done
+  [ "$PORT" = "$(topo_port "$TOPOLOGY" "$NODE")" ] || die "PORT is $PORT; the topology gives node $NODE port $(topo_port "$TOPOLOGY" "$NODE")"
+  topo=$(topo_block "$TOPOLOGY" "$NODE")
+  # the front listens on loopback (nothing but tailscale serve connects to it, and /v1/realtime serves loopback
+  # peers only); any other node on its first address, where the front reaches it
+  [ "$(topo_role "$TOPOLOGY" "$NODE")" = front ] || { front=0; listen=$(topo_addr "$TOPOLOGY" "$NODE"); }
+  listen=${HOST:-$listen}
+  addrs=$(ip -o -4 addr show 2> /dev/null || true)
+  [ "$listen" = 127.0.0.1 ] || [[ " $(awk '{print $4}' <<< "$addrs" | cut -d/ -f1 | tr '\n' ' ') " == *" $listen "* ]] ||
+    die "no interface of this machine has $listen (node $NODE's address; HOST overrides it)"
+fi
 TOOLS=${TOOLS:-$all}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; config.json.in has: $all"; done
+keep=$TOOLS; [ "$topo" = null ] || keep=$(topo_all "$TOPOLOGY")   # the tools the config lists
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
 # marker FILE PINS NAME: qualified, and qualified with this tree's pins
 marker() {
@@ -115,17 +141,18 @@ render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
       -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" \
-      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" "$1"
+      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" -e "s|@HOST@|$listen|g" "$1"
 }
 # pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
 pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')
 case ${PAIRING_REQUIRED:-} in 1) pairing='{"required":true}' ;; 0) pairing='{}' ;; esac
-# the selected tools only (TOOLS), and the voice and defaults that name them
-render "$here/config.json.in" | jq --arg t " $TOOLS " --argjson pairing "$pairing" '
+# the selected tools only (TOOLS; in a topology every node's), the voice and defaults that name them, and the topology
+render "$here/config.json.in" | jq --arg t " $keep " --argjson pairing "$pairing" --argjson topo "$topo" --arg node "$NODE" --arg host "$listen" '
   def kept: . as $id | $t | contains(" " + $id + " ");
   .tools |= map(select(.id | kept)) | .voice.speech_models |= map(select(kept))
   | .defaults |= with_entries(select(.value | kept))
-  | if $pairing == {} then . else .pairing = $pairing end' > "$DEPLOY/config.json.new"
+  | if $pairing == {} then . else .pairing = $pairing end
+  | if $topo == null then . else .machine = $node | .host = $host | .topology = $topo end' > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
 # with pairing required, these scripts' own token (read only: models and residency, env.sh), made once
@@ -173,9 +200,10 @@ if [ $running = 1 ]; then
 fi
 
 # ---- 4. HTTPS for the tailnet
-if [ "$HTTPS_PORT" != 0 ] && command -v tailscale > /dev/null; then
-  sudo -n tailscale serve --bg --https="$HTTPS_PORT" "http://127.0.0.1:$PORT" > /dev/null ||
+if [ "$HTTPS_PORT" != 0 ] && [ $front = 1 ] && command -v tailscale > /dev/null; then
+  sudo -n tailscale serve --bg --https="$HTTPS_PORT" "http://$listen:$PORT" > /dev/null ||
     echo "warning: tailscale serve --https=$HTTPS_PORT failed (needs sudo); use an ssh tunnel (deploy/jarvis/README.md)" >&2
 fi
+URL=http://$listen:$PORT
 echo "installed $commit: $DEPLOY (config.json, current -> src/$commit), unit $UNIT"
 echo "start it: deploy/jarvis/start.sh    URL: $(public_url || true) (loopback: $URL)"
