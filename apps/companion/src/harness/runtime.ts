@@ -39,6 +39,11 @@ export type RuntimeOptions = {
   ownApps?: string[]
   log?: Logger
   fetch?: typeof fetch
+  /**
+   * This computer's executor when it already runs (the app starts it at launch, paired or not): the runtime then
+   * gives it the Spark's decisions and takes them back on close, and never stops it. Without one it starts its own.
+   */
+  executor?: Executor
 }
 
 export type Runtime = {
@@ -58,20 +63,28 @@ export function voiceRegistry(local: Tool[], picture: Tool[], handoff: VideoHand
   return new Registry().add(...local, ...picture, ...handoff.tools())
 }
 
+/** What computer use says on a computer that runs LocalRouter but has not paired with a Spark (yet, or any more). */
+export const UNPAIRED = 'LocalRouter is open on this computer but not paired with a Spark yet, so computer use has nothing to decide its steps: pair it on LocalRouter’s Connect page. Fixed controls (open or quit an app, volume, media, dark mode) and reading the screen work already.'
+
 export const VOICE_CALLER: Caller = { id: 'voice', name: 'Jarvis (voice)', kind: 'voice' }
 
 export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
   const spark = new Spark(o.base, o.token, o.fetch)
-  const executor = await startExecutor({
-    dir: o.dir,
-    name: o.name,
-    machine: o.machine,
-    decider: chatDecider((body) => spark.complete(body), NO_THINKING),
-    gate: o.gate,
-    listen: o.listen ?? false,
-    ...(o.ownApps ? { ownApps: o.ownApps } : {}),
-    ...(o.log ? { log: o.log } : {}),
-  })
+  const decider = chatDecider((body) => spark.complete(body), NO_THINKING)
+  const shared = o.executor ?? null
+  const executor =
+    shared ??
+    (await startExecutor({
+      dir: o.dir,
+      name: o.name,
+      machine: o.machine,
+      decider,
+      gate: o.gate,
+      listen: o.listen ?? false,
+      ...(o.ownApps ? { ownApps: o.ownApps } : {}),
+      ...(o.log ? { log: o.log } : {}),
+    }))
+  if (shared) shared.broker.setDecider(decider)
   const local = () => [...computerTools(executor.broker, VOICE_CALLER), ...fileTools(o.shared)]
   // Typed chat: this computer's tools and picture edits (the page makes its own pictures and videos, with their cards).
   const chat = new Registry().add(...local(), ...pictureTools(spark).filter((t) => t.name === 'edit_image'))
@@ -84,6 +97,9 @@ export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
     journal,
     // Each call gets its own registry, so a video proposal belongs to that call only.
     session: (s = {}) => new ClientToolsSession({ spark, registry: voiceRegistry(local(), pictureTools(spark), new VideoHandoff()), journal, instructions: HARNESS_INSTRUCTIONS, ...s }),
-    close: () => executor.close(),
+    close: async () => {
+      if (shared) shared.broker.setDecider(null, UNPAIRED)
+      else await executor.close()
+    },
   }
 }

@@ -233,7 +233,8 @@ function render(s) {
     li.append(t, b);
     return li;
   }));
-  $('enroll').disabled = !s.paired;
+  // The executor runs before pairing: harnesses can be added any time (computer use itself waits for the Spark).
+  $('harnessNote').hidden = s.paired;
   $('legacy').checked = s.legacy.enabled;
   $('legacy').disabled = !s.paired;
   $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? 'connected to the Spark' : 'connecting…') : '';
