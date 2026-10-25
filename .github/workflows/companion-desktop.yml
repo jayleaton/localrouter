@@ -149,7 +149,15 @@ jobs:
           Xvfb :99 -screen 0 1280x800x24 -nolisten tcp & sleep 1
           openbox & sleep 1
           /usr/libexec/at-spi-bus-launcher --launch-immediately & sleep 1
-          python3 scripts/smoke/gtk-window.py & sleep 3
+          python3 scripts/smoke/gtk-window.py &
+          # Ready means the window is mapped and its app is on the AT-SPI desktop: polled, not slept for (a fixed
+          # wait lost the race on a slow runner).
+          probe='import sys, gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi; d = Atspi.get_desktop(0); sys.exit(0 if any((d.get_child_at_index(i).get_name() or "") == "lr-smoke" for i in range(d.get_child_count())) else 1)'
+          for i in $(seq 60); do
+            if xdotool search --name 'LocalRouter smoke' > /dev/null 2>&1 && python3 -c "$probe"; then echo "session ready after $i polls"; break; fi
+            [ "$i" -lt 60 ] || { echo "the smoke window never reached AT-SPI"; exit 1; }
+            sleep 0.5
+          done
           export LOCALROUTER_ATSPI_DEBUG="$RUNNER_TEMP/atspi.log"
           LOCALROUTER_REAL_LINUX=1 npx vitest run src/platform/linux/real.test.ts
           SH

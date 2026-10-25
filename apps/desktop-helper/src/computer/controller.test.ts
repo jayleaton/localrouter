@@ -1,7 +1,7 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/use/controller.test.ts), reused in LocalRouter with the owner's permission.
 import { describe, expect, it, vi } from 'vitest'
 import { silentLogger } from '../log.ts'
-import { ComputerUse, ComputerUseRuns, quotedTargets, resolveTab, siteNamed, soundKey, textToType, unquotedTabName } from './controller.ts'
+import { ComputerUse, ComputerUseRuns, navigationText, quotedTargets, resolveTab, siteNamed, soundKey, textToType, unquotedTabName } from './controller.ts'
 import type { Authorize, AuthorizeRequest, ComputerTask, Deps, Grant, RunOptions, Session } from './controller.ts'
 import type { Answer, Answers, Question } from './decisions.ts'
 import type { BrowserTab, BrowserTabs, Observation, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
@@ -282,12 +282,16 @@ describe('ComputerUse', () => {
       expect((await runWith(0, { timeoutMs: 600_000 })).actions).toHaveLength(3)
     })
 
-    it('stops when it would repeat the same action on an unchanged screen a third time', async () => {
+    it('steers away from an action that did nothing: the next question leaves it out, and only "stuck" then ends it', async () => {
       const actions: ScreenAction[] = []
-      const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: [control('0.1', 'button', 'Refresh')] }), act: async (action) => void actions.push(action) }
-      const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('c0') }], { page, tabs: null })
-      expect(await computer.run({ goal: 'refresh the inbox until mail arrives', text: null })).toMatchObject({ status: 'stuck', reason: 'It kept doing the same thing (clicked the button “Refresh”) without the screen changing.' })
-      expect(actions).toHaveLength(2)
+      const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: [control('0.1', 'button', 'Refresh'), control('0.2', 'button', 'Archive')] }), act: async (action) => void actions.push(action) }
+      const { computer, asked } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('stuck') }], { page, tabs: null })
+      expect(await computer.run({ goal: 'refresh the inbox until mail arrives', text: null })).toMatchObject({ status: 'stuck', reason: 'It kept doing the same thing (clicked the button “Refresh”) without the screen changing, and nothing else on screen looked right.' })
+      // Refresh once; the same choice on the same screen is not done again but steered away from.
+      expect(actions).toHaveLength(1)
+      const last = asked.at(-1)!
+      expect(Object.keys((last.questions.next as { criteria: Record<string, string> }).criteria)).not.toContain('c0')
+      expect((last.state as { triedWithoutEffect?: string[] }).triedWithoutEffect).toEqual(['clicked the button “Refresh”'])
     })
 
     it('tries a background click that changed nothing once more with the pointer, then counts repeats', async () => {
@@ -319,6 +323,40 @@ describe('ComputerUse', () => {
       const { computer } = computerWith(replies, { page, tabs: null })
       expect(await computer.run({ goal: 'scroll down to the oldest mail', text: null })).toMatchObject({ status: 'done' })
       expect(actions).toHaveLength(4)
+    })
+
+
+    it('after steering, does what the decider picks instead', async () => {
+      const actions: ScreenAction[] = []
+      let archived = false
+      const page: ScreenBackend = { kind: 'desktop', observe: async () => ({ backend: 'desktop', app: 'Mail', title: archived ? 'Archived' : 'Inbox', controls: [control('0.1', 'button', 'Refresh'), control('0.2', 'button', 'Archive')] }), act: async (action) => { actions.push(action); if (action.kind === 'click' && action.ref === '0.2') archived = true } }
+      const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('c1') }, { next: choice('done') }], { page, tabs: null })
+      expect(await computer.run({ goal: 'archive the message', text: null })).toMatchObject({ status: 'done' })
+      expect(actions).toEqual([{ kind: 'click', ref: '0.1' }, { kind: 'click', ref: '0.2' }])
+    })
+
+    it('"go to example.com" in Chrome with the address bar focused: types the address and presses Enter, never clicks the bar again (JJ’s MacBook, 2026-10-25)', async () => {
+      let typed = ''
+      let loaded = false
+      const bar = () => control('0.7', 'textbox', 'Address and search bar', { value: typed || 'https://github.com/jayleaton/t3code/pull/138', focused: true })
+      const page: ScreenBackend = {
+        kind: 'desktop',
+        observe: async () => ({ backend: 'desktop', app: 'Google Chrome', title: loaded ? 'Example Domain' : 'Pull request #138', url: loaded ? 'https://example.com/' : 'https://github.com/jayleaton/t3code/pull/138', controls: [control('0.2', 'button', 'Reload'), bar()] }),
+        act: async (action) => {
+          if (action.kind === 'type') typed = action.text
+          if (action.kind === 'press' && action.key === 'enter' && typed) loaded = true
+        },
+      }
+      const { authorize, requests } = allowAll()
+      // What the decider did on the Mac: it chose the focused address bar ("click"), twice and more.
+      const { computer, asked } = computerWith([{ surface: choice('current') }, { next: choice('c1') }, { next: choice('press_enter') }, { next: choice('done') }], { page, tabs: null }, authorize)
+      expect(await computer.run({ goal: 'open Chrome and go to example.com', text: null })).toMatchObject({ status: 'done' })
+      expect(requests.map((r) => r.action)).toEqual([
+        { kind: 'type', ref: '0.7', role: 'textbox', label: 'Address and search bar', text: 'example.com' },
+        { kind: 'press', key: 'enter', field: { role: 'textbox', label: 'Address and search bar' } },
+      ])
+      // Typing was offered from the first step: the address is the goal's own text.
+      expect(Object.keys((asked[1].questions.next as { criteria: Record<string, string> }).criteria)).toContain('type_text')
     })
 
     it('stops before its next action when aborted, with the reason given', async () => {
@@ -603,5 +641,19 @@ describe('a Chrome that refuses other apps (2026-09-26 10:17: "could not find �
     expect(onScreen.actions).toEqual([{ kind: 'click', ref: 'v:120,150' }])
     const missing = await unreadableChrome(null, [{ surface: choice('browser') }]).computer.run({ goal: "Switch to the 'Billing' tab in Google Chrome.", text: null })
     expect(missing).toMatchObject({ status: 'unavailable', reason: 'It could not find a “Billing” tab with Google Chrome’s tab search.' })
+  })
+})
+
+describe('navigationText', () => {
+  it('takes the address a navigation goal names, as written, and nothing else', () => {
+    expect(navigationText('open Chrome and go to example.com')).toBe('example.com')
+    expect(navigationText('Navigate to https://example.com/docs?a=1.')).toBe('https://example.com/docs?a=1')
+    expect(navigationText('open www.bbc.co.uk/news in Safari')).toBe('www.bbc.co.uk/news')
+    expect(navigationText('visit github.com/jayleaton')).toBe('github.com/jayleaton')
+    expect(navigationText('send the note to bob@example.com')).toBeNull()
+    expect(navigationText('open Notes')).toBeNull()
+    expect(navigationText('reply to the email from example.com')).toBeNull()
+    expect(navigationText('open the email from paypal.com and click unsubscribe')).toBeNull()
+    expect(navigationText('open the website example.org')).toBe('example.org')
   })
 })

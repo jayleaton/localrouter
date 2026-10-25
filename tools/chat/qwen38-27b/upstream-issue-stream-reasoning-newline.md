@@ -1,6 +1,6 @@
 # Draft issue for ashhart/TensorFold (not posted)
 
-**Title:** `serve`: streamed `reasoning_content` keeps a trailing `\n` that the non-streamed reply strips (v1.1.1)
+**Title:** `serve`: streamed `reasoning_content` keeps a trailing `\n` that the non-streamed reply strips (v1.1.1, still in v1.1.4)
 
 ## Summary
 
@@ -12,6 +12,7 @@ or caches by text sees two different replies to one request.
 
 ## Environment
 
+- TensorFold v1.1.4 (`tensorfold-1.1.4-linux-aarch64.tar.gz`, sha256 `2c77ff0179dbfb9ae1c6ac647f85210194c151243f49eb93f0e34a8d53d7a4ec`): the same bytes as v1.1.1 below
 - TensorFold v1.1.1, `tensorfold-1.1.1-linux-aarch64.tar.gz` (sha256 `2e0103a544e64354bfec65bd8a052ede17aa9be1f6a56d8e37c868af9139cb39`)
 - NVIDIA GB10 (DGX Spark), CUDA backend
 - `TensorFold/Qwen3.8-27B-MLX-4bit` @ `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c`, drafter `z-lab/Qwen3.8-27B-DFlash2` @ `50307d4c4cde6860d4eee73e2547cd786fe8e8a4`
@@ -54,5 +55,5 @@ for `reasoning_content` too).
 
 Found by LocalRouter's qualification run, which compares stream against whole for every field on the GB10
 (`tools/chat/qwen38-27b/qualify.sh`). It records this as the named exception
-`tensorfold-1.1.1-stream-reasoning-trailing-newline`, limited to trailing whitespace at the end of a streamed
+`tensorfold-stream-reasoning-trailing-newline`, limited to trailing whitespace at the end of a streamed
 `reasoning_content`, until a fixed release.

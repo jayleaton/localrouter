@@ -1,23 +1,39 @@
 import { describe, expect, it } from 'vitest'
-import { grantStates } from './grants.ts'
+import { grantStates, signingId } from './grants.ts'
 
-const on = { accessibility: true, screen: true }
-const off = { accessibility: false, screen: false }
+const all = (v: boolean) => ({ accessibility: v, screen: v, microphone: v })
+const SIGNED = signingId('identifier "com.localrouter.companion" and certificate leaf = H"ab12"')
+const ADHOC = signingId('cdhash H"77ee"')
 
 describe('macOS grants across builds', () => {
-  it('granted and working: recorded for this build', () => {
-    expect(grantStates(on, on, {}, 'b2')).toEqual({ state: { accessibility: 'granted', screen: 'granted' }, grants: { accessibility: 'b2', screen: 'b2' } })
+  it('granted in this process: recorded under this signing identity', () => {
+    expect(grantStates(all(true), { accessibility: true }, {}, SIGNED)).toEqual({ state: { accessibility: 'granted', screen: 'granted', microphone: 'granted' }, grants: { accessibility: SIGNED, screen: SIGNED, microphone: SIGNED } })
   })
-  it('macOS says yes but the executor cannot read the screen: stale (the older build’s entry)', () => {
-    expect(grantStates({ accessibility: true, screen: false }, { accessibility: false, screen: false }, {}, 'b2').state).toEqual({ accessibility: 'stale', screen: 'not-granted' })
+
+  it('Screen Recording allowed in this process is granted, whatever another process’s probe says (JJ’s MacBook, 2026-10-25)', () => {
+    // TCC: ScreenCapture Allowed (System Set); the osascript preflight said no. Only Accessibility's probe counts.
+    const { state } = grantStates(all(true), { accessibility: true }, { screen: SIGNED }, SIGNED)
+    expect(state.screen).toBe('granted')
   })
-  it('worked in an older build, not in this one: stale', () => {
-    expect(grantStates(off, off, { accessibility: 'b1', screen: 'b1' }, 'b2').state).toEqual({ accessibility: 'stale', screen: 'stale' })
+
+  it('a new build signed by the same certificate keeps its grants: an update is not a stale grant', () => {
+    expect(grantStates(all(true), { accessibility: true }, { accessibility: SIGNED, screen: SIGNED, microphone: SIGNED }, SIGNED).state).toEqual({ accessibility: 'granted', screen: 'granted', microphone: 'granted' })
   })
-  it('worked in this build and is gone: revoked, not stale', () => {
-    expect(grantStates(off, off, { accessibility: 'b2' }, 'b2').state.accessibility).toBe('not-granted')
+
+  it('macOS says Accessibility is on but an AX read fails: stale (the older build’s entry)', () => {
+    expect(grantStates({ accessibility: true, screen: false, microphone: true }, { accessibility: false }, {}, SIGNED).state).toEqual({ accessibility: 'stale', screen: 'not-granted', microphone: 'granted' })
   })
-  it('never granted: not granted', () => {
-    expect(grantStates(off, null, {}, 'b1').state).toEqual({ accessibility: 'not-granted', screen: 'not-granted' })
+
+  it('missing now, seen working under another signature (the ad-hoc build): stale, Microphone included', () => {
+    expect(grantStates(all(false), { accessibility: false }, { accessibility: ADHOC, screen: ADHOC, microphone: ADHOC }, SIGNED).state).toEqual({ accessibility: 'stale', screen: 'stale', microphone: 'stale' })
+  })
+
+  it('missing now, seen working under this same signature: revoked, not stale', () => {
+    expect(grantStates(all(false), null, { microphone: SIGNED }, SIGNED).state.microphone).toBe('not-granted')
+  })
+
+  it('entries from before signatures were recorded, and an unreadable signature, call nothing stale', () => {
+    expect(grantStates(all(false), null, { accessibility: '0.1.0@1761300000000', screen: '0.1.0@1761300000000' }, SIGNED)).toEqual({ state: { accessibility: 'not-granted', screen: 'not-granted', microphone: 'not-granted' }, grants: {} })
+    expect(grantStates(all(false), null, { screen: ADHOC }, null).state.screen).toBe('not-granted')
   })
 })

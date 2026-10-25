@@ -4,19 +4,21 @@ LocalRouter is one "Jarvis box" on a single GB10: a chat model that is always wa
 image and video generation and speech to text and text to speech beside it. The chat model is
 [TensorFold/Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) with the
 [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) drafter, served by
-[TensorFold](https://github.com/ashhart/TensorFold) 1.1.1's own OpenAI-compatible server (`tensorfold serve`, the
+[TensorFold](https://github.com/ashhart/TensorFold) 1.1.4's own OpenAI-compatible server (`tensorfold serve`, the
 release binary `bin/tensorfold-native`). LocalRouter does not reimplement the model: it runs TensorFold's server as the
 tool's worker and proxies requests to it.
 
-**Status: qualified on DGX-01 (GB10)** by `tools/chat/qwen38-27b/qualify.sh` run2 at commit 685f517 on
-2026-10-21: 273 of 273 checks, with one named exception (see [Exceptions](#exceptions)). TensorFold's own
-qualification table lists the 27B only on Metal and an RTX 4090; this run establishes it on GB10 (aarch64 CUDA). Every
+**Status: qualified on DGX-01 (GB10)** by `tools/chat/qwen38-27b/qualify.sh`: TensorFold 1.1.1 by run2 at commit
+685f517 on 2026-10-21, and 1.1.4 by the run at commit 37755e0 on 2026-10-25, each 273 of 273 checks with one named
+exception (see [Exceptions](#exceptions)). TensorFold's 1.1.4 release testing includes the 27B on a DGX Spark; these
+runs establish it on this host, and the deployed marker comes from the run on the deployed commit. Every
 other machine runs qualify.sh itself: the tool is refused (503) on a host until its own marker says qualified.
 
 | Run | Commit | Checks | Result |
 | --- | --- | --- | --- |
 | run1 | 6e83844 | 269 of 273 | not qualified: P1 and P2 stream vs whole `reasoning_content`, TensorFold's trailing `\n` (direct and through LocalRouter alike) |
 | run2 | 685f517 | 273 of 273 | qualified, with `tensorfold-1.1.1-stream-reasoning-trailing-newline` used by exactly those four checks (599 vs 598 B, 352 vs 351 B, tail `\n`). Memory drop 20.0 GiB (configured 24 GiB); cold load 12.5 s; servers stopped on SIGTERM in 0.8 s |
+| 1.1.4 | 37755e0 | 269 of 273, then 273 of 273 | TensorFold 1.1.4: the same four checks, the same bytes (599 vs 598 B, 352 vs 351 B, tail `\n`): the newline is still upstream's, so the exception (renamed `tensorfold-stream-reasoning-trailing-newline`) lists 1.1.4 beside 1.1.1, and compare passes with it. Every prompt's greedy reply (content, reasoning, tool calls, finish reason, token count) equals run2's on 1.1.1, 8 of 8. Memory drop 20.8 GiB |
 
 Marker (sha256 `f64c573b5341c50d7d5fc4474c4b6e84df94d71eabe6c1d5ffd9f20748c5a61e`): `qualified: true`, host
 `dgx-01`, GPU `NVIDIA GB10`, `pins_sha256` `3be3ea41…`, `tensorfold_sha256` `2e0103a5…`, 273 checks, `exceptions:
@@ -69,7 +71,7 @@ The server reads the checkpoint and drafter from the Hugging Face cache that `fe
 | `working_bytes` | 0: the server sizes its KV and prompt cache at start, inside the resident figure |
 | Server flags | `--parallel 1 --prompt-cache-gib 4 --context 32768`, drafter on: one user at a time, as LocalRouter runs one job at a time |
 
-Measured on DGX-01 (GB10) by the bring-up, `docs/dev/JARVIS-BRINGUP.md` (PR #16), TensorFold 1.1.1 at the pinned
+Measured on DGX-01 (GB10) by the bring-up, `docs/dev/JARVIS-BRINGUP.md` (PR #16), TensorFold 1.1.1 (the pin then) at its
 archive:
 
 | Setting | Resident | Speed |
@@ -87,6 +89,26 @@ figure must cover the server's peak. TensorFold's CUDA server also sizes its win
 during both of its server runs and reports the largest drop in `report.json`.
 
 ## Expected speed
+
+**TensorFold 1.1.4 against 1.1.1** on DGX-01 (GB10), 2026-10-25: the same checkpoint, drafter and flags (`--context
+32768 --parallel 1 --prompt-cache-gib 4`, drafter on), one server at a time in the order 1.1.1, 1.1.4, 1.1.4, 1.1.1,
+beside the live service with its image and decision models unloaded and no other GPU process. `chat_bench.py`: fresh
+prompts (a new nonce each), greedy; the footprint is the server process's nvidia-smi memory plus RssAnon and RssShmem
+at 0.5 s.
+
+| | 1.1.1 | 1.1.4 | |
+| --- | --- | --- | --- |
+| TTFT, 2.1k-token prompt | 3.09–3.12 s (676 tok/s) | 1.90–1.91 s (1,102 tok/s) | 1.63x |
+| TTFT, 8.1k | 15.04–15.08 s (538 tok/s) | 7.36–7.38 s (1,098 tok/s) | 2.04x |
+| TTFT, 30.1k | 125.4–125.8 s (240 tok/s) | 29.38–29.39 s (1,024 tok/s) | 4.27x |
+| Decode, 512 tokens (chat and code, 3 runs each a server start: 12) | 37.3–47.7 tok/s, mean 44.4 | 47.5–52.9 tok/s, mean 49.6 | +12% |
+| Load (warm page cache) | 13.7–19.6 s | 14.3 s (92.5 s at its first start on the box) | |
+| Peak footprint, with the 30k prompt | 22.7 GiB (18.2 GiB of it device) | 22.6 GiB (19.4 GiB device) | the same |
+
+Both versions answer every fixed prompt of the qualification with the same bytes (above). A new executable misses
+TensorFold's cache of measured decode-window costs (keyed by the executable) and measures them once, which is the
+likely cause of 1.1.4's slow first start; later starts took 14 s.
+
 
 Measured on DGX-01 (GB10) on 2026-10-22 against the live Jarvis service, with `tools/spark/jarvis/chat_speed.py`.
 It sends the web client's request shape (its system prompt, the image and video tools, thinking off, no temperature)
@@ -193,11 +215,11 @@ checkpoint or drafter) needs a new run.
 Every comparison is exact, with one named exception, defined in `qualify.py` (`EXCEPTIONS`) and listed in the marker
 when a run used it:
 
-| Name | `tensorfold-1.1.1-stream-reasoning-trailing-newline` |
+| Name | `tensorfold-stream-reasoning-trailing-newline` (until 2026-10-25: `tensorfold-1.1.1-stream-reasoning-trailing-newline`) |
 | --- | --- |
-| Scope | `reasoning_content` only; a stream against the whole reply of the same server only (direct stream vs direct whole, LocalRouter stream vs LocalRouter whole); the joined stream may be the whole reply's text followed by whitespace, nothing else. Pinned TensorFold 1.1.1 only |
+| Scope | `reasoning_content` only; a stream against the whole reply of the same server only (direct stream vs direct whole, LocalRouter stream vs LocalRouter whole); the joined stream may be the whole reply's text followed by whitespace, nothing else. TensorFold 1.1.1 and 1.1.4 only (the versions it was observed on) |
 | Still exact | tokens (`completion_tokens`), `content`, `tool_calls`, `finish_reason`, determinism (two whole runs), LocalRouter against TensorFold, and every other field |
-| Evidence | DGX-01 run1 (commit 6e83844): P1 stream 599 B vs whole 598 B, P2 352 B vs 351 B. The stream's last reasoning delta ends with `\n` (`"…Canberra.\"\n"`) that the whole reply strips; the bytes are the same direct and through LocalRouter, so it is TensorFold's, not the proxy's |
+| Evidence | DGX-01 run1 (commit 6e83844, 1.1.1) and the 1.1.4 run (commit 37755e0): P1 stream 599 B vs whole 598 B, P2 352 B vs 351 B, on both. The stream's last reasoning delta ends with `\n` (`"…Canberra.\"\n"`) that the whole reply strips; the bytes are the same direct and through LocalRouter, so it is TensorFold's, not the proxy's |
 | Upstream | drafted, not posted: `tools/chat/qwen38-27b/upstream-issue-stream-reasoning-newline.md` |
 
 LocalRouter passes both forms through unchanged: a streaming client gets the newline, a whole reply does not. Any
@@ -209,7 +231,7 @@ other mismatch, including any difference inside the reasoning text, fails the ru
 
 | What | Pin |
 | --- | --- |
-| TensorFold | v1.1.1, tag `92d71a3c`, commit `b10231b94f8adf3d4132acebdc0a1ac87e53a838`; `tensorfold-1.1.1-linux-aarch64.tar.gz` sha256 `2e0103a5…f9139cb39`, `-linux-x86_64` `e1785e32…6185fbdf` |
+| TensorFold | v1.1.4, tag `585df8ba`, commit `eab8582819688325e371907e4706e1c602b8a273`; `tensorfold-1.1.4-linux-aarch64.tar.gz` sha256 `2c77ff01…8d53d7a4ec`, `-linux-x86_64` `878a23f0…ae18ce2b0` (before: v1.1.1, `b10231b9`) |
 | Checkpoint | TensorFold/Qwen3.8-27B-MLX-4bit @ `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c` (4-bit affine, group 64; three shards, 16,054,541,349 B) |
 | Drafter | z-lab/Qwen3.8-27B-DFlash2 @ `50307d4c4cde6860d4eee73e2547cd786fe8e8a4` (BF16, 3,848,817,896 B; served in 4 bits, `--drafter-bits` default) |
 
@@ -226,7 +248,7 @@ other mismatch, including any difference inside the reasoning text, fails the ru
 
 | Part | Licence |
 | --- | --- |
-| TensorFold 1.1.1 (binary, fetched) | Apache 2.0 |
+| TensorFold 1.1.4 (binary, fetched) | Apache 2.0 |
 | Qwen3.8-27B-MLX-4bit (TensorFold; base Qwen/Qwen3.8-27B) | Apache 2.0 |
 | Qwen3.8-27B-DFlash2 (z-lab) | Apache 2.0 |
 
