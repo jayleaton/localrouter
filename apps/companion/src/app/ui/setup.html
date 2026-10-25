@@ -7,86 +7,160 @@
 <link rel="stylesheet" href="setup.css">
 </head>
 <body>
+<header class="top">
+  <span class="mark" aria-hidden="true"></span>
+  <div class="brand"><b>LocalRouter</b><small>Jarvis on this computer. The models run on your Spark; the tools, your history and every permission stay here.</small></div>
+  <span class="pill" id="linkPill" data-s="offline"><span class="dot"></span><span id="linkText">Not connected</span></span>
+</header>
+
 <main>
-  <h1>LocalRouter</h1>
-  <p class="lead">Jarvis on your own computer. The models run on your Spark; the tools, your history and every permission stay here.</p>
-
-  <section id="spark">
-    <h2>1. Your Spark</h2>
-    <div id="unpaired">
-      <p>On the Spark, make a one-time code (ten minutes, single use):</p>
-      <pre>deploy/jarvis/pair.sh add "<span id="suggestName">My Mac</span>" --scopes inference,media,read</pre>
-      <label>Spark address <input id="base" placeholder="https://your-spark.your-tailnet.ts.net:10443" autocomplete="off" spellcheck="false"></label>
-      <label>This computer’s name <input id="name" autocomplete="off"></label>
-      <label>Pairing code <input id="code" placeholder="XXXX-XXXX" autocomplete="off" spellcheck="false"></label>
-      <button id="pair" class="primary">Pair</button>
-    </div>
-    <div id="paired" hidden>
-      <p>Paired with <b id="pairedBase"></b> as <b id="pairedName"></b>. The token is kept <span id="secrets"></span>.</p>
-      <button id="open" class="primary">Open Jarvis</button> <button id="unpair">Unpair</button>
-    </div>
-    <p class="error" id="pairError" hidden></p>
-  </section>
-
-  <section>
-    <h2>2. Permissions on this Mac</h2>
-    <div class="card warn" id="stale" role="alert" hidden>
-      <p><b id="staleText"></b></p>
-      <p class="note">System Settings may still show LocalRouter switched on: that entry belongs to an older build. In the list, select LocalRouter, remove it with −, add it again with +, then quit and reopen LocalRouter. Or reset it here and switch it on again.</p>
-      <div class="row wrap">
-        <button data-pane="accessibility" id="staleAx">Open Accessibility settings</button>
-        <button data-pane="screen" id="staleScreen">Open Screen Recording settings</button>
-        <button data-reset="accessibility" id="resetAx">Reset Accessibility for LocalRouter</button>
-        <button data-reset="screen" id="resetScreen">Reset Screen Recording for LocalRouter</button>
-        <button id="relaunch" class="primary">Quit and reopen</button>
+  <div class="alert" id="err-general" role="alert" hidden></div>
+  <h2 class="group">Connect</h2>
+  <ol class="steps">
+    <!-- 1. Where the Spark is -->
+    <li class="step" id="step-address" data-s="active">
+      <div class="badge"><span>1</span></div>
+      <div class="body">
+        <div class="head"><b>Spark address</b><span class="sum" id="sum-address"></span><button class="link" id="changeAddress" hidden>Change</button></div>
+        <div class="open" id="open-address">
+          <div class="field">
+            <input id="base" placeholder="https://your-spark.your-tailnet.ts.net:10443" autocomplete="off" spellcheck="false" aria-label="Spark address">
+            <button class="btn primary" id="checkAddress">Continue</button>
+          </div>
+          <div class="found" id="found" hidden></div>
+          <p class="note" id="tailnetNote"></p>
+          <p class="note">The <code>https://</code> address <code>tailscale serve</code> gives your Spark; this Mac must be on the same tailnet. Pasting the <code>localrouter://pair</code> link <code>pair.sh add</code> prints fills in the code too.</p>
+          <div class="alert" id="err-address" role="alert" hidden></div>
+        </div>
       </div>
-      <p class="note" id="resetResult" hidden></p>
-    </div>
-    <div id="macPerms">
-    <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows). macOS asks about Automation the first time Jarvis uses an app.</p>
-    <div class="row"><span>Microphone</span><span class="status" id="pMic"></span><button data-perm="microphone">Allow</button></div>
-    <div class="row"><span>Accessibility</span><span class="status" id="pAx"></span><button data-perm="accessibility">Open System Settings</button></div>
-    <div class="row"><span>Screen Recording</span><span class="status" id="pScreen"></span><button data-perm="screen">Open System Settings</button></div>
-    <div class="row"><span>Automation</span><span class="status">asked on first use</span><button data-perm="automation">Open System Settings</button></div>
-    <p class="note">After granting Accessibility or Screen Recording, quit and reopen LocalRouter.</p>
-    </div>
-    <div id="osPerms" hidden>
-      <p class="note">Computer control here uses <b id="osBackend"></b>. What it needs on this computer:</p>
-      <div id="osReqs"></div>
-    </div>
-  </section>
+    </li>
 
-  <section>
-    <h2>3. This computer</h2>
+    <!-- 2. The one-time code -->
+    <li class="step" id="step-code" data-s="todo">
+      <div class="badge"><span>2</span></div>
+      <div class="body">
+        <div class="head"><b>Pairing code</b><span class="sum" id="sum-code"></span></div>
+        <div class="open" id="open-code" hidden>
+          <p>On the Spark, make a code for this computer:</p>
+          <div class="code"><div class="code-h"><span>On the Spark</span><button id="copyCmd">Copy</button></div><pre id="pairCmd"></pre></div>
+          <ul class="explain">
+            <li><code>pair.sh add</code> makes a <b>one-time code</b> for the name you give it. It lasts <b>10 minutes</b> and works once.</li>
+            <li><code>--scopes</code> is what this computer may use: <b>inference</b> (chat and calls), <b>media</b> (pictures, video, speech) and <b>read</b> (models and voices).</li>
+            <li>The token it gives this computer is kept <span id="secrets"></span>. Nothing else leaves this Mac.</li>
+          </ul>
+          <div class="grid2">
+            <label>This computer’s name <input id="name" autocomplete="off" spellcheck="false"></label>
+            <label>Code <input id="code" placeholder="XXXX-XXXX" autocomplete="off" spellcheck="false" maxlength="24"></label>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="pair">Pair</button>
+            <button class="btn" id="cancelRepair" hidden>Cancel</button>
+          </div>
+          <p class="note" id="repairNote" hidden></p>
+          <div class="alert" id="err-code" role="alert" hidden></div>
+        </div>
+      </div>
+    </li>
+
+    <!-- 3. The connection -->
+    <li class="step" id="step-connection" data-s="todo">
+      <div class="badge"><span>3</span></div>
+      <div class="body">
+        <div class="head"><b>Connection</b><span class="sum" id="sum-connection"></span></div>
+        <div class="open" id="open-connection" hidden>
+          <div class="alert" id="err-connection" role="alert" hidden></div>
+          <div class="alert warn" id="warn-connection" hidden></div>
+          <div id="linked" hidden>
+            <p class="kv"><span>Spark</span><b id="pairedBase"></b></p>
+            <p class="kv"><span>Server</span><b id="serverText"></b></p>
+            <p class="kv"><span>This computer</span><b id="pairedName"></b></p>
+            <div class="kv"><span>Scopes</span><div class="chips" id="scopes"></div></div>
+            <ul class="caps" id="caps"></ul>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="open">Open Jarvis</button>
+            <button class="btn" id="check">Check again</button>
+            <button class="btn" id="repair">Re-pair</button>
+            <span class="grow"></span>
+            <button class="btn danger" id="disconnect">Disconnect</button>
+          </div>
+          <div class="alert warn" id="confirmDisconnect" hidden>
+            <p><b>Disconnect from this Spark?</b></p>
+            <p>This computer forgets the Spark’s address and its token, and stops older clients from using it. To remove it from the Spark too, run <code id="revokeCmd"></code> there.</p>
+            <div class="actions"><button class="btn danger" id="disconnectYes">Disconnect</button><button class="btn" id="disconnectNo">Cancel</button></div>
+          </div>
+          <p class="note" id="checkedAt"></p>
+        </div>
+      </div>
+    </li>
+
+    <!-- 4. macOS permissions -->
+    <li class="step" id="step-permissions" data-s="todo">
+      <div class="badge"><span>4</span></div>
+      <div class="body">
+        <div class="head"><b>Permissions on this Mac</b><span class="sum" id="sum-permissions"></span></div>
+        <div class="open" id="open-permissions">
+          <div class="alert warn" id="stale" role="alert" hidden>
+            <p><b id="staleText"></b></p>
+            <p>System Settings may still show LocalRouter switched on: that entry belongs to an older build. In the list, select LocalRouter, remove it with −, add it again with +, then quit and reopen LocalRouter. Or reset it here and switch it on again.</p>
+            <div class="actions">
+              <button class="btn" data-pane="accessibility" id="staleAx">Open Accessibility settings</button>
+              <button class="btn" data-pane="screen" id="staleScreen">Open Screen Recording settings</button>
+              <button class="btn" data-reset="accessibility" id="resetAx">Reset Accessibility for LocalRouter</button>
+              <button class="btn" data-reset="screen" id="resetScreen">Reset Screen Recording for LocalRouter</button>
+              <button class="btn primary" id="relaunch">Quit and reopen</button>
+            </div>
+            <p class="note" id="resetResult" hidden></p>
+          </div>
+          <div id="macPerms">
+          <p class="note">Ask only for what you use. A voice call needs the microphone; computer control needs Accessibility (and Screen Recording for apps that hide their windows).</p>
+          <div class="perm" id="perm-microphone"><span class="pname">Microphone<small>for calls</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="microphone">Allow</button></div>
+          <div class="perm" id="perm-accessibility"><span class="pname">Accessibility<small>to control this Mac</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="accessibility">Open System Settings</button></div>
+          <div class="perm" id="perm-screen"><span class="pname">Screen Recording<small>for apps that hide their windows</small></span><span class="pill" data-s="offline"><span class="dot"></span><span class="pstate"></span></span><button class="btn" data-perm="screen">Open System Settings</button></div>
+          <div class="perm"><span class="pname">Automation<small>System Events, Chrome, Music…</small></span><span class="pill"><span class="dot"></span><span>asked on first use</span></span><button class="btn" data-perm="automation">Open System Settings</button></div>
+          </div>
+          <div id="osPerms" hidden>
+            <p class="note">Computer control here uses <b id="osBackend"></b>. What it needs on this computer:</p>
+            <div id="osReqs"></div>
+          </div>
+          <div class="actions"><button class="btn" id="recheck">Check again</button><span class="note">After granting Accessibility or Screen Recording, quit and reopen LocalRouter.</span></div>
+        </div>
+      </div>
+    </li>
+  </ol>
+
+  <h2 class="group">This computer</h2>
+  <section class="card">
     <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
-    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <span id="stopWords">⌘⇧⎋, the menu bar, or move the pointer to the top-left corner</span>.</p>
+    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
   </section>
 
-  <section>
-    <h2>4. Folders Jarvis may read</h2>
-    <ul id="folders"></ul>
-    <button id="addFolder">Share a folder…</button>
+  <section class="card">
+    <h3>Folders Jarvis may read</h3>
+    <ul class="list" id="folders"></ul>
+    <button class="btn" id="addFolder">Share a folder…</button>
   </section>
 
-  <section>
-    <h2>5. Other harnesses on this computer (MCP)</h2>
+  <section class="card">
+    <h3>Other harnesses on this computer (MCP)</h3>
     <p class="note">OpenCode, Claude Code, Codex and others can use this computer through LocalRouter’s executor, with the same rules and approvals. Add one to get its token (shown once).</p>
-    <div class="row"><input id="callerName" placeholder="opencode"><button id="enroll">Add</button></div>
-    <pre id="enrolled" hidden></pre>
-    <ul id="callers"></ul>
+    <div class="field"><input id="callerName" placeholder="opencode" aria-label="Harness name"><button class="btn" id="enroll">Add</button></div>
+    <pre class="out" id="enrolled" hidden></pre>
+    <ul class="list" id="callers"></ul>
   </section>
 
-  <section>
-    <h2>6. Older clients (phone app, the Spark’s web page)</h2>
+  <section class="card">
+    <h3>Older clients (phone app, the Spark’s web page)</h3>
     <p class="note">They ask the Spark to use this computer. Every request still goes through this computer’s rules and approvals. On the Spark: <code>deploy/jarvis/pair.sh add "<span class="nm">My Mac</span> helper" --scopes desktop_helper</code></p>
     <label class="check"><input type="checkbox" id="legacy"> Let older clients use this computer</label>
-    <div class="row"><input id="legacyCode" placeholder="XXXX-XXXX (only to switch it on)"><span class="status" id="legacyStatus"></span></div>
+    <div class="field"><input id="legacyCode" placeholder="XXXX-XXXX (only to switch it on)" aria-label="Code for older clients"><span class="note" id="legacyStatus"></span></div>
+    <div class="alert" id="err-legacy" role="alert" hidden></div>
   </section>
 
-  <section>
-    <h2>7. Switching harness</h2>
+  <section class="card">
+    <h3>Switching harness</h3>
     <p class="note">Export your conversations (messages and tool receipts, no tokens) for another harness, then quit LocalRouter. Nothing running moves across.</p>
-    <button id="export">Export conversations…</button> <span class="status" id="exported"></span>
+    <div class="actions"><button class="btn" id="export">Export conversations…</button><span class="note" id="exported"></span></div>
   </section>
 
   <p class="foot">LocalRouter <span id="version"></span></p>
