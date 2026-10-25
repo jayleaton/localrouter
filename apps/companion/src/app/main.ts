@@ -11,7 +11,7 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { EMPTY, HELPER, KeychainHelper, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
+import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
 import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
@@ -975,19 +975,20 @@ async function smoke() {
 
 /** The move itself, in a child process: the read may wait on a keychain prompt, and never blocks this one. */
 function runMigrationChild(timeoutMs: number): Promise<{ ok: boolean; reason: string }> {
-  return new Promise((resolve) => {
-    execFile(process.execPath, ['--secrets-migrate'], { env: { ...process.env, LOCALROUTER_COMPANION_HOME: dir }, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 1 << 20 }, (error, stdout) => {
-      const line = /^COMPANION_MIGRATE (.+)$/m.exec(String(stdout))?.[1]
-      let r: { ok?: boolean; reason?: string } = {}
-      try {
-        r = line ? (JSON.parse(line) as typeof r) : {}
-      } catch {
-        // Not JSON: a failure below.
-      }
-      if (r.ok) return resolve({ ok: true, reason: '' })
-      const killed = error && ((error as { killed?: boolean }).killed || (error as { signal?: string }).signal === 'SIGKILL')
-      resolve({ ok: false, reason: killed ? `no answer to the keychain prompt within ${Math.round(timeoutMs / 1000)} s` : (r.reason ?? (error ? error.message : 'the move did not answer')) })
-    })
+  // `run` ends on the child's result line or its pipes closing, never only on an exit event (which Electron's main
+  // process can miss); the child's own Chromium helpers may keep the pipe open a moment after its line.
+  const env = { ...process.env, LOCALROUTER_COMPANION_HOME: dir }
+  return runCommand(process.execPath, ['--secrets-migrate'], undefined, { timeoutMs, env, done: (out) => /^COMPANION_MIGRATE .+\n/m.test(out) }).then((r) => {
+    const line = /^COMPANION_MIGRATE (.+)$/m.exec(r.stdout)?.[1]
+    let j: { ok?: boolean; reason?: string } = {}
+    try {
+      j = line ? (JSON.parse(line) as typeof j) : {}
+    } catch {
+      // Not JSON: a failure below.
+    }
+    if (j.ok) return { ok: true, reason: '' }
+    if (r.code === 137 && !line) return { ok: false, reason: `no answer to the keychain prompt within ${Math.round(timeoutMs / 1000)} s` }
+    return { ok: false, reason: j.reason ?? (r.stderr.trim().split('\n').pop() || 'the move did not answer') }
   })
 }
 
@@ -1039,9 +1040,8 @@ async function secretsMigrate() {
     await helper.set({ ...EMPTY, ...(JSON.parse(text) as Partial<Secrets>) })
     rmSync(secretsPath(), { force: true })
     out.ok = true
-    out.legacy_item = await new Promise<string>((resolve) =>
-      execFile('/usr/bin/security', ['delete-generic-password', '-s', `${app.getName()} Safe Storage`], { timeout: 10_000, killSignal: 'SIGKILL' }, (error) => resolve(error ? `kept (${(error as { killed?: boolean }).killed ? 'it would have asked' : error.message.split('\n')[0]})` : 'deleted')),
-    )
+    const del = await runCommand('/bin/sh', ['-c', '/usr/bin/security delete-generic-password -s "$1" > /dev/null; echo "LR_STATUS $?" >&2', 'sh', `${app.getName()} Safe Storage`], undefined, { timeoutMs: 10_000 })
+    out.legacy_item = del.code === 0 ? 'deleted' : del.code === 137 ? 'kept (it would have asked)' : `kept (${del.stderr.trim().split('\n')[0] || `exit ${del.code}`})`
   } catch (error) {
     out.ok = false
     out.reason = error instanceof Error ? error.message : String(error)

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { chmod, copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 // The keychain helper is macOS's (Linux and Windows have none, and never reach these paths): POSIX paths on any host.
 import { dirname, join } from 'node:path/posix'
@@ -21,17 +21,65 @@ export const SERVICE = 'LocalRouter'
 export const ACCOUNT = 'spark-tokens'
 export const HELPER = 'localrouter-keychain'
 
-export type Run = (file: string, args: string[], input?: string) => Promise<{ code: number; stdout: string; stderr: string }>
+export type Run = (file: string, args: string[], input?: string, o?: { timeoutMs?: number; done?: (stdout: string) => boolean; env?: NodeJS.ProcessEnv }) => Promise<{ code: number; stdout: string; stderr: string }>
 
-export const run: Run = (file, args, input) =>
+/** A command's own `LR_STATUS <code>` line (the keychain helper's, or the sh wrapper's), and stderr without it. */
+export function statusOf(stderr: string): { code: number | null; stderr: string } {
+  const m = /(?:^|\n)LR_STATUS (\d+)\n?$/.exec(stderr)
+  return m ? { code: Number(m[1]), stderr: stderr.slice(0, m.index) } : { code: null, stderr }
+}
+
+/**
+ * Runs a command and gives its exit code and output. It is done when the command's output pipes close, not when
+ * Node is told the process exited: in Electron's main process on macOS that notification can be lost (another part
+ * of the process collects the exit first), which left the app waiting for ever on a helper that had finished. The
+ * code comes from the exit event when it came, else from the command's `LR_STATUS` line. `done` ends it early once
+ * the output says so (a child that leaves its own children holding the pipe).
+ */
+export const run: Run = (file, args, input, o: { timeoutMs?: number; done?: (stdout: string) => boolean; env?: NodeJS.ProcessEnv } = {}) =>
   new Promise((resolve) => {
     // Long enough for a person to answer a keychain prompt (a replaced helper's first read), never forever.
-    const child = execFile(file, args, { timeout: 180_000, maxBuffer: 1 << 20 }, (error, stdout, stderr) => {
-      const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? ((error as { code: number }).code) : 1) : 0
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) })
+    const timeoutMs = o.timeoutMs ?? 180_000
+    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], ...(o.env ? { env: o.env } : {}) })
+    let stdout = ''
+    let stderr = ''
+    let exitCode: number | null = null
+    let open = 2
+    let settled = false
+    const finish = (forced?: number) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const s = statusOf(stderr)
+      resolve({ code: forced ?? exitCode ?? s.code ?? 1, stdout, stderr: s.stderr })
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(137)
+    }, timeoutMs)
+    const closed = () => {
+      open -= 1
+      // Both pipes closed: the command is gone. Give the exit event a moment, then take the status line.
+      if (open === 0) setTimeout(() => finish(), exitCode === null && statusOf(stderr).code === null ? 200 : 0)
+    }
+    child.stdout.setEncoding('utf8').on('data', (d: string) => {
+      stdout += d
+      if (o.done?.(stdout)) finish(0)
+    }).on('close', closed)
+    child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d)).on('close', closed)
+    child.on('exit', (code) => {
+      exitCode = code ?? 137
     })
-    child.stdin?.end(input ?? '')
+    child.on('error', (error) => {
+      stderr += String(error.message)
+      finish(127)
+    })
+    child.stdin.on('error', () => undefined)
+    child.stdin.end(input ?? '')
   })
+
+/** codesign through sh, which prints its exit code as `LR_STATUS` (codesign prints none of its own). */
+const codesign = (exec: Run, args: string[]) => exec('/bin/sh', ['-c', '/usr/bin/codesign "$@"; echo "LR_STATUS $?" >&2', 'sh', ...args])
 
 export type Fs = {
   exists(path: string): Promise<boolean>
@@ -76,7 +124,7 @@ export class KeychainHelper {
       this.problem = 'this build has no keychain helper'
       return null
     }
-    const dr = await this.exec('/usr/bin/codesign', ['-d', '-r-', this.bundled])
+    const dr = await codesign(this.exec, ['-d', '-r-', this.bundled])
     const requirement = /designated => (.+)/.exec(`${dr.stdout}\n${dr.stderr}`)?.[1]?.trim()
     if (!requirement || !/certificate leaf/.test(requirement)) {
       this.problem = 'the keychain helper is not signed with LocalRouter’s certificate'
@@ -93,7 +141,7 @@ export class KeychainHelper {
   /** Installed, signed like the bundled one, and at least its version. */
   private async usable(requirement: string, wanted: string): Promise<boolean> {
     if (!(await this.fs.exists(this.installed))) return false
-    const verified = await this.exec('/usr/bin/codesign', ['--verify', '--strict', `-R=${requirement}`, this.installed])
+    const verified = await codesign(this.exec, ['--verify', '--strict', `-R=${requirement}`, this.installed])
     if (verified.code !== 0) return false
     const have = (await this.exec(this.installed, ['version'])).stdout.trim()
     return Number(have) >= Number(wanted)

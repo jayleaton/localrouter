@@ -95,7 +95,7 @@ static int fail(OSStatus status, const char *what) {
   return 1;
 }
 
-int main(int argc, char **argv) {
+static int helper(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "version") == 0) {
     printf("%s\n", HELPER_VERSION);
     return 0;
@@ -154,5 +154,14 @@ int main(int argc, char **argv) {
   }
   trace(argv[1], t0, code);
   CFRelease(q);
+  return code;
+}
+
+// The exit code also as the last line on stderr: the app reads it from there, so it never depends on being told the
+// helper exited (in Electron's main process another part of the process can collect that first).
+int main(int argc, char **argv) {
+  int code = helper(argc, argv);
+  fflush(stdout);
+  fprintf(stderr, "LR_STATUS %d\n", code);
   return code;
 }

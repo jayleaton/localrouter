@@ -14,7 +14,9 @@ function mac(o: { bundledVersion?: string; installed?: { version: string; signed
   if (o.installed) files.set('/data/bin/localrouter-keychain', o.installed)
   let item: string | null = null
   const calls: string[][] = []
-  const exec: Run = async (file, args, input) => {
+  const exec: Run = async (file0, args0, input) => {
+    // codesign goes through `sh -c '…' sh ARGS` (its status line): the fake answers as codesign.
+    const [file, args] = file0 === '/bin/sh' ? ['/usr/bin/codesign', args0.slice(3)] : [file0, args0]
     calls.push([file, ...args])
     if (file === '/usr/bin/codesign' && args[0] === '-d') {
       const f = files.get(args[2])
@@ -166,5 +168,20 @@ describe('moving the old token: once in the life of an install', () => {
     let runs = 0
     expect((await migrateLegacy({ legacyPath: p, previous: undefined, haveToken: true, run: async () => (runs++, { ok: true, reason: '' }) })).outcome).toBe('dropped')
     expect(runs).toBe(0)
+  })
+})
+
+describe('commands finish on their output, not only on an exit event', () => {
+  it('reads a command’s own status line', async () => {
+    const { statusOf } = await import('./secrets.ts')
+    expect(statusOf('denied\nLR_STATUS 3\n')).toEqual({ code: 3, stderr: 'denied' })
+    expect(statusOf('no status')).toEqual({ code: null, stderr: 'no status' })
+  })
+  it('runs a real command: output, code, input; and through sh with a status line', async () => {
+    const { run } = await import('./secrets.ts')
+    expect(await run('/bin/sh', ['-c', 'cat; echo out; exit 4'], 'in-')).toEqual({ code: 4, stdout: 'in-out\n', stderr: '' })
+    expect(await run('/bin/sh', ['-c', 'false; echo "LR_STATUS $?" >&2'])).toMatchObject({ code: 0, stderr: '' })
+    expect((await run('/bin/sh', ['-c', 'sleep 5'], undefined, { timeoutMs: 100 })).code).toBe(137)
+    expect((await run('/bin/sh', ['-c', 'echo DONE; sleep 5'], undefined, { done: (o) => o.includes('DONE') })).stdout).toBe('DONE\n')
   })
 })
