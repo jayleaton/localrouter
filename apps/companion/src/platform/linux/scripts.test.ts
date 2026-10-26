@@ -55,7 +55,7 @@ class _Names:
 StateType = _Names('ACTIVE SHOWING VISIBLE FOCUSED FOCUSABLE EDITABLE SINGLE_LINE SELECTED HORIZONTAL VERTICAL')
 Role = _Names('APPLICATION FRAME WINDOW DIALOG PUSH_BUTTON TOGGLE_BUTTON LINK ENTRY PASSWORD_TEXT TEXT PAGE_TAB PAGE_TAB_LIST '
               'LIST LIST_ITEM LIST_BOX TABLE_CELL MENU MENU_BAR MENU_ITEM CHECK_BOX RADIO_BUTTON COMBO_BOX LABEL STATIC HEADING '
-              'PARAGRAPH SECTION SCROLL_PANE SCROLL_BAR TOOL_BAR DOCUMENT_WEB DESKTOP_FRAME IMAGE')
+              'PARAGRAPH SECTION SCROLL_PANE SCROLL_BAR TOOL_BAR DOCUMENT_WEB DESKTOP_FRAME IMAGE CANVAS DRAWING_AREA')
 CoordType = _Names('SCREEN WINDOW')
 KeySynthType = _Names('SYM PRESS RELEASE PRESSRELEASE')
 
@@ -176,6 +176,8 @@ const TREE = {
           { role: 'ENTRY', name: 'To', editable: true, text: '', actions: ['activate'], focus_log: true, states: ['SHOWING', 'EDITABLE', 'SINGLE_LINE', 'FOCUSABLE'], box: box(10, 760, 300, 30) },
           { role: 'SECTION', name: 'Card', focus_log: true, states: ['SHOWING', 'FOCUSABLE'], box: box(400, 760, 100, 30) },
           { role: 'ENTRY', name: 'Locked', editable: true, text: '', no_focus: true, states: ['SHOWING', 'EDITABLE', 'SINGLE_LINE'], box: box(600, 760, 100, 30) },
+          // A drawing app's canvas: no action, focusable, nothing inside.
+          { role: 'DRAWING_AREA', focus_log: true, states: ['SHOWING', 'FOCUSABLE'], box: [700, 300, 250, 250] },
         ],
       }],
     },
@@ -183,7 +185,7 @@ const TREE = {
   ],
 }
 
-const REFS = { send: '1', attach: '2', password: '3', subject: '4', body: '5', row: '8.1.0', news: '0.0.1', to: '9', card: '10', locked: '11' }
+const REFS = { send: '1', attach: '2', password: '3', subject: '4', body: '5', row: '8.1.0', news: '0.0.1', to: '9', card: '10', locked: '11', canvas: '12' }
 
 /**
  * Writes the fake gi and the tree; returns a runner that runs python3 calls for real with -S instead of -I: no
@@ -237,20 +239,30 @@ describe.skipIf(!python)('the AT-SPI script against a fake accessibility tree', 
 
   it('clicks with the element’s own action, selects tabs and rows in their parent, and needs no pointer for either', async () => {
     const { screen, effects, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'click', ref: REFS.send })).toEqual({ mode: 'background' })
-    expect(await screen.act({ kind: 'click', ref: REFS.news })).toEqual({ mode: 'background' })
+    // `at`: the element's centre, where the overlay ring shows the click (Windows run, 2026-10-26: no ring).
+    expect(await screen.act({ kind: 'click', ref: REFS.send })).toEqual({ mode: 'background', at: { x: 340, y: 715 } })
+    expect(await screen.act({ kind: 'click', ref: REFS.news })).toEqual({ mode: 'background', at: { x: 300, y: 20 } })
     expect(effects()).toEqual([{ action: 'press', on: 'Send' }, { select: 1, in: 'PAGE_TAB_LIST' }])
     expect(others.calls).toHaveLength(0)
   })
 
   it('a click on a field focuses it (never its "activate", which is Enter), as on anything focusable; no pointer', async () => {
     const { screen, effects, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'click', ref: REFS.to })).toEqual({ mode: 'background', how: 'focused through AT-SPI' })
-    expect(await screen.act({ kind: 'click', ref: REFS.card })).toEqual({ mode: 'background', how: 'focused through AT-SPI' })
+    expect(await screen.act({ kind: 'click', ref: REFS.to })).toEqual({ mode: 'background', at: { x: 160, y: 775 }, how: 'focused through AT-SPI' })
+    expect(await screen.act({ kind: 'click', ref: REFS.card })).toEqual({ mode: 'background', at: { x: 450, y: 775 }, how: 'focused through AT-SPI' })
     expect(effects()).toEqual([{ focus: 'To' }, { focus: 'Card' }])
     expect(others.calls).toHaveLength(0)
     // A field that will not take the focus, with nothing else to do: the mouse is asked for.
     await expect(screen.act({ kind: 'click', ref: REFS.locked })).rejects.toThrow(/needs your mouse for a moment/)
+  })
+
+  it('offers a canvas as a place to click, and a click there goes to the pointer, never a focus that draws nothing (Paint, 2026-10-26)', async () => {
+    const { screen, effects, others } = fakeDesktop()
+    expect((await screen.observe()).controls.find((c) => c.ref === REFS.canvas)).toMatchObject({ role: 'other', label: 'canvas (it draws itself)' })
+    await expect(screen.act({ kind: 'click', ref: REFS.canvas })).rejects.toThrow(/needs your mouse for a moment/)
+    expect(effects()).toEqual([])
+    expect(await screen.act({ kind: 'click', ref: REFS.canvas }, { allowPointer: true })).toMatchObject({ mode: 'pointer', at: { x: 825, y: 425 } })
+    expect(others.lines()).toEqual(['xdotool mousemove --sync 825 425 click 1'])
   })
 
   it('asks for the pointer at the centre of a control with no action, and clicks there once allowed', async () => {
@@ -264,8 +276,8 @@ describe.skipIf(!python)('the AT-SPI script against a fake accessibility tree', 
 
   it('sets text directly (multi-line where the box allows it), and refuses line breaks in a single-line box', async () => {
     const { screen, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'type', ref: REFS.body, text: 'Dear Sam,\nsee you at 5.' })).toEqual({ mode: 'background' })
-    expect(await screen.act({ kind: 'type', ref: REFS.password, text: 'correct horse' })).toEqual({ mode: 'background' })
+    expect(await screen.act({ kind: 'type', ref: REFS.body, text: 'Dear Sam,\nsee you at 5.' })).toEqual({ mode: 'background', at: { x: 460, y: 380 } })
+    expect(await screen.act({ kind: 'type', ref: REFS.password, text: 'correct horse' })).toEqual({ mode: 'background', at: { x: 160, y: 115 } })
     await expect(screen.act({ kind: 'type', ref: REFS.subject, text: 'one\ntwo' })).rejects.toThrow(MULTILINE)
     expect(others.calls).toHaveLength(0)
   })

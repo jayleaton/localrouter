@@ -285,18 +285,33 @@ let virtualCursor: VirtualCursor | null = null
 function cursor(): VirtualCursor {
   if (virtualCursor) return virtualCursor
   let win: BrowserWindow | null = null
+  // The page loads after the window is built: the first ring of a task waits for it instead of being dropped (Windows
+  // run, 2026-10-26: no ring 241 ms after a background click).
+  let loaded = false
+  let pending: string | null = null
   const build = (): BrowserWindow => {
+    loaded = false
     const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds
     const bounds = screen.getAllDisplays().reduce((b, d) => ({ x: Math.min(b.x, d.bounds.x), y: Math.min(b.y, d.bounds.y), right: Math.max(b.right, d.bounds.x + d.bounds.width), bottom: Math.max(b.bottom, d.bounds.y + d.bounds.height) }), { x: area.x, y: area.y, right: area.x + area.width, bottom: area.y + area.height })
     const w = new BrowserWindow({ x: bounds.x, y: bounds.y, width: bounds.right - bounds.x, height: bounds.bottom - bounds.y, frame: false, transparent: true, resizable: false, movable: false, focusable: false, skipTaskbar: true, hasShadow: false, show: false, webPreferences: { contextIsolation: true } })
     w.setIgnoreMouseEvents(true)
     w.setAlwaysOnTop(true, 'screen-saver')
     if (process.platform === 'darwin') w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    w.webContents.once('did-finish-load', () => {
+      loaded = true
+      if (pending) run(pending)
+      pending = null
+    })
     void w.loadURL(`data:text/html,${encodeURIComponent(overlayHtml())}`)
     return w
   }
   const run = (js: string) => {
-    if (win && !win.isDestroyed()) void win.webContents.executeJavaScript(js).catch(() => undefined)
+    if (!win || win.isDestroyed()) return
+    if (!loaded) {
+      pending = js
+      return
+    }
+    void win.webContents.executeJavaScript(js).catch(() => undefined)
   }
   const surface: Surface = {
     showAt: (x, y, mode) => {
@@ -352,7 +367,11 @@ async function startLocalExecutor(): Promise<void> {
     // The OS check is open behind other windows: say where it is, in a notification as well as on the card.
     if (e.type === 'approval.update' && e.card.waiting && Notification.isSupported()) new Notification({ title: 'Windows Hello is waiting', body: e.card.waiting }).show()
     // The visible virtual cursor: show where the agent acted; let go of the overlay when the task ends.
-    if (e.type === 'cursor') cursor().show({ x: e.at.x, y: e.at.y, mode: e.mode })
+    if (e.type === 'cursor') {
+      // Windows and Linux report screen pixels; the overlay is placed in Electron's DIPs (a 150 % display differs).
+      const at = process.platform === 'darwin' ? e.at : screen.screenToDipPoint(e.at)
+      cursor().show({ x: at.x, y: at.y, mode: e.mode })
+    }
     if (e.type === 'task' && e.task.status !== 'running') cursor().end()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()

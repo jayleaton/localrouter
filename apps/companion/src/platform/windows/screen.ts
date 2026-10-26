@@ -156,6 +156,12 @@ export const NOTCHES = { up: 3, down: -3, top: 25, bottom: -25 } as const
 
 const done = (value: unknown, what: string) => boolean(object(value, what).done, `${what} done`)
 
+/** Where a semantic action acted (the element's centre, screen pixels), for the overlay ring; absent when unknown. */
+function spot(value: unknown): { at: { x: number; y: number } } | Record<string, never> {
+  const v = object(value, 'semantic')
+  return typeof v.x === 'number' && typeof v.y === 'number' && Number.isFinite(v.x) && Number.isFinite(v.y) ? { at: { x: v.x, y: v.y } } : {}
+}
+
 function target(value: unknown): { hwnd: number; x: number; y: number } {
   const t = object(value, 'target')
   return { hwnd: number(t.hwnd, 'target hwnd'), x: number(t.x, 'target x'), y: number(t.y, 'target y') }
@@ -209,7 +215,7 @@ export class WindowsScreen implements ScreenBackend {
         // A UI Automation pattern (Invoke, Select, Toggle, Expand): no pointer, no focus change. A field, or anything else
         // that takes the keyboard focus, is focused (SetFocus): that is all a click there does.
         const semantic = await call('semantic', { kind: 'click', ref })
-        if (done(semantic, 'click')) return object(semantic, 'click').how === 'focus' ? { mode: 'background', how: 'focused through UI Automation' } : { mode: 'background' }
+        if (done(semantic, 'click')) return { mode: 'background', ...spot(semantic), ...(object(semantic, 'click').how === 'focus' ? { how: 'focused through UI Automation' } : {}) }
         // No pattern: the real pointer, only with the person's leave ("needs your mouse for a moment").
         if (!options.allowPointer) throw new NeedsPointer('that control has no UI Automation pattern to click')
         const at = target(await call('point', { ref }))
@@ -219,7 +225,7 @@ export class WindowsScreen implements ScreenBackend {
         const ref = checkRef(action.ref)
         // ValuePattern sets the field's text in the background: no focus change, the person's keyboard untouched.
         const semantic = object(await call('semantic', { kind: 'type', ref, text: action.text }), 'type')
-        if (boolean(semantic.done, 'type done')) return { mode: 'background', how: semantic.focused === true ? 'value set, field focused' : 'value set, field not focused' }
+        if (boolean(semantic.done, 'type done')) return { mode: 'background', ...spot(semantic), how: semantic.focused === true ? 'value set, field focused' : 'value set, field not focused' }
         if (!options.allowPointer) throw new NeedsPointer('that field has no value pattern and must be typed with the keyboard')
         // Keys cannot type a line break without pressing Enter, which could send or submit.
         if (/[\r\n]/.test(action.text)) throw new Error(NEWLINE_REFUSED)
@@ -236,7 +242,8 @@ export class WindowsScreen implements ScreenBackend {
       case 'scroll': {
         const ref = action.ref === undefined ? undefined : checkRef(action.ref)
         const where = ref ? { ref } : {}
-        if (done(await call('semantic', { kind: 'scroll', direction: action.direction, ...where }), 'scroll')) return { mode: 'background' }
+        const scrolled = await call('semantic', { kind: 'scroll', direction: action.direction, ...where })
+        if (done(scrolled, 'scroll')) return { mode: 'background', ...spot(scrolled) }
         if (!options.allowPointer) throw new NeedsPointer('nothing here scrolls through UI Automation')
         const at = target(await call('point', where))
         return { mode: 'pointer', pointer: pointShape(await call('wheel', { ...at, notches: NOTCHES[action.direction] }), 'pointer'), at: { x: at.x, y: at.y } }

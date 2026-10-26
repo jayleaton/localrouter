@@ -54,6 +54,8 @@ for kind, names in (
     ('row', ('LIST_ITEM', 'TABLE_ROW', 'TREE_ITEM', 'TABLE_CELL')),
     ('menuitem', ('MENU_ITEM', 'CHECK_MENU_ITEM', 'RADIO_MENU_ITEM')),
     ('checkbox', ('CHECK_BOX', 'RADIO_BUTTON', 'SWITCH')),
+    # A surface that draws itself (a drawing app's canvas, a game): a place to click, through the pointer fallback.
+    ('other', ('CANVAS', 'DRAWING_AREA')),
 ):
     for r in roles(*names):
         KINDS[r] = kind
@@ -200,6 +202,8 @@ def observe(req):
                 label = name or safe(acc.get_description, '')
                 if not label and kind not in ('textbox',):
                     label = text_of(acc, 100) or (inner_text(acc) if kind in ('row', 'option', 'button', 'link') else '')
+                if kind == 'other':
+                    label = f'{label} (a canvas: it draws itself)' if label else 'canvas (it draws itself)'
                 control = {'ref': '.'.join(str(n) for n in here), 'role': kind, 'label': clip(label, 100)}
                 if box:
                     control['bounds'] = box
@@ -280,7 +284,8 @@ def click(el, win, app):
     for attempt in tries:
         if attempt(el):
             return {'done': True}
-    if focus_in_place(el):
+    # A canvas is never "clicked" by focusing it: that would draw nothing.
+    if kind != 'other' and focus_in_place(el):
         return {'done': True, 'how': 'focused through AT-SPI'}
     return fallback(el, win, app)
 
@@ -350,11 +355,17 @@ def act(req):
     if op == 'scroll':
         return scroll(resolve(win, req['ref']) if req.get('ref') else None, win, app, req.get('direction', 'down'))
     el = resolve(win, req.get('ref'))
+    # Where it acts, read before acting (a click may close it): the overlay ring shows it there.
+    spot = {'point': center(extents(el)), 'frame': extents(win), 'pid': safe(app.get_process_id, 0)}
     if op == 'click':
-        return click(el, win, app)
-    if op == 'type':
-        return type_text(el, win, app, str(req.get('text', '')))
-    raise Fail('LOCALROUTER_UNKNOWN_OP')
+        out = click(el, win, app)
+    elif op == 'type':
+        out = type_text(el, win, app, str(req.get('text', '')))
+    else:
+        raise Fail('LOCALROUTER_UNKNOWN_OP')
+    if out.get('done'):
+        out.update(spot)
+    return out
 
 def read(req):
     app, win = front(req.get('hint') or {})
@@ -507,13 +518,16 @@ export function observationShape(value: unknown): RawObservation {
 }
 
 /** What an act op answered: done through AT-SPI, or the element's raw centre for the pointer. */
-export type RawAct = { done: true; how?: string } | { done: false; point: Point | null; frame: Rect | null; pid: number; secret: boolean }
+export type RawAct = { done: true; how?: string; point?: Point | null; frame?: Rect | null; pid?: number } | { done: false; point: Point | null; frame: Rect | null; pid: number; secret: boolean }
 
 export function actShape(value: unknown): RawAct {
   const raw = object(value, 'action result')
   if (boolean(raw.done, 'action done')) {
     const how = optional(raw.how, 'action how', string)
-    return how ? { done: true, how } : { done: true }
+    const point = optional(raw.point, 'action point', (v, w) => nullable(v, w, pointShape))
+    const frame = optional(raw.frame, 'action frame', (v, w) => nullable(v, w, boxShape))
+    const pid = optional(raw.pid, 'action pid', (v, w) => integerIn(v, 0, 2 ** 31, w))
+    return { done: true, ...(how ? { how } : {}), ...(point ? { point } : {}), ...(frame ? { frame } : {}), ...(pid !== undefined ? { pid } : {}) }
   }
   return {
     done: false,
@@ -580,7 +594,12 @@ export class LinuxScreen implements ScreenBackend {
     const win = await this.compositorWindow()
     // AT-SPI first (an action or EditableText): the person's pointer and keyboard are never touched.
     const result = actShape(json((await this.call('act', { ...action, hint: hint(win) }, options.signal, win)).trim(), 'action result'))
-    if (result.done) return result.how ? { mode: 'background', how: result.how } : { mode: 'background' }
+    if (result.done) {
+      // The ring's spot, in screen coordinates when the window's origin is known (never a guess on Wayland).
+      const offset = result.point ? windowOffset(this.session, result.frame ?? null, result.pid ?? 0, win) : null
+      const at = result.point && offset ? { x: result.point.x + offset.dx, y: result.point.y + offset.dy } : null
+      return { mode: 'background', ...(at ? { at } : {}), ...(result.how ? { how: result.how } : {}) }
+    }
     // The background could not do it. Without the person's leave for the real pointer, say why and stop here.
     if (!options.allowPointer) throw new NeedsPointer(this.pointerReason(result, win, action))
     if (action.kind === 'type') plainText(action.text) // a line break would be Enter: refused before the keyboard
