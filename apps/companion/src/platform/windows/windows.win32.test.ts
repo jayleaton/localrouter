@@ -112,6 +112,15 @@ Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:LR_CS)) -Language CSharp -
     expect(Array.isArray(tabs.tabs)).toBe(true)
   })
 
+  it('background input (a posted key) does not move the real pointer', { timeout: 120_000 }, async () => {
+    const before = (await worker.call('pointer', {}, { timeoutMs: 20_000 })) as { x: number; y: number }
+    // A key posted to the foreground window's focused control: background, no SendInput, so the pointer is untouched.
+    await worker.call('postkey', { vk: 0x09 }, { timeoutMs: 20_000 }) // VK_TAB, harmless
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const after = (await worker.call('pointer', {}, { timeoutMs: 20_000 })) as { x: number; y: number }
+    expect({ x: after.x, y: after.y }).toEqual({ x: before.x, y: before.y })
+  })
+
   it('asks Windows Hello for a window through IUserConsentVerifierInterop, and reads its answer', { timeout: 180_000 }, async () => {
     // A runner has no Hello set up: the request answers at once (no prompt) with a result, which is what this checks.
     const hello = (await worker.call('hello_available', {}, { timeoutMs: 60_000 })) as { availability: string }

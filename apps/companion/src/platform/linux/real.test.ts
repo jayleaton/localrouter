@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,7 +52,7 @@ describe.runIf(REAL)('Linux, for real (Xvfb, openbox, at-spi, the GTK smoke wind
   it('clicks a button through its accessible action, without the pointer', async () => {
     const press = find(await observe(), 'button', /^Press me$/)!
     const result = await platform.screen!.act({ kind: 'click', ref: press.ref })
-    expect(result).toMatchObject({ background: true })
+    expect(result).toMatchObject({ mode: 'background' })
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect((await observe()).text).toContain('Pressed')
   })
@@ -73,6 +74,22 @@ describe.runIf(REAL)('Linux, for real (Xvfb, openbox, at-spi, the GTK smoke wind
     await platform.screen!.act({ kind: 'click', ref: second.ref })
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect((await observe()).text).toContain('Second page')
+  })
+
+  it('acts in the background on the GTK window while a “user” moves the real pointer, and never moves it itself', async () => {
+    // xdotool is the "user" here: it parks the pointer, and we assert the agent's background clicks never move it.
+    const run = (args: string[]) => execFileSync('xdotool', args, { stdio: 'pipe' }).toString().trim()
+    run(['mousemove', '--sync', '1100', '740'])
+    const before = run(['getmouselocation', '--shell'])
+    for (let i = 0; i < 3; i += 1) {
+      const press = find(await observe(), 'button', /^Press me$/)!
+      const result = await platform.screen!.act({ kind: 'click', ref: press.ref })
+      expect(result).toMatchObject({ mode: 'background' }) // never the real pointer
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect((await observe()).text).toContain('Pressed')
+    // The real pointer is exactly where the "user" left it: the agent did not move it.
+    expect(run(['getmouselocation', '--shell'])).toBe(before)
   })
 
   it('reads the pointer and the display, and takes a scaled screenshot of the window', async () => {

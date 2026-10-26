@@ -4,6 +4,7 @@ import { silentLogger } from '../log.ts'
 import { ComputerUse, ComputerUseRuns, navigationText, navigationUnmet, quotedTargets, resolveTab, siteNamed, soundKey, textToType, unquotedTabName } from './controller.ts'
 import type { Authorize, AuthorizeRequest, ComputerTask, Deps, Grant, RunOptions, Session } from './controller.ts'
 import type { Answer, Answers, Question } from './decisions.ts'
+import { NeedsPointer } from './types.ts'
 import type { BrowserTab, BrowserTabs, Observation, ScreenAction, ScreenBackend, ScreenControl } from './types.ts'
 
 const choice = (value: string, probability = 0.9): Answer => ({ type: 'choice', choice: value, probability })
@@ -294,24 +295,45 @@ describe('ComputerUse', () => {
       expect((last.state as { triedWithoutEffect?: string[] }).triedWithoutEffect).toEqual(['clicked the button “Refresh”'])
     })
 
-    it('tries a background click that changed nothing once more with the pointer, then counts repeats', async () => {
-      const calls: Array<{ action: ScreenAction; pointer: boolean }> = []
-      let pressed = false
+    it('a step the backend cannot do in the background asks the person for their mouse, then does it with the pointer', async () => {
+      const calls: Array<{ kind: string; allow: boolean }> = []
       const page: ScreenBackend = {
         kind: 'desktop',
-        observe: async () => ({ backend: 'desktop', app: 'Mail', title: pressed ? 'Sent' : 'Draft', controls: [control('0.1', 'button', 'Archive')] }),
-        // The accessibility press does nothing in this app; the pointer's click works.
+        observe: async () => ({ backend: 'desktop', app: 'Figma', title: 'Canvas', controls: [control('0.1', 'other', 'drawing canvas', { bounds: { x: 10, y: 20, w: 100, h: 100 } })] }),
         act: async (action, options) => {
-          calls.push({ action, pointer: options?.pointer === true })
-          if (options?.pointer) pressed = true
-          return options?.pointer ? { pointer: { x: 1, y: 1 } } : { background: true }
+          calls.push({ kind: action.kind, allow: options?.allowPointer === true })
+          if (!options?.allowPointer) throw new NeedsPointer('that control draws itself and has no accessible action')
+          return { mode: 'pointer', pointer: { x: 60, y: 70 }, at: { x: 60, y: 70 } }
         },
       }
-      const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('done') }], { page, tabs: null })
-      const outcome = await computer.run({ goal: 'archive the draft', text: null })
-      expect(outcome).toMatchObject({ status: 'done' })
-      expect(calls.map((c) => c.pointer)).toEqual([false, true])
-      expect(outcome.steps.at(-1)).toBe('clicked the button “Archive” (again, with the pointer)')
+      const requests: AuthorizeRequest[] = []
+      const authorize = vi.fn(async (r: AuthorizeRequest): Promise<Grant> => { requests.push(r); return { ok: true, grant: 'allow' } })
+      const { computer } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('done') }], { page, tabs: null }, authorize)
+      const outcome = await computer.run({ goal: 'click the canvas', text: null })
+      expect(outcome.status).toBe('done')
+      // First attempted in the background, then the real pointer after the person allowed it.
+      expect(calls).toEqual([{ kind: 'click', allow: false }, { kind: 'click', allow: true }])
+      // The person was asked for the pointer, with the reason.
+      const pointerReq = requests.find((r) => r.action.kind === 'pointer')
+      expect(pointerReq?.action).toMatchObject({ kind: 'pointer', why: expect.stringMatching(/accessible action/) })
+      expect(outcome.steps.at(-1)).toContain('(with your mouse, as you allowed)')
+    })
+
+    it('a background action that changes nothing is steered away, never retried with the pointer behind the person’s back', async () => {
+      const calls: Array<{ allow: boolean }> = []
+      const page: ScreenBackend = {
+        kind: 'desktop',
+        observe: async () => ({ backend: 'desktop', app: 'Mail', title: 'Inbox', controls: [control('0.1', 'button', 'Refresh'), control('0.2', 'button', 'Archive')] }),
+        act: async (_action, options) => {
+          calls.push({ allow: options?.allowPointer === true })
+          return { mode: 'background' }
+        },
+      }
+      const { computer, asked } = computerWith([{ surface: choice('current') }, { next: choice('c0') }, { next: choice('c0') }, { next: choice('stuck') }], { page, tabs: null })
+      expect(await computer.run({ goal: 'refresh the inbox', text: null })).toMatchObject({ status: 'stuck' })
+      // Refresh was tried once in the background; the same choice on the unchanged screen was steered away, never a pointer click.
+      expect(calls).toEqual([{ allow: false }])
+      expect(Object.keys((asked.at(-1)!.questions.next as { criteria: Record<string, string> }).criteria)).not.toContain('c0')
     })
 
     it('keeps scrolling a list whose rows change even when as many are visible each time', async () => {
@@ -375,7 +397,7 @@ describe('ComputerUse', () => {
             if (focused) loaded = true
             else bar = old // Enter went to the page; the bar reverts to the page's address
           }
-          return { background: action.kind === 'type' }
+          return { mode: 'background' }
         },
       }
       const { authorize, requests } = allowAll()

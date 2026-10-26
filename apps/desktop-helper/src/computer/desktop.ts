@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { array, boolean, json, nullable, number, object, oneOf, optional, string } from '../validate.ts'
 import { execRunner } from './runner.ts'
 import type { CommandRunner } from './runner.ts'
-import { CONTROL_ROLES, fitScale, SCREENSHOT_MAX_EDGE } from './types.ts'
+import { CONTROL_ROLES, fitScale, NeedsPointer, SCREENSHOT_MAX_EDGE } from './types.ts'
 import type { ActOptions, ActResult, Observation, ObserveOptions, Point, PointerReading, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './types.ts'
 
 /**
@@ -119,6 +119,19 @@ function onScreen(point) {
   return false;
 }
 function post(event, dryrun) { if (!dryrun) $.CGEventPost($.kCGHIDEventTap, event); }
+// The process id of a running app by its localized name, for events sent to that process (not the global tap).
+function pidOf(name) {
+  var apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+  for (var i = 0; i < apps.count; i++) { var a = apps.objectAtIndex(i); if (ObjC.unwrap(a.localizedName) === name) return a.processIdentifier; }
+  return $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+}
+// Posts an event to one process, so the person's own pointer and keyboard (the global tap) are untouched. A zero pid
+// falls back to the HID tap; CGEventPostToPid needs a real pid.
+function postToPid(pid, event, dryrun) { if (dryrun) return; if (pid > 0) $.CGEventPostToPid(pid, event); else $.CGEventPost($.kCGHIDEventTap, event); }
+function keyToPid(pid, code) {
+  var down = $.CGEventCreateKeyboardEvent($(), code, true), up = $.CGEventCreateKeyboardEvent($(), code, false);
+  postToPid(pid, down, false); postToPid(pid, up, false);
+}
 function mouse(type, point, dryrun) {
   var event = $.CGEventCreateMouseEvent($(), type, $.CGPointMake(point[0], point[1]), $.kCGMouseButtonLeft);
   $.CGEventSetIntegerValueField(event, $.kCGMouseEventClickState, 1);
@@ -371,8 +384,10 @@ function run(argv) {
   var events = Application('System Events');
   trusted();
   if (op === 'press') {
-    if (!dryrun) events.keyCode(payload.code);
-    return 'ok';
+    // A key to the app's own process (CGEventPostToPid), not the global tap, so the person's keyboard is untouched.
+    var app = front();
+    if (!dryrun) keyToPid(app.app ? pidOf(app.app) : 0, payload.code);
+    return JSON.stringify({ mode: 'background' });
   }
   if (op === 'scroll') {
     var target = null;
@@ -389,15 +404,22 @@ function run(argv) {
     if (!onScreen(target)) throw new Error('LOCALROUTER_OFFSCREEN');
     var up = payload.direction === 'up' || payload.direction === 'top';
     var steps = payload.direction === 'top' || payload.direction === 'bottom' ? 20 : 3;
-    // Scroll events go to the view under the pointer, so it is moved over the scroll area first.
-    mouse($.kCGEventMouseMoved, target, dryrun);
-    for (var n = 0; n < steps; n++) post($.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 1, up ? 15 : -15), dryrun);
-    return JSON.stringify({ x: target[0], y: target[1] });
+    // Scroll wheel events to the window's process, at the scroll area: the person's pointer is not moved.
+    var spid = 0; try { spid = pidOf(front().app); } catch (e) { spid = 0; }
+    for (var n = 0; n < steps; n++) { var ev = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 1, up ? 15 : -15); $.CGEventSetLocation(ev, $.CGPointMake(target[0], target[1])); postToPid(spid, ev, dryrun); }
+    return JSON.stringify({ mode: 'background', at: { x: target[0], y: target[1] } });
+  }
+  if (op === 'setvalue') {
+    var box = resolve(front().win, payload.ref);
+    // AXValue set directly on the field (no keyboard): a native field and Chrome's omnibox take it; others do not.
+    if (dryrun) return JSON.stringify({ mode: 'background' });
+    if ($.AXUIElementSetAttributeValue(box, $('AXValue'), $(payload.text)) !== 0) throw new Error('LOCALROUTER_NEEDS_POINTER:this field does not accept text without the keyboard:');
+    return JSON.stringify({ mode: 'background' });
   }
   if (op === 'keys') {
     if (/[\\r\\n]/.test(payload.text)) throw new Error('LOCALROUTER_NEWLINE');
     if (!dryrun) events.keystroke(payload.text);
-    return 'ok';
+    return JSON.stringify({ mode: 'pointer' });
   }
   var spot = /^v:(-?[\\d.]+),(-?[\\d.]+)$/.exec(String(payload.ref || '')), point, el = null, ax = null;
   if (spot) point = [Number(spot[1]), Number(spot[2])];
@@ -413,16 +435,18 @@ function run(argv) {
     if (!dryrun) paste(ax || front().app, payload.text, events);
     return 'ok';
   }
-  if (op === 'click' && el && payload.pointer !== true && pressable(el)) {
-    if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ background: true });
+  if (op === 'click') {
+    if (el && pressable(el)) { if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ mode: 'background', at: point ? { x: point[0], y: point[1] } : null }); }
+    if (payload.allow !== true) throw new Error('LOCALROUTER_NEEDS_POINTER:that control has no accessible action:');
+    if (!point) throw new Error('LOCALROUTER_GONE');
+    clickAt(point, dryrun);
+    return JSON.stringify({ mode: 'pointer', pointer: { x: point[0], y: point[1] }, at: { x: point[0], y: point[1] } });
   }
   if (!point) throw new Error('LOCALROUTER_GONE');
-  clickAt(point, dryrun);
-  // Where the pointer was left, for the local stop: a later move away from it is the person's.
   var left = { x: point[0], y: point[1] };
-  if (op === 'click') return JSON.stringify(left);
   if (op === 'focus') {
-    if (dryrun || !el) return JSON.stringify(left);
+    if (dryrun || !el) return JSON.stringify({ mode: 'pointer', pointer: left, at: left });
+    clickAt(point, dryrun);
     delay(0.15);
     if (!hasFocus(ax, el)) {
       $.AXUIElementSetAttributeValue(el, $('AXFocused'), $.NSNumber.numberWithBool(true));
@@ -432,7 +456,7 @@ function run(argv) {
     // The text it holds is selected (to be replaced) only when there is any.
     var current = plain(el, 'AXValue');
     if (typeof current === 'string' && current.length) command(ax, 'A', events);
-    return JSON.stringify(left);
+    return JSON.stringify({ mode: 'pointer', pointer: left, at: left });
   }
   throw new Error('LOCALROUTER_UNKNOWN_OP');
 }`
@@ -697,9 +721,9 @@ export class DesktopBackend implements ScreenBackend {
   async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
     const signal = options.signal
     if (signal?.aborted) throw stopped(signal)
-    if (action.kind === 'type') return this.type(action.ref, action.text, signal)
-    const payload = { ...actionPayload(action), ...(options.pointer && action.kind === 'click' ? { pointer: true } : {}) }
-    return pointerOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(payload)], signal))
+    if (action.kind === 'type') return this.type(action.ref, action.text, options)
+    const payload = { ...actionPayload(action), ...(options.allowPointer ? { allow: true } : {}) }
+    return resultOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(payload)], signal))
   }
 
   /**
@@ -707,8 +731,20 @@ export class DesktopBackend implements ScreenBackend {
    * select what it holds through the app's Edit menu, type plain text in chunks a stop can come between (or paste
    * anything else), then read the box back: text that did not land is a failure, not a step done.
    */
-  private async type(ref: string, text: string, signal: AbortSignal | undefined): Promise<ActResult> {
-    const left = pointerOf(await this.call(ACT_SCRIPT, ['focus', JSON.stringify({ ref })], signal))
+  /**
+   * Typing in the background: set the field's value through accessibility (AXValue), which a native field and Chrome's
+   * omnibox take without the keyboard, then read it back. A field that refuses it throws NeedsPointer; with the mouse
+   * allowed, the field is clicked and the text typed (focus checked), or pasted when the keyboard cannot type it.
+   */
+  private async type(ref: string, text: string, options: ActOptions): Promise<ActResult> {
+    const signal = options.signal
+    if (!options.allowPointer) {
+      await this.call(ACT_SCRIPT, ['setvalue', JSON.stringify({ ref, text })], signal)
+      await this.sleep(READBACK_MS)
+      if (!landed(await this.readValue(ref, signal), text)) throw new Error('The text did not land in the text box, so it stopped.')
+      return { mode: 'background', how: 'value set through accessibility' }
+    }
+    const left = resultOf(await this.call(ACT_SCRIPT, ['focus', JSON.stringify({ ref, allow: true })], signal))
     if (KEYBOARD_TEXT.test(text)) {
       for (const chunk of chunks(text, KEY_CHUNK)) {
         if (signal?.aborted) throw stopped(signal)
@@ -718,10 +754,13 @@ export class DesktopBackend implements ScreenBackend {
       await this.call(ACT_SCRIPT, ['paste', JSON.stringify({ ref, text })], signal)
     }
     await this.sleep(READBACK_MS)
+    if (!landed(await this.readValue(ref, signal), text)) throw new Error('The text did not land in the text box, so it stopped.')
+    return { ...left, mode: 'pointer', how: KEYBOARD_TEXT.test(text) ? 'clicked into the field, typed keys' : 'clicked into the field, pasted' }
+  }
+
+  private async readValue(ref: string, signal: AbortSignal | undefined): Promise<string | null> {
     const read = object(json((await this.call(ACT_SCRIPT, ['value', JSON.stringify({ ref })], signal)).trim(), 'typed value'), 'typed value')
-    const value = read.value === null || read.value === undefined ? null : string(read.value, 'typed value')
-    if (!landed(value, text)) throw new Error('The text did not land in the text box, so it stopped.')
-    return { ...left, how: KEYBOARD_TEXT.test(text) ? 'clicked into the field, focus checked, typed keys' : 'clicked into the field, focus checked, pasted' }
+    return read.value === null || read.value === undefined ? null : string(read.value, 'typed value')
   }
 
   async pointer(): Promise<PointerReading> {
@@ -772,17 +811,24 @@ export class DesktopBackend implements ScreenBackend {
   }
 }
 
-/** The pointer position an act script printed (`{"x":…,"y":…}`), or nothing when it did not move it. */
-function pointerOf(output: string): ActResult {
+/** An act script's result: its mode ("background" or "pointer"), where it acted (`at`) and where it left the real pointer. */
+function resultOf(output: string): ActResult {
   const text = output.trim()
-  if (!text.startsWith('{')) return {}
+  if (!text.startsWith('{')) return { mode: 'background' }
+  let value: { mode?: unknown; at?: unknown; pointer?: unknown }
   try {
-    const value = JSON.parse(text) as { background?: unknown }
-    if (value.background === true) return { background: true }
-    return { pointer: pointShape(value) }
+    value = JSON.parse(text) as typeof value
   } catch {
-    return {}
+    return { mode: 'background' }
   }
+  const mode: ActResult['mode'] = value.mode === 'pointer' ? 'pointer' : 'background'
+  const point = (v: unknown) => (v && typeof v === 'object' ? pointShape(v) : undefined)
+  const result: ActResult = { mode }
+  const at = point(value.at)
+  const pointer = point(value.pointer)
+  if (at) result.at = at
+  if (pointer) result.pointer = pointer
+  return result
 }
 
 /** `sips -g pixelWidth -g pixelHeight` output → the image's size. */
@@ -802,6 +848,8 @@ function explain(message: string): Error | null {
   if (message.includes('LOCALROUTER_NO_APP')) return new Error('No app is in front on the Mac.')
   if (message.includes('LOCALROUTER_NO_WINDOW')) return new Error('The app in front has no open window.')
   if (message.includes('LOCALROUTER_OFFSCREEN')) return new Error('That control is off screen; scroll it into view first.')
+  const needs = message.match(/LOCALROUTER_NEEDS_POINTER:([^:]*):/)
+  if (needs) return new NeedsPointer(needs[1].trim() || 'it has no accessible action')
   if (message.includes('LOCALROUTER_NOT_FOCUSED')) return new Error('The text box did not take the typing focus, so nothing was typed.')
   if (message.includes('LOCALROUTER_NEWLINE')) return new Error('Line breaks are never typed as keys (a Return could send a message).')
   return macAccessError(message)

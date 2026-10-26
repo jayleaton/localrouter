@@ -1,5 +1,5 @@
 import type { CommandRunner } from '../../../../desktop-helper/src/computer/runner.ts'
-import { CONTROL_ROLES } from '../../../../desktop-helper/src/computer/types.ts'
+import { CONTROL_ROLES, NeedsPointer } from '../../../../desktop-helper/src/computer/types.ts'
 import type { ActOptions, ActResult, Observation, ObserveOptions, Point, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from '../../../../desktop-helper/src/computer/types.ts'
 import { array, boolean, integerIn, json, nullable, number, object, oneOf, optional, string } from '../../../../desktop-helper/src/validate.ts'
 import { activeWindow } from './compositor.ts'
@@ -337,8 +337,6 @@ def act(req):
     if op == 'scroll':
         return scroll(resolve(win, req['ref']) if req.get('ref') else None, win, app, req.get('direction', 'down'))
     el = resolve(win, req.get('ref'))
-    if op == 'click' and req.get('pointer'):
-        return fallback(el, win, app)
     if op == 'click':
         return click(el, win, app)
     if op == 'type':
@@ -564,19 +562,20 @@ export class LinuxScreen implements ScreenBackend {
   async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
     if (action.kind === 'press') return this.press(action.key, options)
     const win = await this.compositorWindow()
-    // `pointer`: the click goes straight to the pointer fallback (a background action left the screen as it was).
-    const result = actShape(json((await this.call('act', { ...action, ...(options.pointer && action.kind === 'click' ? { pointer: true } : {}), hint: hint(win) }, options.signal, win)).trim(), 'action result'))
-    if (result.done) return { background: true }
-    // Line breaks through the keyboard would be Enter: refused before the pointer or keyboard is touched.
-    if (action.kind === 'type') plainText(action.text)
+    // AT-SPI first (an action or EditableText): the person's pointer and keyboard are never touched.
+    const result = actShape(json((await this.call('act', { ...action, hint: hint(win) }, options.signal, win)).trim(), 'action result'))
+    if (result.done) return { mode: 'background' }
+    // The background could not do it. Without the person's leave for the real pointer, say why and stop here.
+    if (!options.allowPointer) throw new NeedsPointer(this.pointerReason(result, win, action))
+    if (action.kind === 'type') plainText(action.text) // a line break would be Enter: refused before the keyboard
     const point = this.globalPoint(result, win)
     if (action.kind === 'click') {
       await this.injector.click(point, options)
-      return { pointer: point }
+      return { mode: 'pointer', pointer: point, at: point }
     }
     if (action.kind === 'scroll') {
       await this.injector.scroll(point, action.direction, options)
-      return { pointer: point }
+      return { mode: 'pointer', pointer: point, at: point }
     }
     await this.injector.click(point, options)
     await this.injector.key('select_all', options)
@@ -585,20 +584,34 @@ export class LinuxScreen implements ScreenBackend {
       const read = object(json((await this.call('read', { ref: action.ref, hint: hint(win) }, options.signal, win)).trim(), 'text read back'), 'text read back')
       if (string(read.text, 'text read back') !== action.text) throw new Error('The text did not land in that box as typed; look again before trying another way.')
     }
-    return { pointer: point }
+    return { mode: 'pointer', pointer: point, at: point }
+  }
+
+  /** Why a step needs the real pointer: the compositor cannot inject one, or the control has no accessible action. */
+  private pointerReason(result: Extract<RawAct, { done: false }>, win: ActiveWindow | null, action: ScreenAction): string {
+    if (this.injector.noPointer) return this.injector.noPointer
+    if (action.kind !== 'scroll' && !result.point) return 'that control has no accessible action and is not on screen'
+    if (action.kind !== 'scroll' && !windowOffset(this.session, result.frame, result.pid, win)) return NO_ORIGIN
+    return 'that control has no accessible action'
   }
 
   /** Keys are global events either way (not background): the injector, or AT-SPI's own on X11 when xdotool is missing. */
+  /**
+   * A key press. On Linux every route (XTest, ydotool, AT-SPI's own generate_keyboard_event) sends the key to the
+   * focused window globally: there is no per-window background key. So a press needs the real keyboard, which the
+   * person allows for the step ("needs your mouse for a moment"); until then it is refused.
+   */
   private async press(key: PressKey, options: ActOptions): Promise<ActResult> {
-    if (!this.injector.noKeys) {
-      await this.injector.key(key, options)
-      return {}
+    if (!options.allowPointer) throw new NeedsPointer('a key press reaches the focused window on Linux, so it needs the real keyboard')
+    if (this.injector.noKeys) {
+      if (this.session.server === 'x11') {
+        const out = object(json((await this.call('key', { keysym: PRESS_KEYSYMS[key] }, options.signal, null)).trim(), 'key'), 'key')
+        if (boolean(out.done, 'key done')) return { mode: 'pointer' }
+      }
+      throw new NeedsPointer(this.injector.noKeys)
     }
-    if (this.session.server === 'x11') {
-      const out = object(json((await this.call('key', { keysym: PRESS_KEYSYMS[key] }, options.signal, null)).trim(), 'key'), 'key')
-      if (boolean(out.done, 'key done')) return {}
-    }
-    throw new Error(this.injector.noKeys)
+    await this.injector.key(key, options)
+    return { mode: 'pointer' }
   }
 
   /** The element's centre in the global space, or the refusal when it cannot be known. */

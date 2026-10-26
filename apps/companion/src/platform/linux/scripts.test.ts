@@ -230,35 +230,42 @@ describe.skipIf(!python)('the AT-SPI script against a fake accessibility tree', 
 
   it('clicks with the element’s own action, selects tabs and rows in their parent, and needs no pointer for either', async () => {
     const { screen, effects, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'click', ref: REFS.send })).toEqual({ background: true })
-    expect(await screen.act({ kind: 'click', ref: REFS.news })).toEqual({ background: true })
+    expect(await screen.act({ kind: 'click', ref: REFS.send })).toEqual({ mode: 'background' })
+    expect(await screen.act({ kind: 'click', ref: REFS.news })).toEqual({ mode: 'background' })
     expect(effects()).toEqual([{ action: 'press', on: 'Send' }, { select: 1, in: 'PAGE_TAB_LIST' }])
     expect(others.calls).toHaveLength(0)
   })
 
-  it('falls back to the pointer at the centre of a control with no action', async () => {
+  it('asks for the pointer at the centre of a control with no action, and clicks there once allowed', async () => {
+    const refused = fakeDesktop()
+    await expect(refused.screen.act({ kind: 'click', ref: REFS.attach })).rejects.toThrow(/needs your mouse for a moment/)
+    expect(refused.others.lines()).toEqual([])
     const { screen, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'click', ref: REFS.attach })).toEqual({ pointer: { x: 415, y: 715 } })
+    expect(await screen.act({ kind: 'click', ref: REFS.attach }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 415, y: 715 }, at: { x: 415, y: 715 } })
     expect(others.lines()).toEqual(['xdotool mousemove --sync 415 715 click 1'])
   })
 
   it('sets text directly (multi-line where the box allows it), and refuses line breaks in a single-line box', async () => {
     const { screen, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'type', ref: REFS.body, text: 'Dear Sam,\nsee you at 5.' })).toEqual({ background: true })
-    expect(await screen.act({ kind: 'type', ref: REFS.password, text: 'correct horse' })).toEqual({ background: true })
+    expect(await screen.act({ kind: 'type', ref: REFS.body, text: 'Dear Sam,\nsee you at 5.' })).toEqual({ mode: 'background' })
+    expect(await screen.act({ kind: 'type', ref: REFS.password, text: 'correct horse' })).toEqual({ mode: 'background' })
     await expect(screen.act({ kind: 'type', ref: REFS.subject, text: 'one\ntwo' })).rejects.toThrow(MULTILINE)
     expect(others.calls).toHaveLength(0)
   })
 
   it('types through the keyboard when the box ignores a direct set, and fails clearly when the text still did not land', async () => {
     const { screen, others } = fakeDesktop()
-    await expect(screen.act({ kind: 'type', ref: REFS.subject, text: 'Lunch' })).rejects.toThrow('The text did not land in that box as typed')
-    expect(others.lines()).toEqual(['xdotool mousemove --sync 310 155 click 1', 'xdotool key --clearmodifiers ctrl+a', 'xdotool type --clearmodifiers --delay 12 -- Lunch'])
+    // Without the mouse allowed, a box that ignores a direct set asks for it rather than typing with the keyboard.
+    await expect(screen.act({ kind: 'type', ref: REFS.subject, text: 'Lunch' })).rejects.toThrow(/needs your mouse for a moment/)
+    expect(others.lines()).toEqual([])
+    const allowed = fakeDesktop()
+    await expect(allowed.screen.act({ kind: 'type', ref: REFS.subject, text: 'Lunch' }, { allowPointer: true })).rejects.toThrow('The text did not land in that box as typed')
+    expect(allowed.others.lines()).toEqual(['xdotool mousemove --sync 310 155 click 1', 'xdotool key --clearmodifiers ctrl+a', 'xdotool type --clearmodifiers --delay 12 -- Lunch'])
   })
 
   it('scrolls a list through its scroll bar’s value, found next to it in the scrolled pane', async () => {
     const { screen, effects, others } = fakeDesktop()
-    expect(await screen.act({ kind: 'scroll', direction: 'down', ref: REFS.row })).toEqual({ background: true })
+    expect(await screen.act({ kind: 'scroll', direction: 'down', ref: REFS.row })).toEqual({ mode: 'background' })
     expect(effects()).toEqual([{ scroll_to: 200 }])
     expect(others.calls).toHaveLength(0)
   })

@@ -2,6 +2,7 @@
 import type { Logger } from '../log.ts'
 import { choiceProbability } from './decisions.ts'
 import type { Answers, Decider, Question } from './decisions.ts'
+import { needsPointer } from './types.ts'
 import type { ActResult, BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
@@ -40,6 +41,11 @@ export type AuthorizeAction =
   | { kind: 'press'; key: 'enter' | 'escape' | 'tab' | 'space'; field?: { role: ScreenControl['role']; label: string } }
   | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom' }
   | { kind: 'surface'; what: 'tab' | 'app'; name: string }
+  /**
+   * The real pointer and keyboard for one step that cannot be done in the background (`step`: the action, `why`: the
+   * backend's reason). Always the person's to approve, on the card "needs your mouse for a moment".
+   */
+  | { kind: 'pointer'; step: string; why: string; target: { role: ScreenControl['role']; label: string } | null }
 
 export type AuthorizeRequest = { step: number; observation: ObservationSummary; action: AuthorizeAction }
 
@@ -61,6 +67,8 @@ export type Session = {
   authorize: Authorize
   /** Each thing it did, in words ("clicked the button “Search”"), as it happens. */
   onStep?: (text: string) => void
+  /** Each action as it was done (background or pointer, where): the audit and the visible virtual cursor. */
+  onAct?: (action: ScreenAction, result: ActResult) => void
 }
 
 export type Deps = Session & {
@@ -190,9 +198,6 @@ export class ComputerUse {
       // again but left out of that screen's next question, with the decider told so. Steering instead of retrying.
       const acted = new Set<string>()
       const avoidBy = new Map<string, Map<string, string>>()
-      // The signature of an action done in the background (an accessibility action, no pointer): the same action on a
-      // screen it left unchanged is first tried once more with the real pointer, and only then steered away from.
-      let backgroundAt = ''
       for (let step = 0; step < run.maxSteps; step += 1) {
         this.checkpoint(run)
         const screen = await backend.observe({ signal: run.signal })
@@ -224,21 +229,20 @@ export class ComputerUse {
         const signature = `${JSON.stringify(action)}|${key}`
         // Typing is offered again only when the field lost the text (the app put its own back, often leaving the screen as
         // it was before), and its read-back fails a step that did not land: it has its own guard.
+        // A background action that left the screen as it was is not retried with the real pointer behind the person's back:
+        // it is steered away from like any other, and only an action the backend says needs the pointer asks for it.
         const same = acted.has(signature) && action.kind !== 'type'
-        const viaPointer = same && backgroundAt === signature
-        if (same && !viaPointer) {
+        if (same) {
           avoid.set(actionKey(action), said)
-          backgroundAt = ''
           continue
         }
         acted.add(signature)
-        const result = await this.act(run, backend, screen, action, said, viaPointer)
+        await this.act(run, backend, screen, action, said)
         // Typing starts a new attempt: what was tried before it (an Enter the app lost) may be right again after it.
         if (action.kind === 'type') {
           acted.clear()
           avoidBy.clear()
         }
-        backgroundAt = result?.background && !viaPointer ? signature : ''
         await this.sleep(this.settleMs)
       }
       return end('stuck', `It did not finish within ${run.maxSteps} steps.`)
@@ -320,33 +324,65 @@ export class ComputerUse {
   }
 
   /**
-   * One action on screen: the control it names must be on the screen it was chosen from, the box must
-   * grant it, and after a tap (time has passed) the same control must still be there, or nothing happens.
+   * One action on screen: the control it names must be on the screen it was chosen from, the box must grant it, and
+   * after a tap (time has passed) the same control must still be there, or nothing happens. It is done in the background
+   * (the person's pointer, focus and keyboard untouched). When the backend says it cannot be, the person is asked for
+   * their mouse for a moment; only on that approval is it done with the real pointer, once.
    */
-  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string, pointer = false): Promise<ActResult | void> {
+  private async act(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction, said: string): Promise<ActResult> {
     const request = this.request(run, screen, action)
     const grant = await this.authorize(run, summary(screen), request)
-    if (grant === 'approved' && (action.kind === 'click' || action.kind === 'type')) {
-      const chosen = this.control(screen, action.ref)
-      const now = await backend.observe({ signal: run.signal })
-      const same = now.controls.find((control) => control.ref === action.ref)
-      if (now.app !== screen.app || !same || same.role !== chosen.role || same.label !== chosen.label) {
-        throw new Halt('stuck', 'The screen changed while it waited for your OK, so it did not act.')
-      }
-    }
+    if (grant === 'approved') await this.sameControl(run, backend, screen, action)
     await this.beforeTouching(run)
-    run.watch?.moving()
-    let left: Awaited<ReturnType<ScreenBackend['act']>>
+    let result: ActResult
     try {
-      left = await backend.act(action, { signal: run.signal, ...(pointer ? { pointer: true } : {}) })
+      result = await this.perform(run, backend, action, false)
     } catch (error) {
-      run.watch?.left(null)
+      if (!needsPointer(error)) throw error
+      const target = action.kind === 'click' || action.kind === 'type' ? this.control(screen, action.ref) : null
+      await this.authorize(run, summary(screen), { kind: 'pointer', step: said, why: error.why, target: target ? { role: target.role, label: target.label } : null })
+      await this.sameControl(run, backend, screen, action)
+      await this.beforeTouching(run)
+      result = await this.perform(run, backend, action, true)
+    }
+    if (action.kind === 'type') run.typedInto = this.control(screen, action.ref)
+    // Where the agent acted, for the visible virtual cursor: the backend's point, else the chosen control's centre.
+    if (!result.at && (action.kind === 'click' || action.kind === 'type')) {
+      const b = this.control(screen, action.ref).bounds
+      if (b) result.at = { x: Math.round(b.x + b.w / 2), y: Math.round(b.y + b.h / 2) }
+    }
+    this.record(run, result.mode === 'pointer' ? `${said} (with your mouse, as you allowed)` : said)
+    this.deps.onAct?.(action, result)
+    return result
+  }
+
+  /** After a wait for the person: the control it chose is still there, on the same app, or nothing happens. */
+  private async sameControl(run: Run, backend: ScreenBackend, screen: Observation, action: ScreenAction) {
+    if (action.kind !== 'click' && action.kind !== 'type') return
+    const chosen = this.control(screen, action.ref)
+    const now = await backend.observe({ signal: run.signal })
+    const same = now.controls.find((control) => control.ref === action.ref)
+    if (now.app !== screen.app || !same || same.role !== chosen.role || same.label !== chosen.label) {
+      throw new Halt('stuck', 'The screen changed while it waited for your OK, so it did not act.')
+    }
+  }
+
+  /**
+   * Hands the action to the backend. In the background the person's own pointer is theirs: the local stop is not told
+   * the helper moves it (it does not). With the pointer, the watch is told, so the helper's own movement is not taken
+   * for the person's.
+   */
+  private async perform(run: Run, backend: ScreenBackend, action: ScreenAction, allowPointer: boolean): Promise<ActResult> {
+    if (allowPointer) run.watch?.moving()
+    let result: ActResult
+    try {
+      result = (await backend.act(action, { signal: run.signal, ...(allowPointer ? { allowPointer: true } : {}) })) ?? { mode: 'background' }
+    } catch (error) {
+      if (allowPointer) run.watch?.left(null)
       throw error
     }
-    run.watch?.left(typeof left === 'object' && left !== null ? left.pointer : undefined)
-    if (action.kind === 'type') run.typedInto = this.control(screen, action.ref)
-    this.record(run, pointer ? `${said} (again, with the pointer)` : said)
-    return left
+    if (allowPointer) run.watch?.left(result.pointer)
+    return result
   }
 
   /** The control a ref names on this screen; a ref that is not on it is never acted on. */

@@ -1,4 +1,4 @@
-import { CONTROL_ROLES, fitScale, SCREENSHOT_MAX_EDGE } from '../../../../desktop-helper/src/computer/types.ts'
+import { CONTROL_ROLES, fitScale, NeedsPointer, SCREENSHOT_MAX_EDGE } from '../../../../desktop-helper/src/computer/types.ts'
 import type { ActOptions, ActResult, Observation, ObserveOptions, Point, PointerReading, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from '../../../../desktop-helper/src/computer/types.ts'
 import { array, boolean, integerIn, number, object, oneOf, optional, string } from '../../../../desktop-helper/src/validate.ts'
 import type { WindowsCall } from './worker.ts'
@@ -194,21 +194,31 @@ export class WindowsScreen implements ScreenBackend {
     const signal = options.signal
     const call = (op: string, args: Record<string, unknown>) => ask(this.worker, op, args, { signal })
     switch (action.kind) {
-      case 'press':
-        // A key goes to whatever has focus: no ref, no pattern, so always a real key event.
+      case 'press': {
+        // In the background the key is posted to the foreground window's focused control (no SendInput). When that is
+        // refused — or the person allowed the real keyboard — a SendInput key event.
+        if (!options.allowPointer) {
+          await call('postkey', { vk: VK[action.key] })
+          return { mode: 'background', how: 'key posted to the focused control' }
+        }
         await call('key', { vk: VK[action.key] })
-        return {}
+        return { mode: 'pointer', how: 'key event (SendInput)' }
+      }
       case 'click': {
         const ref = checkRef(action.ref)
-        // `pointer`: straight to SendInput (a pattern click left the screen as it was).
-        if (!options.pointer && done(await call('semantic', { kind: 'click', ref }), 'click')) return { background: true }
+        // A UI Automation pattern (Invoke, Select, Toggle, Expand): no pointer, no focus change.
+        if (done(await call('semantic', { kind: 'click', ref }), 'click')) return { mode: 'background' }
+        // No pattern: the real pointer, only with the person's leave ("needs your mouse for a moment").
+        if (!options.allowPointer) throw new NeedsPointer('that control has no UI Automation pattern to click')
         const at = target(await call('point', { ref }))
-        return { pointer: pointShape(await call('click', at), 'pointer') }
+        return { mode: 'pointer', pointer: pointShape(await call('click', at), 'pointer'), at: { x: at.x, y: at.y } }
       }
       case 'type': {
         const ref = checkRef(action.ref)
+        // ValuePattern sets the field's text in the background: no focus change, the person's keyboard untouched.
         const semantic = object(await call('semantic', { kind: 'type', ref, text: action.text }), 'type')
-        if (boolean(semantic.done, 'type done')) return { background: true, how: semantic.focused === true ? 'value set, field focused' : 'value set, field not focused' }
+        if (boolean(semantic.done, 'type done')) return { mode: 'background', how: semantic.focused === true ? 'value set, field focused' : 'value set, field not focused' }
+        if (!options.allowPointer) throw new NeedsPointer('that field has no value pattern and must be typed with the keyboard')
         // Keys cannot type a line break without pressing Enter, which could send or submit.
         if (/[\r\n]/.test(action.text)) throw new Error(NEWLINE_REFUSED)
         const at = target(await call('point', { ref }))
@@ -219,14 +229,15 @@ export class WindowsScreen implements ScreenBackend {
           throwIfAborted(signal)
           await call('type', { hwnd: at.hwnd, text: chunk })
         }
-        return { pointer, how: 'clicked into the field, selected its text, typed keys' }
+        return { mode: 'pointer', pointer, at: { x: at.x, y: at.y }, how: 'clicked into the field, selected its text, typed keys' }
       }
       case 'scroll': {
         const ref = action.ref === undefined ? undefined : checkRef(action.ref)
         const where = ref ? { ref } : {}
-        if (done(await call('semantic', { kind: 'scroll', direction: action.direction, ...where }), 'scroll')) return { background: true }
+        if (done(await call('semantic', { kind: 'scroll', direction: action.direction, ...where }), 'scroll')) return { mode: 'background' }
+        if (!options.allowPointer) throw new NeedsPointer('nothing here scrolls through UI Automation')
         const at = target(await call('point', where))
-        return { pointer: pointShape(await call('wheel', { ...at, notches: NOTCHES[action.direction] }), 'pointer') }
+        return { mode: 'pointer', pointer: pointShape(await call('wheel', { ...at, notches: NOTCHES[action.direction] }), 'pointer'), at: { x: at.x, y: at.y } }
       }
     }
   }

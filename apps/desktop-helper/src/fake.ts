@@ -1,7 +1,7 @@
 import { MacControls } from './computer/macControls.ts'
 import type { ComputerControl } from './computer/macControls.ts'
-import { fitScale, SCREENSHOT_MAX_EDGE } from './computer/types.ts'
-import type { ActResult, Observation, Point, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './computer/types.ts'
+import { fitScale, NeedsPointer, SCREENSHOT_MAX_EDGE } from './computer/types.ts'
+import type { ActOptions, ActResult, Observation, Point, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './computer/types.ts'
 
 /**
  * A deterministic, in-memory Mac for tests and for `LOCALROUTER_DESKTOP_FAKE=1` smokes against a real
@@ -51,14 +51,31 @@ export class FakeNotes implements ScreenBackend {
     return { backend: 'desktop', app: 'Notes', title, controls, text }
   }
 
-  async act(action: ScreenAction): Promise<ActResult> {
+  /** Refs that cannot be acted on in the background (a canvas): acting on them needs the person's mouse. */
+  readonly pointerOnly = new Set<string>()
+  /** How each action was done, in order. */
+  readonly modes: Array<'background' | 'pointer'> = []
+
+  /**
+   * Acts like an accessibility action: the real pointer stays where the person has it, and `at` says where it acted
+   * (the virtual cursor). A ref in `pointerOnly` needs the real pointer, which only `allowPointer` gives.
+   */
+  async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
+    const ref = 'ref' in action ? action.ref : undefined
+    const pointer = ref !== undefined && this.pointerOnly.has(ref)
+    if (pointer && !options.allowPointer) throw new NeedsPointer('that control draws itself and has no accessible action')
     this.actions.push(action)
+    const mode = pointer ? 'pointer' : 'background'
+    this.modes.push(mode)
+    const done = (at: Point | undefined): ActResult => {
+      if (pointer && at) this.at = at
+      return { mode, ...(at ? { at } : {}), ...(pointer && at ? { pointer: at } : {}) }
+    }
     switch (action.kind) {
       case 'click': {
         const point = this.spot(action.ref)
         this.click(action.ref)
-        this.at = point
-        return { pointer: point }
+        return done(point)
       }
       case 'type': {
         if (action.ref !== 'search') throw new Error('That control is gone; look again.')
@@ -66,8 +83,7 @@ export class FakeNotes implements ScreenBackend {
         this.query = action.text
         this.searched = false
         this.focus = 'search'
-        this.at = point
-        return { pointer: point }
+        return done(point)
       }
       case 'press':
         if (action.key === 'enter' && this.focus === 'search' && this.query) this.searched = true
@@ -75,10 +91,9 @@ export class FakeNotes implements ScreenBackend {
           this.query = ''
           this.searched = false
         }
-        return {}
+        return done(undefined)
       case 'scroll':
-        this.at = { x: 400, y: 300 }
-        return { pointer: this.at }
+        return done({ x: 400, y: 300 })
     }
   }
 

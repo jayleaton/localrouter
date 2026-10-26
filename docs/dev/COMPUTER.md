@@ -234,25 +234,40 @@ person enrolls them in the app.
 
 ## Background control (the "virtual cursor")
 
-Where the OS lets an app act on a control through accessibility, the executor does that instead of moving the
-person's pointer or sending global keys: the action reports `background`, the pointer stays where the person left it,
-and the local stop sees no movement of its own. When a background action leaves the screen exactly as it was and the
-next step is the same action, it is done once more with the real pointer (`ActOptions.pointer`), so an app whose
-accessible action does nothing still works; only then do repeats count toward "stuck".
+Computer use runs as a **virtual mouse**: the person keeps working in their own apps while the agent acts alongside.
+Every action targets a window or control through accessibility, without moving the real pointer, changing focus or
+sending global keys. The result carries `mode: 'background'`, the real pointer stays where the person left it, and the
+local stop ignores their pointer and typing (they are expected to be working). The **emergency stop** still ends the
+task at once: the pointer in a top-left corner, the keyboard shortcut (⌘⇧⎋ on macOS, Ctrl+Shift+Alt+Esc elsewhere), or
+the Stop button.
+
+A step that genuinely cannot be done in the background (a canvas or game with no accessible control, an app that
+ignores posted input) throws `NeedsPointer`; the controller then asks the person on the approval card ("needs your
+mouse for a moment"). Only on that approval is the step done with the **real pointer** (`mode: 'pointer'`), once, and
+only while that step runs does the person's own pointer movement count as taking over.
+
+The overlay shows where the agent acts: a soft ring for a background action, a filled dot for a pointer step
+(`apps/companion/src/app/overlay.ts`), a transparent click-through always-on-top window that never takes focus. Every
+action is audited as `act { kind, mode, how }` — never the typed text.
 
 | | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Click | `AXPress` on buttons, links, checkboxes, radio buttons, menu items and pop-up buttons; rows, text and screenshot spots use the pointer | AT-SPI Action (`click`/`press`/`activate`) or Selection on the parent (tabs, list items), every session | `Invoke`, `SelectionItem.Select`, `Toggle`, `ExpandCollapse` (a modal that holds the call past 2.5 s counts as done) |
-| Type | the keyboard (focus checked, Select All through the Edit menu, read back) | `EditableText.set_text_contents` (or delete + insert), read back; else the injector | `ValuePattern.SetValue`, read back; else SendInput |
-| Scroll | wheel events over the scroll area (moves the pointer) | `Component.scroll_to` / the scroll bar's value | `ScrollPattern` |
-| Keys (Enter, Tab…) | global key events | global key events (injector) | global key events (SendInput) |
-| Surface (tab, app forward) | Dock click / tab-strip click (pointer) | AT-SPI Selection on the tab strip; compositor focus | `SelectionItem.Select` on the tab strip; `SetForegroundWindow` |
+| Click | `AXPress` on buttons, links, checkboxes, radio buttons, menu items, pop-up buttons; else `NeedsPointer` | AT-SPI Action (`click`/`press`/`activate`) or `Selection` on the parent (tabs, rows); else `NeedsPointer` | `Invoke`, `SelectionItem.Select`, `Toggle`, `ExpandCollapse` (a modal holding the call past 2.5 s counts as done); else `NeedsPointer` |
+| Type | `AXSetValue` (native fields and Chrome's omnibox), read back; else `NeedsPointer` → keyboard | `EditableText.set_text_contents` (focus first), read back; else `NeedsPointer` → keyboard | `ValuePattern.SetValue` (focus first), read back; else `NeedsPointer` → keyboard |
+| Scroll | wheel events to the app's own process (`CGEventPostToPid`) at the scroll area | `Component.scroll_to` / the scroll bar's `Value` | `ScrollPattern`; else `NeedsPointer` → wheel |
+| Keys (Enter, Tab…) | `CGEventPostToPid` to the app's process | every route is global/focused → `NeedsPointer` (real keyboard) | `PostMessage` WM_KEYDOWN/WM_CHAR/WM_KEYUP to the focused control (`postkey`); the real keyboard only with leave |
+| Surface (tab, app forward) | Dock / tab-strip | AT-SPI `Selection`; compositor focus | `SelectionItem.Select`; `SetForegroundWindow` |
 
-How far this goes today: actions still target the window in front. Working in an app behind the one the person uses
-(observing and acting on a named app's window without bringing it forward) is the next step: AX and UI Automation
-both read and act on background windows, AT-SPI too where the app exposes them, but keys, typing through the keyboard
-and anything the pointer does still need the window in front, and approvals bind to what is on screen. Until then the
-person moving the pointer during a task still counts as taking over, since both would use the same window.
+**What still needs the real pointer, per OS** (the person approves it for the step):
+- **macOS:** a click on a control with no `AXPress`; typing into a field that refuses `AXValue`. Keys and per-process
+  scroll go to the app's PID in the background, but a backgrounded Chromium may need to be frontmost for key events to
+  land (Chromium honours per-PID clicks only from v157); verify on a real Mac.
+- **Linux:** any key press (XTest, ydotool and AT-SPI's own key events all reach the focused window globally, so there
+  is no background key); a click or type on a control with no accessible action. On GNOME/KDE Wayland the pointer
+  cannot be placed by another app at all, so those fall through to the approval and then fail unless frontmost.
+- **Windows:** a click with no UI Automation pattern; a field with no `ValuePattern`. Posted keys (`postkey`) are
+  best-effort — many apps read raw input or key state and ignore them, and Chromium/Electron render widgets often do —
+  so a press that does nothing falls to the real keyboard with leave. Verify posted-key reliability on a real PC.
 
 ## Status
 

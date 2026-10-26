@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fitScale } from '../../../../desktop-helper/src/computer/types.ts'
 import { chunks, displaysShape, explain, NEWLINE_REFUSED, screenshotShape, WindowsScreen } from './screen.ts'
+import { needsPointer } from '../../../../desktop-helper/src/computer/types.ts'
 import type { CallOptions, WindowsCall } from './worker.ts'
 import { HELPER_CS } from './helper.cs.ts'
 
@@ -69,37 +70,31 @@ describe('WindowsScreen observe', () => {
 describe('WindowsScreen act', () => {
   it('clicks through a UI Automation pattern first: no pointer, reported as background', async () => {
     const { worker, calls } = fakeWorker(() => ({ done: true, how: 'invoke' }))
-    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ background: true })
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ mode: 'background' })
     expect(calls.map((c) => c.op)).toEqual(['semantic'])
     expect(calls[0]!.args).toEqual({ kind: 'click', ref: REF })
   })
 
   it('counts a pattern click still running (a modal dialog it opened holds Invoke) as done, without a pointer fallback', async () => {
     const { worker, calls } = fakeWorker(() => ({ done: true, how: 'invoke', pending: true }))
-    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ background: true })
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ mode: 'background' })
     expect(calls.map((c) => c.op)).toEqual(['semantic'])
   })
 
-  it('falls back to a real click at the control when it has no pattern, and reports where the pointer was left', async () => {
-    const { worker, calls } = fakeWorker((call) => {
-      if (call.op === 'semantic') return { done: false, how: '' }
-      if (call.op === 'point') return { hwnd: 1311234, x: 240, y: 80 }
-      return { x: 240, y: 80 }
-    })
-    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ pointer: { x: 240, y: 80 } })
-    expect(calls.map((c) => c.op)).toEqual(['semantic', 'point', 'click'])
-    expect(calls[2]!.args).toEqual({ hwnd: 1311234, x: 240, y: 80 })
-  })
-
-  it('clicks with the real pointer, skipping the pattern, when the pointer is asked for', async () => {
-    const { worker, calls } = fakeWorker((call) => (call.op === 'point' ? { hwnd: 1311234, x: 240, y: 80 } : { x: 240, y: 80 }))
-    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF }, { pointer: true })).toEqual({ pointer: { x: 240, y: 80 } })
-    expect(calls.map((c) => c.op)).toEqual(['point', 'click'])
+  it('asks the person for their mouse when a control has no UI Automation pattern, then clicks there once allowed', async () => {
+    const respond = (call: Call) => (call.op === 'semantic' ? { done: false, how: '' } : call.op === 'point' ? { hwnd: 1311234, x: 240, y: 80 } : { x: 240, y: 80 })
+    const refused = fakeWorker(respond)
+    await expect(new WindowsScreen(refused.worker).act({ kind: 'click', ref: REF })).rejects.toSatisfy(needsPointer)
+    expect(refused.calls.map((c) => c.op)).toEqual(['semantic']) // nothing touched the pointer
+    const allowed = fakeWorker(respond)
+    expect(await new WindowsScreen(allowed.worker).act({ kind: 'click', ref: REF }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 240, y: 80 }, at: { x: 240, y: 80 } })
+    expect(allowed.calls.map((c) => c.op)).toEqual(['semantic', 'point', 'click'])
+    expect(allowed.calls[2]!.args).toEqual({ hwnd: 1311234, x: 240, y: 80 })
   })
 
   it('sets a value semantically; a value that did not land is an error, not a retry with keys', async () => {
     const set = fakeWorker(() => ({ done: true, how: 'value' }))
-    expect(await new WindowsScreen(set.worker).act({ kind: 'type', ref: REF, text: 'line one\nline two' })).toMatchObject({ background: true })
+    expect(await new WindowsScreen(set.worker).act({ kind: 'type', ref: REF, text: 'line one\nline two' })).toMatchObject({ mode: 'background' })
     expect(set.calls[0]!.args).toEqual({ kind: 'type', ref: REF, text: 'line one\nline two' })
     const missed = fakeWorker(() => new Error('LR_DID_NOT_TAKE|Search mail|'))
     await expect(new WindowsScreen(missed.worker).act({ kind: 'type', ref: REF, text: 'x' })).rejects.toThrow('The text did not land in “Search mail”')
@@ -114,7 +109,7 @@ describe('WindowsScreen act', () => {
       if (call.op === 'click') return { x: 10, y: 20 }
       return {}
     })
-    expect(await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text })).toEqual({ pointer: { x: 10, y: 20 }, how: 'clicked into the field, selected its text, typed keys' })
+    expect(await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 10, y: 20 }, at: { x: 10, y: 20 }, how: 'clicked into the field, selected its text, typed keys' })
     expect(calls.map((c) => c.op)).toEqual(['semantic', 'point', 'click', 'select_all', 'type', 'type', 'type'])
     expect(calls.filter((c) => c.op === 'type').map((c) => (c.args.text as string).length)).toEqual([200, 200, 50])
     expect(calls.filter((c) => c.op === 'type').every((c) => c.args.hwnd === 77)).toBe(true)
@@ -122,7 +117,7 @@ describe('WindowsScreen act', () => {
 
   it('never types a line break as keys: nothing is clicked or typed', async () => {
     const { worker, calls } = fakeWorker(() => ({ done: false, how: '' }))
-    await expect(new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: 'Hi\r\nthere' })).rejects.toThrow(NEWLINE_REFUSED)
+    await expect(new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: 'Hi\r\nthere' }, { allowPointer: true })).rejects.toThrow(NEWLINE_REFUSED)
     expect(calls.map((c) => c.op)).toEqual(['semantic'])
   })
 
@@ -135,32 +130,35 @@ describe('WindowsScreen act', () => {
       if (call.op === 'type') controller.abort('You stopped it on the computer.')
       return {}
     })
-    await expect(new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: 'b'.repeat(500) }, { signal: controller.signal })).rejects.toThrow('You stopped it on the computer.')
+    await expect(new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: 'b'.repeat(500) }, { signal: controller.signal, allowPointer: true })).rejects.toThrow('You stopped it on the computer.')
     expect(calls.filter((c) => c.op === 'type')).toHaveLength(1)
     expect(calls.every((c) => c.options.signal === controller.signal)).toBe(true)
   })
 
   it('clears a field typed empty with Delete after selecting its text', async () => {
     const { worker, calls } = fakeWorker((call) => (call.op === 'semantic' ? { done: false, how: '' } : call.op === 'point' ? { hwnd: 5, x: 1, y: 1 } : { x: 1, y: 1 }))
-    await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: '' })
+    await new WindowsScreen(worker).act({ kind: 'type', ref: REF, text: '' }, { allowPointer: true })
     expect(calls.map((c) => c.op)).toEqual(['semantic', 'point', 'click', 'select_all', 'key'])
     expect(calls[4]!.args).toEqual({ hwnd: 5, vk: 0x2e })
   })
 
   it('scrolls with ScrollPattern when it can, else with the wheel over the ref or the window', async () => {
     const semantic = fakeWorker(() => ({ done: true, how: 'scroll' }))
-    expect(await new WindowsScreen(semantic.worker).act({ kind: 'scroll', direction: 'bottom' })).toEqual({ background: true })
+    expect(await new WindowsScreen(semantic.worker).act({ kind: 'scroll', direction: 'bottom' })).toEqual({ mode: 'background' })
     expect(semantic.calls[0]!.args).toEqual({ kind: 'scroll', direction: 'bottom' })
     const wheel = fakeWorker((call) => (call.op === 'semantic' ? { done: false, how: '' } : call.op === 'point' ? { hwnd: 9, x: 500, y: 400 } : { x: 500, y: 400 }))
-    expect(await new WindowsScreen(wheel.worker).act({ kind: 'scroll', direction: 'down', ref: REF })).toEqual({ pointer: { x: 500, y: 400 } })
+    expect(await new WindowsScreen(wheel.worker).act({ kind: 'scroll', direction: 'down', ref: REF }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 500, y: 400 }, at: { x: 500, y: 400 } })
     expect(wheel.calls[1]!.args).toEqual({ ref: REF })
     expect(wheel.calls[2]).toMatchObject({ op: 'wheel', args: { hwnd: 9, x: 500, y: 400, notches: -3 } })
   })
 
-  it('presses keys as virtual-key codes, without moving the pointer', async () => {
-    const { worker, calls } = fakeWorker(() => ({}))
-    expect(await new WindowsScreen(worker).act({ kind: 'press', key: 'enter' })).toEqual({})
-    expect(calls[0]).toMatchObject({ op: 'key', args: { vk: 0x0d } })
+  it('posts a key to the focused control in the background, and uses a real key event only with the person’s leave', async () => {
+    const bg = fakeWorker(() => ({ hwnd: 42 }))
+    expect(await new WindowsScreen(bg.worker).act({ kind: 'press', key: 'enter' })).toMatchObject({ mode: 'background' })
+    expect(bg.calls[0]).toMatchObject({ op: 'postkey', args: { vk: 0x0d } })
+    const real = fakeWorker(() => ({}))
+    expect(await new WindowsScreen(real.worker).act({ kind: 'press', key: 'enter' }, { allowPointer: true })).toMatchObject({ mode: 'pointer' })
+    expect(real.calls[0]).toMatchObject({ op: 'key', args: { vk: 0x0d } })
   })
 
   it('refuses a ref that is not one of its own before asking the helper', async () => {
@@ -173,7 +171,7 @@ describe('WindowsScreen act', () => {
     const elevated = fakeWorker((call) => (call.op === 'semantic' ? new Error('LR_ELEVATED|Registry Editor|') : {}))
     await expect(new WindowsScreen(elevated.worker).act({ kind: 'click', ref: REF })).rejects.toThrow('Registry Editor runs as administrator')
     const behind = fakeWorker((call) => (call.op === 'semantic' ? { done: false } : new Error('LR_NOT_FRONT|Notepad|')))
-    await expect(new WindowsScreen(behind.worker).act({ kind: 'click', ref: REF })).rejects.toThrow('Windows did not let LocalRouter bring Notepad to the front. Click Notepad in the taskbar, then try again.')
+    await expect(new WindowsScreen(behind.worker).act({ kind: 'click', ref: REF }, { allowPointer: true })).rejects.toThrow('Windows did not let LocalRouter bring Notepad to the front. Click Notepad in the taskbar, then try again.')
   })
 })
 
@@ -248,9 +246,9 @@ describe('setting a field’s value gives it the focus first (Windows run, 2026-
 describe('typing says whether the field had the focus (for the audit)', () => {
   it('reports how a value was set, never the text', async () => {
     const focused = fakeWorker((c) => (c.op === 'semantic' ? { done: true, how: 'value', focused: true } : {}))
-    expect(await new WindowsScreen(focused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ background: true, how: 'value set, field focused' })
+    expect(await new WindowsScreen(focused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ mode: 'background', how: 'value set, field focused' })
     const unfocused = fakeWorker((c) => (c.op === 'semantic' ? { done: true, how: 'value', focused: false } : {}))
-    expect(await new WindowsScreen(unfocused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ background: true, how: 'value set, field not focused' })
+    expect(await new WindowsScreen(unfocused.worker).act({ kind: 'type', ref: REF, text: 'example.com' })).toEqual({ mode: 'background', how: 'value set, field not focused' })
   })
 })
 

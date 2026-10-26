@@ -7,16 +7,19 @@ import { silentLogger } from './log.ts'
 import type { Logger } from './log.ts'
 
 /**
- * The local stop: the person at the Mac can always end a task without the box. While a task runs the
- * pointer is read every 250 ms and before each action. Moving it into a top-left corner the pointer stops in
- * (the main display's, or with displays arranged around it, the top-left corner of any display that has no
- * display to its left or above: a corner, not an edge the pointer passes through) stops the task; so does a deliberate move away from where the helper last left it, or a click
- * (the person took over). Movement the helper makes itself, and movement while it waits for the box (the
- * person may tap Approve on this Mac), is not a takeover; the corner always is.
+ * The local stop: the person at the computer can always end a task without the box. While a task runs the pointer
+ * is read every 250 ms and before each action. Moving it into a top-left corner the pointer stops in (the main
+ * display's, or with displays arranged around it, the top-left corner of any display that has no display to its left
+ * or above: a corner, not an edge the pointer passes through) stops the task, always.
  *
- * Deliberate means: more than TAKEOVER_POINTS away, on two readings in a row (one stray reading is not a
- * move), counting only steps larger than JITTER_POINTS between readings. A hand resting on a trackpad, or
- * a mouse drifting a point or two, moves the baseline along with it instead of adding up to a takeover.
+ * Computer use works in the background (a virtual cursor): the person keeps using their own pointer and keyboard in
+ * other apps, so their moving the pointer or clicking is never a reason to stop. Only during a step the person let
+ * use their real pointer ("needs your mouse for a moment": between `moving()` and `left()`) does a deliberate move
+ * away from where the helper left it, or a click, count as taking over; even then the helper's own movement does not.
+ *
+ * Deliberate means: more than TAKEOVER_POINTS away, on two readings in a row (one stray reading is not a move),
+ * counting only steps larger than JITTER_POINTS between readings. A hand resting on a trackpad, or a mouse drifting a
+ * point or two, moves the baseline along with it instead of adding up to a takeover.
  */
 export const CORNER_POINTS = 4
 export const TAKEOVER_POINTS = 24
@@ -27,9 +30,11 @@ export const SUSTAINED_READINGS = 2
 /** A click this long after the helper last acted is the person's (the probe and the poll run late by up to this). */
 export const CLICK_MARGIN_MS = 400
 export const POLL_MS = 250
+/** After the helper lets go of the real pointer, how long the person's moves still count as taking it back. */
+export const HOLD_AFTER_MS = 1500
 
-export const STOPPED_IN_CORNER = 'You stopped it on the Mac.'
-export const TAKEN_OVER = 'You moved the pointer, so it stopped and left the rest to you.'
+export const STOPPED_IN_CORNER = 'You stopped it on this computer.'
+export const TAKEN_OVER = 'You moved the pointer while it was using your mouse, so it stopped and left the rest to you.'
 
 /** Runs `tick` every `ms` until the returned function is called. */
 export type Schedule = (tick: () => void, ms: number) => () => void
@@ -93,6 +98,12 @@ class PointerTaskWatch implements TaskWatch {
   /** When the helper last finished touching the pointer: a click after this is the person's. */
   private leftAt: number
   private helperMoving = false
+  /**
+   * The helper holds the real pointer for an allowed step: from `moving()` until a while after `left()`, the person's
+   * movement and clicks are a takeover. Otherwise (the background, by default) they are the person's own work.
+   */
+  private holding = false
+  private holdUntil = 0
   /** Changes whenever the helper moves the pointer, so a reading taken before that is not judged after it. */
   private generation = 0
   private polling = false
@@ -122,19 +133,27 @@ class PointerTaskWatch implements TaskWatch {
     if (point) this.judge(point, generation, 1)
   }
 
+  /** The helper is about to use the real pointer for a step the person allowed. */
   moving(): void {
-    // A move already under way when the helper is about to act or wait is the person's: it is not forgotten.
-    if (this.beyond > 0 && !this.ended && !this.helperMoving) return this.stop(TAKEN_OVER)
+    this.holding = true
     this.helperMoving = true
     this.generation += 1
     this.beyond = 0
   }
 
+  /**
+   * The helper let go of the real pointer, at `point` (undefined: it did not move it; null: somewhere unknown). The
+   * person's moves just after count as a takeover for a moment (HOLD_AFTER_MS): their hand was waiting for it to finish.
+   */
   left(point?: Point | null): void {
+    // Only ever called just after the helper used the real pointer: the person taking it back now is a takeover, for a
+    // moment (HOLD_AFTER_MS), while their hand was waiting for the step to finish.
+    this.holding = true
     this.helperMoving = false
     this.generation += 1
     this.beyond = 0
     this.leftAt = this.now()
+    this.holdUntil = this.now() + HOLD_AFTER_MS
     if (point === null) this.expected = this.last = null
     else if (point) this.expected = this.last = { x: point.x, y: point.y }
   }
@@ -172,6 +191,12 @@ class PointerTaskWatch implements TaskWatch {
   private judge(point: PointerReading, generation: number, needed: number) {
     if (this.ended) return
     if (this.corners.some((c) => Math.hypot(point.x - c.x, point.y - c.y) <= CORNER_POINTS)) return this.stop(STOPPED_IN_CORNER)
+    // In the background the pointer is the person's: only the corner stops the task.
+    if (this.holding && !this.helperMoving && this.now() > this.holdUntil) {
+      this.holding = false
+      this.expected = this.last = null
+    }
+    if (!this.holding) return
     if (this.helperMoving || generation !== this.generation) return
     // A click since the helper last acted (its own clicks were before that) is the person taking over.
     if (point.sinceClickS !== undefined && this.now() - point.sinceClickS * 1000 > this.leftAt + CLICK_MARGIN_MS) return this.stop(TAKEN_OVER)

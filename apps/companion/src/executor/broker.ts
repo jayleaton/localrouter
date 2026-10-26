@@ -5,7 +5,7 @@ import type { Answers, Decider, Question } from '../../../desktop-helper/src/com
 import type { ComputerControl } from '../../../desktop-helper/src/computer/macControls.ts'
 import type { Platform } from '../platform/types.ts'
 import { SCREENSHOT_MAX_EDGE } from '../../../desktop-helper/src/computer/types.ts'
-import type { BrowserTabs, Observation, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
+import type { ActResult, BrowserTabs, Observation, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
 import { silentLogger } from '../../../desktop-helper/src/log.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { Store } from './approvals.ts'
@@ -119,6 +119,8 @@ export type BrokerEvent =
   | { type: 'approval.end'; id: string; outcome: Taken }
   /** The card changed while it waits (the OS check is open behind other windows). */
   | { type: 'approval.update'; card: Card }
+  /** The agent acted at `at` (global screen coordinates): the overlay cursor shows where, and whether it used the real pointer. */
+  | { type: 'cursor'; task_id: string; mode: ActResult['mode']; at: { x: number; y: number }; kind: string }
   | { type: 'task'; task: TaskView }
 
 export type Started = { ok: true; task_id: string; finished: Promise<ComputerOutcome> } | { ok: false; error: string }
@@ -748,8 +750,10 @@ export class Broker {
                 const result = await screen.act(a, o)
                 // How each action was done (background or pointer, a field focused before its value was set): the audit
                 // answers "did it focus the box first" without the screen's text or the typed text.
-                const r = result && typeof result === 'object' ? result : {}
-                this.options.audit.record('act', { task_id: this.active?.id ?? '', kind: a.kind, background: r.background === true, ...(r.how ? { how: r.how } : {}) })
+                const r = (result && typeof result === 'object' ? result : { mode: 'background' }) as ActResult
+                this.options.audit.record('act', { task_id: this.active?.id ?? '', kind: a.kind, mode: r.mode, ...(r.how ? { how: r.how } : {}) })
+                // The visible virtual cursor: where the agent acted, and whether it used the real pointer. No screen text.
+                if (r.at) this.emit({ type: 'cursor', task_id: this.active?.id ?? '', mode: r.mode, at: r.at, kind: a.kind })
                 return result
               }),
             ...(screen.pointer ? { pointer: () => screen.pointer!() } : {}),
@@ -778,6 +782,8 @@ export function flatten(a: AuthorizeAction): policy.Action {
       return { kind: 'scroll', direction: a.direction }
     case 'surface':
       return { kind: 'surface', what: a.what, name: a.name }
+    case 'pointer':
+      return { kind: 'pointer', why: a.why, ...(a.target ? { role: a.target.role, label: a.target.label } : {}) }
   }
 }
 
@@ -808,6 +814,8 @@ export function describeAction(b: Binding): string {
       return `press ${a.key ?? ''} in ${a.field_label || 'the focused field'} (${where})`
     case 'click':
       return `click “${a.label || a.role || ''}” in ${where}`
+    case 'pointer':
+      return `use your mouse for a moment${a.label ? ` on “${a.label}”` : ''} in ${where} (it cannot be done in the background)`
     case 'control':
       return b.goal
     default:
