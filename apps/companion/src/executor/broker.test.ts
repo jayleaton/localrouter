@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Grant } from '../../../desktop-helper/src/computer/controller.ts'
 import type { Card } from './broker.ts'
-import { Broker, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
+import { Broker, CONSENT_NOTE, CONSENT_WAITING, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
 import type { Answers, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import type { Observation, ScreenAction } from '../../../desktop-helper/src/computer/types.ts'
 import { MemoryAudit } from './audit.ts'
@@ -414,6 +414,45 @@ describe('the standing grant (JJ, 2026-10-26: auto-approved; if it asks, once on
     expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
   })
 
+  it('the consent card does not run out: the task times out on its own, the card stays, and a late yes is the grant (Mac run, 2026-10-26)', async () => {
+    // Touch ID unavailable, the in-app confirmation offered, and the card "expired after 60 s": it must not.
+    let clock = 1_000_000
+    const standing = new MemoryStanding()
+    const { broker, mac, audit } = fakeBroker([...SEND_GROCERIES, ...SEND_GROCERIES], { standing, now: () => clock, limits: { approvalTimeoutMs: 50 } })
+    const shown = cards(broker)
+    const first = await run(broker)
+    expect(first).toMatchObject({ status: 'blocked', reason: CONSENT_WAITING })
+    expect(shown).toHaveLength(1)
+    expect(shown[0]).toMatchObject({ action: 'control this computer', until_answered: true, waiting: CONSENT_NOTE })
+    // Ten minutes, then a day, later: still up, still pending.
+    clock += 10 * 60_000
+    expect(broker.approvals().find((c) => c.id === shown[0].id)?.state).toBe('pending')
+    clock += 24 * 3_600_000
+    expect(broker.approvals().find((c) => c.id === shown[0].id)?.state).toBe('pending')
+    // A second request while it is up waits on the same card, not a new one.
+    const second = await run(broker)
+    expect(second.status).toBe('blocked')
+    expect(shown).toHaveLength(1)
+    // The person answers late: the grant is kept, and the next request runs without any card.
+    expect(await broker.answer(shown[0].id, 'approve', 'app window')).toEqual({ ok: true })
+    expect(standing.kept.granted).toBe(true)
+    expect(audit.lines.filter((l) => l.event === 'consent.granted')).toHaveLength(1)
+    expect(broker.approvals().filter((c) => c.state === 'pending')).toEqual([])
+    expect((await run(broker)).status).toBe('done')
+    expect(shown).toHaveLength(1)
+    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
+  })
+
+  it('a task still waiting when the person approves goes on at once', async () => {
+    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding() })
+    const card = nextCard(broker)
+    const started = broker.startUse(app, 'send the Groceries note', null)
+    if (!started.ok) throw new Error(started.error)
+    expect(await broker.answer((await card).id, 'approve', 'app window')).toEqual({ ok: true })
+    expect((await started.finished).status).toBe('done')
+    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
+  })
+
   it('a stop during the consent card ends the task as stopped, before anything is done', async () => {
     const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding() })
     const card = nextCard(broker)
@@ -423,6 +462,8 @@ describe('the standing grant (JJ, 2026-10-26: auto-approved; if it asks, once on
     broker.stop(undefined, 'the keyboard')
     expect((await started.finished).status).toBe('stopped')
     expect(mac.desktop.actions).toEqual([])
+    // Stopped by the person: the card goes too, so it cannot be granted later.
+    expect(broker.approvals().filter((c) => c.state === 'pending')).toEqual([])
   })
 })
 

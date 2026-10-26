@@ -54,6 +54,8 @@ export type Card = {
   /** While Approve's OS check is open and could not come to the front: where to find it. Empty otherwise. */
   waiting: string
   expires_in_s: number
+  /** The one consent ("Let Jarvis control this computer?"): it does not run out; it stays until answered or stopped. */
+  until_answered?: true
   state: Approval['state']
 }
 
@@ -157,6 +159,13 @@ export type Started = { ok: true; task_id: string; finished: Promise<ComputerOut
  */
 export const BACKGROUND_NOTE = 'It runs in the background as a virtual mouse: it leaves the user’s own mouse and keyboard alone, and they can keep working meanwhile. How each step is done is decided on the computer, never by you, so never decline it or ask the user how it should run. Steps are not approved one at a time: the user let Jarvis control the computer once; if a step still waits for them, the result says so.'
 
+/** The consent card's binding has no task: a task ending does not take it down. */
+const CONSENT_TASK = 'consent'
+/** How long the consent card is held: until the person answers or stops it, in practice (the app's run). */
+export const CONSENT_HOLD_MS = 30 * 24 * 3_600_000
+export const CONSENT_NOTE = 'Waiting for your answer: this stays here until you choose. Jarvis asks only this once.'
+export const CONSENT_WAITING = 'It is waiting for you to let Jarvis control this computer: the card stays up in LocalRouter. Answer it, then ask again.'
+
 export const DISABLED_MESSAGE = 'Computer control is switched off on this computer'
 export const NO_DECIDER = 'computer use needs the decision service on the Spark, which is not connected'
 export const OWN_TARGET = 'LocalRouter’s own windows are never a target.'
@@ -200,6 +209,9 @@ export class Broker {
   private readonly waitingNotes = new Map<string, string>()
   /** The presence check open for an approval (Approve pressed, the OS prompt or sheet up), to dismiss it if the approval ends. */
   private readonly checks = new Map<string, AbortController>()
+  /** The consent card while it is up, and the tasks waiting for it. */
+  private consentId: string | null = null
+  private readonly consentWaiters = new Set<(t: Taken | 'waiting') => void>()
   private readonly tasks: Task[] = []
   private active: Task | null = null
   private injecting = 0
@@ -684,12 +696,106 @@ export class Broker {
   /** The one consent ("Let Jarvis control this computer?"), when there is no standing grant yet; kept once given. */
   private async consent(task: Task): Promise<Grant> {
     if (this.approvalMode() !== 'consent') return { ok: true, grant: 'allow' }
+    if (task.stopping) return { ok: false, denied: 'It was stopped.' }
+    const nowhere = this.options.approvalSurface?.() ?? null
+    if (nowhere) return { ok: false, denied: nowhere }
+    const open = this.openConsent(task)
+    if ('denied' in open) return open
+    task.approvalId = open.id
+    this.emitTask(task)
+    const start = this.now()
+    // The task waits as long as a step would; the card itself stays (Mac run, 2026-10-26: it ran out after 60 s).
+    const outcome = await new Promise<Taken | 'waiting'>((resolve) => {
+      const timer = setTimeout(() => done('waiting'), this.limits.approvalTimeoutMs)
+      const done = (t: Taken | 'waiting') => {
+        clearTimeout(timer)
+        this.consentWaiters.delete(done)
+        task.wake = null
+        resolve(t)
+      }
+      this.consentWaiters.add(done)
+      task.wake = () => {
+        if (task.stopping || task.status !== 'running') {
+          // Stopped by the person: the card goes too.
+          this.cancelConsent('cancelled')
+          done('cancelled')
+        }
+      }
+    })
+    task.waited += this.now() - start
+    task.approvalId = null
+    this.emitTask(task)
+    switch (outcome) {
+      case 'approved':
+        return { ok: true, grant: 'approved' }
+      case 'denied':
+        return { ok: false, denied: 'You said no on the approval card.' }
+      case 'waiting':
+        return { ok: false, denied: CONSENT_WAITING }
+      case 'cancelled':
+        return { ok: false, denied: 'It was stopped.' }
+      default:
+        return { ok: false, denied: 'The approval did not match this step.' }
+    }
+  }
+
+  /**
+   * The consent card, shared by every task that waits for it: made once and held (it does not run out with a step's
+   * 60 s), bound to no task, so a task that times out leaves it up and a later Approve still gives the grant.
+   */
+  private openConsent(task: Task): { id: string } | { ok: false; denied: string } {
+    const now = this.now()
+    if (this.consentId && this.store.get(this.consentId, now)?.state === 'pending') return { id: this.consentId }
     const why = `from now on Jarvis clicks, types and, when it must, uses your mouse here without asking each time. ${this.options.stopHint ?? 'Move the pointer to the top-left corner to stop.'} Settings can turn this off.`
-    const g = await this.awaitApproval(task, { step: 0, app: '', title: '', url: '', action: { kind: 'consent' }, why })
-    if (!g.ok) return g
-    this.options.standing?.set(true)
-    this.options.audit.record('consent.granted', { task_id: task.id, method: this.options.gate.method })
-    return g
+    const binding: Binding = { executor: this.executorId, task_id: CONSENT_TASK, goal: task.goal, requester: task.requester.caller.name, step: 0, app: '', title: '', url: '', action: { kind: 'consent' }, why }
+    const id = `appr_${randomBytes(12).toString('hex')}`
+    let x: Approval
+    try {
+      x = this.store.create(binding, now, id)
+    } catch (error) {
+      return { ok: false, denied: messageOf(error) }
+    }
+    this.store.hold(id, now + CONSENT_HOLD_MS, now)
+    this.consentId = id
+    this.waitingNotes.set(id, CONSENT_NOTE)
+    this.waiters.set(id, () => this.settleConsent(id, x.digest))
+    this.options.audit.record('approval.request', { task_id: task.id, approval_id: id, step: 0, action: { kind: 'consent' }, app: '', why: 'the one consent for computer control' })
+    this.emit({ type: 'approval', card: this.card(this.store.get(id, now) ?? x, now) })
+    return { id }
+  }
+
+  /** The consent card was answered: the grant is kept on Approve, and every task waiting for it goes on. */
+  private settleConsent(id: string, d: string) {
+    const t = this.store.take(id, d, this.now())
+    if (t === 'pending') return
+    if (t === 'approved') {
+      this.options.standing?.set(true)
+      this.options.audit.record('consent.granted', { approval_id: id, method: this.options.gate.method })
+    }
+    this.endConsent(id, t)
+  }
+
+  /** Stopped while the consent card was up: it can no longer be granted (an open OS check is dismissed). */
+  private cancelConsent(outcome: Taken) {
+    const id = this.consentId
+    if (!id) return
+    this.store.cancelTask(CONSENT_TASK)
+    const check = this.checks.get(id)
+    if (check) {
+      check.abort(outcome)
+      this.options.audit.record('approval.dismissed', { approval_id: id, method: this.options.gate.method, outcome })
+    }
+    this.endConsent(id, outcome)
+  }
+
+  private endConsent(id: string, outcome: Taken) {
+    if (this.consentId !== id) return
+    this.consentId = null
+    this.waiters.delete(id)
+    this.waitingNotes.delete(id)
+    this.options.audit.record('approval.end', { approval_id: id, outcome, consent: true })
+    this.emit({ type: 'approval.end', id, outcome })
+    for (const done of [...this.consentWaiters]) done(outcome)
   }
 
   private async awaitApproval(task: Task, b: Omit<Binding, 'executor' | 'task_id' | 'goal' | 'requester'>): Promise<Grant> {
@@ -796,7 +902,7 @@ export class Broker {
 
   private card(x: Approval, now: number): Card {
     const b = x.binding
-    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method, this.options.gate.why), waiting: this.waitingNotes.get(x.id) ?? '', expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
+    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method, this.options.gate.why), waiting: this.waitingNotes.get(x.id) ?? '', expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state, ...(b.task_id === CONSENT_TASK ? { until_answered: true as const } : {}) }
   }
 
   private emit(event: BrokerEvent) {
