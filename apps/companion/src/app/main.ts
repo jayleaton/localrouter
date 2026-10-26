@@ -1,18 +1,18 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { hostname, tmpdir } from 'node:os'
+import { homedir, hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { EMPTY, HELPER, KeychainHelper, loadSecrets as loadStoredSecrets } from './secrets.ts'
-import type { Secrets } from './secrets.ts'
+import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
+import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
@@ -47,12 +47,45 @@ import type { Fetch } from '../harness/spark.ts'
  * Mac has it, asked by this process, so a click in the page alone never approves.
  */
 const VERSION = app.getVersion()
-const log = createLogger()
+
+/**
+ * The log, in a file as well as on stderr (an app opened from the Finder has no stderr anyone sees): on macOS
+ * ~/Library/Logs/LocalRouter/LocalRouter.log, elsewhere <data>/logs. Kept under 5 MiB (the older half dropped).
+ */
+export const LOG_FILE = process.platform === 'darwin' ? join(homedir(), 'Library', 'Logs', 'LocalRouter', 'LocalRouter.log') : join(dataDir(), 'logs', 'LocalRouter.log')
+function logLine(line: string) {
+  process.stderr.write(`${line}\n`)
+  try {
+    mkdirSync(dirname(LOG_FILE), { recursive: true, mode: 0o700 })
+    appendFileSync(LOG_FILE, `${line}\n`, { mode: 0o600 })
+  } catch {
+    // A log that cannot be written never stops the app.
+  }
+}
+try {
+  if (statSync(LOG_FILE).size > 5 << 20) writeFileSync(LOG_FILE, readFileSync(LOG_FILE, 'utf8').slice(-(2 << 20)), { mode: 0o600 })
+} catch {
+  // No log yet.
+}
+const log = createLogger(logLine)
+
+/**
+ * On macOS the app's tokens are in the keychain helper's item (src/app/secrets.ts). Chromium would still read its own
+ * "LocalRouter Safe Storage" keychain item at start (safeStorage, cookie encryption): an item that belongs to the
+ * build that made it, so every update made macOS ask again, and the read blocks the main thread until someone
+ * answers. The app therefore runs on Chromium's mock keychain and never touches the real one; only the one-time move
+ * of an older build's token (`--secrets-migrate`, a child process) and its tests use the real keychain.
+ */
+const REAL_KEYCHAIN_OPS = ['write-legacy', 'load-legacy']
+const selftestOp = process.argv[process.argv.indexOf('--secrets-selftest') + 1] ?? ''
+const keychainHelperShipped = process.platform === 'darwin' && existsSync(join(process.resourcesPath ?? '', HELPER))
+const needsRealKeychain = process.argv.includes('--secrets-migrate') || (process.argv.includes('--secrets-selftest') && REAL_KEYCHAIN_OPS.includes(selftestOp))
+if (keychainHelperShipped && !needsRealKeychain) app.commandLine.appendSwitch('use-mock-keychain')
 const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>> }
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -89,10 +122,15 @@ async function initSecrets() {
   const helper = keychain && (await keychain.path()) ? keychain : null
   if (keychain && !helper) log.warn('secrets.no_keychain_helper', { why: keychain.problem })
   try {
-    const r = await loadStoredSecrets({ helper, legacyPath: secretsPath(), legacyDecrypt })
-    memorySecrets = r.secrets
-    secretsStore = r.store
-    if (r.migrated) log.info('secrets.migrated', { to: 'keychain helper' })
+    if (helper) {
+      // An older build's safeStorage file is moved later, off the main thread (moveLegacySecrets).
+      memorySecrets = (await helper.get()) ?? { ...EMPTY }
+      secretsStore = 'keychain'
+    } else {
+      const r = await loadStoredSecrets({ helper: null, legacyPath: secretsPath(), legacyDecrypt })
+      memorySecrets = r.secrets
+      secretsStore = r.store
+    }
   } catch (error) {
     log.error('secrets.load_failed', { error: error instanceof Error ? error.message : String(error) })
   }
@@ -933,13 +971,94 @@ async function smoke() {
   app.exit(ok ? 0 : 1)
 }
 
+// ------------------------------------------------------------------ moving an older build's token, once
+
+/** The move itself, in a child process: the read may wait on a keychain prompt, and never blocks this one. */
+function runMigrationChild(timeoutMs: number): Promise<{ ok: boolean; reason: string }> {
+  // `run` ends on the child's result line or its pipes closing, never only on an exit event (which Electron's main
+  // process can miss); the child's own Chromium helpers may keep the pipe open a moment after its line.
+  const env = { ...process.env, LOCALROUTER_COMPANION_HOME: dir }
+  return runCommand(process.execPath, ['--secrets-migrate'], undefined, { timeoutMs, env, done: (out) => /^COMPANION_MIGRATE .+\n/m.test(out) }).then((r) => {
+    const line = /^COMPANION_MIGRATE (.+)$/m.exec(r.stdout)?.[1]
+    let j: { ok?: boolean; reason?: string } = {}
+    try {
+      j = line ? (JSON.parse(line) as typeof j) : {}
+    } catch {
+      // Not JSON: a failure below.
+    }
+    if (j.ok) return { ok: true, reason: '' }
+    if (r.code === 137 && !line) return { ok: false, reason: `no answer to the keychain prompt within ${Math.round(timeoutMs / 1000)} s` }
+    return { ok: false, reason: j.reason ?? (r.stderr.trim().split('\n').pop() || 'the move did not answer') }
+  })
+}
+
+/**
+ * After the window is up: an older build's safeStorage file is moved into the keychain helper, once. macOS asks once;
+ * Deny, Allow-once-then-fail or no answer in time is recorded, the file is dropped, and the person pairs again.
+ */
+async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number } = { interactive: true }) {
+  if (!keychain || !(await keychain.path()) || !existsSync(secretsPath())) return 'none'
+  const previous = settings.secretsMigration
+  if (o.interactive && !memorySecrets.token && previous?.state !== 'failed') {
+    void dialog.showMessageBox({ type: 'info', message: 'macOS will ask once to move your Spark login to the new storage', detail: 'Choose Always Allow (or Allow). It is the last time: LocalRouter keeps your login in its own keychain item from now on, and updates do not ask again.', buttons: ['OK'] })
+  }
+  const r = await migrateLegacy({ legacyPath: secretsPath(), previous, haveToken: Boolean(memorySecrets.token), run: runMigrationChild, timeoutMs: o.timeoutMs, log: (event, fields) => log.info(event, fields) })
+  if (r.migration) {
+    settings = { ...settings, secretsMigration: r.migration }
+    saveSettings(settings)
+  }
+  if (r.outcome === 'migrated') {
+    memorySecrets = (await keychain.get()) ?? { ...EMPTY }
+    if (o.interactive) {
+      await startRuntimeFromSettings().catch((error: unknown) => log.error('runtime.start_failed', { error: error instanceof Error ? error.message : String(error) }))
+      refreshTray()
+      if (runtime) {
+        showMain()
+        setupWindow?.close()
+      }
+    }
+  } else if (r.outcome === 'failed' && o.interactive) {
+    showSetup()
+    void dialog.showMessageBox({ type: 'warning', message: 'Pair LocalRouter with your Spark again', detail: `Your Spark login from the older LocalRouter could not be moved (${r.migration?.reason ?? 'refused'}). Make a new pairing code on the Spark and enter it on the Connect page. LocalRouter will not ask the keychain about the old one again.`, buttons: ['OK'] })
+  }
+  return r.outcome
+}
+
+/**
+ * `--secrets-migrate`: the child that moves the token. It reads the older build's file with the real safeStorage
+ * (macOS may ask), stores it through the keychain helper (this process is LocalRouter, so the helper answers it),
+ * then deletes the file and, if it can without asking, the old "LocalRouter Safe Storage" item.
+ */
+async function secretsMigrate() {
+  const out: Record<string, unknown> = {}
+  try {
+    app.setPath('userData', mkdtempSync(join(tmpdir(), 'lr-migrate-')))
+    await app.whenReady()
+    const text = legacyDecrypt(readFileSync(secretsPath()))
+    if (text === null) throw new Error('the keychain refused (Deny), or the old login could not be read')
+    const helper = new KeychainHelper({ bundled: join(process.resourcesPath ?? '', HELPER), dataDir: dir })
+    await helper.set({ ...EMPTY, ...(JSON.parse(text) as Partial<Secrets>) })
+    rmSync(secretsPath(), { force: true })
+    out.ok = true
+    const del = await runCommand('/bin/sh', ['-c', '/usr/bin/security delete-generic-password -s "$1" > /dev/null; echo "LR_STATUS $?" >&2', 'sh', `${app.getName()} Safe Storage`], undefined, { timeoutMs: 10_000 })
+    out.legacy_item = del.code === 0 ? 'deleted' : del.code === 137 ? 'kept (it would have asked)' : `kept (${del.stderr.trim().split('\n')[0] || `exit ${del.code}`})`
+  } catch (error) {
+    out.ok = false
+    out.reason = error instanceof Error ? error.message : String(error)
+  }
+  process.stdout.write(`COMPANION_MIGRATE ${JSON.stringify(out)}\n`)
+  app.exit(out.ok ? 0 : 1)
+}
+
 // ------------------------------------------------------------------ secrets self-test (CI: install over, read back)
 
 /**
  * `--secrets-selftest OP [VALUE]` with LOCALROUTER_COMPANION_HOME: the app's own secret store, headless, for the
  * update test (build A stores, build B installed over it reads). Prints `COMPANION_SECRETS {json}`; the token only as
- * a SHA-256 prefix. OPs: `write-legacy V` (an older build's safeStorage file), `load` (as the app starts, migrating),
- * `save V`, `load-legacy` (safeStorage directly: the control, which an update makes ask again).
+ * a SHA-256 prefix. OPs: `write-legacy V` (an older build's safeStorage file), `migrate` (the one-time move, as the
+ * app does after its window is up; LR_MIGRATE_TIMEOUT_MS shortens its limit), `load` (as the app starts), `save V`,
+ * `load-legacy` (safeStorage directly: the control, which an update makes ask again). Each stays up LR_SELFTEST_HOLD_MS
+ * (default 4 s) after its work, as a running app would, so anything that reads the keychain at start is caught.
  */
 async function secretsSelftest() {
   const at = process.argv.indexOf('--secrets-selftest')
@@ -949,7 +1068,15 @@ async function secretsSelftest() {
   const out: Record<string, unknown> = { op }
   try {
     await app.whenReady()
-    if (op === 'write-legacy') {
+    settings = loadSettings()
+    if (op === 'migrate') {
+      await initSecrets()
+      out.outcome = await moveLegacySecrets({ interactive: false, timeoutMs: Number(process.env.LR_MIGRATE_TIMEOUT_MS ?? MIGRATION_TIMEOUT_MS) })
+      out.ok = true
+      out.migration = settings.secretsMigration ?? null
+      out.token = digest(memorySecrets.token)
+      out.legacy_file = existsSync(secretsPath())
+    } else if (op === 'write-legacy') {
       mkdirSync(dir, { recursive: true, mode: 0o700 })
       writeFileSync(secretsPath(), safeStorage.encryptString(JSON.stringify({ token: value, legacy_token: '' })), { mode: 0o600 })
       out.ok = true
@@ -969,7 +1096,9 @@ async function secretsSelftest() {
       out.helper = keychain ? await keychain.path() : null
       out.problem = keychain?.problem || undefined
       out.legacy_file = existsSync(secretsPath())
+      out.migration = settings.secretsMigration ?? null
     } else throw new Error(`unknown op ${op}`)
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.LR_SELFTEST_HOLD_MS ?? 4000)))
   } catch (error) {
     out.ok = false
     out.error = error instanceof Error ? error.message : String(error)
@@ -987,6 +1116,8 @@ if (process.argv.includes('--version')) {
   void smoke()
 } else if (process.argv.includes('--secrets-selftest')) {
   void secretsSelftest()
+} else if (process.argv.includes('--secrets-migrate')) {
+  void secretsMigrate()
 } else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -1018,5 +1149,7 @@ if (process.argv.includes('--version')) {
     refreshTray()
     if (runtime) showMain()
     else showSetup()
+    log.info('app.started', { version: VERSION, secrets: secretsStore, keychain: keychainHelperShipped ? 'helper (Chromium on its mock keychain)' : 'safeStorage', log: LOG_FILE })
+    void moveLegacySecrets().catch((error: unknown) => log.error('secrets.migration.failed', { error: error instanceof Error ? error.message : String(error) }))
   })
 }

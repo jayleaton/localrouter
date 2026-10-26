@@ -97,69 +97,87 @@ jobs:
           tools=$(jq -c 'select(.id == 2) | [.result.tools[].name]' "$RUNNER_TEMP/mcp.txt")
           echo "tools: $tools"
           [ "$(jq 'index("computer_use") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list has no computer_use"; exit 1; }
-      - name: update keeps the stored token with no keychain prompt (install previous, store, install this over it, read)
+      - name: update keeps the stored token with no keychain prompt (previous build moves an old token; launches and updates never ask; a refused move asks to pair again; 3 rounds)
         run: |
-          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
           apps="$RUNNER_TEMP/Applications"; mkdir -p "$apps"; app="$apps/LocalRouter.app"; bin="$app/Contents/MacOS/LocalRouter"
+          ms() { perl -MTime::HiRes=time -e 'printf "%d", time*1000'; }
           sha() { printf '%s' "$1" | shasum -a 256 | cut -c1-12; }
-          step() { # NAME HOME ARGS…: the app's own secret store, headless; prints and keeps its COMPANION_SECRETS line
+          trace="$RUNNER_TEMP/helper-trace.log"
+          step() { # NAME HOME ARGS…: the app's own secret store, headless; its COMPANION_SECRETS line, wall time, and the helper's phases
             local name=$1 h=$2; shift 2
-            set +e; LOCALROUTER_COMPANION_HOME="$h" LR_KEYCHAIN_NO_UI=1 limit 40 "$bin" --secrets-selftest "$@" > "$RUNNER_TEMP/s.txt" 2> "$RUNNER_TEMP/s.err"; code=$?; set -e
-            line=$(grep -m1 '^COMPANION_SECRETS ' "$RUNNER_TEMP/s.txt" | sed 's/^COMPANION_SECRETS //' || true)
-            echo "$name (exit $code): ${line:-no answer (killed after 40 s: a keychain prompt was waiting)}"
-            [ -n "$line" ] || line='{"ok":false,"timeout":true}'
+            : > "$trace"; local t0; t0=$(ms)
+            LOCALROUTER_COMPANION_HOME="$h" LR_KEYCHAIN_NO_UI=1 LR_KEYCHAIN_TRACE="$trace" "$bin" --secrets-selftest "$@" > "$RUNNER_TEMP/s.txt" 2> "$RUNNER_TEMP/s.err" &
+            local pid=$! waited=0 code
+            while kill -0 "$pid" 2>/dev/null && [ $waited -lt 400 ]; do
+              sleep 0.1; waited=$((waited + 1))
+              if [ $waited -eq 350 ]; then
+                echo "  $name still running at 35 s; processes:"
+                ps -axo pid,ppid,etime,stat,%cpu,command | grep -E 'LocalRouter|localrouter-keychain|SecurityAgent|codesign' | grep -v grep | cut -c1-200 | sed 's/^/    /'
+                # Where its main thread is (the call graph's heaviest stack, top 45 frames).
+                sample "$pid" 2 -file "$RUNNER_TEMP/sample.txt" > /dev/null 2>&1 || true
+                awk '/^Call graph:/{p=1} p' "$RUNNER_TEMP/sample.txt" 2>/dev/null | head -45 | cut -c1-200 | sed 's/^/    sample: /'
+              fi
+            done
+            if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid"; wait "$pid" 2>/dev/null || true; code=killed; else wait "$pid" && code=0 || code=$?; fi
+            local line; line=$(grep -m1 '^COMPANION_SECRETS ' "$RUNNER_TEMP/s.txt" | sed 's/^COMPANION_SECRETS //' || true)
+            echo "$name ($code, $(( $(ms) - t0 )) ms): ${line:-no answer after 40 s}"
+            sed "s/^/    trace[$name]: /" "$trace"
+            if [ -z "$line" ]; then sed 's/^/    stderr: /' "$RUNNER_TEMP/s.err" | grep -v 'XPC error' | tail -15; line='{"ok":false,"timeout":true}'; fi
             printf '%s' "$line" > "$RUNNER_TEMP/$name.json"
           }
-          # The keychain: the runner's login keychain when it is open (where a person's tokens are, and where macOS
-          # partitions items made by apps without a Team ID), else a temporary one (which does not partition them,
-          # so there the control below cannot fail and is only reported).
+          # The runner's login keychain (where macOS partitions items made by apps without a Team ID; a temporary
+          # keychain does not, so the control below could not fail there). Each job is its own VM: nothing shares it.
           login="$HOME/Library/Keychains/login.keychain-db"
-          kc=""; mode=temp
-          if [ -f "$login" ] && security show-keychain-info "$login" > /dev/null 2>&1 && printf 'x' | limit 10 security add-generic-password -U -s lr-probe -a probe -w x "$login" > /dev/null 2>&1; then
-            security delete-generic-password -s lr-probe -a probe "$login" > /dev/null 2>&1 || true
-            security default-keychain -d user -s "$login"; mode=login
-          else
-            kc="$RUNNER_TEMP/update-test.keychain-db"
-            security create-keychain -p test "$kc"; security set-keychain-settings "$kc"; security unlock-keychain -p test "$kc"
-            security list-keychains -d user -s "$kc"; security default-keychain -d user -s "$kc"
-          fi
-          echo "keychain: $mode ($(security default-keychain -d user | tr -d ' "'))"
-          home="$RUNNER_TEMP/lrhome"; control="$RUNNER_TEMP/lrcontrol"
-          ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"
-          echo "previous: $(codesign -dvvv "$app" 2>&1 | grep '^CDHash=')"
-          step a-write-legacy "$home" write-legacy tok-from-an-old-build
-          step a-load "$home" load
-          step a-control "$control" write-legacy control-token
-          rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"
-          echo "this build: $(codesign -dvvv "$app" 2>&1 | grep '^CDHash=')"
-          echo "--- the two items' access lists (attributes only, no secrets)"
-          kcdump=$(security default-keychain -d user | tr -d ' "')
-          security dump-keychain -a "$kcdump" 2>/dev/null | awk '/"svce"<blob>="LocalRouter( Safe Storage)?"/{p=1} p&&/^keychain:/{p=0} p' | grep -vE '^\s*$' | cut -c1-200 | head -80 || true
-          step b-load "$home" load
-          step b-save "$home" save tok-saved-after-update
-          step b-control "$control" load-legacy
-          echo "installed helper: $(codesign -dvvv "$home/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
-          echo "bundled helper:   $(codesign -dvvv "$app/Contents/Resources/localrouter-keychain" 2>&1 | grep '^CDHash=')"
-          set +e; "$home/bin/localrouter-keychain" get LocalRouter spark-tokens > /dev/null 2>&1; direct=$?; set -e
-          echo "the helper run from a shell: exit $direct (3 = refused)"
+          security default-keychain -d user -s "$login"
+          security show-keychain-info "$login"
+          clean() {
+            for svc in "LocalRouter Safe Storage" "LocalRouter"; do while security delete-generic-password -s "$svc" "$login" > /dev/null 2>&1; do :; done; done
+            rm -rf "$RUNNER_TEMP/lrhome" "$RUNNER_TEMP/lrcontrol" "$app"
+          }
           j() { jq -r "$2" "$RUNNER_TEMP/$1.json"; }
-          fail=0; check() { if [ "$1" = "$2" ]; then echo "ok   $3"; else echo "::error::$3: got $1, want $2"; fail=1; fi; }
-          check "$(j a-load .token)" "$(sha tok-from-an-old-build)" "previous build: the safeStorage token moved into the keychain helper"
-          check "$(j a-load .legacy_file)" false "previous build: the old safeStorage file is gone after the move"
-          check "$(j b-load .ok)/$(j b-load .store)" true/keychain "this build, installed over it: loads from the keychain helper"
-          check "$(j b-load .token)" "$(sha tok-from-an-old-build)" "this build, installed over it: the same token, with no prompt (none allowed)"
-          check "$(j b-save .token)" "$(sha tok-saved-after-update)" "this build: saves and reads back, with no prompt"
-          check "$direct" 3 "the helper answers only LocalRouter"
-          if [ "$mode" = login ]; then check "$(j b-control .ok)" false "control: safeStorage (the old store) cannot read after the update without asking"
-          else echo "note: control (safeStorage after the update) on a temporary keychain, which does not partition: ok=$(j b-control .ok)"; fi
-          {
-            echo "### Keychain across an update ($mode keychain)"
-            for f in a-load b-load b-save b-control; do echo "- $f: \`$(cat "$RUNNER_TEMP/$f.json")\`"; done
-            echo "- helper run from a shell: exit $direct"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$mode" = login ]; then
-            security delete-generic-password -s LocalRouter -a spark-tokens "$login" > /dev/null 2>&1 || true
-          else security delete-keychain "$kc"; fi
+          fail=0; check() { if [ "$1" = "$2" ]; then echo "ok   $3"; else echo "::error::round $round: $3: got $1, want $2"; fail=1; fi; }
+          gone() { if security find-generic-password -s "$1" "$login" > /dev/null 2>&1; then echo kept; else echo gone; fi; }
+          for round in 1 2 3; do
+            echo "=== round $round"
+            clean
+            home="$RUNNER_TEMP/lrhome"; control="$RUNNER_TEMP/lrcontrol"
+            ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"
+            step a-write-legacy "$home" write-legacy tok-from-an-old-build     # an older build's safeStorage file and item
+            step a-migrate "$home" migrate                                      # the one-time move, in its child process
+            a_item=$(gone "LocalRouter Safe Storage")
+            step a-load "$home" load                                            # a second launch: no move, no keychain prompt
+            step a-control "$control" write-legacy control-token
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"   # the update
+            step b-load "$home" load
+            step b-save "$home" save tok-saved-after-update
+            step b-load2 "$home" load                                           # a second launch after the update
+            step b-legacy-control "$control" load-legacy                        # the old store: asks after an update
+            export LR_MIGRATE_TIMEOUT_MS=15000; step b-deny "$control" migrate; unset LR_MIGRATE_TIMEOUT_MS   # nobody answers that prompt (or Deny)
+            step b-deny-again "$control" migrate                                # never asked again
+            step b-deny-load "$control" load                                    # no token: pair again
+            rm -rf "$app"; ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"; step c-load "$home" load        # another update
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"; step d-load "$home" load  # and another
+            set +e; "$home/bin/localrouter-keychain" get LocalRouter spark-tokens > /dev/null 2>&1; direct=$?; set -e
+            t1=$(sha tok-from-an-old-build); t2=$(sha tok-saved-after-update)
+            check "$(j a-migrate .outcome)/$(j a-migrate .migration.state)/$(j a-migrate .token)" "migrated/done/$t1" "the older build's token moved into the keychain helper, once"
+            check "$(j a-migrate .legacy_file)/$a_item" false/gone "after the move: the old file and the old Safe Storage item are gone"
+            check "$(j a-load .ok)/$(j a-load .token)" "true/$t1" "a second launch: the token, no prompt"
+            check "$(j b-load .ok)/$(j b-load .store)/$(j b-load .token)" "true/keychain/$t1" "the first launch after an update: the token, no prompt"
+            check "$(j b-save .token)" "$t2" "after the update: saves and reads back, no prompt"
+            check "$(j b-load2 .ok)/$(j b-load2 .token)" "true/$t2" "a second launch after the update: no prompt"
+            check "$(j b-legacy-control .ok)" false "control: the old safeStorage store cannot read after the update without asking"
+            check "$(j b-deny .outcome)/$(j b-deny .migration.state)/$(j b-deny .legacy_file)" failed/failed/false "an unanswered or refused move: recorded, the old file dropped"
+            check "$(j b-deny-again .outcome)" none "a refused move is never asked again"
+            check "$(j b-deny-load .ok)/$(j b-deny-load .token)/$(j b-deny-load .migration.state)" "true//failed" "after a refused move: no token, so the app asks to pair again"
+            check "$(j c-load .ok)/$(j c-load .token)" "true/$t2" "another update: no prompt"
+            check "$(j d-load .ok)/$(j d-load .token)" "true/$t2" "and another: no prompt"
+            check "$direct" 3 "the helper answers only LocalRouter"
+            echo "### Keychain across updates, round $round" >> "$GITHUB_STEP_SUMMARY"
+            for f in a-migrate a-load b-load b-save b-load2 b-legacy-control b-deny b-deny-again b-deny-load c-load d-load; do echo "- $f: \`$(cat "$RUNNER_TEMP/$f.json")\`" >> "$GITHUB_STEP_SUMMARY"; done
+          done
+          echo "installed helper: $(codesign -dvvv "$RUNNER_TEMP/lrhome/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
+          echo "bundled helper:   $(codesign -dvvv out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-keychain 2>&1 | grep '^CDHash=')"
+          clean
           exit $fail
       - name: job summary
         if: always()

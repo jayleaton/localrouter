@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { KeychainHelper, loadSecrets } from './secrets.ts'
+import { KeychainHelper, loadSecrets, migrateLegacy } from './secrets.ts'
 import type { Fs, Run } from './secrets.ts'
 
 const REQ = 'identifier "com.localrouter.companion.keychain" and certificate leaf = H"ca6edcf5f3b24de8cb6c84be2cae1d79aa15c36d"'
@@ -14,7 +14,9 @@ function mac(o: { bundledVersion?: string; installed?: { version: string; signed
   if (o.installed) files.set('/data/bin/localrouter-keychain', o.installed)
   let item: string | null = null
   const calls: string[][] = []
-  const exec: Run = async (file, args, input) => {
+  const exec: Run = async (file0, args0, input) => {
+    // codesign goes through `sh -c '…' sh ARGS` (its status line): the fake answers as codesign.
+    const [file, args] = file0 === '/bin/sh' ? ['/usr/bin/codesign', args0.slice(3)] : [file0, args0]
     calls.push([file, ...args])
     if (file === '/usr/bin/codesign' && args[0] === '-d') {
       const f = files.get(args[2])
@@ -118,5 +120,69 @@ describe('loading the tokens', () => {
     const legacy = join(d, 'secrets.bin')
     writeFileSync(legacy, 'ENCRYPTED')
     expect(await loadSecrets({ helper: null, legacyPath: legacy, legacyDecrypt: () => JSON.stringify(tokens) })).toEqual({ secrets: tokens, store: 'legacy', migrated: false })
+  })
+})
+
+describe('moving the old token: once in the life of an install', () => {
+  const legacyFile = () => {
+    const d = mkdtempSync(join(tmpdir(), 'lr-mig-'))
+    dirs.push(d)
+    const p = join(d, 'secrets.bin')
+    writeFileSync(p, 'ENCRYPTED')
+    return p
+  }
+
+  it('moves it, then the old file is gone and nothing runs again', async () => {
+    const p = legacyFile()
+    let runs = 0
+    const run = async () => (runs++, { ok: true, reason: '' })
+    const first = await migrateLegacy({ legacyPath: p, previous: undefined, haveToken: false, run, now: () => 5 })
+    expect(first).toEqual({ outcome: 'migrated', migration: { state: 'done', at: 5 } })
+    expect(existsSync(p)).toBe(false)
+    expect((await migrateLegacy({ legacyPath: p, previous: first.migration, haveToken: true, run })).outcome).toBe('none')
+    expect(runs).toBe(1)
+  })
+
+  it('refused (Deny) or unanswered (time out): recorded, the old file dropped, never asked again', async () => {
+    const p = legacyFile()
+    let runs = 0
+    const r = await migrateLegacy({ legacyPath: p, previous: undefined, haveToken: false, run: async () => (runs++, { ok: false, reason: 'no answer within 120 s' }) })
+    expect(r).toMatchObject({ outcome: 'failed', migration: { state: 'failed', reason: 'no answer within 120 s' } })
+    expect(existsSync(p)).toBe(false)
+    // Even if an old file turned up again (a restored backup), a failed move is not retried.
+    writeFileSync(p, 'ENCRYPTED')
+    expect((await migrateLegacy({ legacyPath: p, previous: r.migration, haveToken: false, run: async () => (runs++, { ok: true, reason: '' }) })).outcome).toBe('dropped')
+    expect(runs).toBe(1)
+    expect(existsSync(p)).toBe(false)
+  })
+
+  it('a crash of the move counts as failed, not as "try again next launch"', async () => {
+    const p = legacyFile()
+    const r = await migrateLegacy({ legacyPath: p, previous: undefined, haveToken: false, run: async () => { throw new Error('spawn failed') } })
+    expect(r.migration).toMatchObject({ state: 'failed', reason: 'spawn failed' })
+    expect(existsSync(p)).toBe(false)
+  })
+
+  it('a token already in the keychain makes the old file a leftover: dropped without asking', async () => {
+    const p = legacyFile()
+    let runs = 0
+    expect((await migrateLegacy({ legacyPath: p, previous: undefined, haveToken: true, run: async () => (runs++, { ok: true, reason: '' }) })).outcome).toBe('dropped')
+    expect(runs).toBe(0)
+  })
+})
+
+describe('commands finish on their output, not only on an exit event', () => {
+  it('reads a command’s own status line', async () => {
+    const { statusOf } = await import('./secrets.ts')
+    expect(statusOf('denied\nLR_STATUS 3\n')).toEqual({ code: 3, stderr: 'denied' })
+    expect(statusOf('no status')).toEqual({ code: null, stderr: 'no status' })
+  })
+  // The keychain path is macOS only; these run real POSIX commands (no /bin/sh on Windows).
+  it.skipIf(process.platform === 'win32')('runs a real command: output, code, input; and through sh with a status line', async () => {
+    const { run } = await import('./secrets.ts')
+    expect(await run('/bin/sh', ['-c', 'cat; echo out; exit 4'], 'in-')).toEqual({ code: 4, stdout: 'in-out\n', stderr: '' })
+    expect(await run('/bin/sh', ['-c', 'false; echo "LR_STATUS $?" >&2'])).toMatchObject({ code: 0, stderr: '' })
+    expect((await run('/bin/sh', ['-c', 'sleep 5'], undefined, { timeoutMs: 100 })).code).toBe(137)
+    expect((await run('/bin/sh', ['-c', 'echo DONE; sleep 5'], undefined, { done: (o) => o.includes('DONE') })).stdout).toBe('DONE\n')
   })
 })

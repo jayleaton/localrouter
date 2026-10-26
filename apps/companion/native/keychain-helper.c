@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "requirement.h" // #define LR_APP_REQUIREMENT "identifier \"…\" and certificate leaf = H\"…\"" (package-mac.sh)
@@ -32,6 +33,21 @@
 #ifdef LR_NOISE // CI only: a "previous build" whose helper differs in bytes, to prove the installed one is kept
 __attribute__((used)) static const char lr_noise[] = LR_NOISE;
 #endif
+
+// LR_KEYCHAIN_TRACE=<file>: appends how long each phase took (tests; never the secret).
+static double now_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+}
+static void trace(const char *what, double since, int result) {
+  const char *path = getenv("LR_KEYCHAIN_TRACE");
+  if (!path || !*path) return;
+  FILE *f = fopen(path, "a");
+  if (!f) return;
+  fprintf(f, "helper pid=%d %s %.0f ms -> %d\n", (int)getpid(), what, now_ms() - since, result);
+  fclose(f);
+}
 
 static int parent_is_localrouter(void) {
   pid_t parent = getppid();
@@ -79,7 +95,7 @@ static int fail(OSStatus status, const char *what) {
   return 1;
 }
 
-int main(int argc, char **argv) {
+static int helper(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "version") == 0) {
     printf("%s\n", HELPER_VERSION);
     return 0;
@@ -88,7 +104,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: localrouter-keychain version | get|set|delete SERVICE ACCOUNT\n");
     return 2;
   }
-  if (!parent_is_localrouter()) {
+  double t0 = now_ms();
+  int parent_ok = parent_is_localrouter();
+  trace("parent check", t0, parent_ok);
+  if (!parent_ok) {
     fprintf(stderr, "localrouter-keychain answers only LocalRouter\n");
     return 3;
   }
@@ -133,6 +152,16 @@ int main(int argc, char **argv) {
     OSStatus status = SecItemDelete(q);
     if (status != errSecSuccess && status != errSecItemNotFound) code = fail(status, "delete");
   }
+  trace(argv[1], t0, code);
   CFRelease(q);
+  return code;
+}
+
+// The exit code also as the last line on stderr: the app reads it from there, so it never depends on being told the
+// helper exited (in Electron's main process another part of the process can collect that first).
+int main(int argc, char **argv) {
+  int code = helper(argc, argv);
+  fflush(stdout);
+  fprintf(stderr, "LR_STATUS %d\n", code);
   return code;
 }
