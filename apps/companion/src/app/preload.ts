@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('companion', {
     revoke: (id: string) => ipcRenderer.invoke('setup:revoke', id),
     legacy: (enabled: boolean, code: string) => ipcRenderer.invoke('setup:legacy', enabled, code),
     control: (on: boolean) => ipcRenderer.invoke('setup:control', on),
+    askEach: (on: boolean) => ipcRenderer.invoke('setup:askEach', on),
+    revokeControl: () => ipcRenderer.invoke('setup:revokeControl'),
     exportConversations: () => ipcRenderer.invoke('setup:export'),
     openVoice: () => ipcRenderer.invoke('setup:openVoice'),
   },

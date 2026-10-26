@@ -2,9 +2,9 @@ import { createServer } from 'node:http'
 import type { Server as HttpServer, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AddressError, capabilitiesOf, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, tailnetPeers, tailscaleCandidates } from './connect.ts'
+import { AddressError, capabilitiesOf, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerNameFor, tailnetPeers, tailscaleCandidates } from './connect.ts'
 import type { ConnectInput, Connection } from './connect.ts'
-import { pair, Spark } from '../harness/spark.ts'
+import { normalizeBase, pair, PlainHttpError, Spark } from '../harness/spark.ts'
 import type { Capabilities } from '../harness/spark.ts'
 
 const granted = { microphone: 'granted', accessibility: 'granted', screen: 'granted', stale: { accessibility: false, screen: false } }
@@ -134,6 +134,25 @@ describe('codes, links and the tailnet', () => {
     expect(tailnetPeers({ BackendState: 'Stopped' })).toBeNull()
     expect(tailnetPeers(null)).toBeNull()
   })
+
+  it('names the peer behind a LAN address, from its endpoints; never a guess', () => {
+    const status = {
+      BackendState: 'Running',
+      Peer: {
+        a: { DNSName: 'dgx-02.tail1.ts.net.', Online: true, Addrs: ['203.0.113.9:41641', '192.168.1.117:41641'], CurAddr: '' },
+        b: { DNSName: 'dgx-01.tail1.ts.net.', Online: true, Addrs: null, CurAddr: '192.168.1.116:41641' },
+        c: { DNSName: 'v6.tail1.ts.net.', Online: true, Addrs: ['[fe80::1]:41641'] },
+        d: { DNSName: 'old.tail1.ts.net.', Online: false, Addrs: ['192.168.1.50:41641'] },
+      },
+    }
+    expect(peerNameFor(status, '192.168.1.117')).toBe('dgx-02.tail1.ts.net')
+    expect(peerNameFor(status, '192.168.1.116')).toBe('dgx-01.tail1.ts.net')
+    expect(peerNameFor(status, '[FE80::1]')).toBe('v6.tail1.ts.net')
+    expect(peerNameFor(status, '192.168.1.50')).toBeNull() // offline
+    expect(peerNameFor(status, '192.168.1.11')).toBeNull()
+    expect(peerNameFor({ ...status, BackendState: 'Stopped' }, '192.168.1.117')).toBeNull()
+    expect(peerNameFor(null, '192.168.1.117')).toBeNull()
+  })
 })
 
 // ------------------------------------------------------------------ error states, from real requests
@@ -217,6 +236,17 @@ describe('what went wrong, from real failures', () => {
   it('a code or address that cannot be right is caught before any request', () => {
     expect(classify(new CodeError('x'), 'code', 15).kind).toBe('code_format')
     expect(classify(new AddressError('the Spark address must not carry credentials'), 'address', 8)).toMatchObject({ kind: 'invalid_address', hint: expect.stringContaining('credentials') })
+  })
+
+  it('plain http:// to a LAN address says why, and names the tailnet address (real test, 2026-10-26)', async () => {
+    const e = await caught(Promise.resolve().then(() => normalizeBase('http://192.168.1.117:8190')))
+    expect(e).toBeInstanceOf(PlainHttpError)
+    const generic = classify(e, 'address', 8)
+    expect(generic).toMatchObject({ kind: 'invalid_address', title: 'Plain http:// works only over the tailnet' })
+    expect(generic.hint).toMatch(/local network.*unencrypted.*Tailscale/s)
+    expect(generic.hint).toContain('http://your-spark.your-tailnet.ts.net:8190')
+    ;(e as PlainHttpError).suggestion = 'dgx-02.tail1.ts.net'
+    expect(classify(e, 'address', 8).hint).toContain('http://dgx-02.tail1.ts.net:8190')
   })
 })
 

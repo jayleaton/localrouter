@@ -193,6 +193,48 @@ describe('DesktopBackend', () => {
     expect(SCRIPTS.act).toContain("AXUIElementPerformAction(el, $('AXPress'))")
   })
 
+  it('the act script: a click on a field with no AXPress (Chrome’s omnibox) focuses it through AXFocused, never the pointer', () => {
+    // The real act script, run with a stand-in AX bridge: the element's role, its actions and whether AXFocused is settable.
+    type El = { role: string; actions?: string[]; focusSettable?: boolean; setRefused?: boolean }
+    const act = (el: El, payload: Record<string, unknown> = { ref: '0.1' }) => {
+      const log: string[] = []
+      const $ = Object.assign((s: string) => s, {
+        AXUIElementCopyActionNames: (_e: El, ref: unknown[]) => ((ref[0] = { count: (el.actions ?? []).length, objectAtIndex: (i: number) => (el.actions ?? [])[i] }), 0),
+        AXUIElementPerformAction: (_e: El, name: string) => (log.push(`perform ${name}`), 0),
+        AXUIElementIsAttributeSettable: (_e: El, _name: string, ref: unknown[]) => ((ref[0] = el.focusSettable === true), 0),
+        AXUIElementSetAttributeValue: (_e: El, name: string, value: unknown) => (log.push(`set ${name}=${String(value)}`), el.setRefused ? -25205 : 0),
+        NSNumber: { numberWithBool: (b: boolean) => b },
+      })
+      const ObjC = { import: () => undefined, unwrap: (x: unknown) => x, castRefToObject: (x: unknown) => x }
+      const stubs = `
+function trusted() {}
+function front() { return { win: {}, app: {} }; }
+function resolve() { return __el; }
+function center() { return [40, 50]; }
+function plain(e, name) { return name === 'AXRole' ? e.role : undefined; }
+function clickAt() { __log.push('pointer click'); }
+return run;`
+      const run = new Function('$', 'ObjC', 'Ref', 'Application', 'delay', '__el', '__log', `${SCRIPTS.act}\n${stubs}`)($, ObjC, () => [], () => ({}), () => undefined, el, log) as (argv: string[]) => string
+      try {
+        return { out: JSON.parse(run(['click', JSON.stringify(payload)])) as Record<string, unknown>, log }
+      } catch (error) {
+        return { error: (error as Error).message, log }
+      }
+    }
+    // Chrome's omnibox: an AXTextField with no AXPress. Focused in the background.
+    expect(act({ role: 'AXTextField', actions: ['AXShowMenu'] })).toEqual({ out: { mode: 'background', at: { x: 40, y: 50 }, how: 'focused through accessibility' }, log: ['set AXFocused=true'] })
+    // Any other control whose AXFocused is settable (a web group with a tabindex): the same.
+    expect(act({ role: 'AXGroup', focusSettable: true }).out).toMatchObject({ mode: 'background', how: 'focused through accessibility' })
+    // A button is pressed, not focused.
+    expect(act({ role: 'AXButton', actions: ['AXPress'] })).toEqual({ out: { mode: 'background', at: { x: 40, y: 50 } }, log: ['perform AXPress'] })
+    // Nothing to press and nothing to focus (or the app refused the focus): only then the mouse is asked for.
+    expect(act({ role: 'AXImage' }).error).toMatch(/LOCALROUTER_NEEDS_POINTER/)
+    expect(act({ role: 'AXTextField', setRefused: true }).error).toMatch(/LOCALROUTER_NEEDS_POINTER/)
+    expect(act({ role: 'AXImage' }, { ref: '0.1', allow: true })).toEqual({ out: { mode: 'pointer', pointer: { x: 40, y: 50 }, at: { x: 40, y: 50 } }, log: ['pointer click'] })
+    // With the mouse allowed, a field is still focused in the background: the pointer is the last resort.
+    expect(act({ role: 'AXTextField' }, { ref: '0.1', allow: true }).log).toEqual(['set AXFocused=true'])
+  })
+
   it('fails a typing step whose text did not land, without repeating the text', async () => {
     const { runner } = fakeRunner((call) => (call.argv[0] === 'value' ? '{"value":"something else"}' : 'ok'))
     const error = await new DesktopBackend(runner, { sleep: async () => {} }).act({ kind: 'type', ref: '0.1', text: 'groceries' }).catch((e: unknown) => e as Error)

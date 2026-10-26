@@ -2,7 +2,7 @@ import { fakeMac } from '../../../desktop-helper/src/fake.ts'
 import type { Answers, Decider, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import { MemoryAudit } from './audit.ts'
 import { Broker } from './broker.ts'
-import type { BrokerOptions, Card, PresenceGate } from './broker.ts'
+import type { BrokerOptions, Card, PresenceGate, Standing } from './broker.ts'
 
 /**
  * Test and headless doubles for the executor: a decision provider that answers from a script of next steps, and a
@@ -31,11 +31,34 @@ export function scriptedDecider(next: string[], judge = 0.9): Decider & { asked:
 export class TestGate implements PresenceGate {
   readonly method = 'test presence'
   readonly asked: Card[] = []
+  readonly signals: AbortSignal[] = []
   answer = true
 
-  async verify(card: Card) {
+  async verify(card: Card, _waiting?: (text: string) => void, signal?: AbortSignal) {
     this.asked.push(card)
+    if (signal) this.signals.push(signal)
     return this.answer
+  }
+}
+
+/** A standing grant in `kept`: a test hands the same object to a second broker to stand for a restart or an update. */
+export class MemoryStanding implements Standing {
+  readonly kept: { granted: boolean; askEach: boolean }
+
+  constructor(kept: { granted: boolean; askEach: boolean } = { granted: false, askEach: false }) {
+    this.kept = kept
+  }
+
+  granted() {
+    return this.kept.granted
+  }
+
+  set(granted: boolean) {
+    this.kept.granted = granted
+  }
+
+  askEachAction() {
+    return this.kept.askEach
   }
 }
 

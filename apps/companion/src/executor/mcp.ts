@@ -1,3 +1,4 @@
+import { BACKGROUND_NOTE } from './broker.ts'
 import type { Reply } from './server.ts'
 
 /**
@@ -26,10 +27,10 @@ const CONTROL_SCHEMA = {
 
 export const TOOLS = [
   { name: 'computer_capabilities', description: 'What this computer’s executor offers: its controls, whether computer use is available, its limits, how approvals are confirmed, and whether control is switched off.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-  { name: 'computer_control', description: 'Run one fixed control on this computer (open or quit an app, volume, media, dark mode, lock the screen). Locking asks the person on this computer first.', inputSchema: { type: 'object', properties: { control: CONTROL_SCHEMA }, required: ['control'], additionalProperties: false } },
+  { name: 'computer_control', description: 'Run one fixed control on this computer (open or quit an app, volume, media, dark mode, lock the screen). It runs at once.', inputSchema: { type: 'object', properties: { control: CONTROL_SCHEMA }, required: ['control'], additionalProperties: false } },
   {
     name: 'computer_use',
-    description: 'Do a small task on this computer’s screen (at most 15 steps, 90 s). Steps that could send, buy, delete, post or type into a field that is not a search box wait for the person to approve them on this computer. Returns the outcome (done, stuck, blocked, unavailable, stopped, failed) with its steps, or the task while it still runs.',
+    description: `Do a small task on this computer’s screen (at most 15 steps, 90 s). ${BACKGROUND_NOTE} Returns the outcome (done, stuck, blocked, unavailable, stopped, failed) with its steps, or the task while it still runs.`,
     inputSchema: { type: 'object', properties: { goal: { type: 'string', maxLength: 1000 }, text: { type: 'string', description: 'the exact text to type, if the task types anything', maxLength: 4000 }, wait_s: { type: 'integer', minimum: 0, maximum: 600, description: 'how long to wait for the outcome (default 120)' } }, required: ['goal'], additionalProperties: false },
   },
   { name: 'computer_status', description: 'A task’s state (and whether it waits for an approval), or this computer’s recent tasks.', inputSchema: { type: 'object', properties: { task_id: { type: 'string' }, wait_s: { type: 'integer', minimum: 0, maximum: 600 } }, additionalProperties: false } },

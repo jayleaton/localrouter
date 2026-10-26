@@ -15,8 +15,16 @@ import { dirname, join } from 'node:path/posix'
  * altered or older one is replaced, which costs that Mac one last prompt. The helper itself answers only a parent
  * that satisfies LocalRouter's designated requirement.
  */
-export type Secrets = { token: string; legacy_token: string }
-export const EMPTY: Secrets = { token: '', legacy_token: '' }
+/**
+ * `computer_grant`: when the person said yes to "Let Jarvis control this computer?" (ISO time), or empty. Kept with
+ * the tokens so it survives restarts and updates the same way, and another program cannot grant it by editing a file.
+ */
+export type Secrets = { token: string; legacy_token: string; computer_grant: string }
+export const EMPTY: Secrets = { token: '', legacy_token: '', computer_grant: '' }
+/** The stored JSON as this build reads it: a field an older build never wrote is empty, one it does not know is kept. */
+export function parseSecrets(text: string): Secrets {
+  return { ...EMPTY, ...(JSON.parse(text) as Partial<Secrets>) }
+}
 export const SERVICE = 'LocalRouter'
 export const ACCOUNT = 'spark-tokens'
 export const HELPER = 'localrouter-keychain'
@@ -153,7 +161,7 @@ export class KeychainHelper {
     const r = await this.exec(helper, ['get', SERVICE, ACCOUNT])
     if (r.code === 4) return null
     if (r.code !== 0) throw new Error(`keychain: ${r.stderr.trim() || `exit ${r.code}`}`)
-    return { ...EMPTY, ...(JSON.parse(r.stdout) as Partial<Secrets>) }
+    return parseSecrets(r.stdout)
   }
 
   async set(s: Secrets): Promise<void> {
@@ -174,12 +182,12 @@ export async function loadSecrets(o: {
   const legacy = await readFile(o.legacyPath).catch(() => null)
   if (!o.helper) {
     const text = legacy ? o.legacyDecrypt(legacy) : null
-    return { secrets: text ? { ...EMPTY, ...(JSON.parse(text) as Partial<Secrets>) } : { ...EMPTY }, store: text ? 'legacy' : 'none', migrated: false }
+    return { secrets: text ? parseSecrets(text) : { ...EMPTY }, store: text ? 'legacy' : 'none', migrated: false }
   }
   if (legacy) {
     const text = o.legacyDecrypt(legacy)
     if (text) {
-      const secrets = { ...EMPTY, ...(JSON.parse(text) as Partial<Secrets>) }
+      const secrets = parseSecrets(text)
       await o.helper.set(secrets)
       // Only once it is in the keychain: a failed move keeps the old file for the next start.
       await rm(o.legacyPath, { force: true })

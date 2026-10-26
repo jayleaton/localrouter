@@ -566,6 +566,7 @@ namespace LocalRouterWin
                 case "access": return Json.Write(Access());
                 case "hello_start": return Json.Write(HelloStart(a));
                 case "hello_wait": return Json.Write(HelloWait(a));
+                case "hello_cancel": return Json.Write(HelloCancel());
                 default: throw new LrError("UNKNOWN_OP", op);
             }
         }
@@ -629,7 +630,10 @@ namespace LocalRouterWin
             return d;
         }
 
-        /** Waits (up to ms) for the started prompt's answer: one of UserConsentVerificationResult's names. */
+        /**
+         * Waits (up to ms) for the started prompt's answer: one of UserConsentVerificationResult's names, or "Pending"
+         * when it is still open (the app polls in short waits, so it can cancel the prompt between them).
+         */
         private static Dictionary<string, object> HelloWait(Dictionary<string, object> a)
         {
             if (helloOp == null || helloInfo == null) throw new LrError("UNKNOWN_OP", "hello_wait without hello_start");
@@ -645,10 +649,10 @@ namespace LocalRouterWin
             Dictionary<string, object> d = D();
             if (status == 0)
             {
-                helloInfo.Cancel();
-                d["result"] = "Canceled";
+                d["result"] = "Pending";
+                return d;
             }
-            else if (status == 1)
+            if (status == 1)
             {
                 int result;
                 Check(helloOp.GetResults(out result), "results");
@@ -660,6 +664,24 @@ namespace LocalRouterWin
                 helloInfo.GetErrorCode(out code);
                 d["result"] = status == 2 ? "Canceled" : "Error";
                 d["code"] = string.Format("0x{0:X8}", code);
+            }
+            helloInfo.Close();
+            helloOp = null;
+            helloInfo = null;
+            return d;
+        }
+
+        /** Cancels the open prompt (the approval ended another way): Windows closes the Windows Security window. */
+        private static Dictionary<string, object> HelloCancel()
+        {
+            Dictionary<string, object> d = D();
+            d["cancelled"] = false;
+            if (helloInfo == null) return d;
+            int status;
+            if (helloInfo.GetStatus(out status) == 0 && status == 0)
+            {
+                helloInfo.Cancel();
+                d["cancelled"] = true;
             }
             helloInfo.Close();
             helloOp = null;
@@ -1226,10 +1248,11 @@ namespace LocalRouterWin
                         if (ec.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) ec.Expand(); else ec.Collapse();
                     }, "expand");
                 }
+                // No pattern: a click on a field, or on anything that takes the keyboard focus, only focuses it
+                // (Chrome's omnibox is an Edit with no Invoke). SetFocus, never the pointer.
                 ControlType type = el.Current.ControlType;
-                if (type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox)
+                if (type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox || el.Current.IsKeyboardFocusable)
                 {
-                    // Clicking into a field only focuses it.
                     el.SetFocus();
                     return Done(true, "focus");
                 }

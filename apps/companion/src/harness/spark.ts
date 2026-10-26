@@ -32,8 +32,24 @@ export function normalizeBase(input: string): string {
   const url = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`)
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('the Spark address is https://… (or http:// on this computer or the tailnet)')
   if (url.username || url.password) throw new Error('the Spark address must not carry credentials')
-  if (url.protocol === 'http:' && !isPrivateHost(url.hostname)) throw new Error('plain http:// only to this computer or a tailnet address; use the https:// address `tailscale serve` gives the box')
+  if (url.protocol === 'http:' && !isPrivateHost(url.hostname)) throw new PlainHttpError(url.hostname.replace(/^\[|\]$/g, ''), url.port || '80')
   return `${url.protocol}//${url.host}`
+}
+
+/**
+ * Plain http:// to a host that is not this computer or the tailnet (a LAN IP, say): refused by design, since the pairing
+ * code, the token and the screen would cross the network unencrypted. `suggestion`: the host's tailnet name, when the
+ * caller found one (the Connect page asks `tailscale status`).
+ */
+export class PlainHttpError extends Error {
+  readonly host: string
+  readonly port: string
+  suggestion: string | null = null
+  constructor(host: string, port: string) {
+    super('plain http:// only to this computer or a tailnet address; use the tailnet name or the https:// address `tailscale serve` gives the box')
+    this.host = host
+    this.port = port
+  }
 }
 
 /** Loopback, a tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) or a MagicDNS name. */

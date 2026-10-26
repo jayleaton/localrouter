@@ -81,6 +81,14 @@ describe('WindowsScreen act', () => {
     expect(calls.map((c) => c.op)).toEqual(['semantic'])
   })
 
+  it('a click on a field with no pattern (Chrome’s omnibox) is SetFocus in the background, never the pointer', async () => {
+    const { worker, calls } = fakeWorker(() => ({ done: true, how: 'focus' }))
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ mode: 'background', how: 'focused through UI Automation' })
+    expect(calls.map((c) => c.op)).toEqual(['semantic'])
+    // The helper focuses Edit, Document and ComboBox, and any other element that takes the keyboard focus.
+    expect(HELPER_CS).toMatch(/type == ControlType\.ComboBox \|\| el\.Current\.IsKeyboardFocusable\)\s*\{\s*el\.SetFocus\(\);\s*return Done\(true, "focus"\);/)
+  })
+
   it('asks the person for their mouse when a control has no UI Automation pattern, then clicks there once allowed', async () => {
     const respond = (call: Call) => (call.op === 'semantic' ? { done: false, how: '' } : call.op === 'point' ? { hwnd: 1311234, x: 240, y: 80 } : { x: 240, y: 80 })
     const refused = fakeWorker(respond)

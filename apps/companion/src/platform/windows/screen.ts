@@ -206,8 +206,10 @@ export class WindowsScreen implements ScreenBackend {
       }
       case 'click': {
         const ref = checkRef(action.ref)
-        // A UI Automation pattern (Invoke, Select, Toggle, Expand): no pointer, no focus change.
-        if (done(await call('semantic', { kind: 'click', ref }), 'click')) return { mode: 'background' }
+        // A UI Automation pattern (Invoke, Select, Toggle, Expand): no pointer, no focus change. A field, or anything else
+        // that takes the keyboard focus, is focused (SetFocus): that is all a click there does.
+        const semantic = await call('semantic', { kind: 'click', ref })
+        if (done(semantic, 'click')) return object(semantic, 'click').how === 'focus' ? { mode: 'background', how: 'focused through UI Automation' } : { mode: 'background' }
         // No pattern: the real pointer, only with the person's leave ("needs your mouse for a moment").
         if (!options.allowPointer) throw new NeedsPointer('that control has no UI Automation pattern to click')
         const at = target(await call('point', { ref }))

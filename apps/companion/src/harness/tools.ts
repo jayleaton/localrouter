@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseControl } from '../../../desktop-helper/src/computer/macControls.ts'
+import { BACKGROUND_NOTE } from '../executor/broker.ts'
 import type { Broker, Caller } from '../executor/broker.ts'
 import type { Tool, ToolContext } from './registry.ts'
 import type { McpResult, Spark } from './spark.ts'
@@ -17,7 +18,7 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
   return [
     {
       name: 'computer_control',
-      description: 'Run one fixed control on the user’s computer: {"kind":"open_app","app"}, {"kind":"quit_app","app"}, {"kind":"volume","action":"up|down|mute|unmute|set","level"?,"target":"system|Spotify|Music"}, {"kind":"media","action":"play|pause|next|previous","player":"Spotify|Music"}, {"kind":"dark_mode","action":"on|off|toggle"}, {"kind":"lock_screen"}. Locking asks the user on screen first.',
+      description: 'Run one fixed control on the user’s computer: {"kind":"open_app","app"}, {"kind":"quit_app","app"}, {"kind":"volume","action":"up|down|mute|unmute|set","level"?,"target":"system|Spotify|Music"}, {"kind":"media","action":"play|pause|next|previous","player":"Spotify|Music"}, {"kind":"dark_mode","action":"on|off|toggle"}, {"kind":"lock_screen"}. It runs at once.',
       parameters: { type: 'object', properties: { control: { type: 'object', description: 'the control, as above' } }, required: ['control'], additionalProperties: false },
       async run(args, ctx) {
         const r = await broker.control({ caller, utterance: ctx.utterance }, parseControl(args.control))
@@ -26,7 +27,7 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
     },
     {
       name: 'computer_use',
-      description: 'Do a small task on the user’s computer screen toward a goal (at most 15 steps). Anything that could send, buy, delete, post or type into a field that is not a search box waits for the user to approve it on their screen: tell them so. Pass any exact text to type as `text`, never invent it.',
+      description: `Do a small task on the user’s computer screen toward a goal (at most 15 steps). ${BACKGROUND_NOTE} Pass any exact text to type as \`text\`, never invent it.`,
       parameters: { type: 'object', properties: { goal: { type: 'string', description: 'what to do, in the user’s words', maxLength: 1000 }, text: { type: 'string', description: 'exact text to type, if any', maxLength: 4000 } }, required: ['goal'], additionalProperties: false },
       async run(args, ctx) {
         const started = broker.startUse({ caller, utterance: ctx.utterance }, String(args.goal), typeof args.text === 'string' ? args.text : null)

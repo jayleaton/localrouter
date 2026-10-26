@@ -85,7 +85,7 @@ describe('the keychain helper survives app updates', () => {
 })
 
 describe('loading the tokens', () => {
-  const tokens = { token: 'lr_tok', legacy_token: '' }
+  const tokens = { token: 'lr_tok', legacy_token: '', computer_grant: '' }
 
   it('moves an older build’s safeStorage file into the keychain once, then deletes the file', async () => {
     const d = mkdtempSync(join(tmpdir(), 'lr-sec-'))

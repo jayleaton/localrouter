@@ -52,7 +52,7 @@ class _Names:
         for name in names.split():
             setattr(self, name, name)
 
-StateType = _Names('ACTIVE SHOWING VISIBLE FOCUSED EDITABLE SINGLE_LINE SELECTED HORIZONTAL VERTICAL')
+StateType = _Names('ACTIVE SHOWING VISIBLE FOCUSED FOCUSABLE EDITABLE SINGLE_LINE SELECTED HORIZONTAL VERTICAL')
 Role = _Names('APPLICATION FRAME WINDOW DIALOG PUSH_BUTTON TOGGLE_BUTTON LINK ENTRY PASSWORD_TEXT TEXT PAGE_TAB PAGE_TAB_LIST '
               'LIST LIST_ITEM LIST_BOX TABLE_CELL MENU MENU_BAR MENU_ITEM CHECK_BOX RADIO_BUTTON COMBO_BOX LABEL STATIC HEADING '
               'PARAGRAPH SECTION SCROLL_PANE SCROLL_BAR TOOL_BAR DOCUMENT_WEB DESKTOP_FRAME IMAGE')
@@ -94,7 +94,10 @@ class Node:
     def get_process_id(self): return self.spec.get('pid', 0)
     def get_parent(self): return self.parent
     def get_index_in_parent(self): return self.index
-    def grab_focus(self): return False
+    def grab_focus(self):
+        if self.spec.get('focus_log'):
+            log({'focus': self.get_name()})
+        return not self.spec.get('no_focus')
     def get_text_iface(self): return self if 'text' in self.spec else None
     def get_character_count(self): return len(self.spec['text'])
     # As in PyGObject: Accessible.get_text() is the one-argument alias for the Text interface, so the interface's
@@ -169,6 +172,10 @@ const TREE = {
             { role: 'SCROLL_BAR', states: ['SHOWING', 'VERTICAL'], value: [0, 1000, 100], box: box(960, 100, 20, 500) },
             { role: 'LIST', selection: true, box: [600, 100, 360, 500], children: [{ role: 'LIST_ITEM', name: 'Row A', box: box(600, 100, 360, 30) }] },
           ] },
+          // A GTK entry: its one action is "activate" (Enter). And a focusable card with no action at all.
+          { role: 'ENTRY', name: 'To', editable: true, text: '', actions: ['activate'], focus_log: true, states: ['SHOWING', 'EDITABLE', 'SINGLE_LINE', 'FOCUSABLE'], box: box(10, 760, 300, 30) },
+          { role: 'SECTION', name: 'Card', focus_log: true, states: ['SHOWING', 'FOCUSABLE'], box: box(400, 760, 100, 30) },
+          { role: 'ENTRY', name: 'Locked', editable: true, text: '', no_focus: true, states: ['SHOWING', 'EDITABLE', 'SINGLE_LINE'], box: box(600, 760, 100, 30) },
         ],
       }],
     },
@@ -176,7 +183,7 @@ const TREE = {
   ],
 }
 
-const REFS = { send: '1', attach: '2', password: '3', subject: '4', body: '5', row: '8.1.0', news: '0.0.1' }
+const REFS = { send: '1', attach: '2', password: '3', subject: '4', body: '5', row: '8.1.0', news: '0.0.1', to: '9', card: '10', locked: '11' }
 
 /**
  * Writes the fake gi and the tree; returns a runner that runs python3 calls for real with -S instead of -I: no
@@ -234,6 +241,16 @@ describe.skipIf(!python)('the AT-SPI script against a fake accessibility tree', 
     expect(await screen.act({ kind: 'click', ref: REFS.news })).toEqual({ mode: 'background' })
     expect(effects()).toEqual([{ action: 'press', on: 'Send' }, { select: 1, in: 'PAGE_TAB_LIST' }])
     expect(others.calls).toHaveLength(0)
+  })
+
+  it('a click on a field focuses it (never its "activate", which is Enter), as on anything focusable; no pointer', async () => {
+    const { screen, effects, others } = fakeDesktop()
+    expect(await screen.act({ kind: 'click', ref: REFS.to })).toEqual({ mode: 'background', how: 'focused through AT-SPI' })
+    expect(await screen.act({ kind: 'click', ref: REFS.card })).toEqual({ mode: 'background', how: 'focused through AT-SPI' })
+    expect(effects()).toEqual([{ focus: 'To' }, { focus: 'Card' }])
+    expect(others.calls).toHaveLength(0)
+    // A field that will not take the focus, with nothing else to do: the mouse is asked for.
+    await expect(screen.act({ kind: 'click', ref: REFS.locked })).rejects.toThrow(/needs your mouse for a moment/)
   })
 
   it('asks for the pointer at the centre of a control with no action, and clicks there once allowed', async () => {

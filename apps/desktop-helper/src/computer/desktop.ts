@@ -286,7 +286,7 @@ function middleOfWindow() {
 }
 var TEXT_ROLES = { AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1 };
 // Controls whose AXPress is the click a person makes: pressed through accessibility, the pointer and the app in front
-// stay as they are (the "virtual cursor"). Rows, text and screenshot spots are clicked with the pointer.
+// stay as they are (the "virtual cursor"). Fields are focused (focusInPlace); the rest needs the person's mouse.
 var PRESS_ROLES = { AXButton: 1, AXLink: 1, AXCheckBox: 1, AXRadioButton: 1, AXMenuItem: 1, AXMenuButton: 1, AXPopUpButton: 1 };
 function pressable(el) {
   if (!PRESS_ROLES[plain(el, 'AXRole')]) return false;
@@ -295,6 +295,18 @@ function pressable(el) {
   var names = ObjC.castRefToObject(ref[0]);
   for (var i = 0; names && i < names.count; i++) if (ObjC.unwrap(names.objectAtIndex(i)) === 'AXPress') return true;
   return false;
+}
+// A click on a text field, or on any control whose AXFocused can be set, is what a click there does: it takes the
+// focus. Set through accessibility, so the pointer stays where the person left it (Chrome's omnibox has no AXPress).
+function focusable(el) {
+  if (TEXT_ROLES[plain(el, 'AXRole')]) return true;
+  var settable = Ref();
+  return $.AXUIElementIsAttributeSettable(el, $('AXFocused'), settable) === 0 && (settable[0] === true || settable[0] === 1);
+}
+function focusInPlace(el) {
+  if (!focusable(el)) return false;
+  if ($.AXUIElementSetAttributeValue(el, $('AXFocused'), $.NSNumber.numberWithBool(true)) !== 0) return false;
+  return true;
 }
 // The scroll view a person would scroll: the largest scroll or web area inside the window (not a sidebar), else null.
 function scrollArea(win) {
@@ -436,7 +448,9 @@ function run(argv) {
     return 'ok';
   }
   if (op === 'click') {
-    if (el && pressable(el)) { if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ mode: 'background', at: point ? { x: point[0], y: point[1] } : null }); }
+    var at = point ? { x: point[0], y: point[1] } : null;
+    if (el && pressable(el)) { if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ mode: 'background', at: at }); }
+    if (el && (dryrun ? focusable(el) : focusInPlace(el))) return JSON.stringify({ mode: 'background', at: at, how: 'focused through accessibility' });
     if (payload.allow !== true) throw new Error('LOCALROUTER_NEEDS_POINTER:that control has no accessible action:');
     if (!point) throw new Error('LOCALROUTER_GONE');
     clickAt(point, dryrun);
@@ -815,7 +829,7 @@ export class DesktopBackend implements ScreenBackend {
 function resultOf(output: string): ActResult {
   const text = output.trim()
   if (!text.startsWith('{')) return { mode: 'background' }
-  let value: { mode?: unknown; at?: unknown; pointer?: unknown }
+  let value: { mode?: unknown; at?: unknown; pointer?: unknown; how?: unknown }
   try {
     value = JSON.parse(text) as typeof value
   } catch {
@@ -828,6 +842,7 @@ function resultOf(output: string): ActResult {
   const pointer = point(value.pointer)
   if (at) result.at = at
   if (pointer) result.pointer = pointer
+  if (typeof value.how === 'string' && value.how) result.how = value.how
   return result
 }
 

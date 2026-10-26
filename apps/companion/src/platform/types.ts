@@ -52,15 +52,18 @@ export type AccessReport = {
   requirements: Requirement[]
 }
 
-export type PresenceOptions = { window?: number; waiting?: (text: string) => void }
+export type PresenceOptions = { window?: number; waiting?: (text: string) => void; signal?: AbortSignal }
 
 /** The person's presence for one approval, checked by the OS where it can be (Touch ID, Windows Hello). */
 export interface PlatformPresence {
   readonly method: string
+  /** After `available()` said no: why, in words ("Windows Hello is not set up for you"). */
+  readonly why?: string
   /**
    * Resolves true only when the OS confirmed the person; false when they cancelled or it failed. `window`: the app's
    * window handle, so the OS prompt opens over it (Windows: an HWND); `waiting`: called with a sentence for the card when
-   * the prompt is open but could not be brought in front of other windows.
+   * the prompt is open but could not be brought in front of other windows; `signal`: aborted when the approval ends
+   * another way, which cancels the OS prompt and resolves false.
    */
   verify(prompt: string, options?: PresenceOptions): Promise<boolean>
   /** Whether it can be used on this computer now (hardware enrolled, service running). */

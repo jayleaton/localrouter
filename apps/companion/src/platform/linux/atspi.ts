@@ -262,13 +262,26 @@ def fallback(el, win, app, **extra):
     out.update(extra)
     return out
 
+def focus_in_place(el):
+    # What a click on a field, or on anything that takes the focus, does: it takes the focus. grab_focus, no pointer.
+    states = safe(el.get_state_set)
+    if not (has(states, S.EDITABLE) or has(states, S.FOCUSABLE)):
+        return False
+    return bool(safe(el.grab_focus, False))
+
 def click(el, win, app):
     parent = safe(el.get_parent)
-    kind = kind_of(el, safe(el.get_role), safe(el.get_state_set), safe(parent.get_role) if parent is not None else None)
+    states = safe(el.get_state_set)
+    kind = kind_of(el, safe(el.get_role), states, safe(parent.get_role) if parent is not None else None)
+    # A text field is focused, never "activated": a GtkEntry's activate is Enter, which could send or submit.
+    if has(states, S.EDITABLE) and focus_in_place(el):
+        return {'done': True, 'how': 'focused through AT-SPI'}
     tries = (select_in_parent, named_action) if kind in SELECTABLE else (named_action, select_in_parent)
     for attempt in tries:
         if attempt(el):
             return {'done': True}
+    if focus_in_place(el):
+        return {'done': True, 'how': 'focused through AT-SPI'}
     return fallback(el, win, app)
 
 def landed(el, text):
@@ -494,11 +507,14 @@ export function observationShape(value: unknown): RawObservation {
 }
 
 /** What an act op answered: done through AT-SPI, or the element's raw centre for the pointer. */
-export type RawAct = { done: true } | { done: false; point: Point | null; frame: Rect | null; pid: number; secret: boolean }
+export type RawAct = { done: true; how?: string } | { done: false; point: Point | null; frame: Rect | null; pid: number; secret: boolean }
 
 export function actShape(value: unknown): RawAct {
   const raw = object(value, 'action result')
-  if (boolean(raw.done, 'action done')) return { done: true }
+  if (boolean(raw.done, 'action done')) {
+    const how = optional(raw.how, 'action how', string)
+    return how ? { done: true, how } : { done: true }
+  }
   return {
     done: false,
     point: nullable(raw.point, 'action point', pointShape),
@@ -564,7 +580,7 @@ export class LinuxScreen implements ScreenBackend {
     const win = await this.compositorWindow()
     // AT-SPI first (an action or EditableText): the person's pointer and keyboard are never touched.
     const result = actShape(json((await this.call('act', { ...action, hint: hint(win) }, options.signal, win)).trim(), 'action result'))
-    if (result.done) return { mode: 'background' }
+    if (result.done) return result.how ? { mode: 'background', how: result.how } : { mode: 'background' }
     // The background could not do it. Without the person's leave for the real pointer, say why and stop here.
     if (!options.allowPointer) throw new NeedsPointer(this.pointerReason(result, win, action))
     if (action.kind === 'type') plainText(action.text) // a line break would be Enter: refused before the keyboard

@@ -65,6 +65,12 @@ ELECTRON_RUN_AS_NODE=1 exec "$contents/MacOS/LocalRouter" "$contents/Resources/a
 SH
 chmod 755 "$launcher"
 
+# Touch ID for approvals (native/presence-helper.m): its prompt can be dismissed and it says why Touch ID is not
+# available, which Electron's promptTouchID cannot. Signed below with the app's identity (or ad-hoc with it).
+presence="$app/Contents/Resources/localrouter-presence"
+xcrun --sdk macosx clang -O2 -Wall -Werror -fobjc-arc -mmacosx-version-min=13.0 -arch arm64 \
+  -framework Foundation -framework LocalAuthentication -o "$presence" "$root/native/presence-helper.m"
+
 # Signing, after every file is in place (the launcher is a sealed resource). macOS ties Accessibility and Screen
 # Recording to the app's designated requirement: an ad-hoc build's is its code hash, new with every build, so each
 # update loses them. With LR_SIGN_P12 (a base64 .p12, scripts/make-signing-identity.sh) and LR_SIGN_PASSWORD, every
@@ -110,6 +116,7 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
     -r="designated => identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
   codesign --verify --strict -R="identifier \"$kh_id\" and certificate leaf = H\"$sha1\"" "$kh"
   echo "package-mac: keychain helper $(codesign -dvvv "$kh" 2>&1 | grep -E '^CDHash=' || true), requirement: $(codesign -d -r- "$kh" 2>&1 | sed -n 's/^designated => //p')"
+  codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$bundle_id.presence" "$presence"
   codesign --force --sign "$sha1" --keychain "$kc" --timestamp=none --identifier "$bundle_id" -r="$requirement" "$app"
   # What TCC checks on every launch: this build satisfies the requirement every build has.
   codesign --verify --deep --strict -R="identifier \"$bundle_id\" and certificate leaf = H\"$sha1\"" "$app"
@@ -121,6 +128,7 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
 else
   echo "::warning::package-mac: no signing identity (MACOS_SIGNING_P12): this build is ad-hoc signed, and Accessibility and Screen Recording will not survive the next update"
   echo "::warning::package-mac: no keychain helper without a signing identity: the token is kept with safeStorage, which asks again after every update"
+  codesign --force --sign - --timestamp=none --identifier "$bundle_id.presence" "$presence"
   codesign --force --deep --sign - --timestamp=none "$app"
 fi
 codesign --verify --deep --strict --verbose=2 "$app"

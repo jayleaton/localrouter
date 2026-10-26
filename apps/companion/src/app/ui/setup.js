@@ -211,7 +211,10 @@ function render(s) {
   renderFound();
   $('control').checked = s.control;
   $('control').disabled = !s.paired;
-  $('presence').textContent = s.presence;
+  $('presence').textContent = s.presence_why ? `${s.presence} (${s.presence_why})` : s.presence;
+  $('askEach').checked = s.ask_each;
+  $('grantState').textContent = s.granted_since ? `you allowed it on ${new Date(s.granted_since).toLocaleString()}` : 'not yet';
+  $('revokeControl').disabled = !s.granted_since;
   $('folders').replaceChildren(...s.shared.map((f) => {
     const li = document.createElement('li');
     const t = document.createElement('span');
@@ -330,6 +333,8 @@ for (const b of document.querySelectorAll('[data-reset]')) b.onclick = () => gua
 }, b);
 $('relaunch').onclick = () => api.relaunch();
 $('control').onchange = () => guarded(() => api.control($('control').checked));
+$('askEach').onchange = () => guarded(() => api.askEach($('askEach').checked));
+$('revokeControl').onclick = () => guarded(() => api.revokeControl());
 $('addFolder').onclick = () => guarded(() => api.addFolder());
 $('enroll').onclick = () => guarded(async () => {
   const name = $('callerName').value.trim() || 'harness';

@@ -133,7 +133,10 @@
   <h2 class="group">This computer</h2>
   <section class="card">
     <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
-    <p class="note">Anything that could send, buy, delete or post, or type into a field that is not a search box, waits for your approval on screen, confirmed with <b id="presence"></b>. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
+    <p class="note">Jarvis works in the background as a virtual mouse: your own mouse and keyboard stay yours. It asks once, the first time (<span id="grantState">not yet</span>), and then does not ask for each step. Every step is in the audit log. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
+    <label class="check"><input type="checkbox" id="askEach"> Ask before each action</label>
+    <p class="note">Off by default. On: anything that could send, buy, delete or post, type into a field that is not a search box, or use your mouse waits for your approval on screen, confirmed with <b id="presence"></b>.</p>
+    <button class="btn" id="revokeControl">Revoke computer control</button>
   </section>
 
   <section class="card">

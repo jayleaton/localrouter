@@ -67,6 +67,20 @@ jobs:
           # and Screen Recording across updates. Absent: an ad-hoc build, with a warning.
           LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
           LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+      - name: Touch ID helper (packaged, signed; a runner has no Touch ID, so it must say so and why, and a verify ends at once)
+        run: |
+          presence="out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-presence"
+          codesign --verify --strict "$presence"
+          check=$("$presence" check)
+          echo "check: $check"
+          node -e 'const v = JSON.parse(process.argv[1]); if (typeof v.biometrics !== "boolean" || typeof v.code !== "number") process.exit(1)' "$check"
+          set +e
+          verify=$(echo 'LocalRouter CI' | perl -e 'alarm shift; exec @ARGV' 20 "$presence" verify)
+          code=$?
+          set -e
+          echo "verify: $verify (exit $code)"
+          # No Touch ID here: 4 (unavailable, with its code). 0 would be a pass nobody gave.
+          [ "$code" = 4 ] || [ "$code" = 3 ]
       - name: smoke (the packaged app starts, its UI loads, the executor answers; the MCP launcher lists its tools)
         run: |
           app="out/LocalRouter-darwin-arm64/LocalRouter.app"

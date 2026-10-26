@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { HELLO_BEHIND, WindowsHello } from './presence.ts'
+import { HELLO_BEHIND, helloUnavailable, WindowsHello } from './presence.ts'
 import type { WindowsCall } from './worker.ts'
 
 type Call = { op: string; args: Record<string, unknown> }
@@ -51,5 +51,28 @@ describe('Windows Hello for an approval (Windows run, 2026-10-25: the prompt ope
     const { worker: w, calls } = worker((c) => (c.op === 'hello_start' ? { front: true, seen: true } : new Error('worker restarted')))
     expect(await new WindowsHello(w).verify('x', { window: 7 })).toBe(false)
     expect(calls.map((c) => c.op)).toEqual(['hello_start', 'hello_wait'])
+  })
+
+  it('polls the open prompt in short waits, and an approval that ends another way cancels it (Mac run, 2026-10-26)', async () => {
+    let waits = 0
+    const stop = new AbortController()
+    const { worker: w, calls } = worker((c) => {
+      if (c.op === 'hello_start') return { front: true, seen: true }
+      if (c.op === 'hello_wait') {
+        waits += 1
+        if (waits === 2) stop.abort('cancelled')
+        return { result: 'Pending' }
+      }
+      return { cancelled: true }
+    })
+    expect(await new WindowsHello(w).verify('x', { window: 7, signal: stop.signal })).toBe(false)
+    expect(calls.map((c) => c.op)).toEqual(['hello_start', 'hello_wait', 'hello_wait', 'hello_cancel'])
+  })
+
+  it('says why Hello cannot be used, for the card that names the fallback', async () => {
+    const hello = new WindowsHello(worker(() => ({ availability: 'NotConfiguredForUser' })).worker)
+    expect(await hello.available()).toBe(false)
+    expect(hello.why).toBe('Windows Hello (a PIN, face or fingerprint) is not set up for you')
+    expect(helloUnavailable('DisabledByPolicy')).toMatch(/policy/)
   })
 })

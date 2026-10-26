@@ -129,5 +129,7 @@ Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:LR_CS)) -Language CSharp -
     expect(typeof start.front).toBe('boolean')
     const done = (await worker.call('hello_wait', { ms: 30_000 }, { timeoutMs: 60_000 })) as { result: string }
     expect(['DeviceNotPresent', 'NotConfiguredForUser', 'DisabledByPolicy', 'DeviceBusy', 'Canceled']).toContain(done.result)
+    // Cancelling after the answer (an approval that ended another way) is harmless: nothing is open.
+    expect(await worker.call('hello_cancel', {}, { timeoutMs: 60_000 })).toEqual({ cancelled: false })
   })
 })
