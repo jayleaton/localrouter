@@ -81,6 +81,10 @@ jobs:
           echo "verify: $verify (exit $code)"
           # No Touch ID here: 4 (unavailable, with its code). 0 would be a pass nobody gave.
           [ "$code" = 4 ] || [ "$code" = 3 ]
+          # Automation, checked without asking (never automation-ask here: nobody can answer a prompt on a runner).
+          automation=$(perl -e 'alarm shift; exec @ARGV' 30 "$presence" automation com.apple.systemevents)
+          echo "automation: $automation"
+          node -e 'const v = JSON.parse(process.argv[1]); if (!Number.isInteger(v.status)) process.exit(1)' "$automation"
       - name: smoke (the packaged app starts, its UI loads, the executor answers; the MCP launcher lists its tools)
         run: |
           app="out/LocalRouter-darwin-arm64/LocalRouter.app"

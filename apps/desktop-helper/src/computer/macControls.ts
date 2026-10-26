@@ -5,7 +5,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { jxa } from './desktop.ts'
-import { integerIn, isObject, oneOf, string } from '../validate.ts'
+import type { AutomationCheck } from './types.ts'
+import { array, integerIn, isObject, json, oneOf, string } from '../validate.ts'
 
 /** `name`: the bundle's file name (what `open -a` takes); `aliases`: its bundle and display names, when they differ. */
 export type InstalledApp = { id: string; name: string; aliases?: string[] }
@@ -85,6 +86,12 @@ export type MacControlsOptions = {
   /** An app's Info.plist as text (its bundle and display names, when it is XML). */
   readText?: (path: string) => Promise<string>
   now?: () => number
+  /**
+   * macOS's Automation grants, checked without asking. With it, no control sends an Apple Event to an app macOS has
+   * not already allowed (it would open "LocalRouter wants to control …"): the control is refused with words instead.
+   * Absent: Apple Events are sent as before.
+   */
+  automation?: AutomationCheck
 }
 
 const execFileAsync = promisify(execFile)
@@ -98,6 +105,41 @@ const execRunner: CommandRunner = {
 const APP_CACHE_MS = 5 * 60_000
 const VOLUME_STEP = 20
 const PERMISSION_ERROR = /not allowed|assistive access|accessibility|\(1002\)|-1743|-25211/i
+
+/** Bundle ids of the apps the controls send Apple Events to, for the Automation check. */
+const SYSTEM_EVENTS = 'com.apple.systemevents'
+const PLAYER_BUNDLES: Record<Player, string> = { Spotify: 'com.spotify.client', Music: 'com.apple.Music' }
+
+/**
+ * Running foreground apps (activation policy regular: those in the Dock and the app switcher), from NSWorkspace in
+ * this process: no Apple Event to System Events, so no permission prompt.
+ */
+export const RUNNING_SCRIPT = `ObjC.import('AppKit');
+function run() {
+  var apps = $.NSWorkspace.sharedWorkspace.runningApplications, out = [];
+  for (var i = 0; i < apps.count; i++) {
+    var app = apps.objectAtIndex(i);
+    if (Number(app.activationPolicy) !== 0) continue;
+    var name = ObjC.unwrap(app.localizedName);
+    if (name && out.indexOf(name) < 0) out.push(name);
+  }
+  return JSON.stringify(out);
+}`
+
+/** The bundle id of an app by name (running first, else installed), for the Automation check. argv: the name. */
+export const BUNDLE_SCRIPT = `ObjC.import('AppKit');
+function run(argv) {
+  var ws = $.NSWorkspace.sharedWorkspace, apps = ws.runningApplications, wanted = argv[0];
+  for (var i = 0; i < apps.count; i++) {
+    var app = apps.objectAtIndex(i), url = app.bundleURL;
+    var file = url && !url.isNil() ? ObjC.unwrap(url.URLByDeletingPathExtension.lastPathComponent) : '';
+    if (ObjC.unwrap(app.localizedName) === wanted || file === wanted) return ObjC.unwrap(app.bundleIdentifier) || '';
+  }
+  var path = ws.fullPathForApplication(wanted);
+  if (!path || path.isNil()) return '';
+  var bundle = $.NSBundle.bundleWithPath(path);
+  return bundle && !bundle.isNil() ? ObjC.unwrap(bundle.bundleIdentifier) || '' : '';
+}`
 
 // Player scripts name the app literally because `next track` and `sound volume` only compile
 // against a known dictionary; the literal comes from the closed Player union, never from input.
@@ -137,6 +179,7 @@ export class MacControls {
   private readonly readDir: (path: string) => Promise<string[]>
   private readonly readText: (path: string) => Promise<string>
   private readonly now: () => number
+  private readonly automation: AutomationCheck | null
   private cache: { at: number; apps: InstalledApp[] } | null = null
 
   constructor(options: MacControlsOptions = {}) {
@@ -153,6 +196,7 @@ export class MacControls {
     this.readDir = options.readDir ?? ((path) => readdir(path))
     this.readText = options.readText ?? ((path) => readFile(path, 'utf8'))
     this.now = options.now ?? Date.now
+    this.automation = options.automation ?? null
   }
 
   get available(): boolean {
@@ -219,16 +263,11 @@ export class MacControls {
     }
   }
 
-  /** Names of running foreground apps; empty when System Events is unavailable. */
+  /** Names of running foreground apps (NSWorkspace, no Apple Event); empty when they cannot be read. */
   async running(): Promise<string[]> {
     if (!this.available) return []
     try {
-      const out = await this.osascript([
-        'tell application "System Events" to set names to name of every application process whose background only is false',
-        'set AppleScript\'s text item delimiters to linefeed',
-        'return names as text',
-      ])
-      return out.split('\n').map((line) => line.trim()).filter(Boolean)
+      return array(json((await this.runner.run(...jxa(RUNNING_SCRIPT))).trim() || '[]', 'running apps'), 'running apps', string).map((name) => name.trim()).filter(Boolean)
     } catch {
       return []
     }
@@ -278,6 +317,9 @@ export class MacControls {
       case 'quit_app': {
         const app = await this.resolveApp(control.app)
         if (!(await this.isRunning(app))) return { done: `${app} wasn't open.` }
+        // Any app can be quit, and the app's setup asks macOS only about the few LocalRouter controls: for the others the
+        // person quits it, rather than macOS asking mid-task.
+        await this.mayControl(app, this.automation ? (await this.runner.run(...jxa(BUNDLE_SCRIPT, [app]))).trim() : '', `macOS has not given LocalRouter its OK to control ${app}, and LocalRouter never asks for it during a task: quit ${app} yourself this time.`)
         await this.osascript(['tell application (item 1 of argv) to quit'], [app])
         return { done: `Quit ${app}.` }
       }
@@ -286,11 +328,13 @@ export class MacControls {
       case 'media': {
         const player = await this.resolveApp(control.player)
         if (control.action !== 'play' && !(await this.isRunning(player))) return { done: `${player} isn't playing.` }
+        await this.mayControl(control.player, PLAYER_BUNDLES[control.player])
         await this.osascript([`tell application "${control.player}" to ${MEDIA_VERBS[control.action]}`])
         return { done: `${MEDIA_DONE[control.action]} ${player}.` }
       }
       case 'dark_mode': {
         const next = { on: 'true', off: 'false', toggle: 'not dark mode' }[control.action]
+        await this.mayControl('System Events', SYSTEM_EVENTS)
         const out = await this.osascript([
           'tell application "System Events" to tell appearance preferences',
           `set dark mode to ${next}`,
@@ -300,6 +344,7 @@ export class MacControls {
         return { done: `Dark mode is ${out.trim() === 'true' ? 'on' : 'off'}.` }
       }
       case 'lock_screen':
+        await this.mayControl('System Events', SYSTEM_EVENTS)
         try {
           await this.osascript(['tell application "System Events" to keystroke "q" using {control down, command down}'])
         } catch (error) {
@@ -331,6 +376,7 @@ export class MacControls {
   ): Promise<{ done: string }> {
     const player = await this.resolveApp(target)
     if (!(await this.isRunning(player))) return { done: `${player} isn't playing.` }
+    await this.mayControl(target, PLAYER_BUNDLES[target])
     const level =
       control.action === 'mute' ? 0 : control.action === 'unmute' ? 50 : await this.nextLevel(control, () =>
         this.osascript([`return sound volume of application "${target}"`])
@@ -358,7 +404,17 @@ export class MacControls {
     return resolveInstalled(requested, await this.apps())
   }
 
-  // `is running` checks without launching, unlike a `tell` block.
+  /**
+   * Refuses, before any Apple Event, a control of an app macOS has not allowed LocalRouter to control: sending one
+   * would open macOS's "wants to control" prompt, which never appears during a task. No check configured: allowed.
+   */
+  private async mayControl(app: string, bundleId: string, refusal?: string): Promise<void> {
+    if (!this.automation) return
+    if (bundleId && (await this.automation.allowed(bundleId).catch(() => false))) return
+    throw new ControlError('unavailable', refusal ?? `macOS needs your OK once for LocalRouter to control ${app}: LocalRouter › Settings › This computer asks for it.`)
+  }
+
+  // `is running` checks without launching, unlike a `tell` block, and sends the app no Apple Event.
   private async isRunning(app: string): Promise<boolean> {
     return (await this.osascript(['return application (item 1 of argv) is running'], [app])).trim() === 'true'
   }

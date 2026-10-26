@@ -66,10 +66,12 @@ SH
 chmod 755 "$launcher"
 
 # Touch ID for approvals (native/presence-helper.m): its prompt can be dismissed and it says why Touch ID is not
-# available, which Electron's promptTouchID cannot. Signed below with the app's identity (or ad-hoc with it).
+# available, which Electron's promptTouchID cannot. It also checks macOS's Automation grants without asking (Apple
+# Events: CoreServices; System Events started hidden: AppKit). Signed below with the app's identity (or ad-hoc with it).
 presence="$app/Contents/Resources/localrouter-presence"
 xcrun --sdk macosx clang -O2 -Wall -Werror -fobjc-arc -mmacosx-version-min=13.0 -arch arm64 \
-  -framework Foundation -framework LocalAuthentication -o "$presence" "$root/native/presence-helper.m"
+  -framework Foundation -framework LocalAuthentication -framework CoreServices -framework AppKit \
+  -o "$presence" "$root/native/presence-helper.m"
 
 # Signing, after every file is in place (the launcher is a sealed resource). macOS ties Accessibility and Screen
 # Recording to the app's designated requirement: an ad-hoc build's is its code hash, new with every build, so each

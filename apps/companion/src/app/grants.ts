@@ -48,3 +48,14 @@ export function grantStates(said: Record<Permission, boolean>, works: { accessib
   }
   return { state, grants }
 }
+
+/**
+ * Whether to reset this app's own Microphone entry before asking. macOS keeps an entry made under another signature
+ * (the ad-hoc builds) and never prompts again while it fails to match this build ("Failed to match existing code
+ * requirement … kTCCServiceMicrophone", Mac run, 2026-10-26), reporting it as not granted. So whenever the Microphone
+ * is not granted now, the entry is reset first and macOS asks once; that grant is tied to the stable certificate's
+ * requirement and survives every later update. A working grant is never touched.
+ */
+export function micResetBeforeAsk(status: string): boolean {
+  return status !== 'granted'
+}

@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('companion', {
     control: (on: boolean) => ipcRenderer.invoke('setup:control', on),
     askEach: (on: boolean) => ipcRenderer.invoke('setup:askEach', on),
     revokeControl: () => ipcRenderer.invoke('setup:revokeControl'),
+    grantControl: (from: string) => ipcRenderer.invoke('setup:grantControl', from),
     exportConversations: () => ipcRenderer.invoke('setup:export'),
     openVoice: () => ipcRenderer.invoke('setup:openVoice'),
   },

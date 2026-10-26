@@ -213,8 +213,11 @@ function render(s) {
   $('control').disabled = !s.paired;
   $('presence').textContent = s.presence_why ? `${s.presence} (${s.presence_why})` : s.presence;
   $('askEach').checked = s.ask_each;
-  $('grantState').textContent = s.granted_since ? `you allowed it on ${new Date(s.granted_since).toLocaleString()}` : 'not yet';
-  $('revokeControl').disabled = !s.granted_since;
+  $('grantState').textContent = s.granted_since ? `you allowed it on ${new Date(s.granted_since).toLocaleString()}` : 'not allowed yet: a task is refused until you allow it';
+  $('revokeControl').hidden = !s.control_granted;
+  $('allowControl').hidden = s.control_granted;
+  $('open-control').hidden = s.control_granted;
+  $('grantControl').disabled = !s.paired;
   $('folders').replaceChildren(...s.shared.map((f) => {
     const li = document.createElement('li');
     const t = document.createElement('span');
@@ -335,6 +338,8 @@ $('relaunch').onclick = () => api.relaunch();
 $('control').onchange = () => guarded(() => api.control($('control').checked));
 $('askEach').onchange = () => guarded(() => api.askEach($('askEach').checked));
 $('revokeControl').onclick = () => guarded(() => api.revokeControl());
+$('grantControl').onclick = () => guarded(() => api.grantControl('onboarding'), $('grantControl'), 'Asking macOS…');
+$('allowControl').onclick = () => guarded(() => api.grantControl('settings'), $('allowControl'));
 $('addFolder').onclick = () => guarded(() => api.addFolder());
 $('enroll').onclick = () => guarded(async () => {
   const name = $('callerName').value.trim() || 'harness';

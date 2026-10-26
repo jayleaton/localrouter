@@ -150,6 +150,16 @@ export type BrowserTab = { window: number; index: number; title: string; url: st
 /** A named tab group and its tabs' titles as the tab strip shows them, in order. */
 export type TabGroup = { name: string; tabs: string[] }
 
+/**
+ * macOS Automation (Apple Events to another app) checked without asking: true only when macOS already gave this app
+ * its OK to control the target (by bundle id). Nothing that would show "LocalRouter wants to control …" runs during
+ * a task unless this said yes; the one moment macOS may ask is the app's setup. Absent: Apple Events are sent as
+ * before (the standalone helper, which has no way to check).
+ */
+export interface AutomationCheck {
+  allowed(bundleId: string): Promise<boolean>
+}
+
 /** The browser's open tabs (read-only), and switching to one by clicking it in the tab strip with the cursor. */
 export interface BrowserTabs {
   readonly browser: string

@@ -21,14 +21,14 @@ const caps: Capabilities = {
   decisions: { available: false },
 }
 const ok: Connection = connectionOf(caps, { required: true, paired: true, device: { id: 'd1', name: 'Mac', scopes: ['inference', 'media', 'read'] } }, 1)
-const input = (over: Partial<ConnectInput>): ConnectInput => ({ paired: false, base: '', draft: null, connection: null, errors: {}, permissions: granted, ...over })
+const input = (over: Partial<ConnectInput>): ConnectInput => ({ paired: false, base: '', draft: null, connection: null, errors: {}, permissions: granted, control: { granted: true }, ...over })
 const statuses = (i: ConnectInput) => Object.fromEntries(connectView(i).steps.map((s) => [s.id, s.status]))
 
 describe('the Connect steps', () => {
   it('walks address, code, connection, permissions in order', () => {
     const fresh = input({ permissions: { ...granted, accessibility: 'not-granted' } })
     expect(connectView(fresh).current).toBe('address')
-    expect(statuses(fresh)).toEqual({ address: 'active', code: 'todo', connection: 'todo', permissions: 'todo' })
+    expect(statuses(fresh)).toEqual({ address: 'active', code: 'todo', connection: 'todo', permissions: 'todo', control: 'done' })
 
     const checked = input({ draft: { base: 'https://spark.ts.net:10443', server, repair: false } })
     expect(connectView(checked).current).toBe('code')
@@ -41,7 +41,14 @@ describe('the Connect steps', () => {
 
     const connected = input({ paired: true, base: 'https://spark.ts.net:10443', connection: ok })
     expect(connectView(connected).current).toBe('done')
-    expect(statuses(connected)).toEqual({ address: 'done', code: 'done', connection: 'done', permissions: 'done' })
+    expect(statuses(connected)).toEqual({ address: 'done', code: 'done', connection: 'done', permissions: 'done', control: 'done' })
+  })
+
+  it('the last step is the one consent for computer control, in setup: open until it is given, then done for good', () => {
+    const notYet = input({ paired: true, base: 'https://spark.ts.net:10443', connection: ok, control: { granted: false } })
+    expect(connectView(notYet).current).toBe('control')
+    expect(connectView(notYet).steps[4]).toMatchObject({ id: 'control', status: 'active', summary: expect.stringMatching(/asked only here, once/) })
+    expect(connectView(input({ paired: true, connection: ok, control: { granted: true } })).steps[4].status).toBe('done')
   })
 
   it('stops at the permission step until the grants are in, and flags a stale grant', () => {
@@ -67,7 +74,7 @@ describe('the Connect steps', () => {
   it('re-pairing reopens the code step while the old token still works', () => {
     const v = connectView(input({ paired: true, base: 'https://s', connection: ok, draft: { base: 'https://s', server, repair: true } }))
     expect(v.current).toBe('code')
-    expect(v.steps.map((s) => s.status)).toEqual(['done', 'active', 'todo', 'done'])
+    expect(v.steps.map((s) => s.status)).toEqual(['done', 'active', 'todo', 'done', 'done'])
   })
 
   it('a connection that works without the token being known is a warning, not a stop', () => {

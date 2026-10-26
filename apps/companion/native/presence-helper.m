@@ -10,6 +10,19 @@
 //
 // verify's exit codes: 0 verified, 1 not (cancelled, failed, refused), 2 usage, 3 dismissed (SIGTERM or stdin closed),
 // 4 Touch ID cannot be used now (its code on stdout).
+//
+// It also answers whether macOS lets LocalRouter send Apple Events to an app (Automation), for the same reason it
+// lives here: a helper LocalRouter starts counts as LocalRouter for macOS's privacy checks. During a task nothing may
+// open "LocalRouter wants to control …", so every Apple Event is preceded by `automation`, which never asks; only
+// the app's setup runs `automation-ask`, the one moment macOS may show its prompt.
+//
+//   localrouter-presence automation BUNDLE_ID       {"status":0} granted, -1743 denied, -1744 would ask, -600 not running
+//   localrouter-presence automation-ask BUNDLE_ID   the same, asking the person when macOS has no answer yet
+//
+// System Events is a background app that is often not running: it is started hidden first, so the answer is never
+// "not running" for it.
+#import <AppKit/AppKit.h>
+#import <CoreServices/CoreServices.h>
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 #include <signal.h>
@@ -36,10 +49,56 @@ static dispatch_source_t on_signal(int sig) {
   return s;
 }
 
+// Starts an app by bundle id without bringing it forward or showing it, and waits (up to 5 s) until it runs.
+static void launch_hidden(NSString *bundle) {
+  if ([NSRunningApplication runningApplicationsWithBundleIdentifier:bundle].count) return;
+  NSURL *url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:bundle];
+  if (!url) return;
+  NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+  config.activates = NO;
+  config.hides = YES;
+  config.addsToRecentItems = NO;
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  [[NSWorkspace sharedWorkspace] openApplicationAtURL:url configuration:config completionHandler:^(NSRunningApplication *app, NSError *error) {
+    (void)app;
+    (void)error;
+    dispatch_semaphore_signal(done);
+  }];
+  dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+}
+
+// AEDeterminePermissionToAutomateTarget for the app with that bundle id. The check uses wildcards (any event); the ask
+// names the event LocalRouter sends most (core/getd, a property read), since macOS asks only for a concrete event.
+// The consent is per target app, so either covers every event LocalRouter sends it.
+static int automation_status(const char *bundle, Boolean ask) {
+  NSString *bid = [NSString stringWithUTF8String:bundle];
+  if ([bid isEqualToString:@"com.apple.systemevents"]) launch_hidden(bid);
+  AEAddressDesc target;
+  OSErr made = AECreateDesc(typeApplicationBundleID, bundle, (Size)strlen(bundle), &target);
+  if (made != noErr) {
+    printf("{\"status\":%d}\n", (int)made);
+    return 0;
+  }
+  OSStatus status = noErr;
+  // A just-started app takes a moment to be reachable: "not running" is retried for up to 2 s.
+  for (int tries = 0; tries < 20; tries++) {
+    status = ask ? AEDeterminePermissionToAutomateTarget(&target, kCoreEventClass, kAEGetData, true)
+                 : AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, false);
+    if (status != procNotFound || ![bid isEqualToString:@"com.apple.systemevents"]) break;
+    usleep(100 * 1000);
+  }
+  AEDisposeDesc(&target);
+  printf("{\"status\":%d}\n", (int)status);
+  return 0;
+}
+
 int main(int argc, const char **argv) {
   @autoreleasepool {
+    if (argc == 3 && (strcmp(argv[1], "automation") == 0 || strcmp(argv[1], "automation-ask") == 0)) {
+      return automation_status(argv[2], strcmp(argv[1], "automation-ask") == 0);
+    }
     if (argc != 2) {
-      fprintf(stderr, "usage: localrouter-presence check|verify\n");
+      fprintf(stderr, "usage: localrouter-presence check|verify|automation BUNDLE_ID|automation-ask BUNDLE_ID\n");
       return 2;
     }
     context = [[LAContext alloc] init];

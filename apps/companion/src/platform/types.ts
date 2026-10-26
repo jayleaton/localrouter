@@ -89,6 +89,12 @@ export type Platform = {
   /** An OS presence check for approvals; null: the app's own confirmation dialog. */
   readonly presence: PlatformPresence | null
   access(): Promise<AccessReport>
+  /**
+   * macOS: the Automation grants computer use relies on, asked once from the app's setup (the one moment a "LocalRouter
+   * wants to control …" prompt may appear; during tasks nothing asks). Resolves each bundle id asked to macOS's
+   * status: 0 granted, -1743 denied, -1744 no answer, -600 not running (not asked), -1 could not be checked.
+   */
+  readonly automation?: { ask(): Promise<Record<string, number>> }
   /** Ends what the platform keeps running (Windows' PowerShell workers), when the executor stops. */
   close?(): void
 }

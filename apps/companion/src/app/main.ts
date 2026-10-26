@@ -11,11 +11,11 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { StoredStanding } from './standing.ts'
+import { migrates, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
 import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
 import type { Migration, Secrets } from './secrets.ts'
-import { grantStates, signingId } from './grants.ts'
+import { grantStates, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -90,7 +90,7 @@ const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; automationAsked?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -349,15 +349,43 @@ let executor: Executor | null = null
 
 export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark: pair it on the Connect page.'
 
-/** The person's one consent for computer control, kept with the tokens; "Ask before each action" is a setting. */
+/** The person's grant for computer control, kept with the tokens; "Ask before each action" is a setting. */
 const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => saveSecrets(s) }, () => settings?.askEachAction === true)
+
+/**
+ * An install already set up (paired, with the OS grants computer control needs) that never decided gets the standing
+ * grant at start with no card: that setup was the consent (JJ, 2026-10-26). Audited as `source: migrated`.
+ */
+async function migrateStanding() {
+  if (!executor || !standing.undecided) return
+  const access = await executor.built.platform.access().catch(() => null)
+  if (!migrates({ paired: Boolean(settings.base && loadSecrets().token), undecided: standing.undecided, os: process.platform, access })) return
+  executor.broker.grantStanding('migrated')
+  log.info('consent.migrated', { os: process.platform })
+}
+
+/**
+ * macOS: the Automation grants (System Events, and Chrome when it runs), asked once, from setup, where the person
+ * pressed the button: the one moment a "LocalRouter wants to control…" prompt may come. During tasks nothing asks.
+ */
+async function askAutomationOnce() {
+  const automation = executor?.built.platform.automation
+  if (!automation || settings.automationAsked) return
+  const answers = await automation.ask().catch(() => ({}))
+  settings = { ...settings, automationAsked: new Date().toISOString() }
+  saveSettings(settings)
+  log.info('automation.asked', answers)
+}
 
 async function startLocalExecutor(): Promise<void> {
   if (executor) return
   executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, standing, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
   executor.broker.setDecider(null, UNPAIRED)
   await gate.use(executor.built.platform.presence)
+  await migrateStanding()
   executor.broker.on((e) => {
+    // Refused for want of the grant: a notification only, never a window over the person's work.
+    if (e.type === 'consent.needed' && Notification.isSupported()) new Notification({ title: 'Computer control is off', body: `Jarvis asked to ${e.goal.slice(0, 80)}. Turn computer control on in LocalRouter → Settings.` }).show()
     if (e.type === 'approval') {
       showMain()
       if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
@@ -645,10 +673,9 @@ function registerIpc() {
   setup('setup:permission', async (kind) => {
     if (process.platform !== 'darwin') return state()
     if (kind === 'microphone') {
-      // Denied (or held by an older build's entry that macOS reports as denied): macOS never asks again by itself, so
-      // this app's entry is reset first and macOS shows its prompt.
-      const status = systemPreferences.getMediaAccessStatus('microphone')
-      if (status === 'denied' || status === 'restricted') await resetGrant('Microphone')
+      // Not granted now (denied, or an older build's entry that no longer matches this signature): macOS never asks
+      // again by itself, so this app's entry is reset first and macOS shows its prompt, once (grants.ts).
+      if (micResetBeforeAsk(systemPreferences.getMediaAccessStatus('microphone'))) await resetGrant('Microphone')
       await systemPreferences.askForMediaAccess('microphone')
     }
     if (kind === 'accessibility') {
@@ -703,7 +730,15 @@ function registerIpc() {
     saveSettings(settings)
     return state()
   })
-  // "Revoke computer control": the standing grant is cleared, and the next computer use asks once again.
+  // The one consent, in setup (the onboarding step, or Settings): never a card over a task. On a Mac it also asks the
+  // Automation grants once, here, so no "wants to control" prompt can come up during a task.
+  setup('setup:grantControl', async (from) => {
+    if (!executor) return state()
+    executor.broker.grantStanding(from === 'settings' ? 'settings' : 'onboarding')
+    await askAutomationOnce()
+    return state()
+  })
+  // "Revoke computer control": the standing grant is cleared; tasks are refused until it is given again here.
   setup('setup:revokeControl', () => {
     if (executor) executor.broker.revokeStanding('settings')
     else standing.set(false)
@@ -897,12 +932,13 @@ async function state() {
     secrets: secretsWhere(),
     control: executor ? !executor.broker.disabled : false,
     approvals: executor?.broker.approvalMode() ?? 'consent',
+    control_granted: standing.granted(),
     ask_each: settings.askEachAction === true,
     granted_since: standing.since,
     machine: machineKind(),
     permissions: permissionState,
     stop_words: executor?.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
-    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState }), draft, connection, errors },
+    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState, control: { granted: standing.granted() } }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
     mcp: { command: mcpLauncher(process.resourcesPath ?? '', process.platform), socket: executorSocket(dir) },
@@ -1126,6 +1162,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
   }
   if (r.outcome === 'migrated') {
     memorySecrets = (await keychain.get()) ?? { ...EMPTY }
+    await migrateStanding()
     if (o.interactive) {
       await startRuntimeFromSettings().catch((error: unknown) => log.error('runtime.start_failed', { error: error instanceof Error ? error.message : String(error) }))
       refreshTray()

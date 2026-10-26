@@ -7,7 +7,7 @@
 import { PlainHttpError } from '../harness/spark.ts'
 import type { Capabilities, WhoAmI } from '../harness/spark.ts'
 
-export type StepId = 'address' | 'code' | 'connection' | 'permissions'
+export type StepId = 'address' | 'code' | 'connection' | 'permissions' | 'control'
 export type StepStatus = 'todo' | 'active' | 'done' | 'warn' | 'error'
 export type ErrorKind = 'invalid_address' | 'unreachable' | 'refused' | 'timeout' | 'tls' | 'not_localrouter' | 'too_old' | 'code_format' | 'wrong_code' | 'revoked' | 'server'
 export type ConnectError = { kind: ErrorKind; title: string; hint: string; detail?: string }
@@ -41,6 +41,8 @@ export type ConnectInput = {
   /** The last failed address check or pairing; a failed connection is in `connection`. */
   errors: Partial<Record<'address' | 'code', ConnectError>>
   permissions: Permissions
+  /** The standing grant for computer control: given once here, in setup, never by a card over a task. */
+  control?: { granted: boolean }
 }
 
 export type Step = { id: StepId; status: StepStatus; summary: string }
@@ -104,7 +106,10 @@ export function connectView(i: ConnectInput): ConnectView {
   else connection = { id: 'connection', status: i.connection.warning ? 'warn' : 'done', summary: i.connection.warning ?? `Connected · ${i.connection.capabilities.filter((c) => c.ok).length} of ${i.connection.capabilities.length} features available` }
 
   const p = permissionStep(i.permissions)
-  const steps: Step[] = [address, code, connection, { id: 'permissions', ...p }]
+  const control: Step = i.control?.granted
+    ? { id: 'control', status: 'done', summary: 'Jarvis may use this computer, in the background; stop it any time' }
+    : { id: 'control', status: 'todo', summary: 'Let Jarvis use this computer: asked only here, once' }
+  const steps: Step[] = [address, code, connection, { id: 'permissions', ...p }, control]
   // Warnings do not block: a connection that works with a caveat counts as done for what comes next.
   const first = steps.find((s) => s.status !== 'done' && s.status !== 'warn')
   if (first && first.status === 'todo') first.status = 'active'

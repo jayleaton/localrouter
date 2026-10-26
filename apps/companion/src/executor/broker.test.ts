@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Grant } from '../../../desktop-helper/src/computer/controller.ts'
 import type { Card } from './broker.ts'
-import { Broker, CONSENT_NOTE, CONSENT_WAITING, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
+import { Broker, CONTROL_OFF, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
 import type { Answers, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import type { Observation, ScreenAction } from '../../../desktop-helper/src/computer/types.ts'
 import { MemoryAudit } from './audit.ts'
@@ -331,43 +331,61 @@ describe('LocalRouter in front: leaving it is fine, acting on it is not', () => 
   })
 })
 
-describe('the standing grant (JJ, 2026-10-26: auto-approved; if it asks, once on first start-up)', () => {
-  /** Every card the broker shows, by action. */
+describe('the standing grant (JJ, 2026-10-26: auto-approved; no permission window ever blocks a task)', () => {
+  /** Every card the broker shows. */
   const cards = (broker: ReturnType<typeof fakeBroker>['broker']) => {
     const shown: Card[] = []
     broker.on((e) => void (e.type === 'approval' && shown.push(e.card)))
     return shown
   }
-  /** Answers each card as it appears (the person approving). */
-  const approving = (broker: ReturnType<typeof fakeBroker>['broker']) => broker.on((e) => void (e.type === 'approval' && setTimeout(() => void broker.answer(e.card.id, 'approve', 'app window'), 1)))
   const run = async (broker: ReturnType<typeof fakeBroker>['broker'], goal = 'send the Groceries note') => {
     const started = broker.startUse(app, goal, null)
     if (!started.ok) throw new Error(started.error)
     return started.finished
   }
+  /** A presence gate that fails the test if anything asks it: the default path never opens Touch ID, Hello or a sheet. */
+  const noModal = { method: 'Touch ID', verify: async (): Promise<boolean> => { throw new Error('a modal was opened during a task') } }
 
-  it('asks exactly once, on the first task: one consent card, then no card for Send, and none for the next task', async () => {
+  it('without the grant a task is refused at once, with an honest reply and a notification event, never a card', async () => {
     const standing = new MemoryStanding()
-    const { broker, mac, gate, audit } = fakeBroker([...SEND_GROCERIES, ...SEND_GROCERIES], { standing })
+    const { broker, mac, audit } = fakeBroker([...SEND_GROCERIES], { standing, gate: noModal })
     const shown = cards(broker)
-    approving(broker)
-    expect(broker.approvalMode()).toBe('consent')
+    const needed: string[] = []
+    broker.on((e) => void (e.type === 'consent.needed' && needed.push(e.goal)))
+    const started = broker.startUse(app, 'send the Groceries note', null)
+    expect(started).toEqual({ ok: false, error: CONTROL_OFF })
+    expect(CONTROL_OFF).toMatch(/Turn it on in LocalRouter → Settings/)
+    expect(needed).toEqual(['send the Groceries note'])
+    expect(shown).toEqual([])
+    expect(mac.desktop.actions).toEqual([])
+    expect(broker.status().tasks).toEqual([]) // nothing waits
+    // Locking the screen (a step that would have asked) is refused the same way; a volume change still runs.
+    expect(await broker.control(app, { kind: 'lock_screen' })).toEqual({ ok: false, text: CONTROL_OFF })
+    expect((await broker.control(app, { kind: 'volume', action: 'up', target: 'system' })).ok).toBe(true)
+    expect(shown).toEqual([])
+    expect(audit.lines.filter((l) => l.event === 'deny')).toHaveLength(2)
+  })
+
+  it('granted (onboarding, or migrated from an install already set up): no card, no modal, for any step, the pointer included', async () => {
+    const standing = new MemoryStanding()
+    const { broker, mac, audit } = fakeBroker([...SEND_GROCERIES], { standing, gate: noModal })
+    broker.grantStanding('migrated')
+    broker.grantStanding('onboarding') // already granted: nothing more
+    expect(audit.lines.filter((l) => l.event === 'consent.granted')).toEqual([expect.objectContaining({ grant: 'standing', source: 'migrated' })])
+    mac.desktop.pointerOnly.add('send') // Send needs the real pointer: it still runs without a card
+    const shown = cards(broker)
     expect((await run(broker)).status).toBe('done')
-    expect(shown.map((c) => c.action)).toEqual(['control this computer'])
-    expect(shown[0].why).toMatch(/without asking each time/)
-    expect(gate.asked).toHaveLength(1) // the one presence check, on the consent
-    expect(standing.kept.granted).toBe(true)
-    expect((await run(broker)).status).toBe('done')
-    expect(shown).toHaveLength(1)
-    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread', 'Groceries: milk, eggs, bread'])
-    expect(audit.lines.filter((l) => l.event === 'consent.granted')).toHaveLength(1)
-    // Send would have asked: the grant line says it ran under the standing grant and why it would have asked.
-    expect(audit.lines.find((l) => l.event === 'grant' && (l.action as { label?: string }).label === 'Send')).toMatchObject({ grant: 'standing', would_ask: expect.stringMatching(/send/) })
+    expect((await broker.control(app, { kind: 'lock_screen' })).ok).toBe(true)
+    expect(shown).toEqual([])
+    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
+    expect(mac.desktop.modes).toContain('pointer')
     expect(audit.lines.filter((l) => l.event === 'act').every((l) => l.grant === 'standing')).toBe(true)
+    expect(audit.lines.find((l) => l.event === 'grant' && (l.action as { label?: string }).label === 'Send')).toMatchObject({ grant: 'standing', would_ask: expect.stringMatching(/send/) })
   })
 
   it('kept across a restart or an update (a new broker over the same stored grant): no card at all', async () => {
-    const kept = { granted: true, askEach: false }
+    const kept = { granted: false, askEach: false }
+    fakeBroker([], { standing: new MemoryStanding(kept) }).broker.grantStanding('onboarding')
     const { broker, mac, gate } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding(kept) })
     const shown = cards(broker)
     expect((await run(broker)).status).toBe('done')
@@ -376,94 +394,24 @@ describe('the standing grant (JJ, 2026-10-26: auto-approved; if it asks, once on
     expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
   })
 
-  it('with the grant, a step that needs the real pointer runs without a card, and the audit says pointer mode', async () => {
-    const { broker, mac, audit } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding({ granted: true, askEach: false }) })
-    mac.desktop.pointerOnly.add('send')
-    const shown = cards(broker)
-    expect((await run(broker)).status).toBe('done')
-    expect(shown).toEqual([])
-    expect(mac.desktop.modes).toContain('pointer')
-    expect(audit.lines.filter((l) => l.event === 'act' && l.mode === 'pointer')).toEqual([expect.objectContaining({ grant: 'standing' })])
-  })
-
-  it('a refused consent blocks the task and asks again next time; revoking brings the consent back', async () => {
-    const standing = new MemoryStanding()
-    const { broker, mac } = fakeBroker([...SEND_GROCERIES, ...SEND_GROCERIES, ...SEND_GROCERIES], { standing })
-    const shown = cards(broker)
-    const off = broker.on((e) => void (e.type === 'approval' && setTimeout(() => void broker.answer(e.card.id, 'deny', 'app window'), 1)))
-    expect(await run(broker)).toMatchObject({ status: 'blocked', reason: 'You said no on the approval card.' })
-    expect(mac.desktop.actions).toEqual([])
-    off()
-    approving(broker)
-    expect((await run(broker)).status).toBe('done')
-    expect(shown.map((c) => c.action)).toEqual(['control this computer', 'control this computer'])
+  it('revoking turns computer control off again: the next task is refused at once', async () => {
+    const standing = new MemoryStanding({ granted: true, askEach: false })
+    const { broker } = fakeBroker([...SEND_GROCERIES], { standing })
     broker.revokeStanding('settings')
     expect(standing.kept.granted).toBe(false)
     expect(broker.approvalMode()).toBe('consent')
-    expect((await run(broker)).status).toBe('done')
-    expect(shown.map((c) => c.action)).toEqual(['control this computer', 'control this computer', 'control this computer'])
+    expect(broker.startUse(app, 'send the Groceries note', null)).toEqual({ ok: false, error: CONTROL_OFF })
   })
 
-  it('"Ask before each action" brings the per-step cards back, grant or not, and no consent card', async () => {
-    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding({ granted: true, askEach: true }) })
+  it('"Ask before each action" (opt-in) brings the per-step cards back, the presence check with them', async () => {
+    const { broker, mac, gate } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding({ granted: false, askEach: true }) })
     expect(broker.approvalMode()).toBe('each')
     const shown = cards(broker)
-    approving(broker)
+    broker.on((e) => void (e.type === 'approval' && setTimeout(() => void broker.answer(e.card.id, 'approve', 'app window'), 1)))
     expect((await run(broker)).status).toBe('done')
     expect(shown.map((c) => c.action)).toEqual(['click “Send” in Notes'])
+    expect(gate.asked).toHaveLength(1)
     expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
-  })
-
-  it('the consent card does not run out: the task times out on its own, the card stays, and a late yes is the grant (Mac run, 2026-10-26)', async () => {
-    // Touch ID unavailable, the in-app confirmation offered, and the card "expired after 60 s": it must not.
-    let clock = 1_000_000
-    const standing = new MemoryStanding()
-    const { broker, mac, audit } = fakeBroker([...SEND_GROCERIES, ...SEND_GROCERIES], { standing, now: () => clock, limits: { approvalTimeoutMs: 50 } })
-    const shown = cards(broker)
-    const first = await run(broker)
-    expect(first).toMatchObject({ status: 'blocked', reason: CONSENT_WAITING })
-    expect(shown).toHaveLength(1)
-    expect(shown[0]).toMatchObject({ action: 'control this computer', until_answered: true, waiting: CONSENT_NOTE })
-    // Ten minutes, then a day, later: still up, still pending.
-    clock += 10 * 60_000
-    expect(broker.approvals().find((c) => c.id === shown[0].id)?.state).toBe('pending')
-    clock += 24 * 3_600_000
-    expect(broker.approvals().find((c) => c.id === shown[0].id)?.state).toBe('pending')
-    // A second request while it is up waits on the same card, not a new one.
-    const second = await run(broker)
-    expect(second.status).toBe('blocked')
-    expect(shown).toHaveLength(1)
-    // The person answers late: the grant is kept, and the next request runs without any card.
-    expect(await broker.answer(shown[0].id, 'approve', 'app window')).toEqual({ ok: true })
-    expect(standing.kept.granted).toBe(true)
-    expect(audit.lines.filter((l) => l.event === 'consent.granted')).toHaveLength(1)
-    expect(broker.approvals().filter((c) => c.state === 'pending')).toEqual([])
-    expect((await run(broker)).status).toBe('done')
-    expect(shown).toHaveLength(1)
-    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
-  })
-
-  it('a task still waiting when the person approves goes on at once', async () => {
-    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding() })
-    const card = nextCard(broker)
-    const started = broker.startUse(app, 'send the Groceries note', null)
-    if (!started.ok) throw new Error(started.error)
-    expect(await broker.answer((await card).id, 'approve', 'app window')).toEqual({ ok: true })
-    expect((await started.finished).status).toBe('done')
-    expect(mac.desktop.sent).toEqual(['Groceries: milk, eggs, bread'])
-  })
-
-  it('a stop during the consent card ends the task as stopped, before anything is done', async () => {
-    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding() })
-    const card = nextCard(broker)
-    const started = broker.startUse(app, 'send the Groceries note', null)
-    if (!started.ok) throw new Error(started.error)
-    await card
-    broker.stop(undefined, 'the keyboard')
-    expect((await started.finished).status).toBe('stopped')
-    expect(mac.desktop.actions).toEqual([])
-    // Stopped by the person: the card goes too, so it cannot be granted later.
-    expect(broker.approvals().filter((c) => c.state === 'pending')).toEqual([])
   })
 })
 
