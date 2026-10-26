@@ -341,10 +341,10 @@ pub const Weights = struct {
         errdefer w.deinit();
         const st = &w.store;
         const side = .{
-            .{ "img_in.weight", &w.img_in },                                   .{ "txt_in.in_layer.weight", &w.txt_in1 },
-            .{ "txt_in.out_layer.weight", &w.txt_in2 },                        .{ "time_text_embed.timestep_embedder.linear_1.weight", &w.t1 },
+            .{ "img_in.weight", &w.img_in },                                 .{ "txt_in.in_layer.weight", &w.txt_in1 },
+            .{ "txt_in.out_layer.weight", &w.txt_in2 },                      .{ "time_text_embed.timestep_embedder.linear_1.weight", &w.t1 },
             .{ "time_text_embed.timestep_embedder.linear_2.weight", &w.t2 }, .{ "modulation.1.weight", &w.mod },
-            .{ "norm_out.linear.weight", &w.norm_out },                        .{ "proj_out.weight", &w.proj_out },
+            .{ "norm_out.linear.weight", &w.norm_out },                      .{ "proj_out.weight", &w.proj_out },
         };
         inline for (side) |e| e[1].* = try st.tensor(up, p, e[0]);
         { // the zero-centred text norm: weight + 1 in f32

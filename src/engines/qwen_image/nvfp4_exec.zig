@@ -56,7 +56,7 @@ pub const Nvfp4 = struct {
             }
             return c.f;
         };
-        const f = try e.mods[@intFromEnum(l.module)].function(l.symbol);
+        const f = try e.mods[@backingInt(l.module)].function(l.symbol);
         if (l.needsSmemOptIn()) try f.allowDynamicShared(l.smem);
         try e.cache.append(e.gpa, .{ .symbol = l.symbol, .f = f, .smem_set = l.smem });
         return f;

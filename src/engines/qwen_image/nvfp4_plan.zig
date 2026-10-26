@@ -277,7 +277,7 @@ pub fn gemm(mode: Mode, m: u32, n: u32, k: u32, npad: u32, mpad: u32, tile: u32,
     try checkGemm(k, n, npad);
     const t = ckTile(mode, tile, gb10, m, k);
     if ((k / 64) % t.ks != 0) return error.KNotWholeStages;
-    const found = kernels.findCk(@intFromEnum(mode), t.bm, t.bn, 2, 4, t.stages, t.ks, is_f32, 0) orelse return error.MissingKernel;
+    const found = kernels.findCk(@backingInt(mode), t.bm, t.bn, 2, 4, t.stages, t.ks, is_f32, 0) orelse return error.MissingKernel;
     const rows_t = ceilDiv(m, t.bm);
     const mp: u32 = if (mode == .a4) mpad else 0;
     var l = Launch{
@@ -347,7 +347,7 @@ pub fn gemmWs(mode: Mode, m: u32, n: u32, k: u32, mpad: u32, npad: u32, tile: u3
     if ((k / 64) % ks != 0) return error.KNotWholeStages;
     if (mpad % 128 != 0) return error.MpadNotTiled;
     if (mpad < m) return error.MpadBelowM;
-    const found = kernels.findWs(@intFromEnum(mode), 128, bn, stages, ks, is_f32) orelse return error.MissingKernel;
+    const found = kernels.findWs(@backingInt(mode), 128, bn, stages, ks, is_f32) orelse return error.MissingKernel;
     const rows_t: u64 = mpad / 128;
     var l = Launch{
         .symbol = found.symbol,
@@ -507,14 +507,14 @@ test "gemm tile 0 (the down projection after gemm_gu_ck): by chip and rows" {
 
 test "every launch the plan can make has its symbol built" {
     for (kernels.ck_instances) |c| {
-        const mode: Mode = @enumFromInt(c.mode);
+        const mode: Mode = @fromBackingInt(@intCast(c.mode));
         if (c.epi != 0) continue;
         const tile: u32 = if (c.bm == 64) 3 else if (c.bn == 256) 2 else 1;
         const l = try gemm(mode, 4096, 4096, 4096, 4096, 4096, tile, c.f32, 1, false);
         try tt.expectEqualStrings(c.symbol, l.symbol);
     }
     for (kernels.ws_instances) |c| {
-        const mode: Mode = @enumFromInt(c.mode);
+        const mode: Mode = @fromBackingInt(@intCast(c.mode));
         const tile: u32 = if (c.bn == 128) 3 else if (c.ks == 2) 2 else 1;
         const l = try gemmWs(mode, 4096, 4096, 4096, 4096, 4096, tile, c.f32, 1);
         try tt.expectEqualStrings(c.symbol, l.symbol);
