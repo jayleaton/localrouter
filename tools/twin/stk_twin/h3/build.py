@@ -19,7 +19,7 @@ import torch
 
 from . import ops as H
 from . import sampler
-from .dit import H3Dit, LAYERS, LINEARS, load_checkpoint
+from .dit import H3Dit, LAYERS, LINEARS, SOURCE, load_checkpoint
 from .shapes import latent_shapes
 
 LORA = "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
@@ -84,7 +84,15 @@ def main() -> None:
     conds = encode(models, prompts)
     w = load_checkpoint(models / DIT)
     merged = merge_lora(w, models / LORA, dev) if a.lora else 0
-    sig = sampler.sigmas(a.steps)                # LocalRouter's own `simple` schedule (gate.py asserts it equals ComfyUI's)
+    # The block linears (nearly all of the 40 GB) on the device once, each host tensor dropped as it moves: H3Dit's bf16
+    # linears and pack.write's NVFP4 quantisation then use these same tensors (`.to` and `.cuda` of a device tensor are
+    # no-ops), so the bytes are unchanged. On GB10 a host copy and a device copy are both the box's memory: holding both
+    # took 65 GiB at the peak, more than is free beside the warm Jarvis set.
+    for i in range(LAYERS):
+        for nm in LINEARS:
+            k = f"blocks.{i}.{SOURCE[nm]}.weight"
+            w[k] = w[k].to(dev, torch.bfloat16).contiguous()
+    sig =sampler.sigmas(a.steps)                # LocalRouter's own `simple` schedule (gate.py asserts it equals ComfyUI's)
     twin = H3Dit(w, kind="bf16", attn="bf16", device=dev)
     amax: dict[str, float] = {}
     orig = twin.lin
