@@ -1197,6 +1197,9 @@ async function smoke() {
     req.on('end', () => {
       const body = Buffer.concat(parts)
       res.setHeader('content-type', 'application/json')
+      // A fresh connection per request: this server shares the app's event loop, and a stalled loop (an Intel build
+      // under Rosetta) let its 5 s idle close race fetch's reuse of the pooled socket ("fetch failed").
+      res.setHeader('connection', 'close')
       res.end(JSON.stringify({ method: req.method, url: req.url, type: req.headers['content-type'] ?? '', bytes: body.length, clip: body.includes('RIFFclip'), auth: req.headers.authorization ?? '' }))
     })
   })
@@ -1223,7 +1226,7 @@ async function smoke() {
     await win.loadURL(`${ORIGIN}/voice.html`)
     result.page = await win.webContents.executeJavaScript('({ shim: window.__companionShim === true, bridge: typeof (window.companion && window.companion.realtime && window.companion.realtime.open) === "function", title: document.title, socket: String(WebSocket.name), beta: (document.querySelector(".top .lr-beta") || {}).textContent || "" })')
     result.status = await win.webContents.executeJavaScript('fetch("/v1/computer/status").then(r => r.json()).then(s => ({ computers: s.computers.length, placement: s.computers[0] && s.computers[0].placement }))')
-    result.proxy = await win.webContents.executeJavaScript('fetch("/v1/models").then(r => r.status)')
+    result.proxy = await win.webContents.executeJavaScript('fetch("/v1/models").then(async (r) => r.status === 200 ? 200 : `${r.status} ${await r.text()}`)')
     result.voices = await win.webContents.executeJavaScript(`(async () => {
       const fd = new FormData();
       fd.append('file', new Blob([new TextEncoder().encode('RIFFclip'), new Uint8Array(4096)], { type: 'audio/wav' }), 'take.wav');
