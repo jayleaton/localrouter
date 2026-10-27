@@ -208,17 +208,34 @@ codes) spoken into the prompt before the text, not a speaker embedding. Nothing 
 from the pinned engine's own `tensorfold-native voice encode` (patches 0051 and 0052; the NVFP4 build carries it too),
 which reads `codec.pth`, the same file in both checkpoints, and encodes in BF16 on the GPU.
 
-1. **Prepared by the daemon** (`src/media/voiceprep.zig`, upstream's `drama_voice_clip.py` gates and numbers on 10 ms
-   frames at 44.1 kHz): each clip decoded with ffmpeg; refused when silent, clipped, starting inside a word, or with a
-   background less than 30 dB under the speech (on the whole clip and on what is kept); trimmed to 0.25 s before its
-   first and after its last loud frame; cut inside pauses into references of at most 30 s; each levelled to -20 dBFS
-   speech, peaks under -1 dBFS. All clips together: 10 to 60 s, at most 8 references. Not checked, unlike upstream:
-   a steady tone or hum in the pauses, and a second speaker (both need spectra this port does not compute).
-2. **Transcribed** by the transcription model where the caller gave no transcript (a clip with one is never cut).
-3. **Encoded** by the worker: one `voice encode` per reference, a job of its own on the realtime lane, booked at
+1. **Heard whole** by the transcription model: its Silero voice activity detector says where each clip's speech is,
+   and its transcript is the reference's when the clip makes one reference.
+2. **Prepared by the daemon** (`src/media/voiceprep.zig`, upstream's `drama_voice_clip.py` trim, cut and level numbers
+   on 10 ms frames at 44.1 kHz): each clip decoded with ffmpeg; trimmed to 0.25 s before its first and after its last
+   speech frame; cut inside pauses into references of at most 30 s; each levelled to -20 dBFS speech, peaks under
+   -1 dBFS. All clips together: at least 10 s; the first 60 s and 8 references are kept. Only clear failures are
+   refused: no speech (a clip with none is left out), under 10 s in all, or a background about as loud as the voice.
+   The background is the mean power of the frames at least 0.1 s from any speech the detector heard (with under 0.3 s
+   of them it is not measured, and passes), so a loudness-normalised, compressed or limited upload, whose quietest
+   frames are soft syllables rather than noise, is not read as noisy (upstream's rule, the quietest tenth of all
+   frames, read a heavily compressed take at 16 dB and music alone at 2.3 dB). Under 30 dB is a warning in the voice's `clips[].warnings`; under 5 dB is refused with
+   code `noisy_background` unless `force=true` ("Use anyway"). A tonal background (spectral flatness under 0.06) is
+   named as music or a hum. Clipping, a clip starting or ending inside a word, a 30 s stretch with no pause and an
+   over-long clip with a transcript (set aside, transcribed) are warnings. Not checked: a second speaker.
+
+   | Fixture (LibriSpeech speaker 1272) | Speech over background |
+   |---|---|
+   | as published; loudnorm -14 LUFS + limiter, MP3; dynaudnorm + limiter | 32.7; 32.2; 35.7 dB |
+   | 1272-135031-0001 as published (a noisy room) | 28.6 dB: warned |
+   | heavy compression (20:1, +20 dB makeup), its pauses removed | 6.7 dB: warned |
+   | a jazz band 15, 25 dB under the speech, then mastered | 17.9, 26.5 dB: warned as music |
+   | a chord bed 10 dB under the speech | 3.2 dB: refused as music |
+3. **Transcribed** by the transcription model where the caller gave no transcript and the clip makes several
+   references (a clip with one is never cut).
+4. **Encoded** by the worker: one `voice encode` per reference, a job of its own on the realtime lane, booked at
    `clone_working_bytes` beside the loaded model. The job directory, clips included, is deleted once the codes are read,
    and so are the transcription jobs.
-4. **Kept** in `data_dir/voices/NAME.json` (0600): the transcripts, codes, `source` and the consent statement (who, when);
+5. **Kept** in `data_dir/voices/NAME.json` (0600): the transcripts, codes, `source` and the consent statement (who, when);
    a draft (no name yet) lives in memory for an hour. `DELETE` removes the file.
 5. **Spoken** with its references inline (`references` in the server request, after any the caller sent) and no
    `voice`, so the server needs no restart and no `--voices` file, and the prefix cache keys on the same rows. The

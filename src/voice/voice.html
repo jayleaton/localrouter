@@ -395,6 +395,8 @@
   .clone-out { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
   .clone-out:empty { display: none; }
   .clone-out q { color: var(--text); }
+  .clone-warn { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 2px 10px; border-left: 3px solid var(--warn); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .clone-warn:empty { display: none; }
   #cloneStatus .dots { padding: 0 6px 0 0; vertical-align: middle; }
   #lightbox .lb { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
   #toast { position: fixed; left: 50%; bottom: calc(110px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
@@ -607,6 +609,8 @@
       <h3 id="hTry">Preview</h3>
       <div class="vline"><button class="btn primary" id="cloneMake" disabled>Make a preview</button><span class="grow"></span><button class="btn" id="cloneAgain" hidden>Try again</button></div>
       <p class="note-s" id="cloneStatus" role="status" aria-live="polite"></p>
+      <div class="vline" id="cloneForceRow" hidden><button class="btn" id="cloneForce" aria-describedby="cloneStatus">Use anyway</button></div>
+      <div class="clone-warn" id="cloneWarn" aria-live="polite"></div>
       <div class="vline" id="clonePlayRow" hidden><button class="play" id="clonePlay" aria-label="Preview your new voice"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button><span class="note-s">Hear your new voice</span></div>
       <div class="clone-out" id="cloneOut"></div>
     </section>
@@ -2026,7 +2030,8 @@ const CLONE_MIN = 10, CLONE_MAX = 60, CLONE_CLIPS = 8;
 const CLONE_LINE = 'Hello! This is my new voice. Does it sound like me? I hope so, because I read a whole page for it.';
 const CLONE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const C = { model: '', tab: 'rec', stream: null, ctx: null, an: null, buf: null, rec: null, chunks: [], keep: false, secs: 0,
-  t0: 0, raf: 0, vis: 0, loud: 0, clipAt: -1e9, clipped: false, phase: '', hint: '', take: null, files: [], draft: null, ctl: null };
+  t0: 0, raf: 0, vis: 0, loud: 0, clipAt: -1e9, clipped: false, phase: '', hint: '', take: null, files: [], draft: null, ctl: null,
+  noisy: false }; // noisy: the box refused these clips' background, so "Use anyway" (force) is offered
 const canClone = id => { const m = models.find(x => x.id === id); return !!m && (m.capabilities || []).includes('voice_clone'); };
 const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function cloneSay(id, text, error) { $(id).textContent = text; $(id).classList.toggle('err', !!error); }
@@ -2040,6 +2045,8 @@ function openClone() {
   $('cloneName').value = '';
   ['cloneStatus', 'cloneNameNote', 'cloneSampleNote', 'recPhase', 'recHint', 'cloneVoicesNote'].forEach(id => cloneSay(id, ''));
   $('cloneOut').replaceChildren();
+  $('cloneWarn').replaceChildren();
+  C.noisy = false;
   cloneTab('rec');
   renderClips();
   cloneRender();
@@ -2058,6 +2065,8 @@ function cloneRender() {
   cloneSay('cloneSampleNote', s.note, s.bad);
   $('cloneMake').disabled = !ok || recording || busy || !s.ok;
   $('cloneMake').textContent = busy ? 'Making…' : 'Make a preview';
+  $('cloneForceRow').hidden = !C.noisy || busy;
+  $('cloneForce').disabled = $('cloneMake').disabled;
   $('cloneAgain').hidden = !C.draft || busy;
   $('clonePlayRow').hidden = !C.draft;
   $('cloneSaveSect').hidden = !C.draft;
@@ -2080,6 +2089,7 @@ function cloneSample() {
   return { ok: true, note: `${n} clip${n > 1 ? 's' : ''}${known ? `, ${Math.round(total)} s in all` : ''}${total > CLONE_MAX ? ` (more than ${CLONE_MAX} s adds little)` : ''}.` };
 }
 function cloneTab(tab) {
+  if (tab !== C.tab) C.noisy = false; // other clips
   C.tab = tab;
   for (const t of document.querySelectorAll('#clone [role=tab]')) {
     const on = t.dataset.tab === tab;
@@ -2094,7 +2104,7 @@ function cloneTab(tab) {
 async function recStart() {
   if (V.ws) { cloneSay('recHint', 'End the voice call first: it is using the microphone.', true); return; }
   recStop(false);
-  C.take = null;
+  C.take = null; C.noisy = false;
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC(); // made in the tap, so it may start
   let stream;
@@ -2195,6 +2205,7 @@ function addFiles(list) {
   const add = [...list].slice(0, Math.max(0, room)).map(file => ({ file, seconds: null, transcript: '' }));
   cloneSay('cloneStatus', list.length > room ? `A voice takes up to ${CLONE_CLIPS} clips: ${list.length - add.length} left out.` : '', true);
   C.files.push(...add);
+  if (add.length) C.noisy = false;
   $('cloneFiles').value = '';
   renderClips();
   cloneRender();
@@ -2206,7 +2217,7 @@ function renderClips() {
     const len = f.seconds == null ? '…' : f.seconds > 0 ? `${f.seconds.toFixed(1)} s` : 'length unknown';
     const del = Object.assign(ccEl('button', 'icon-btn'), { innerHTML: I.trash });
     del.setAttribute('aria-label', `Remove ${f.file.name}`);
-    del.onclick = () => { C.files.splice(i, 1); renderClips(); cloneRender(); $('cloneFiles').focus(); };
+    del.onclick = () => { C.files.splice(i, 1); C.noisy = false; renderClips(); cloneRender(); $('cloneFiles').focus(); };
     head.append(ccEl('span', null, f.file.name), ccEl('em', null, len), del);
     const tr = Object.assign(document.createElement('input'), { type: 'text', value: f.transcript, placeholder: 'Transcript (optional)', autocomplete: 'off' });
     tr.setAttribute('aria-label', `Transcript of ${f.file.name} (optional)`);
@@ -2231,7 +2242,9 @@ async function dropDraft() {
   const r = await api('/v1/voices/' + encodeURIComponent(d.id), { method: 'DELETE' }).catch(() => null);
   dbg('voice.clone.drop', { id: d.id, status: r ? r.status : 0 });
 }
-async function cloneMake() {
+// force: "Use anyway", the same clips again with a loud background accepted.
+async function cloneMake(force) {
+  force = force === true;
   const s = cloneSample();
   if (!$('cloneConsent').checked || !s.ok || C.ctl) return;
   const fd = new FormData();
@@ -2245,21 +2258,27 @@ async function cloneMake() {
   }
   fd.append('consent', 'true');
   fd.append('model', C.model);
+  if (force) fd.append('force', 'true');
+  C.noisy = false;
   const ctl = C.ctl = new AbortController();
   const status = $('cloneStatus');
   status.classList.remove('err');
   status.innerHTML = '<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>Making a preview voice: transcribing and encoding takes up to half a minute…';
   $('cloneOut').replaceChildren();
+  $('cloneWarn').replaceChildren();
   cloneRender();
   const t0 = performance.now();
   try {
     await dropDraft();
     const r = await api('/v1/voices', { method: 'POST', body: fd, signal: ctl.signal });
-    if (!r.ok) throw new Error(await cloneError(r));
+    if (!r.ok) {
+      const j = await r.clone().json().catch(() => null);
+      throw Object.assign(new Error(await cloneError(r)), { code: j && j.error && j.error.code });
+    }
     const v = await r.json();
     C.draft = v;
     if (ctl.signal.aborted) { await dropDraft(); return; } // closed while it was made
-    dbg('voice.clone.draft', { model: C.model, id: v.id, seconds: v.seconds, clips: (v.clips || []).length, transcribed: v.transcribed, ms: Math.round(performance.now() - t0) });
+    dbg('voice.clone.draft', { model: C.model, id: v.id, seconds: v.seconds, clips: (v.clips || []).length, transcribed: v.transcribed, force, ms: Math.round(performance.now() - t0) });
     C.take = null; C.files = []; renderClips(); // on the box now: dropped here
     $('recPhase').textContent = '';
     cloneResult(v);
@@ -2269,7 +2288,8 @@ async function cloneMake() {
     const err = await preview(C.model, { id: v.id, name: 'your new voice', line: CLONE_LINE }, $('clonePlay'));
     if (err) cloneSay('cloneStatus', `The voice is made, but its preview failed: ${err}`, true);
   } catch (e) {
-    dbg('voice.clone.draft', { model: C.model, error: e.message });
+    dbg('voice.clone.draft', { model: C.model, error: e.message, code: e.code, force });
+    C.noisy = !force && e.code === 'noisy_background' && $('clone').open;
     cloneSay('cloneStatus', e.name === 'AbortError' ? 'Stopped.' : `No voice made: ${e.message}`, true);
   } finally {
     if (C.ctl === ctl) C.ctl = null;
@@ -2286,10 +2306,13 @@ function cloneResult(v) {
   if (v.seconds) out.push(ccEl('span', null, `${v.seconds.toFixed(1)} s of speech in the voice${v.transcribed ? ', transcribed on the box' : ''}. What it heard:`));
   for (const ref of v.references || []) { const p = ccEl('span'); p.append(ccEl('q', null, ref.text)); out.push(p); }
   $('cloneOut').replaceChildren(...out);
+  const warn = (v.clips || []).flatMap((c, i) => (c.warnings || []).map(w => ccEl('span', null, `Clip ${i + 1}: ${w}`)));
+  $('cloneWarn').replaceChildren(...warn);
 }
 async function cloneAgain() {
   await dropDraft();
   $('cloneOut').replaceChildren();
+  $('cloneWarn').replaceChildren();
   cloneSay('cloneStatus', '');
   cloneSay('cloneNameNote', '');
   cloneRender();
@@ -2320,6 +2343,7 @@ async function cloneSave(e) {
     saveSettings(); sessionUpdate(); renderVoices(); renderVoiceName();
     $('cloneName').value = '';
     $('cloneOut').replaceChildren();
+    $('cloneWarn').replaceChildren();
     cloneSay('cloneNameNote', '');
     cloneSay('cloneStatus', `Saved “${v.name || v.id}”: Jarvis speaks with it now.`);
     cloneList();
@@ -2385,6 +2409,7 @@ async function cloneDelete(v, btn) {
 function cloneClosed() {
   if (C.ctl) C.ctl.abort();
   C.ctl = null;
+  C.noisy = false;
   recStop(false);
   C.take = null; C.files = []; renderClips();
   if (previewAudio) previewAudio.pause();
@@ -3413,7 +3438,8 @@ $('cloneConsent').addEventListener('change', cloneRender);
 $('recStart').onclick = recStart;
 $('recStop').onclick = () => recStop(true);
 $('cloneFiles').addEventListener('change', () => addFiles($('cloneFiles').files));
-$('cloneMake').onclick = cloneMake;
+$('cloneMake').onclick = () => cloneMake(false);
+$('cloneForce').onclick = () => cloneMake(true);
 $('cloneAgain').onclick = cloneAgain;
 $('cloneSaveSect').addEventListener('submit', cloneSave);
 for (const t of document.querySelectorAll('#clone [role=tab]')) {

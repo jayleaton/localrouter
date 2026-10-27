@@ -427,10 +427,16 @@ test "Jarvis box: chat, Drama 3 and Whisper warm together under LocalRouter's ad
 const Part = struct { f64, bool };
 
 fn clip(a: std.mem.Allocator, parts: []const Part) ![]const u8 {
+    return clipOver(a, parts, 0);
+}
+
+/// `clip` over a 440 Hz hum of amplitude `bed` throughout.
+fn clipOver(a: std.mem.Allocator, parts: []const Part, bed: f64) ![]const u8 {
     var pcm: std.ArrayList(u8) = .empty;
     var t: usize = 0;
     for (parts) |p| for (0..@as(usize, @intFromFloat(p[0] * 44100))) |_| {
-        const v: i16 = if (p[1]) @intFromFloat(@round(@sin(@as(f64, @floatFromInt(t)) * 2 * std.math.pi * 180 / 44100) * 2300)) else 0;
+        const x = @as(f64, @floatFromInt(t)) * 2 * std.math.pi / 44100;
+        const v: i16 = @intFromFloat(@round((if (p[1]) @sin(x * 180) * 2300 else 0) + @sin(x * 440) * bed));
         var b: [2]u8 = undefined;
         std.mem.writeInt(i16, &b, v, .little);
         try pcm.appendSlice(a, &b);
@@ -520,6 +526,10 @@ test "Drama 3: a voice cloned from clips is listed, spoken with its references a
     try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "name", "Narrator" } }, &.{.{ "file", take }}), .conflict, &.{"own voices"});
     // The encoder's own refusal comes back as a 400 naming the reference.
     try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "transcript", "REFUSE-ME please" } }, &.{.{ "file", take }}), .bad_request, &.{"reference 0:"});
+    // A background about as loud as the voice is refused with its own code, and kept, with a warning, when forced.
+    const hum = try clipOver(a, parts.items, 2000);
+    try expectResp(try clone(&d, a, &.{.{ "consent", "true" }}, &.{.{ "file", hum }}), .bad_request, &.{ "\"code\":\"noisy_background\"", "there is music (or a hum) under the speech" });
+    try expectResp(try clone(&d, a, &.{ .{ "consent", "true" }, .{ "force", "true" } }, &.{.{ "file", hum }}), .ok, &.{ "\"status\":\"draft\"", "\"background\":\"music\"", "the voice may carry some of it" });
 
     // Saved at once with its transcript: listed beside the configured voice, in /v1/models and MCP list_voices.
     const sam = try clone(&d, a, &.{ .{ "consent", "true" }, .{ "name", "Sam" }, .{ "transcript", "One two three four." } }, &.{.{ "file", take }});

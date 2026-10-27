@@ -3,9 +3,12 @@
 //!
 //! - POST /v1/voices: clips (multipart `file`, repeated; WAV, MP3, WebM, Ogg, FLAC, M4A), `consent=true`, optional
 //!   `transcript` (one per clip, in order; none, or a blank one: the transcription model writes it), `name` (none: a draft, kept an
-//!   hour, for a preview), `model`, `language`, `source` (`owner` or `consented`) and `note`. The clips are decoded,
-//!   checked and levelled (`media/voiceprep.zig`), transcribed, and encoded by the model (a `Speech.clone` job); the
-//!   clips are deleted as soon as the codes are back.
+//!   hour, for a preview), `model`, `language`, `source` (`owner` or `consented`), `note` and `force` (`true`: use
+//!   clips whose background is about as loud as the voice, which are otherwise refused with code `noisy_background`).
+//!   Each clip is decoded and transcribed whole (the transcription model's voice activity detector says where the
+//!   speech is), then checked and levelled (`media/voiceprep.zig`; what may make the voice worse is in the voice's
+//!   `clips[].warnings`), its references transcribed when they are not the whole clip, and encoded by the model (a
+//!   `Speech.clone` job); the clips are deleted as soon as the codes are back.
 //! - GET /v1/voices[?model=ID]: every voice, the configured ones (`kind: named`) and the cloned (`kind: cloned`).
 //! - GET /v1/voices/{id}, PATCH /v1/voices/{id} `{"name"}` (saves a draft, or renames), DELETE /v1/voices/{id}.
 //!
@@ -126,6 +129,7 @@ const Form = struct {
     language: []const u8 = "",
     source: []const u8 = "owner",
     note: []const u8 = "",
+    force: bool = false,
 };
 
 /// POST /v1/voices.
@@ -166,23 +170,35 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
             error.DecoderFailed => h.fail(req, a, 500, "server_error", "could not run ffmpeg to decode the clips"),
         }, .transcript = transcripts.len > 0 and given(transcripts[n - 1]) };
     }
+    // each clip heard whole: where its speech is, and its words (a clip that makes one reference needs no second pass)
+    const owner = caller.owner();
+    const heard = try a.alloc(?Heard, clips.len);
+    for (clips, heard, 1..) |*c, *hd, n| {
+        hd.* = listen(app, a, try audio.wav(a, voiceprep.rate, 1, std.mem.sliceAsBytes(c.samples)), b.language, owner, n);
+        if (hd.*) |x| c.speech = x.speech;
+    }
     var pmsg: []const u8 = "";
-    const prepared = voiceprep.prepare(a, clips, &pmsg) catch |err| return switch (err) {
+    const prepared = voiceprep.prepare(a, clips, .{ .force = b.force }, &pmsg) catch |err| return switch (err) {
         error.Invalid => h.fail(req, a, 400, "invalid_request_error", pmsg),
+        error.Noisy => h.failWith(req, a, 400, "invalid_request_error", "noisy_background", pmsg, &.{}),
         error.OutOfMemory => h.fail(req, a, 503, "insufficient_memory", "out of memory preparing the clips"),
     };
 
-    // the references' words: as given (a clip with a transcript is one reference), else transcribed
-    const owner = caller.owner();
+    // the references' words: as given (a clip with a transcript is one reference), else heard or transcribed
     const refs = prepared.references;
     const texts = try a.alloc([]const u8, refs.len);
     const wavs = try a.alloc([]const u8, refs.len);
     for (refs, wavs) |r, *wv| wv.* = try audio.wav(a, voiceprep.rate, 1, std.mem.sliceAsBytes(r.samples));
     for (refs, texts, wavs, 1..) |r, *t, wv, n| {
-        if (clips[r.clip].transcript) {
+        const rep = prepared.clips[r.clip];
+        if (rep.transcript) {
             t.* = std.mem.trim(u8, transcripts[r.clip], " \t\r\n");
             continue;
         }
+        if (rep.whole) if (heard[r.clip]) |x| if (std.mem.trim(u8, x.text, " \t\r\n.").len > 0 and textProblem(x.text) == null) {
+            t.* = x.text;
+            continue;
+        };
         t.* = transcribe(app, a, wv, b.language, owner, &why) orelse return h.fail(req, a, why.status, why.typ, try std.fmt.allocPrint(a, "transcribing reference {d}: {s}", .{ n, why.message }));
         if (std.mem.trim(u8, t.*, " \t\r\n.").len == 0) return h.fail(req, a, 400, "invalid_request_error", try std.fmt.allocPrint(a, "no words were heard in reference {d} (clip {d}): speak clearly, closer to the microphone", .{ n, r.clip + 1 }));
         if (textProblem(t.*)) |p| return h.fail(req, a, 400, "invalid_request_error", try std.fmt.allocPrint(a, "the transcript of reference {d} {s}", .{ n, p }));
@@ -215,14 +231,22 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
         p.* = .{ .text = t, .seconds = r.seconds, .frames = c.frames, .clip = r.clip, .level_dbfs = r.level_dbfs, .gain_db = r.gain_db, .snr_db = r.snr_db };
     }
     const clip_info = try a.alloc(store.Clip, prepared.clips.len);
-    for (clip_info, prepared.clips) |*o, c| o.* = .{ .seconds_in = c.seconds_in, .seconds_kept = c.seconds_kept, .speech_left_out_s = c.speech_left_out_s, .references = c.references };
+    for (clip_info, prepared.clips) |*o, c| o.* = .{
+        .seconds_in = c.seconds_in,
+        .seconds_kept = c.seconds_kept,
+        .speech_left_out_s = c.speech_left_out_s,
+        .references = c.references,
+        .snr_db = c.snr_db,
+        .background = if (c.background) |bg| @tagName(bg) else null,
+        .warnings = c.warnings,
+    };
     const v: store.Voice = .{
         .id = id,
         .model = cfg.id,
         .created_at = now,
         .source = .{ .kind = kind, .note = b.note },
         .consent = .{ .statement = consent_statement, .by = owner, .at = now },
-        .transcribed = transcribed(clips),
+        .transcribed = transcribed(prepared.clips),
         .seconds = prepared.seconds,
         .clips = clip_info,
         .prep = prep,
@@ -237,9 +261,49 @@ fn given(t: []const u8) bool {
     return std.mem.trim(u8, t, " \t\r\n").len > 0;
 }
 
-fn transcribed(clips: []const voiceprep.Clip) bool {
-    for (clips) |c| if (!c.transcript) return true;
+fn transcribed(clips: []const voiceprep.ClipReport) bool {
+    for (clips) |c| if (!c.transcript and c.references > 0) return true;
     return false;
+}
+
+/// A whole clip as the transcription model heard it: its words, and the intervals (seconds) its voice activity
+/// detector found speech in (null: it runs none).
+const Heard = struct { text: []const u8, speech: ?[]const [2]f64 };
+
+/// Clip `n` heard whole; its job (the clip's audio) is deleted. Null when no transcription model could run it: the
+/// clip is prepared without a detector, and its references transcribed (or refused) one by one.
+fn listen(app: *App, a: std.mem.Allocator, wav: []const u8, language: []const u8, owner: []const u8, n: usize) ?Heard {
+    var why: Refusal = .{};
+    const j = speech.startTranscription(app, a, .{ .language = language }, wav, owner, &why) orelse {
+        std.log.info("voices: clip {d} prepared without a voice activity detector: {s}", .{ n, why.message });
+        return null;
+    };
+    defer scrub(app, j);
+    j.done.wait(app.io) catch return null;
+    if (j.status != .completed) {
+        std.log.info("voices: clip {d} prepared without a voice activity detector: {s}", .{ n, j.error_message });
+        return null;
+    }
+    const t = speech.readTranscript(app, a, j, &why) orelse return null;
+    const said = t.get("text");
+    const text = if (said != null and said.? == .string) std.mem.trim(u8, said.?.string, " \t\r\n") else "";
+    const vad = t.get("vad") orelse return .{ .text = text, .speech = null };
+    const spans = if (vad == .object) vad.object.get("speech") else null;
+    if (spans == null or spans.? != .array) return .{ .text = text, .speech = null };
+    const out = a.alloc([2]f64, spans.?.array.items.len) catch return null;
+    for (out, spans.?.array.items) |*o, it| {
+        if (it != .array or it.array.items.len != 2) return .{ .text = text, .speech = null };
+        o.* = .{ seconds(it.array.items[0]) orelse return .{ .text = text, .speech = null }, seconds(it.array.items[1]) orelse return .{ .text = text, .speech = null } };
+    }
+    return .{ .text = text, .speech = out };
+}
+
+fn seconds(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
 }
 
 /// Why a transcript cannot be a reference's (the model's prompt syntax, blank, too long), else null.

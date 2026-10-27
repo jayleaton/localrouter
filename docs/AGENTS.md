@@ -236,10 +236,14 @@ as the multipart field `file` (repeat it; WAV, MP3, FLAC, OGG/Opus, M4A, WebM; u
 60 s of speech in all) and `consent=true`, the caller's statement that the voice is their own (`source=owner`, the
 default) or that its owner consented on record (`source=consented` with a `note` saying where). Optional: `name`,
 `transcript` (once per clip, in order: the clip's exact words; blank or absent, the transcription model writes them),
-`model`, `language`. Each clip is trimmed to its speech and cut at pauses into references of at most 30 s, each brought
-to the same level; a clip is refused with a 400 saying which and why when it is silent, clipped, starts inside a word,
-or its background is less than 30 dB under the speech, and so is a set with less than 10 s or more than 60 s of speech.
-The model then encodes the references (a few seconds on the GPU) and the clips are deleted.
+`model`, `language`, `force`. Each clip is heard whole by the transcription model (its voice activity detector finds
+the speech), trimmed to its speech and cut at pauses into references of at most 30 s, each brought to the same level.
+Only clear failures are refused, with a 400 saying which clip and why: no speech, less than 10 s of it in all, or a
+background (noise, or music, named as such) less than 5 dB under the voice, measured between the words; that one has
+code `noisy_background`, and `force=true` uses the clips anyway. Anything else that may make the voice worse (a
+background under 30 dB, clipping, a clip cut inside a word, more than 60 s or 8 references, of which the first are
+kept) is a warning in the voice's `clips[].warnings`. The model then encodes the references (a few seconds on the GPU)
+and the clips are deleted.
 
 Without `name` the voice is a draft (`"status": "draft"`, `id` `draft-...`, `expires_at` an hour on), usable as a
 `voice` for a preview but not listed; `PATCH /v1/voices/{id}` with a `name` saves it (and renames a saved voice), and
@@ -248,8 +252,8 @@ or `draft-...`, and not a name already in use (ignoring case; 409). A voice is t
 model's `voices` (`/v1/models`, MCP `list_voices`) and spoken there in speech requests, voice sessions and
 `synthesize_speech`; a request that names it without a `model` goes to that model. The voice object: `id`, `name`,
 `model`, `kind` (`named` or `cloned`), `status`, `created_at`, `seconds`, `transcribed`, `source`, `clips` (per clip:
-`seconds_in`, `seconds_kept`, `speech_left_out_s`, `references`) and `references` (each `text`, `seconds`, `frames`,
-`level_dbfs`, `gain_db`, `snr_db`). Creating, renaming and deleting need `manage`; listing needs `read`.
+`seconds_in`, `seconds_kept`, `speech_left_out_s`, `references`, `snr_db` (null: not measured), `background` (`noise`
+or `music`), `warnings`) and `references` (each `text`, `seconds`, `frames`, `level_dbfs`, `gain_db`, `snr_db`). Creating, renaming and deleting need `manage`; listing needs `read`.
 
 ## Transcriptions (OpenAI Audio API)
 

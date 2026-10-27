@@ -398,7 +398,9 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
 - **Clone my voice**, for a speech model that lists `voice_clone`: a dialog that asks the speaker to confirm the voice
   is theirs (nothing records or uploads before), then records them reading a script (echo cancellation, noise
   suppression and gain control off; a level meter; a quiet second first, 10 to 60 s) or takes up to 8 files, makes a
-  draft with `POST /v1/voices`, plays a line in it, and saves it under a name (`PATCH`). Its list deletes cloned
+  draft with `POST /v1/voices`, plays a line in it, and saves it under a name (`PATCH`). Clips refused for a loud
+  background (`noisy_background`) offer **Use anyway** (`force=true`); a draft's clip warnings show under the preview.
+  Its list deletes cloned
   voices. Recordings stay in the page's memory until they are uploaded and are never stored by the page; closing the
   dialog deletes an unsaved draft ([DRAMA3.md](DRAMA3.md#cloned-voices)).
 - The choice is kept per engine and sent as the session's `voice`. Settings the daemon no longer lists, such as a

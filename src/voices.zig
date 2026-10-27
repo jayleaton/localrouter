@@ -16,8 +16,18 @@ pub const Reference = struct { text: []const u8, seconds: f64 = 0, frames: u32 =
 pub const Source = struct { kind: []const u8, note: []const u8 = "" };
 /// Who said it is their voice (or that its owner consented), what they agreed to, and when.
 pub const Consent = struct { statement: []const u8, by: []const u8 = "", at: i64 = 0 };
-pub const Clip = struct { seconds_in: f64, seconds_kept: f64, speech_left_out_s: f64 = 0, references: usize = 0 };
-pub const ReferenceInfo = struct { text: []const u8, seconds: f64, frames: u32, clip: usize = 0, level_dbfs: f64 = 0, gain_db: f64 = 0, snr_db: f64 = 0 };
+/// What preparation found in one clip (`media/voiceprep.zig`): `snr_db` is its speech over the background between the
+/// words (null: too little of it to measure), `background` "noise" or "music", `warnings` what may make the voice worse.
+pub const Clip = struct {
+    seconds_in: f64,
+    seconds_kept: f64,
+    speech_left_out_s: f64 = 0,
+    references: usize = 0,
+    snr_db: ?f64 = null,
+    background: ?[]const u8 = null,
+    warnings: []const []const u8 = &.{},
+};
+pub const ReferenceInfo = struct { text: []const u8, seconds: f64, frames: u32, clip: usize = 0, level_dbfs: f64 = 0, gain_db: f64 = 0, snr_db: ?f64 = null };
 
 /// A voice as stored (`references` holds the codes).
 pub const Voice = struct {
@@ -278,9 +288,20 @@ fn summary(e: Entry, a: std.mem.Allocator) !Summary {
         .seconds = v.seconds,
         .transcribed = v.transcribed,
         .source = .{ .kind = try a.dupe(u8, v.source.kind), .note = try a.dupe(u8, v.source.note) },
-        .clips = try a.dupe(Clip, v.clips),
+        .clips = try clipsOf(a, v),
         .references = try infos(a, v),
     };
+}
+
+fn clipsOf(a: std.mem.Allocator, v: Voice) ![]const Clip {
+    const out = try a.dupe(Clip, v.clips);
+    for (out) |*c| {
+        if (c.background) |b| c.background = try a.dupe(u8, b);
+        const ws = try a.alloc([]const u8, c.warnings.len);
+        for (ws, c.warnings) |*o, w| o.* = try a.dupe(u8, w);
+        c.warnings = ws;
+    }
+    return out;
 }
 
 fn infos(a: std.mem.Allocator, v: Voice) ![]const ReferenceInfo {
