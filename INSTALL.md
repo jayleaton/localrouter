@@ -178,12 +178,13 @@ route but `/health` and pairing answers only paired devices, each within its sco
 and each device sees only its own jobs and files. Devices paired before scopes keep everything they had. The deploy
 scripts use their own read-only token (`$DEPLOY/operator.token`, made by install.sh). Before turning it on:
 
-- pair every phone (`pair.sh add NAME --url URL`, the app enters the code);
+- pair every phone and companion (`pair.sh add NAME --url URL`, the app enters the code; with no `--scopes` it gets
+  `all`, every feature, until you narrow it with `pair.sh scopes NAME LIST`);
 - mint a token for each harness, MCP client and script with what it needs (`pair.sh token NAME --scopes
   inference,media,read`, printed once; `manage` only for what loads and unloads models) and give it to them:
   `claude mcp add --transport http localrouter <url>/mcp --header "Authorization: Bearer <token>"`,
   `localrouter mcp-stdio --token <token>`, and `LOCALROUTER_TOKEN=<token>` for the smoke and check scripts (a token
-  with no `--scopes`, which can do everything they check);
+  with no `--scopes`: `all`);
 - in the web page (`/voice`), paste a token into **Settings → API key**.
 
 `pair.sh list` shows the devices and `pair.sh revoke <id or name>` removes one (its next connection is refused).

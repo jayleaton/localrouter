@@ -74,7 +74,7 @@ function renderSteps(s) {
 
   // 2. Code: open once the address answers, while not paired or re-pairing.
   $('open-code').hidden = byId.address.status !== 'done' || (s.paired && !repairing);
-  $('pairCmd').textContent = `deploy/jarvis/pair.sh add "${$('name').value.trim() || s.name}" --scopes inference,media,read`;
+  $('pairCmd').textContent = `deploy/jarvis/pair.sh add "${$('name').value.trim() || s.name}"`;
   $('cancelRepair').hidden = !repairing;
   $('pair').textContent = repairing ? 'Pair again' : 'Pair';
   $('repairNote').hidden = !(repairing && s.device);

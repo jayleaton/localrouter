@@ -127,9 +127,9 @@ route but `/health`, pairing and the `/voice` page answers only paired devices, 
 jobs and files. It is off by default.
 
 ```sh
-deploy/jarvis/pair.sh add "JJ's phone"     # a code for the app (XXXX-XXXX, 10 minutes, once) and its localrouter:// link
+deploy/jarvis/pair.sh add "JJ's phone"     # a code for the app (XXXX-XXXX, 10 minutes, once) and its localrouter:// link; every scope
 deploy/jarvis/pair.sh token opencode --scopes inference,media,read   # a harness's token (printed once)
-deploy/jarvis/pair.sh token smoke          # no --scopes: every service scope (scripts that check everything)
+deploy/jarvis/pair.sh token smoke          # no --scopes: all, every scope (scripts that check everything)
 deploy/jarvis/pair.sh list                 # id, name, created, scopes
 deploy/jarvis/pair.sh revoke ID|NAME       # refused from the next request
 ```

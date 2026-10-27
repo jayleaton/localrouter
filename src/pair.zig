@@ -18,7 +18,9 @@ pub const max_name_len = 64;
 pub const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const token_len = 43;
 
-/// `scopes`: what the device may do. None listed (every device paired before scopes existed) is `voice` and `mcp`.
+/// `scopes`: what the device may do. A device paired without a list (`localrouter pair add` or `token` with no
+/// `--scopes`) gets `all`: every scope, including any added later; an operator narrows it with `pair scopes`. None
+/// listed (every device paired before `all` existed, and before scopes) is `voice` and `mcp`.
 /// The service scopes a harness is issued, least privilege: `inference` (chat completions and /v1/realtime), `media`
 /// (image, video, speech and transcription), `decisions` (typed decisions), `read` (models, voices, residency) and
 /// `manage` (load, unload, reserve and release models). Computer control's `desktop_helper`, `computer` and `approve`
@@ -33,10 +35,11 @@ pub const Device = struct {
     created: i64,
     scopes: []const []const u8 = &.{},
 
-    /// Whether the device holds `scope` itself (none listed: `voice` and `mcp`); `grants` is what a request needs.
+    /// Whether the device holds `scope` itself (`all`: every one; none listed: `voice` and `mcp`); `grants` is what a
+    /// request needs.
     pub fn allows(d: Device, scope: []const u8) bool {
         if (d.scopes.len == 0) return std.mem.eql(u8, scope, "voice") or std.mem.eql(u8, scope, "mcp");
-        for (d.scopes) |x| if (std.mem.eql(u8, x, scope)) return true;
+        for (d.scopes) |x| if (std.mem.eql(u8, x, scope) or std.mem.eql(u8, x, all)) return true;
         return false;
     }
 
@@ -92,8 +95,16 @@ pub const Pending = struct { code_sha256: []const u8, name: []const u8, expires:
 
 /// The least-privilege scopes for a harness.
 pub const service_scopes = [_][]const u8{ "inference", "media", "decisions", "read", "manage" };
-/// Every scope a device may be given: the service scopes, computer control's, and the legacy `voice` and `mcp`.
-pub const scope_names = service_scopes ++ [_][]const u8{ "voice", "mcp", "desktop_helper", "computer", "approve" };
+/// Computer control's scopes (docs/dev/COMPUTER.md).
+pub const computer_scopes = [_][]const u8{ "desktop_helper", "computer", "approve" };
+/// Every scope there is, now and later: what a device paired without `--scopes` gets.
+pub const all = "all";
+/// The default of a new device or code: everything (an operator narrows it with `--scopes` or `pair scopes`).
+pub const default_scopes = [_][]const u8{all};
+/// What `all` holds today, as listed to a client (`GET /v1/pair`): every service and computer-control scope.
+pub const all_scopes = service_scopes ++ computer_scopes;
+/// Every scope a device may be given: `all`, the service scopes, computer control's, and the legacy `voice` and `mcp`.
+pub const scope_names = [_][]const u8{all} ++ service_scopes ++ [_][]const u8{ "voice", "mcp" } ++ computer_scopes;
 
 /// `voice,mcp,computer` as a list in `a`; null when a name is not one of `scope_names` or the list is empty.
 pub fn parseScopes(a: std.mem.Allocator, text: []const u8) !?[]const []const u8 {
@@ -160,7 +171,7 @@ pub const Store = struct {
 
     /// A new pending code for a device to be called `name`.
     pub fn addCode(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, at: i64) !Code {
-        return s.addCodeScoped(io, a, name, &.{}, at);
+        return s.addCodeScoped(io, a, name, &default_scopes, at);
     }
 
     /// `addCode` for a device that gets `scopes` (none: the defaults) when it redeems the code.
@@ -180,7 +191,7 @@ pub const Store = struct {
 
     /// A new device called `name`, with its token.
     pub fn mint(s: Store, io: Io, a: std.mem.Allocator, name: []const u8, at: i64) !Minted {
-        return s.mintScoped(io, a, name, &.{}, at);
+        return s.mintScoped(io, a, name, &default_scopes, at);
     }
 
     /// `mint` for a device with `scopes` (none: the defaults).
@@ -474,7 +485,7 @@ test "utc dates" {
     try testing.expectEqualStrings("2026-10-23 14:05 UTC", utc(&buf, 1792764300));
 }
 
-test "scopes: none is voice and mcp; a list grants only what it names; codes and tokens carry them; they can change" {
+test "scopes: the default is all; none listed is voice and mcp; a list grants only what it names; codes and tokens carry them; they can change" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -482,7 +493,8 @@ test "scopes: none is voice and mcp; a list grants only what it names; codes and
     const t = try TestStore.init(a);
     defer t.deinit();
     const s = t.store;
-    const old = try s.mint(io, a, "phone", 10);
+    const old = try s.mintScoped(io, a, "phone", &.{}, 10); // paired before scopes
+    const companion = try s.mint(io, a, "companion", 10); // the default: all
     const helper = try s.mintScoped(io, a, "mac", (try parseScopes(a, "desktop_helper")).?, 11);
     const code = try s.addCodeScoped(io, a, "tablet", (try parseScopes(a, "voice, mcp,approve")).?, 12);
     _ = (try s.redeem(io, a, &code.text, "", 13)).?;
@@ -491,10 +503,15 @@ test "scopes: none is voice and mcp; a list grants only what it names; codes and
     const h = (try s.verify(io, a, &helper.token)).?;
     try testing.expect(h.allows("desktop_helper") and !h.allows("mcp") and !h.allows("voice"));
     const doc = try s.load(io, a);
-    try testing.expect(doc.devices[2].allows("approve") and doc.devices[2].allows("voice") and !doc.devices[2].allows("computer"));
+    try testing.expect(doc.devices[3].allows("approve") and doc.devices[3].allows("voice") and !doc.devices[3].allows("computer"));
     const changed = try s.setScopes(io, a, "phone", (try parseScopes(a, "voice,mcp,computer,approve")).?, 14);
     try testing.expectEqual(@as(usize, 1), changed.len);
     try testing.expect((try s.verify(io, a, &old.token)).?.allows("computer"));
+    const c = (try s.verify(io, a, &companion.token)).?;
+    for (scope_names) |n| try testing.expect(c.allows(n));
+    try testing.expect(c.allows("a scope added later"));
+    for (std.enums.values(Need)) |n| try testing.expect(c.grants(n));
+    try testing.expectEqualStrings("all", (try parseScopes(a, "all")).?[0]);
     try testing.expect(try parseScopes(a, "voice,root") == null);
     try testing.expect(try parseScopes(a, " , ") == null);
 }
