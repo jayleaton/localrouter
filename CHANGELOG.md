@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Speech to text runs in a set language by default: `stt.language` (`en`) when a caller names none, for voice calls,
+  `/v1/audio/transcriptions` and MCP `transcribe_audio`; `auto` (from the caller or the config) detects it. A voice
+  session no longer carries the language its last turn was detected in: Whisper's detection on a 1 to 2 s turn is
+  unreliable (on DGX-02 a clean "Stop." came back as Italian and as Korean), and one misheard turn held the rest of the
+  call in that language, so clear English came back as other languages. The `/voice` page and the companion have a
+  **Language** setting (English by default, Auto-detect, or any of Whisper's languages), kept per device and sent as
+  each call's transcription language.
 - Voice cloning no longer refuses loud, mastered uploads as noisy. Each clip is heard whole by the transcription
   model, whose Silero detector says where the speech is, and the background is measured only between the words (not
   measured, and passed, when there is too little of it); upstream's quietest-tenth rule read loudness-normalised or

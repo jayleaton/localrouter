@@ -172,6 +172,27 @@ describe('realtime in client tool mode', () => {
     expect((last.session.tools as Array<{ name: string }>).map((t) => t.name)).toEqual(['get_time'])
   })
 
+  it('the language a call hears: the app’s setting when the page names none, the page’s when it does', async () => {
+    const box = fakeBox()
+    const s = new ClientToolsSession({ spark, registry: new Registry().add(tool), dial: box.dial, language: 'de' })
+    await s.connect()
+    expect(box.sent[0]).toMatchObject({ type: 'session.update', session: { input_audio_transcription: { language: 'de' } } })
+    s.send({ type: 'session.update', session: { voice: 'Mae' } })
+    expect(box.sent[box.sent.length - 1]).toMatchObject({ session: { voice: 'Mae', input_audio_transcription: { language: 'de' } } })
+    s.send({ type: 'session.update', session: { input_audio_transcription: { language: 'ja' } } })
+    expect(box.sent[box.sent.length - 1]).toMatchObject({ session: { input_audio_transcription: { language: 'ja' } } })
+    s.send({ type: 'session.update', session: { input_audio_transcription: { language: 'auto' } } })
+    expect(box.sent[box.sent.length - 1]).toMatchObject({ session: { input_audio_transcription: { language: 'auto' } } })
+  })
+
+  it('without an app setting or a page language the session names none (the box’s default)', async () => {
+    const box = fakeBox()
+    const s = new ClientToolsSession({ spark, registry: new Registry().add(tool), dial: box.dial })
+    await s.connect()
+    s.send({ type: 'session.update', session: { voice: 'Mae' } })
+    expect((box.sent[box.sent.length - 1] as { session: Record<string, unknown> }).session.input_audio_transcription).toBeUndefined()
+  })
+
   it('the page sees generation calls as items, and no other tool’s', () => {
     expect(pageView({ type: 'response.output_item.done', item: { type: 'function_call', name: 'generate_image' } })).toBe(true)
     expect(pageView({ type: 'response.output_item.done', item: { type: 'function_call', name: 'computer_use' } })).toBe(false)

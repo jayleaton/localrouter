@@ -26,7 +26,8 @@ contextBridge.exposeInMainWorld('companion', {
     send: (id: string, text: string) => ipcRenderer.send('rt:send', id, text),
     close: (id: string) => ipcRenderer.send('rt:close', id),
   },
-  // The page's host: this computer's tools for typed chat, the journal, and a video moved from a call.
+  // The page's host: this computer's tools for typed chat, the journal, a video moved from a call, and the language a
+  // call hears (this computer's setting; `onLanguage` hears it changed in Settings).
   host: {
     tools: () => ipcRenderer.invoke('host:tools'),
     run: (callId: string, name: string, args: string, utterance: string) => ipcRenderer.invoke('host:run', callId, name, args, utterance),
@@ -34,6 +35,11 @@ contextBridge.exposeInMainWorld('companion', {
     save: (conversation: string, items: unknown[]) => ipcRenderer.invoke('host:save', conversation, items),
     prepareVideo: () => ipcRenderer.invoke('host:prepareVideo'),
     restoreVoice: () => ipcRenderer.invoke('host:restoreVoice'),
+    language: () => ipcRenderer.invoke('host:language'),
+    setLanguage: (language: string) => ipcRenderer.invoke('host:setLanguage', language),
+    onLanguage: (listener: (language: string) => void) => {
+      ipcRenderer.on('host:language', (_e, language: string) => listener(language))
+    },
   },
   setup: {
     state: () => ipcRenderer.invoke('setup:state'),
@@ -54,6 +60,7 @@ contextBridge.exposeInMainWorld('companion', {
     legacy: (enabled: boolean, code: string) => ipcRenderer.invoke('setup:legacy', enabled, code),
     control: (on: boolean) => ipcRenderer.invoke('setup:control', on),
     askEach: (on: boolean) => ipcRenderer.invoke('setup:askEach', on),
+    language: (language: string) => ipcRenderer.invoke('setup:language', language),
     revokeControl: () => ipcRenderer.invoke('setup:revokeControl'),
     grantControl: (from: string) => ipcRenderer.invoke('setup:grantControl', from),
     exportConversations: () => ipcRenderer.invoke('setup:export'),

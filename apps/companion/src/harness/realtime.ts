@@ -38,6 +38,11 @@ export type SessionOptions = {
   conversation?: string
   instructions?: string
   model?: string
+  /**
+   * What speech to text hears (a Whisper code such as "en", or "auto": detect it on each turn) when the UI's own
+   * `session.update` names none: the app's setting. Unset: the box's default.
+   */
+  language?: string
   /** Push to talk (true: no server VAD; the caller commits) or server VAD (false, the default). */
   pushToTalk?: boolean
   dial?: Dial
@@ -158,10 +163,13 @@ export class ClientToolsSession {
 
   private session(page: Record<string, unknown>): Record<string, unknown> {
     const { tools: _ignored, tool_choice: _choice, localrouter: _lr, ...rest } = page
+    const stt = rest.input_audio_transcription && typeof rest.input_audio_transcription === 'object' ? (rest.input_audio_transcription as Record<string, unknown>) : {}
+    const language = typeof stt.language === 'string' && stt.language ? stt.language : this.o.language
     return {
       ...(this.o.pushToTalk ? { turn_detection: null } : {}),
       ...(this.o.instructions && !rest.instructions ? { instructions: this.o.instructions } : {}),
       ...rest,
+      ...(language ? { input_audio_transcription: { ...stt, language } } : {}),
       ...(this.o.instructions && rest.instructions ? { instructions: `${String(rest.instructions)}\n\n${this.o.instructions}` } : {}),
       tools: this.o.registry.realtime(),
       tool_choice: 'auto',

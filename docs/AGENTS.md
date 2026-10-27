@@ -265,7 +265,7 @@ curl -s -m 900 $BASE/audio/transcriptions -F file=@meeting.m4a -F response_forma
 | Field | Notes |
 | --- | --- |
 | `file` | WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC; up to 32 MB and 30 minutes (or the model's `max_audio_s`). A JSON body may send it as base64, a data URL or a URL |
-| `language` | ISO-639-1 (`en`, `de`, `ja`...); omit to detect it |
+| `language` | ISO-639-1 (`en`, `de`, `ja`...) or `auto` (detect it); omitted: the server's `stt.language` (`en` unless configured) |
 | `prompt` | text that guides spelling and style |
 | `response_format` | `json` (default: `text`, `usage`), `text`, `verbose_json` (`language`, `duration`, `segments`), `srt`, `vtt` |
 | `timestamp_granularities[]` | `segment` and/or `word`, with `verbose_json`; `word` only for models that support it (else 400) |
@@ -385,7 +385,7 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | --- | --- |
 | `model` | the chat model (also `?model=` on the URL); blank: the chat server's default |
 | `voice`, `speech_model` | a voice from any speech model's `voices` in `/v1/models` (without `speech_model`, the first configured speech model that lists it speaks; it stays the session's voice for every reply), and which speech model (extension) |
-| `input_audio_transcription` | `{model, language, prompt}` for the transcription model |
+| `input_audio_transcription` | `{model, language, prompt}` for the transcription model; `language` a code or `auto` (detect each turn); unset: the server's `stt.language` (`en`) |
 | `turn_detection` | `{type: "server_vad", threshold, prefix_padding_ms, silence_duration_ms, create_response, interrupt_response}`, or null for push to talk (`input_audio_buffer.commit`, then `response.create`) |
 | `modalities` | `["audio","text"]` (default) or `["text"]` |
 | `instructions`, `tools`, `tool_choice`, `temperature`, `max_response_output_tokens` | as OpenAI's; `tools` are your functions (you return `function_call_output`) |
