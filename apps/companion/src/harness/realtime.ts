@@ -55,6 +55,14 @@ export type SessionOptions = {
 // Made during a call, shown as the page's own job card. A video on a call is a proposal (`videoHandoff`), never a job.
 const GENERATION_TOOLS = new Set(['generate_image', 'edit_image'])
 
+/** The box refused the realtime socket (401, 403): retrying cannot help; `message` is its reason. */
+export class RealtimeRefused extends Error {
+  constructor(reason: string) {
+    super(`the Spark refused the call: ${reason}`)
+    this.name = 'RealtimeRefused'
+  }
+}
+
 export class ClientToolsSession {
   readonly calls: CallRecord[] = []
   private readonly o: SessionOptions
@@ -92,18 +100,32 @@ export class ClientToolsSession {
     const { url, protocols } = this.o.spark.realtime(this.o.model)
     this.ready = new Promise((resolve, reject) => {
       let settled = false
+      let opened = false
       const socket = (this.o.dial ?? nodeDial)(url, protocols)
       this.socket = socket
-      socket.onopen = () => this.sendRaw({ type: 'session.update', session: this.session({}) })
+      socket.onopen = () => {
+        opened = true
+        this.sendRaw({ type: 'session.update', session: this.session({}) })
+      }
       socket.onerror = () => undefined
       socket.onclose = (e) => {
         this.socket = null
         for (const c of this.pending.values()) c.abort.abort('the session closed')
-        if (!settled) {
-          settled = true
-          reject(new Error(`the realtime session closed (${e.code}${e.reason ? ` ${e.reason}` : ''})`))
+        const closed = () => {
+          if (!settled) {
+            settled = true
+            reject(new Error(`the realtime session closed (${e.code}${e.reason ? ` ${e.reason}` : ''})`))
+          }
+          this.o.onClose?.(e.reason || String(e.code))
         }
-        this.o.onClose?.(e.reason || String(e.code))
+        if (opened || settled) return closed()
+        // Never opened: a refusal (not paired, a scope, calls kept to the box itself) is final and said once, with the
+        // box's reason; anything else (the box restarting, a dropped link) closes as before, for the caller to retry.
+        void this.o.spark.realtimeRefusal().then((why) => {
+          if (!why) return closed()
+          settled = true
+          reject(new RealtimeRefused(why))
+        })
       }
       socket.onmessage = (m) => {
         let ev: ServerEvent

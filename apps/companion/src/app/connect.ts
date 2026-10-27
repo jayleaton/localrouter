@@ -48,6 +48,23 @@ export type ConnectInput = {
 export type Step = { id: StepId; status: StepStatus; summary: string }
 export type ConnectView = { current: StepId | 'done'; steps: Step[] }
 
+/**
+ * Why the box will refuse calls from this computer, from its discovery document: it serves them to itself only
+ * (`realtime.remote` false: it listens on the network with `voice.remote` off) and `base` is not this machine. Null when
+ * a call may go ahead (also when the box does not say).
+ */
+export function callRefusal(caps: Capabilities, base: string): string | null {
+  if (caps.realtime?.remote !== false) return null
+  let host: string
+  try {
+    host = new URL(base).hostname.replace(/^\[|\]$/g, '')
+  } catch {
+    return null
+  }
+  if (host === 'localhost' || host.startsWith('127.') || host === '::1') return null
+  return 'the Spark answers voice calls from itself only: set "voice": {"remote": true} in its config (the default for a box on the network with pairing on) and restart it'
+}
+
 /** The client tool mode this app's calls need (contract 2026-10-23). */
 export function supportsApp(caps: Capabilities): boolean {
   return Boolean(caps.realtime?.tool_execution?.includes('client'))
@@ -145,7 +162,7 @@ function allows(scopes: string[], scope: string): boolean {
  * What this app can use on the box, from its discovery document and the token's scopes: each feature the app relies
  * on, whether the box offers it, and whether this token may use it (scopes matter only with pairing required).
  */
-export function capabilitiesOf(caps: Capabilities, scopes: string[]): Capability[] {
+export function capabilitiesOf(caps: Capabilities, scopes: string[], base = ''): Capability[] {
   const have = new Set(((caps.models as { capabilities?: string[] } | undefined)?.capabilities ?? []) as string[])
   const required = Boolean(caps.auth?.pairing_required)
   const media = (caps.media ?? {}) as { image_edit?: boolean; image_to_video?: boolean }
@@ -156,10 +173,12 @@ export function capabilitiesOf(caps: Capabilities, scopes: string[]): Capability
     return { id, label, ok: true, detail }
   }
   const chatModels = caps.chat?.models ?? []
+  const refusal = base ? callRefusal(caps, base) : null
+  const voice = row('voice', 'Voice calls', supportsApp(caps), 'inference', caps.realtime?.profile ?? 'realtime')
   const tools = caps.mcp?.tools ?? []
   return [
     row('chat', 'Chat', Boolean(caps.chat?.available), 'inference', chatModels.length ? chatModels.join(', ') : 'available'),
-    row('voice', 'Voice calls', supportsApp(caps), 'inference', caps.realtime?.profile ?? 'realtime'),
+    voice.ok && refusal ? { ...voice, ok: false, detail: 'answered on the Spark itself only: voice.remote is off there' } : voice,
     row('images', 'Pictures', have.has('text_to_image'), 'media', media.image_edit ? 'make and edit' : 'make'),
     row('video', 'Video', have.has('text_to_video') || have.has('image_to_video'), 'media', [have.has('text_to_video') && 'from text', media.image_to_video && 'from a picture'].filter(Boolean).join(', ') || 'available'),
     row('speech', 'Speech', have.has('text_to_speech'), 'media', 'text to speech'),
@@ -170,7 +189,7 @@ export function capabilitiesOf(caps: Capabilities, scopes: string[]): Capability
 }
 
 /** The connection step from the two open discovery reads: `/v1/capabilities` and `GET /v1/pair` with the token. */
-export function connectionOf(caps: Capabilities, who: WhoAmI, at: number): Connection {
+export function connectionOf(caps: Capabilities, who: WhoAmI, at: number, base = ''): Connection {
   const required = Boolean(caps.auth?.pairing_required ?? who.required)
   if (!supportsApp(caps)) return { ok: false, at, error: tooOld() }
   if (!who.paired && required) return { ok: false, at, error: revoked() }
@@ -181,7 +200,7 @@ export function connectionOf(caps: Capabilities, who: WhoAmI, at: number): Conne
     server: serverOf(caps),
     scopes: scopes.map((name) => ({ name, label: scopeLabel(name) })),
     pairing_required: required,
-    capabilities: capabilitiesOf(caps, scopes),
+    capabilities: capabilitiesOf(caps, scopes, base),
     ...(who.paired ? {} : { warning: 'Connected, but the Spark does not know this computer’s token. It works only while pairing is off on the Spark: re-pair to keep working when it is turned on.' }),
   }
 }
