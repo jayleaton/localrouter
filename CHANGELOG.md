@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Voice cloning no longer refuses loud, mastered uploads as noisy. Each clip is heard whole by the transcription
+  model, whose Silero detector says where the speech is, and the background is measured only between the words (not
+  measured, and passed, when there is too little of it); upstream's quietest-tenth rule read loudness-normalised or
+  compressed takes, whose quietest frames are soft syllables, as noise. Only clear failures are refused: no speech,
+  under 10 s, or a background under 5 dB below the voice, which names music when it is tonal (code
+  `noisy_background`; `force=true` or **Use anyway** in the `/voice` dialog keeps it). Everything else that was
+  refused (a background under 30 dB, clipping, a clip cut inside a word, over 60 s or 8 references) is a warning in
+  `clips[].warnings`, shown under the preview. A clip that makes one reference reuses that transcript.
 - The MiniMax H3 pack build (`python -m stk_twin.h3.build`, `tools/spark/prepare.sh`) moves the DiT's block linears to
   the GPU once instead of holding a host and a device copy: 53.4 GiB at the peak instead of over 65 GiB (it was stopped
   at 5 GiB free beside the warm Jarvis set on DGX-02), and the pack is byte-identical to the pins
