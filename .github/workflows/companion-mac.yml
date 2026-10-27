@@ -1,6 +1,8 @@
 name: Companion (macOS)
 on:
   push:
+    # Branches only: a companion-v* tag builds through companion-release.yml.
+    branches: ['**']
     paths:
       - apps/companion/**
       - apps/desktop-helper/**
@@ -13,12 +15,18 @@ on:
       - src/voice/voice.html
       - .github/workflows/companion-mac.yml
   workflow_dispatch:
+  # A release (companion-release.yml): the same checks, plus the Intel build.
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   mac:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: apps/companion
@@ -197,11 +205,30 @@ jobs:
           echo "bundled helper:   $(codesign -dvvv out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-keychain 2>&1 | grep '^CDHash=')"
           clean
           exit $fail
+      - name: Intel build for a release (cross-built on this arm64 runner, same identity; started under Rosetta, its UI loads, its smoke passes)
+        if: inputs.release
+        run: |
+          LR_MAC_ARCH=x64 bash scripts/package-mac.sh
+          bin="out/LocalRouter-darwin-x64/LocalRouter.app/Contents/MacOS/LocalRouter"
+          lipo -archs "$bin" | grep -qx x86_64 || { echo "::error::$bin is $(lipo -archs "$bin"), not x86_64"; exit 1; }
+          /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license > /dev/null
+          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          limit 90 /usr/bin/arch -x86_64 "$bin" --version
+          set +e
+          limit 120 /usr/bin/arch -x86_64 "$bin" --smoke > "$RUNNER_TEMP/smoke-x64.txt" 2> "$RUNNER_TEMP/smoke-x64.err"
+          code=$?
+          set -e
+          smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke-x64.txt" | sed 's/^COMPANION_SMOKE //' || true)
+          echo "x64 smoke (exit $code): $smoke"
+          [ -n "$smoke" ] && [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] && [ "$(jq -r '.arch' <<< "$smoke")" = "x64" ] && [ "$code" -eq 0 ] || { tail -40 "$RUNNER_TEMP/smoke-x64.err"; echo "::error::x64 smoke not ok"; exit 1; }
+        env:
+          LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
       - name: job summary
         if: always()
         run: |
           {
-            echo "### LocalRouter for macOS (arm64)"
+            echo "### LocalRouter for macOS"
             echo
             echo "Signed by: $(cat out/signed-by.txt 2>/dev/null || echo unknown)"
             echo
@@ -217,7 +244,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: LocalRouter-macos-arm64
+          name: ${{ inputs.release && 'LocalRouter-macos' || 'LocalRouter-macos-arm64' }}
           path: |
             apps/companion/out/*.dmg
             apps/companion/out/*.zip

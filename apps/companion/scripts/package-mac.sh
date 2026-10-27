@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Packages dist/ (from `npm run build`) as out/LocalRouter-darwin-arm64/LocalRouter.app, ad-hoc signed (no Apple
+# Packages dist/ (from `npm run build`) as out/LocalRouter-darwin-<arch>/LocalRouter.app, ad-hoc signed (no Apple
 # identity: the user opens it with right-click > Open, or `xattr -dr com.apple.quarantine`), then a .dmg and a .zip.
-# macOS only. `npm run package:mac` builds and packages.
+# macOS only. `npm run package:mac` builds and packages. LR_MAC_ARCH=x64 packages for Intel Macs (default arm64);
+# each arch keeps its own files in out/, so both can be packaged one after the other.
 set -euo pipefail
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -13,17 +14,23 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 [ -f dist/package.json ] && [ -f dist/main.cjs ] && [ -f dist/mcp.cjs ] || { echo "package-mac: run npm run build first" >&2; exit 1; }
 
+arch=${LR_MAC_ARCH:-arm64}
+case "$arch" in
+  arm64) cc_arch=arm64 ;;
+  x64) cc_arch=x86_64 ;;
+  *) echo "package-mac: LR_MAC_ARCH must be arm64 or x64, not $arch" >&2; exit 1 ;;
+esac
 version=$(node -p 'require("./package.json").version')
 electron_version=$(node -p 'require("electron/package.json").version')
 out="$root/out"
-app="$out/LocalRouter-darwin-arm64/LocalRouter.app"
-rm -rf "$out"
+app="$out/LocalRouter-darwin-$arch/LocalRouter.app"
+rm -rf "$out/LocalRouter-darwin-$arch" "$out/LocalRouter-$version-$arch.dmg" "$out/LocalRouter-$version-$arch.zip"
 mkdir -p "$out"
 
-echo "package-mac: LocalRouter $version on Electron $electron_version"
-node --input-type=module - "$root/dist" "$out" "$electron_version" "$version" <<'JS'
+echo "package-mac: LocalRouter $version ($arch) on Electron $electron_version"
+node --input-type=module - "$root/dist" "$out" "$electron_version" "$version" "$arch" "$root/build/icon.icns" <<'JS'
 import { packager } from '@electron/packager'
-const [dir, out, electronVersion, appVersion] = process.argv.slice(2)
+const [dir, out, electronVersion, appVersion, arch, icon] = process.argv.slice(2)
 const paths = await packager({
   dir,
   out,
@@ -33,7 +40,9 @@ const paths = await packager({
   name: 'LocalRouter',
   executableName: 'LocalRouter',
   platform: 'darwin',
-  arch: 'arm64',
+  arch,
+  // The LocalRouter mark (scripts/make-icons.mjs).
+  icon,
   appBundleId: 'com.localrouter.companion',
   appCategoryType: 'public.app-category.productivity',
   asar: false,
@@ -52,6 +61,8 @@ JS
 
 [ -x "$app/Contents/MacOS/LocalRouter" ] || { echo "package-mac: $app has no LocalRouter executable" >&2; exit 1; }
 [ -f "$app/Contents/Resources/app/mcp.cjs" ] || { echo "package-mac: mcp.cjs missing from the bundle" >&2; exit 1; }
+icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")
+cmp -s "$root/build/icon.icns" "$app/Contents/Resources/${icon_file%.icns}.icns" || { echo "package-mac: the bundle's icon ($icon_file) is not build/icon.icns" >&2; exit 1; }
 
 # The executor's MCP server for other harnesses: Electron's own Node runs dist/mcp.cjs.
 launcher="$app/Contents/Resources/localrouter-executor-mcp"
@@ -69,7 +80,7 @@ chmod 755 "$launcher"
 # available, which Electron's promptTouchID cannot. It also checks macOS's Automation grants without asking (Apple
 # Events: CoreServices; System Events started hidden: AppKit). Signed below with the app's identity (or ad-hoc with it).
 presence="$app/Contents/Resources/localrouter-presence"
-xcrun --sdk macosx clang -O2 -Wall -Werror -fobjc-arc -mmacosx-version-min=13.0 -arch arm64 \
+xcrun --sdk macosx clang -O2 -Wall -Werror -fobjc-arc -mmacosx-version-min=13.0 -arch "$cc_arch" \
   -framework Foundation -framework LocalAuthentication -framework CoreServices -framework AppKit \
   -o "$presence" "$root/native/presence-helper.m"
 
@@ -108,7 +119,7 @@ if [ -n "${LR_SIGN_P12:-}" ]; then
   kh_build="$sign_dir/keychain"
   mkdir -p "$kh_build"
   printf '#define LR_APP_REQUIREMENT "identifier \\"%s\\" and certificate leaf = H\\"%s\\""\n' "$bundle_id" "$sha1" > "$kh_build/requirement.h"
-  xcrun --sdk macosx clang -O2 -Wall -Werror -mmacosx-version-min=13.0 -arch arm64 -I "$kh_build" \
+  xcrun --sdk macosx clang -O2 -Wall -Werror -mmacosx-version-min=13.0 -arch "$cc_arch" -I "$kh_build" \
     ${LR_KEYCHAIN_CFLAGS:-} -framework Security -framework CoreFoundation -o "$kh_build/localrouter-keychain" "$root/native/keychain-helper.c"
   kh="$app/Contents/Resources/localrouter-keychain"
   cp "$kh_build/localrouter-keychain" "$kh"
@@ -139,8 +150,8 @@ echo "package-mac: designated requirement: $(codesign -d -r- "$app" 2>&1 | sed -
 echo "package-mac: signed by $signed_by"
 printf '%s\n' "$signed_by" > "$out/signed-by.txt"
 
-dmg="$out/LocalRouter-$version-arm64.dmg"
-zip="$out/LocalRouter-$version-arm64.zip"
+dmg="$out/LocalRouter-$version-$arch.dmg"
+zip="$out/LocalRouter-$version-$arch.zip"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"; [ -n "${kc:-}" ] && { security delete-keychain "$kc" >/dev/null 2>&1 || true; rm -rf "$sign_dir"; }; true' EXIT
 ditto "$app" "$stage/LocalRouter.app"

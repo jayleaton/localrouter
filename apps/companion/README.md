@@ -33,10 +33,22 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
   (a speech model with `voice_clone`) records or uploads through the same proxy (`src/app/passthrough.ts`: multipart,
   PATCH, DELETE); the clips and voices stay on the Spark, the app keeps none, and cloning needs a pairing with `manage`.
 
+## Download
+
+Every release is on the [Releases page](https://github.com/jayleaton/localrouter/releases) (tags `companion-v*`, a
+pre-release while the app is in beta): `LocalRouter-<version>-arm64.dmg` (Apple silicon) and `-x64.dmg` (Intel Macs),
+`-win-x64.exe` (Windows installer) and `.zip`, and the Linux `.AppImage` and `.deb`. A branch's builds are the artifacts
+of its **Companion (macOS)** and **Companion (Linux, Windows)** runs in GitHub Actions.
+
+**A release:** bump `version` in `package.json` (and `src/executor/mcpMain.ts`), merge, then push the tag
+`companion-v<version>` from main (or run **Companion release** with that tag). `.github/workflows/companion-release.yml`
+runs both workflows (plus the Intel Mac build, smoke-started under Rosetta) and attaches their files, with
+`release-notes.md`. The app's icons are in `build/`, rendered from the LocalRouter mark by `node scripts/make-icons.mjs`.
+
 ## Install on a Mac (unsigned build)
 
-1. Download the `LocalRouter-macos-arm64` artifact from the latest green **Companion (macOS)** run in GitHub Actions,
-   unzip it, open `LocalRouter-<version>-arm64.dmg` and drag LocalRouter to Applications.
+1. Download `LocalRouter-<version>-arm64.dmg` (or `-x64.dmg` on an Intel Mac) from the
+   [latest release](https://github.com/jayleaton/localrouter/releases), open it and drag LocalRouter to Applications.
 2. The build is signed with LocalRouter's own certificate, not an Apple Developer ID, so macOS refuses a double-click the first time. Either
    right-click LocalRouter in Applications › **Open** › **Open**, or in Terminal:
    `xattr -dr com.apple.quarantine /Applications/LocalRouter.app`. If macOS still says it is damaged, System Settings
@@ -137,8 +149,9 @@ reopen LocalRouter.
 
 ## Install on Linux or Windows (unsigned builds)
 
-Download `LocalRouter-linux-x64` or `LocalRouter-windows-x64` from the latest green **Companion (Linux, Windows)** run
-in GitHub Actions. Pair and use it as on the Mac (steps 3, 4 and 6 above); Settings lists what computer control needs on
+Download the `.exe` installer (Windows), or the `.AppImage` or `.deb` (Linux), from the
+[latest release](https://github.com/jayleaton/localrouter/releases). Windows SmartScreen stops an unsigned installer:
+**More info** › **Run anyway**. Pair and use it as on the Mac (steps 3, 4 and 6 above); Settings lists what computer control needs on
 this computer, each with its fix. Approvals use Windows Hello where it is set up, otherwise a confirmation dialog.
 **Stop**: the card's Stop button, Ctrl+Shift+Alt+Esc, the tray icon's menu, or (where the OS lets an app read the
 pointer: X11, Hyprland, Windows) the pointer in the top-left corner.

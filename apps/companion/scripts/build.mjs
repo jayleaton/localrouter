@@ -61,9 +61,12 @@ const patched = `${voice.slice(0, at)}${shimTag}\n${voice.slice(at)}`
 if (!patched.includes(shimTag)) fail('voice shim not injected')
 await writeFile(join(dist, 'ui', 'voice.html'), patched)
 
+// The tray (Windows, Linux) and the Linux window icon, from scripts/make-icons.mjs.
+for (const name of ['icon.png', 'tray.png', 'tray@2x.png']) await cp(join(root, 'build', name), join(dist, name))
+
 await writeFile(
   join(dist, 'package.json'),
   `${JSON.stringify({ name: 'localrouter-companion', productName: 'LocalRouter', version: pkg.version, description: pkg.description, author: { name: 'LocalRouter', email: 'noreply@localrouter.invalid' }, homepage: 'https://github.com/jayleaton/localrouter', license: pkg.license, main: 'main.cjs' }, null, 2)}\n`,
 )
 
-process.stdout.write(`build: dist/ (main.cjs, preload.cjs, mcp.cjs, ui/, package.json) for ${pkg.version}\n`)
+process.stdout.write(`build: dist/ (main.cjs, preload.cjs, mcp.cjs, ui/, icons, package.json) for ${pkg.version}\n`)
