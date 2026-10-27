@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('companion', {
     cancel: () => ipcRenderer.invoke('setup:cancel'),
     disconnect: () => ipcRenderer.invoke('setup:disconnect'),
     discover: () => ipcRenderer.invoke('setup:discover'),
+    assistant: (name: string, step: boolean) => ipcRenderer.invoke('setup:assistant', name, step),
     permission: (kind: string) => ipcRenderer.invoke('setup:permission', kind),
     resetGrant: (kind: string) => ipcRenderer.invoke('setup:resetGrant', kind),
     relaunch: () => ipcRenderer.invoke('setup:relaunch'),

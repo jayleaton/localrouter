@@ -6,6 +6,8 @@ const api = window.companion.setup;
 let last = null;
 let confirming = false;
 let discovered = null;
+// The Settings name field while the person edits it: a refresh does not overwrite what they typed.
+let assistantEdited = false;
 
 const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not needed here' };
 const PERM_DOT = { granted: 'ready', stale: 'failed', denied: 'failed' };
@@ -63,6 +65,10 @@ function renderSteps(s) {
     $(`step-${st.id}`).dataset.s = st.status;
     $(`sum-${st.id}`).textContent = st.summary;
   }
+  // The name step is there only after a first pairing; the badges count the steps shown.
+  $('step-assistant').hidden = !byId.assistant;
+  let n = 0;
+  for (const li of document.querySelectorAll('.steps > .step')) if (!li.hidden) li.querySelector('.badge span').textContent = String(++n);
   const repairing = Boolean(c.draft && c.draft.repair);
 
   // 1. Address: open until it is checked; Change goes back to it before pairing.
@@ -112,6 +118,12 @@ function renderSteps(s) {
   $('checkedAt').textContent = conn ? `Checked ${new Date(conn.at).toLocaleTimeString()}` : 'Checking…';
   $('confirmDisconnect').hidden = !confirming || !s.paired;
   $('revokeCmd').textContent = `deploy/jarvis/pair.sh revoke ${s.device ? s.device.id : `"${s.name}"`}`;
+
+  // The assistant's name: asked once after the first pairing, prefilled with the Spark's (Jarvis on a fresh box).
+  $('open-assistant').hidden = !(byId.assistant && byId.assistant.status === 'active');
+  if (!$('assistantName').value) $('assistantName').value = s.assistant.name;
+  $('assistantStepNote').hidden = !s.assistant.unavailable;
+  $('assistantStepNote').textContent = s.assistant.unavailable;
 
   // The header pill.
   const pill = $('linkPill');
@@ -206,6 +218,10 @@ function render(s) {
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
   $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted by the operating system (the Keychain, Windows DPAPI or the Secret Service)' : 'for this run only (no keychain here)';
   if (s.stop_words) $('stopWords').textContent = s.stop_words;
+  for (const n of document.querySelectorAll('.an')) n.textContent = s.assistant.name;
+  // A busy button's label is plain text for a moment (guarded), so this one is written whole.
+  if (!$('grantControl').classList.contains('busy')) $('grantControl').textContent = `Let ${s.assistant.name} use this computer`;
+  renderAssistant(s);
   renderSteps(s);
   renderPermissions(s);
   renderFound();
@@ -249,6 +265,17 @@ function render(s) {
   $('legacy').checked = s.legacy.enabled;
   $('legacy').disabled = !s.paired;
   $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? 'connected to the Spark' : 'connecting…') : '';
+}
+
+/** Settings › Assistant: the name on the Spark, and its default voice as a hint (no voice is chosen here). */
+function renderAssistant(s) {
+  const a = s.assistant;
+  if (!assistantEdited) $('assistantEdit').value = a.name;
+  $('assistantEdit').placeholder = a.default_name;
+  $('assistantEdit').disabled = $('renameAssistant').disabled = !s.paired || Boolean(a.unavailable);
+  $('assistantVoice').hidden = !a.voice;
+  $('assistantVoice').textContent = a.voice ? `${a.voice}: the Spark’s default voice for calls.` : '';
+  $('assistantNote').textContent = a.unavailable || (s.paired ? `Kept on the Spark: every device paired with it shows and speaks this name. Leave it empty for ${a.default_name}.` : 'Kept on the Spark: pair with it to change the name.');
 }
 
 /** Runs `work` with `button` showing it is busy; an error the main process threw goes into `errorEl`. */
@@ -328,6 +355,17 @@ $('disconnectYes').onclick = async () => {
   discover();
 };
 $('open').onclick = () => api.openVoice();
+$('saveAssistant').onclick = () => guarded(() => api.assistant($('assistantName').value, true), $('saveAssistant'), 'Saving…', $('err-assistant'));
+$('assistantName').addEventListener('keydown', (e) => e.key === 'Enter' && $('saveAssistant').click());
+$('assistantEdit').addEventListener('input', () => (assistantEdited = true));
+$('renameAssistant').onclick = async () => {
+  const s = await guarded(() => api.assistant($('assistantEdit').value, false), $('renameAssistant'), 'Saving…', $('err-assistantEdit'));
+  if (s) {
+    assistantEdited = false;
+    renderAssistant(s);
+  }
+};
+$('assistantEdit').addEventListener('keydown', (e) => e.key === 'Enter' && $('renameAssistant').click());
 $('recheck').onclick = () => guarded(() => api.state(), $('recheck'), 'Checking…');
 for (const b of document.querySelectorAll('[data-perm]')) b.onclick = () => guarded(() => api.permission(b.dataset.perm), b);
 for (const b of document.querySelectorAll('[data-pane]')) b.onclick = () => guarded(() => api.permission(b.dataset.pane), b);

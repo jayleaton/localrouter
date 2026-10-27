@@ -101,7 +101,12 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName };
+
+fn assistantName(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    const app = self(ptr).app;
+    return app.assistant.name(app.io, a);
+}
 
 /// Client tool execution makes the session a harness's inference service: its device needs the inference scope.
 fn clientTools(ptr: *anyopaque, why: *Why) bool {
@@ -231,6 +236,17 @@ fn speechCandidates(app: *App, a: std.mem.Allocator, named_model: []const u8, vo
     };
     if (list.items.len == 0) try list.append(a, null);
     return list.items;
+}
+
+/// The voice a call speaks in when it names none (a hint beside the assistant's name, `api/assistant.zig`): the first
+/// speech model a call would try and its voice (`voice.voice`, else the model's `default_voice`); null without one.
+pub fn defaultVoice(app: *App, a: std.mem.Allocator) !?struct { model: []const u8, voice: []const u8 } {
+    const first = (try speechCandidates(app, a, app.cfg.voice.speech_model, app.cfg.voice.voice))[0];
+    var ref: routes.Refusal = .{};
+    const i = routes.resolveSpeech(app, first, app.cfg.voice.voice, &ref) orelse return null;
+    const c = app.scheduler.slots[i].tool.config();
+    const wanted = voiceFor(app, c.id, app.cfg.voice.voice);
+    return .{ .model = c.id, .voice = if (wanted.len > 0) wanted else engine.optionString(c, "default_voice", "") };
 }
 
 /// Counts what reaches the session, so a model that failed after it began speaking is not followed by another.

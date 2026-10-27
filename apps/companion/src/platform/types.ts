@@ -19,7 +19,7 @@ export type ControlSupport = Partial<Record<ComputerControl['kind'], string>>
 export interface PlatformControls {
   /** Runs one fixed control; throws a ControlError (macControls.ts) with words for the person when it cannot. */
   run(control: ComputerControl): Promise<{ done: string }>
-  /** A desktop notification (the "Jarvis is using this computer" notice). */
+  /** A desktop notification (the "<assistant> is using this computer" notice). */
   notify?(title: string, text: string): Promise<void>
   /** Controls this OS has no way to run, with why ("Windows has no per-app volume for Music"). */
   readonly unsupported?: ControlSupport

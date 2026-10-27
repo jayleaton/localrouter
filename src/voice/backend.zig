@@ -81,7 +81,14 @@ pub const Backend = struct {
         shadow: ?*const fn (ptr: *anyopaque, turn: Shadow) void = null, // must not block: called under the session's lock
         client_tools: ?*const fn (ptr: *anyopaque, why: *Why) bool = null, // may the session own its tools (null: yes)
         yield_chat: ?*const fn (ptr: *anyopaque, model: []const u8, op: Yield, holder: usize) bool = null, // speech first
+        assistant_name: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: the default
     };
+
+    /// What the assistant is called now (`assistant.zig`), in `a`: read each turn, so a rename counts from the next one.
+    pub fn assistantName(b: Backend, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+        const f = b.vtable.assistant_name orelse return @import("../assistant.zig").default_name;
+        return f(b.ptr, a);
+    }
 
     /// Speech first (sched/yielder.zig): `check` whether chat model `model` ("": the default) can be paused for speech,
     /// `hold` it paused for one more lease (`holder`: the response), `release` it.

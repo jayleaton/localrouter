@@ -15,6 +15,7 @@ import type { ComputerControl } from './computer/macControls.ts'
 import type { BrowserTabs, Point, ScreenBackend } from './computer/types.ts'
 import { DISABLED_MESSAGE, checkUrl, configDir, configPath, controlSocketPath, describeConfig, desktopSocketUrl, loadConfig, saveConfig, setDisabled } from './config.ts'
 import type { Config } from './config.ts'
+import { assistantName, DEFAULT_ASSISTANT, startNotice } from './assistant.ts'
 import { Connection } from './connection.ts'
 import type { HelloAccess } from './connection.ts'
 import { fakeMac } from './fake.ts'
@@ -151,10 +152,17 @@ async function run(dir: string): Promise<number> {
   const log = createLogger()
   const mac = fake ? fakeOne() : realMac()
   const stop = new LocalStop({ pointer: mac.pointer, log })
+  // The box's name for its assistant, read again each time it welcomes the helper; the default until it answers.
+  let assistant = DEFAULT_ASSISTANT
+  const lookUpAssistant = () =>
+    void assistantName(config.url, config.token).then((name) => {
+      if (name !== assistant) log.info('assistant.name', { name })
+      assistant = name
+    })
   const runs = new ComputerUseRuns({
     create: (session) => new ComputerUse({ ...session, tabs: mac.tabs, desktop: mac.desktop, dock: mac.dock, apps: mac.apps, log }),
     watch: (abort) => stop.watch(abort),
-    onStart: (task) => void mac.controls.notify(NOTICE_TITLE, `Jarvis is using your Mac: ${task.goal}. Move the pointer to the top-left corner to stop.`),
+    onStart: (task) => void mac.controls.notify(NOTICE_TITLE, startNotice(assistant, task.goal)),
     log,
   })
   const connection = new Connection({
@@ -165,6 +173,7 @@ async function run(dir: string): Promise<number> {
     controls: mac.controls,
     runs,
     disabled: () => config.disabled,
+    onWelcome: lookUpAssistant,
     log,
   })
   const handle = async (command: ControlCommand): Promise<ControlReply> => {

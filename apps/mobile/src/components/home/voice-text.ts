@@ -1,7 +1,7 @@
 import type { VoiceState } from '@/lib/voice/voiceState'
 
-/** "hey jarvis" → "Hey Jarvis". */
-const title = (phrase: string) => phrase.replace(/\b\w/g, (letter) => letter.toUpperCase())
+/** "hey Friday" → "Hey Friday" (the name keeps the case it was given). */
+const title = (phrase: string) => phrase.charAt(0).toUpperCase() + phrase.slice(1)
 
 /** What a call is doing, in a word or two: the line under the voice wave and in the lightbox's call pill. */
 export function callLine(voice: VoiceState) {

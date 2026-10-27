@@ -18,7 +18,7 @@ linux:
   executableName: localrouter
   category: Utility
   maintainer: LocalRouter <noreply@localrouter.invalid>
-  synopsis: Jarvis on your own computer, with the models on your LocalRouter box
+  synopsis: Your assistant on your own computer, with the models on your LocalRouter box
   target:
     - AppImage
     - deb

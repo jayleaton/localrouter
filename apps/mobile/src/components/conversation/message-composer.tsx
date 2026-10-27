@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, TextInput, View } from 'react-native'
 import { ThemedText } from '@/components/themed-text'
 import { Palette, Spacing } from '@/constants/theme'
 import { useTheme } from '@/hooks/use-theme'
+import { useAssistantName } from '@/lib/app/box'
 
 /** Longer messages are cut at the input: a phone message this long is a paste gone wrong, not a question. */
 const MAX_TEXT_LENGTH = 4000
@@ -11,6 +12,7 @@ const MAX_TEXT_LENGTH = 4000
 /** The typed message field. In a call a typed message gets a spoken reply, like a spoken one. */
 export function MessageComposer({ onSend }: { onSend: (text: string) => void }) {
   const theme = useTheme()
+  const name = useAssistantName()
   const [text, setText] = useState('')
   const ready = text.trim().length > 0
   const send = () => {
@@ -24,7 +26,7 @@ export function MessageComposer({ onSend }: { onSend: (text: string) => void }) 
         value={text}
         onChangeText={setText}
         maxLength={MAX_TEXT_LENGTH}
-        placeholder="Message Jarvis…"
+        placeholder={`Message ${name}…`}
         placeholderTextColor={theme.textSecondary}
         accessibilityLabel="Message"
         testID="message-input"

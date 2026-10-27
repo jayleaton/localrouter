@@ -1,10 +1,11 @@
 import { z } from 'zod'
 
 import { fileUrl } from './address'
+import type { Assistant } from './assistant'
 
 /*
- * LocalRouter's HTTP API, as the app uses it: pairing, the models and their voices, a generation's retry and its
- * job. `fetch` is passed in, so the headless check runs this under Node exactly as the phone does.
+ * LocalRouter's HTTP API, as the app uses it: pairing, the assistant's name, the models and their voices, a
+ * generation's retry and its job. `fetch` is passed in, so the headless check runs this under Node exactly as the phone does.
  */
 
 export type Fetch = (input: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
@@ -41,6 +42,13 @@ const model = z.object({
 }).loose()
 const models = z.object({ data: z.array(model) }).loose()
 
+const assistant = z.object({
+  name: z.string().min(1),
+  default_name: z.string().min(1),
+  custom: z.boolean().default(false),
+  voice: z.object({ model: z.string(), voice: z.string() }).loose().nullable().optional(),
+}).loose()
+
 const job = z.object({
   id: z.string(),
   status: z.string(),
@@ -67,6 +75,10 @@ export function speechEngines(list: Model[]): SpeechEngine[] {
       defaultVoice: m.default_voice ?? null,
       isDefault: m.default_for.includes('text_to_speech'),
     }))
+}
+
+function fromAssistant(a: z.infer<typeof assistant>): Assistant {
+  return { name: a.name, defaultName: a.default_name, custom: a.custom, voice: a.voice ? { model: a.voice.model, voice: a.voice.voice } : null, supported: true }
 }
 
 function message(error: unknown) {
@@ -108,6 +120,12 @@ export function createApi(options: { baseUrl: string; token?: string | null; fet
     pairStatus: () => call('/v1/pair', pairStatus),
 
     models: async () => (await call('/v1/models', models)).data,
+
+    /** The assistant's name and the box's default voice (`GET /v1/assistant`; an older box answers 404 or 403). */
+    assistant: async (): Promise<Assistant> => fromAssistant(await call('/v1/assistant', assistant)),
+
+    /** Renames the assistant (`manage` permission); an empty name restores the default. */
+    setAssistantName: async (name: string): Promise<Assistant> => fromAssistant(await call('/v1/assistant', assistant, { method: 'PATCH', body: { name } })),
 
     /** Makes a picture again over HTTP (a failed card's Retry). */
     async image(prompt: string) {

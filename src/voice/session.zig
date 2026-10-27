@@ -146,7 +146,7 @@ pub const Session = struct {
         s.resetDetector();
         var tmp: std.heap.ArenaAllocator = .init(gpa);
         defer tmp.deinit();
-        s.emit.send(tmp.allocator(), "session.created", .{ .session = try events.sessionObject(tmp.allocator(), s.id, &s.settings) });
+        s.emit.send(tmp.allocator(), "session.created", .{ .session = try s.shown(tmp.allocator()) });
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
         s.mutex.lockUncancelable(io);
         respond.prime(s); // the system prompt and tools, before the first turn needs them
@@ -261,7 +261,14 @@ pub const Session = struct {
         s.settings_arena = next;
         old.deinit();
         if (vad_changed and s.turn == null) s.resetDetector();
-        s.emit.send(a, "session.updated", .{ .session = try events.sessionObject(a, s.id, &s.settings) });
+        s.emit.send(a, "session.updated", .{ .session = try s.shown(a) });
+    }
+
+    /// The session object a client sees: its instructions as the chat model reads them, the assistant's name filled in.
+    fn shown(s: *Session, a: std.mem.Allocator) !Value {
+        var st = s.settings;
+        st.instructions = try @import("../assistant.zig").systemPrompt(a, st.instructions, try s.backend.assistantName(a));
+        return events.sessionObject(a, s.id, &st);
     }
 
     fn resetDetector(s: *Session) void {

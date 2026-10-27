@@ -79,7 +79,7 @@ export const MAX_READ = 64 * 1024
 
 /** The real path of `path` when it is inside one of `roots` (after links); else an error. */
 export async function inside(roots: string[], path: string): Promise<string> {
-  if (!roots.length) throw new Error('no folder is shared with Jarvis: add one in LocalRouter › Settings › Files')
+  if (!roots.length) throw new Error('no folder is shared yet: the user adds one in LocalRouter › Settings › Files')
   const real = await Promise.all(roots.map((r) => realpath(r).catch(() => null)))
   const base = real.find(Boolean)
   if (!base) throw new Error('the shared folders are gone')
@@ -95,7 +95,7 @@ export async function inside(roots: string[], path: string): Promise<string> {
     const rel = relative(r, target)
     if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel) && !rel.split(sep).includes('..'))) return target
   }
-  throw new Error(`${path} is outside the folders shared with Jarvis`)
+  throw new Error(`${path} is outside the shared folders`)
 }
 
 export function fileTools(roots: () => string[]): Tool[] {

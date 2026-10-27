@@ -20,6 +20,8 @@ import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { DEFAULT_LANGUAGE, languageChoices, parseSettings, settingsText, sttLanguage } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
+import { assistantNameProblem, assistantOf, DEFAULT_ASSISTANT, tidyAssistantName, voiceHint } from '../harness/assistant.ts'
+import type { Assistant } from '../harness/assistant.ts'
 import { CONFIRMATION } from '../executor/broker.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
@@ -38,7 +40,7 @@ import { createPlatform } from '../platform/index.ts'
 import { stopShortcut } from '../platform/shortcut.ts'
 import type { PlatformPresence } from '../platform/types.ts'
 import type { Runtime } from '../harness/runtime.ts'
-import { normalizeBase, pair, PlainHttpError, Spark } from '../harness/spark.ts'
+import { normalizeBase, pair, PlainHttpError, Spark, SparkError } from '../harness/spark.ts'
 import type { Fetch } from '../harness/spark.ts'
 
 /**
@@ -93,8 +95,10 @@ const PRELOAD = join(__dirname, 'preload.cjs')
 /**
  * `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one).
  * `language`: what a call's speech to text hears (a Whisper code, or "auto"), one per computer: the voice page's too.
+ * `assistant`: the Spark's assistant (its name and default voice) as last read there, so the name shows offline.
+ * `assistantStep`: the name step of setup, 'ask' after this computer's first pairing until answered; none before it.
  */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; language: string; askEachAction?: boolean; automationAsked?: string; pairedAt?: string; micAskedFor?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; language: string; askEachAction?: boolean; automationAsked?: string; pairedAt?: string; micAskedFor?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration; assistant?: Assistant; assistantStep?: 'ask' | 'done' }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -116,7 +120,9 @@ function loadSettings(): Settings {
   } catch {
     // No file yet: the defaults.
   }
-  return parseSettings(text, dflt)
+  const s = parseSettings(text, dflt)
+  // The cached assistant is read like the Spark's answer: a hand-edited or broken entry is the default.
+  return { ...s, assistant: s.assistant ? assistantOf(s.assistant) : undefined, assistantStep: s.assistantStep === 'ask' || s.assistantStep === 'done' ? s.assistantStep : undefined }
 }
 
 function saveSettings(s: Settings) {
@@ -240,7 +246,7 @@ class AppPresenceGate implements PresenceGate {
   }
 
   async verify(card: Card, waiting?: (text: string) => void, signal?: AbortSignal): Promise<boolean> {
-    const prompt = `let Jarvis ${card.action}`.slice(0, 200)
+    const prompt = `let ${assistantName()} ${card.action}`.slice(0, 200)
     if (this.touchId) {
       // The helper's prompt is dismissed when the approval ends another way; Electron's (a dev build) cannot be.
       if (this.touch) return this.touch.verify(prompt, signal)
@@ -249,7 +255,7 @@ class AppPresenceGate implements PresenceGate {
     if (this.os && this.osReady) {
       // The app's window owns the OS prompt (Windows Hello opens over it, not behind it).
       const window = windowHandle(mainWindow)
-      return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200), { ...(window !== undefined ? { window } : {}), ...(waiting ? { waiting } : {}), ...(signal ? { signal } : {}) }).catch(() => false)
+      return this.os.verify(`Let ${assistantName()} ${card.action}`.slice(0, 200), { ...(window !== undefined ? { window } : {}), ...(waiting ? { waiting } : {}), ...(signal ? { signal } : {}) }).catch(() => false)
     }
     void this.probe()
     const where = [card.app, card.title, card.url].filter(Boolean).join(' · ')
@@ -259,7 +265,7 @@ class AppPresenceGate implements PresenceGate {
       defaultId: 0,
       cancelId: 0,
       noLink: true,
-      message: `Let Jarvis ${card.action}?`,
+      message: `Let ${assistantName()} ${card.action}?`,
       detail: `${where}\n${card.kind === 'type' ? `Text: ${card.text}\n` : ''}Why it asks: ${card.why}\nFor: ${card.goal}\nAsked by: ${card.requester}`,
       // A stop, or the approval ending another way, closes the sheet (it must have a parent window to be closable).
       ...(signal ? { signal } : {}),
@@ -400,17 +406,18 @@ async function startLocalExecutor(): Promise<void> {
   if (executor) return
   executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, standing, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
   executor.broker.setDecider(null, UNPAIRED)
+  executor.broker.setAssistant(assistantName())
   await gate.use(executor.built.platform.presence)
   await migrateStanding('launch')
   executor.broker.on((e) => {
     // Refused for want of the grant: a notification only, never a window over the person's work.
-    if (e.type === 'consent.needed' && Notification.isSupported()) new Notification({ title: 'Computer control is off', body: `Jarvis asked to ${e.goal.slice(0, 80)}. Turn computer control on in LocalRouter → Settings.` }).show()
+    if (e.type === 'consent.needed' && Notification.isSupported()) new Notification({ title: 'Computer control is off', body: `${assistantName()} asked to ${e.goal.slice(0, 80)}. Turn computer control on in LocalRouter → Settings.` }).show()
     if (e.type === 'approval') {
       showMain()
-      if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
+      if (Notification.isSupported()) new Notification({ title: `${assistantName()} asks for your OK`, body: `${e.card.action}. Approve it in LocalRouter.` }).show()
     }
     // A card nobody answered: say so, since the task ended while the person may have been away from the window.
-    if (e.type === 'approval.end' && e.outcome === 'expired' && Notification.isSupported()) new Notification({ title: 'Jarvis stopped', body: 'Nobody approved the step in time, so nothing was done.' }).show()
+    if (e.type === 'approval.end' && e.outcome === 'expired' && Notification.isSupported()) new Notification({ title: `${assistantName()} stopped`, body: 'Nobody approved the step in time, so nothing was done.' }).show()
     // The OS check is open behind other windows: say where it is, in a notification as well as on the card.
     if (e.type === 'approval.update' && e.card.waiting && Notification.isSupported()) new Notification({ title: 'Windows Hello is waiting', body: e.card.waiting }).show()
     // The visible virtual cursor: show where the agent acted; let go of the overlay when the task ends.
@@ -431,7 +438,9 @@ async function startRuntimeFromSettings(): Promise<void> {
   await startLocalExecutor()
   const secrets = loadSecrets()
   if (!settings.base || !secrets.token || !executor) return
-  runtime = await startRuntime({ base: settings.base, token: secrets.token, dir, name: settings.name, machine: machineKind(), gate, shared: () => settings.shared, executor, log })
+  runtime = await startRuntime({ base: settings.base, token: secrets.token, dir, name: settings.name, machine: machineKind(), gate, shared: () => settings.shared, executor, assistant: assistantName, log })
+  // The name as the Spark keeps it now (the cached one meanwhile): read at every start, not only with Settings open.
+  void readAssistant()
   if (settings.legacy && secrets.legacy_token) {
     const local = executor
     legacy = new LegacyBridge({ url: settings.base, token: secrets.legacy_token, name: settings.name, version: VERSION, broker: local.broker, access: () => local.built.platform.access(), log })
@@ -644,7 +653,9 @@ function registerIpc() {
       if (!c) throw new CodeError('not a code')
       const nm = String(name || settings.name).trim() || settings.name
       const p = await pair(draft.base, c, nm, timed(PAIR_S))
-      settings = { ...settings, base: draft.base, device: p.device, name: nm, pairedAt: new Date().toISOString() }
+      // A first pairing (not a re-pair) asks the assistant's name next; an install paired before never is.
+      const step = draft.repair ? settings.assistantStep : 'ask'
+      settings = { ...settings, base: draft.base, device: p.device, name: nm, pairedAt: new Date().toISOString(), ...(step ? { assistantStep: step } : {}) }
       saveSettings(settings)
       saveSecrets({ ...loadSecrets(), token: p.token })
       // A pairing (first, or again after the box revoked the token) reruns the migration: never a step left at "not allowed".
@@ -686,6 +697,29 @@ function registerIpc() {
     return state()
   })
   setup('setup:discover', () => discoverSparks())
+  // The assistant's name, on the Spark for every device: the setup step (`step`, which it then marks answered) and
+  // Settings. An unchanged name is not sent; an empty one is the default again.
+  setup('setup:assistant', async (input, step) => {
+    const wanted = tidyAssistantName(String(input ?? ''))
+    const problem = assistantNameProblem(wanted)
+    if (problem) throw new Error(problem)
+    const current = settings.assistant
+    const unchanged = wanted ? wanted === assistantName() : !current?.custom
+    if (!unchanged) {
+      if (!runtime) throw new Error('Connect to your Spark first: the name is kept there, for every device.')
+      if (assistantAvailable === false) throw new Error(OLD_BOX)
+      try {
+        useAssistant(await new Spark(settings.base, loadSecrets().token, timed(CHECK_S)).renameAssistant(wanted))
+      } catch (error) {
+        throw new Error(renameRefusal(error))
+      }
+    }
+    if (step && settings.assistantStep === 'ask') {
+      settings = { ...settings, assistantStep: 'done' }
+      saveSettings(settings)
+    }
+    return state()
+  })
   setup('setup:resetGrant', async (kind) => {
     if (process.platform !== 'darwin') return { ok: false, text: 'only macOS keeps these grants', state: await state() }
     const which = kind === 'screen' ? 'screen' : kind === 'microphone' ? 'microphone' : 'accessibility'
@@ -723,7 +757,7 @@ function registerIpc() {
     return state()
   })
   setup('setup:addFolder', async () => {
-    const r = await dialog.showOpenDialog({ title: 'Share a folder with Jarvis', properties: ['openDirectory'] })
+    const r = await dialog.showOpenDialog({ title: `Share a folder with ${assistantName()}`, properties: ['openDirectory'] })
     if (!r.canceled && r.filePaths[0] && !settings.shared.includes(r.filePaths[0])) {
       settings = { ...settings, shared: [...settings.shared, r.filePaths[0]] }
       saveSettings(settings)
@@ -936,10 +970,57 @@ async function checkConnection() {
     const spark = new Spark(settings.base, loadSecrets().token, timed(CHECK_S))
     const [caps, who] = await Promise.all([spark.capabilities(), spark.whoami()])
     connection = connectionOf(caps, who, Date.now(), settings.base)
+    await readAssistant(spark)
   } catch (error) {
     connection = { ok: false, at: Date.now(), error: classify(error, 'connection', CHECK_S) }
   }
   log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
+}
+
+// ------------------------------------------------------------------ the assistant's name (kept on the Spark)
+
+/** Whether the Spark keeps the name: null until read, false on a box from before the setting. */
+let assistantAvailable: boolean | null = null
+const OLD_BOX = `This Spark’s LocalRouter does not keep an assistant name yet, so it stays ${DEFAULT_ASSISTANT}: update LocalRouter on the Spark to change it.`
+
+/** The assistant's name: the Spark's as last read (kept in settings, so it shows offline), else the default. */
+function assistantName(): string {
+  return settings?.assistant?.name || DEFAULT_ASSISTANT
+}
+
+/** What the Spark said about its assistant (null: a box from before the setting, so the default), kept and used. */
+function useAssistant(a: Assistant | null) {
+  assistantAvailable = a !== null
+  const next: Assistant = a ?? { name: DEFAULT_ASSISTANT, default_name: DEFAULT_ASSISTANT, custom: false, voice: null }
+  const before = assistantName()
+  if (JSON.stringify(next) !== JSON.stringify(settings.assistant ?? null)) {
+    settings = { ...settings, assistant: next }
+    saveSettings(settings)
+  }
+  executor?.broker.setAssistant(next.name)
+  if (next.name !== before) {
+    log.info('assistant.name', { name: next.name, custom: next.custom })
+    buildMenu()
+    refreshTray()
+  }
+}
+
+/** Reads the name on the Spark; a box that does not answer keeps the name last read. */
+async function readAssistant(spark = runtime ? new Spark(settings.base, loadSecrets().token, timed(CHECK_S)) : null) {
+  if (!spark) return
+  try {
+    useAssistant(await spark.assistant())
+  } catch (error) {
+    log.warn('assistant.read_failed', { error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+/** Why the Spark did not rename the assistant, for the person. */
+function renameRefusal(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (error instanceof SparkError && (error.status === 404 || error.status === 405)) return OLD_BOX
+  if (error instanceof SparkError && (error.status === 401 || error.status === 403)) return `This computer’s pairing may not rename the assistant (that needs the manage scope): ${message}. Pair it again with a code made without --scopes, or rename it from a device that may.`
+  return `The Spark did not rename the assistant: ${message}`
 }
 
 const TAILSCALE = tailscaleCandidates(process.platform, process.env)
@@ -1007,7 +1088,8 @@ async function state() {
     machine: machineKind(),
     permissions: permissionState,
     stop_words: executor?.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
-    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState, control: { granted: standing.granted() } }), draft, connection, errors },
+    assistant: { name: assistantName(), default_name: settings.assistant?.default_name ?? DEFAULT_ASSISTANT, custom: settings.assistant?.custom ?? false, voice: voiceHint(settings.assistant?.voice ?? null), available: assistantAvailable, unavailable: assistantAvailable === false ? OLD_BOX : '', step: settings.assistantStep ?? null },
+    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState, control: { granted: standing.granted() }, assistant: { name: assistantName(), ...(settings.assistantStep ? { step: settings.assistantStep } : {}) } }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
     mcp: { command: mcpLauncher(process.resourcesPath ?? '', process.platform), socket: executorSocket(dir) },
@@ -1058,7 +1140,7 @@ function showSetup() {
 
 function stopAll(by: string) {
   const n = executor?.broker.stop(undefined, by, 'You stopped it.') ?? 0
-  if (n && Notification.isSupported()) new Notification({ title: 'LocalRouter', body: 'Stopped what Jarvis was doing on this computer.' }).show()
+  if (n && Notification.isSupported()) new Notification({ title: 'LocalRouter', body: `Stopped what ${assistantName()} was doing on this computer.` }).show()
 }
 
 function refreshTray() {
@@ -1071,7 +1153,7 @@ function refreshTray() {
     { label: 'Settings…', click: () => showSetup() },
     { type: 'separator' },
     { label: busy ? `Stop: ${busy.goal.slice(0, 40)}` : 'Nothing running on this computer', enabled: Boolean(busy), click: () => stopAll('the menu bar') },
-    { label: 'Let Jarvis control this computer', type: 'checkbox', enabled: Boolean(broker), checked: broker ? !broker.disabled : false, click: (item) => { broker?.setDisabled(!item.checked); refreshTray() } },
+    { label: `Let ${assistantName()} control this computer`, type: 'checkbox', enabled: Boolean(broker), checked: broker ? !broker.disabled : false, click: (item) => { broker?.setDisabled(!item.checked); refreshTray() } },
     { type: 'separator' },
     { label: 'Quit LocalRouter', click: () => app.quit() },
   ]
@@ -1080,7 +1162,7 @@ function refreshTray() {
 
 function buildMenu() {
   const template: MenuItemConstructorOptions[] = [
-    { label: 'LocalRouter', submenu: [{ role: 'about' }, { type: 'separator' }, { label: 'Settings…', accelerator: 'CommandOrControl+,', click: () => showSetup() }, { label: 'Stop what Jarvis is doing', accelerator: STOP.accelerator, click: () => stopAll('the keyboard') }, { type: 'separator' }, { role: 'hide' }, { role: 'quit' }] },
+    { label: 'LocalRouter', submenu: [{ role: 'about' }, { type: 'separator' }, { label: 'Settings…', accelerator: 'CommandOrControl+,', click: () => showSetup() }, { label: `Stop what ${assistantName()} is doing`, accelerator: STOP.accelerator, click: () => stopAll('the keyboard') }, { type: 'separator' }, { role: 'hide' }, { role: 'quit' }] },
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },

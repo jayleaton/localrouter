@@ -21,7 +21,7 @@ export type Binding = {
   why: string
   /** What the person asked for. */
   goal: string
-  /** Who started the task: "Jarvis (voice)", "MCP: opencode", "LocalRouter box (legacy)". */
+  /** Who started the task: "Jarvis (voice)" (the assistant's name), "MCP: opencode", "LocalRouter box (legacy)". */
   requester: string
 }
 

@@ -13,7 +13,7 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "LocalRouter listens on your phone for the wake phrase, then streams your voice to your own LocalRouter box for the conversation.",
-        "NSSpeechRecognitionUsageDescription": "Listens on your phone for the wake phrase (\"Hey Jarvis\") and for \"end call\" and \"mute audio\". Recognition runs on this phone; nothing is sent anywhere until a call opens.",
+        "NSSpeechRecognitionUsageDescription": "Listens on your phone for the wake phrase you chose (\"Hey Jarvis\" by default) and for \"end call\" and \"mute audio\". Recognition runs on this phone; nothing is sent anywhere until a call opens.",
         "UIBackgroundModes": ["audio", "voip"],
         "ITSAppUsesNonExemptEncryption": false
       }

@@ -1,7 +1,7 @@
 {
   "name": "voice-commands",
   "version": "0.1.0",
-  "description": "On-device recognition of spoken app commands (\"mute audio\", \"hey Jarvis\") on the call's microphone stream",
+  "description": "On-device recognition of spoken app commands (\"mute audio\", \"hey <name>\") on the call's microphone stream",
   "private": true,
   "main": "src/index.ts",
   "license": "UNLICENSED",

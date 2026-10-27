@@ -2,14 +2,15 @@ import { Pressable, StyleSheet, View } from 'react-native'
 
 import { ThemedText } from '@/components/themed-text'
 import { Palette, Spacing } from '@/constants/theme'
-import { updateSettings, useBox } from '@/lib/app/box'
+import { updateSettings, useAssistantName, useBox } from '@/lib/app/box'
 import { clampWait, WAIT_MAX_MS, WAIT_MIN_MS } from '@/lib/localrouter/protocol'
 
 const STEP_MS = 100
 
-/** How long the user can pause before Jarvis answers, in 0.1 s steps (the app has no slider module). */
+/** How long the user can pause before the assistant answers, in 0.1 s steps (the app has no slider module). */
 export function WaitStepper() {
   const waitMs = useBox((box) => box.settings.waitMs)
+  const name = useAssistantName()
   // Steps land on tenths even if a saved value does not.
   const step = (direction: -1 | 1) => updateSettings({ waitMs: clampWait(Math.round(waitMs / STEP_MS) * STEP_MS + direction * STEP_MS) })
   const seconds = `${(waitMs / 1000).toFixed(1)} s`
@@ -24,7 +25,7 @@ export function WaitStepper() {
         <StepButton label="+" a11y="Longer wait" disabled={waitMs >= WAIT_MAX_MS} onPress={() => step(1)} />
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        How long you can pause before Jarvis answers; talking again restarts the wait.
+        How long you can pause before {name} answers; talking again restarts the wait.
       </ThemedText>
     </View>
   )

@@ -4,6 +4,7 @@ import { Alert, Pressable, StyleSheet, View } from 'react-native'
 import { MicIcon, SpeakerIcon } from '@/components/icons'
 import { ThemedText } from '@/components/themed-text'
 import { Palette } from '@/constants/theme'
+import { useAssistantName } from '@/lib/app/box'
 import { updateVoiceSettings, useVoiceSettings } from '@/lib/voice/standbyController'
 import { loadVoiceEngine, useVoice } from '@/lib/voice/voiceState'
 
@@ -14,10 +15,11 @@ import { loadVoiceEngine, useVoice } from '@/lib/voice/voiceState'
 export function TalkButton({ height = 64 }: { height?: number }) {
   const voice = useVoice()
   const settings = useVoiceSettings()
+  const name = useAssistantName()
 
   const action =
     voice.status === 'connecting' ? { label: 'Cancel', a11y: 'Cancel the call', run: async () => (await loadVoiceEngine())?.endSession() }
-    : voice.status === 'standby' ? { label: 'Talk', a11y: 'Talk to Jarvis', run: async () => (await loadVoiceEngine())?.wake() }
+    : voice.status === 'standby' ? { label: 'Talk', a11y: `Talk to ${name}`, run: async () => (await loadVoiceEngine())?.wake() }
     : { label: settings.enabled && voice.status === 'off' && voice.error ? 'Try again' : 'Turn on voice', a11y: 'Turn on voice', run: async () => updateVoiceSettings({ enabled: true }) }
   const disabled = voice.status === 'live'
   return (
@@ -31,7 +33,7 @@ export function TalkButton({ height = 64 }: { height?: number }) {
       onLongPress={() =>
         Alert.alert(
           'Voice',
-          'This phone listens for the wake phrase itself; nothing leaves the phone until you say it or tap Talk. In a call, pause and Jarvis answers. Say “mute audio” for quiet until the wake phrase, or “end call” to finish.'
+          `This phone listens for the wake phrase itself; nothing leaves the phone until you say it or tap Talk. In a call, pause and ${name} answers. Say “mute audio” for quiet until the wake phrase, or “end call” to finish.`
         )
       }
       style={({ pressed }) => [styles.button, { height, backgroundColor: Palette.amber, opacity: disabled ? 0.45 : pressed ? 0.85 : 1 }]}
@@ -111,12 +113,13 @@ export function MicButton({ height = 64 }: { height?: number }) {
  */
 export function SpeakerButton({ size = 64 }: { size?: number }) {
   const call = useVoice()
+  const name = useAssistantName()
   if (call.status !== 'live') return null
   const muted = call.voiceMuted
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={muted ? 'Jarvis’s voice muted. Tap to hear it' : 'Jarvis’s voice on. Tap to mute it'}
+      accessibilityLabel={muted ? `${name}’s voice muted. Tap to hear it` : `${name}’s voice on. Tap to mute it`}
       accessibilityState={{ checked: !muted }}
       testID="voice-speaker"
       onPress={() => void loadVoiceEngine().then((engine) => engine?.setVoiceMuted(!muted))}

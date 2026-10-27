@@ -6,6 +6,7 @@ import type { ComputerControl } from '../../../desktop-helper/src/computer/macCo
 import type { Platform } from '../platform/types.ts'
 import { SCREENSHOT_MAX_EDGE } from '../../../desktop-helper/src/computer/types.ts'
 import type { ActResult, BrowserTabs, Observation, Screenshot } from '../../../desktop-helper/src/computer/types.ts'
+import { DEFAULT_ASSISTANT } from '../../../desktop-helper/src/assistant.ts'
 import { silentLogger } from '../../../desktop-helper/src/log.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { Store } from './approvals.ts'
@@ -156,9 +157,9 @@ export type Started = { ok: true; task_id: string; finished: Promise<ComputerOut
 
 /**
  * What a model is told about how computer use runs, in every tool description and the harness instructions (Mac run,
- * 2026-10-26: Jarvis declined a task, believing it would take the person's real pointer). The server says the same.
+ * 2026-10-26: the assistant declined a task, believing it would take the person's real pointer). The server says the same.
  */
-export const BACKGROUND_NOTE = 'It runs in the background as a virtual mouse: it leaves the user’s own mouse and keyboard alone, and they can keep working meanwhile. How each step is done is decided on the computer, never by you, so never decline it or ask the user how it should run. Steps are not approved one at a time: the user let Jarvis control the computer once; if a step still waits for them, the result says so.'
+export const BACKGROUND_NOTE = 'It runs in the background as a virtual mouse: it leaves the user’s own mouse and keyboard alone, and they can keep working meanwhile. How each step is done is decided on the computer, never by you, so never decline it or ask the user how it should run. Steps are not approved one at a time: the user allowed computer control once; if a step still waits for them, the result says so.'
 
 /**
  * Without the standing grant a task is refused at once (JJ, 2026-10-26: "stuck at permission windows"): no card ever
@@ -216,6 +217,7 @@ export class Broker {
   private readonly machine: Machine
   private decider: Decider | null
   private noDecider = NO_DECIDER
+  private assistantName = DEFAULT_ASSISTANT
 
   constructor(options: BrokerOptions) {
     this.options = options
@@ -247,6 +249,15 @@ export class Broker {
   setDecider(decider: Decider | null, why = NO_DECIDER) {
     this.decider = decider
     this.noDecider = why
+  }
+
+  /** The assistant's name on the Spark (the app reads it there), for what this computer says about a task. */
+  setAssistant(name: string) {
+    this.assistantName = name.trim() || DEFAULT_ASSISTANT
+  }
+
+  get assistant() {
+    return this.assistantName
   }
 
   get disabled() {
@@ -357,7 +368,7 @@ export class Broker {
       now: this.now,
       ...(this.options.settleMs !== undefined ? { settleMs: this.options.settleMs } : {}),
     })
-    void this.machine.controls.notify?.('LocalRouter', `Jarvis is using ${this.name}: ${g}. ${this.options.stopHint ?? 'Move the pointer to the top-left corner to stop.'}`).catch(() => undefined)
+    void this.machine.controls.notify?.('LocalRouter', `${this.assistantName} is using ${this.name}: ${g}. ${this.options.stopHint ?? 'Move the pointer to the top-left corner to stop.'}`).catch(() => undefined)
     const finished = computer
       .run({ goal: g, text }, { signal: task.controller.signal, limits: { maxSteps: Math.min(this.limits.maxSteps, extra.limits?.maxSteps ?? MAX_STEPS), timeoutMs: Math.min(this.limits.timeoutMs, extra.limits?.timeoutMs ?? TIMEOUT_MS) }, ...(watch ? { watch } : {}) })
       .then((outcome) => {
@@ -580,7 +591,7 @@ export class Broker {
     task.authorized += 1
     const obs = request.observation
     // Bringing an app forward acts on the app it brings, not on the one in front: leaving LocalRouter for Chrome is
-    // the usual case (the person talks to Jarvis in LocalRouter's window). Anything done on screen acts on the app in
+    // the usual case (the person talks to the assistant in LocalRouter's window). Anything done on screen acts on the app in
     // front, so LocalRouter there is refused, as is bringing LocalRouter itself forward.
     if (act.kind === 'surface' ? this.isOwn(act.name) : this.isOwn(obs.app)) return deny(OWN_TARGET)
     let d = policy.screen(act)
@@ -706,7 +717,7 @@ export class Broker {
     return CONTROL_OFF
   }
 
-  /** The one consent ("Let Jarvis control this computer?"), when there is no standing grant yet; kept once given. */
+  /** The one consent ("Let <assistant> control this computer?"), when there is no standing grant yet; kept once given. */
   private async awaitApproval(task: Task, b: Omit<Binding, 'executor' | 'task_id' | 'goal' | 'requester'>): Promise<Grant> {
     if (task.stopping) return { ok: false, denied: 'It was stopped.' }
     const nowhere = this.options.approvalSurface?.() ?? null

@@ -55,10 +55,14 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 
 ```json
 {"voice": {"remote": null, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
-           "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
+           "transcription_model": "", "voice": "", "instructions": "You are {name}, a helpful voice assistant...",
            "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "speak_written": false, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
            "temperature": null}}
 ```
+
+`{name}` in `instructions` (the daemon's or a session's) is the assistant's name, `assistant.name` or the one a client
+set over `/v1/assistant` ([AGENTS.md](../AGENTS.md#the-assistants-name)), read each turn; instructions that do not
+mention the name get "You are <name>." before them, so the assistant knows what it is called whatever a client sent.
 
 `voice.temperature` is a session's chat temperature until it sends its own (null: the chat server's). The Jarvis
 deployment runs Qwen with thinking off at its non-thinking sampling, `temperature` 0.7 with `top_p` 0.8 in `chat_extra`:
