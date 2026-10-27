@@ -350,13 +350,63 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
 
 
 LONG_ASK = "Tell me a short story about a lighthouse keeper, in about six sentences."
+# The /voice page's start hold (src/voice/voice.html: holdNeed, startOrWait), replayed on a reply's recorded events.
+START_MS, KEEP_UP, RATE_MS, HOLD_CAP_MS, WRITING_CAP_MS, MS_PER_CHAR, MARGIN = 200, 1.05, 250, 10000, 1000, 65, 1.25
 
 
-def long_reply(sess, results, checks, start_s=0.2):
-    """A long reply (a typed turn, 20 s of speech or more) must stream: a player that starts start_s after its first
-    audio plays it to the end without running dry, and that first audio comes well before the response is done. Before
-    voice.speak_written, speech shared the GPU with the chat model still writing and came at 0.55x real time, so a
-    client held the start for the writing (10.4 s on DGX-02) or ran dry 3.7 s into the reply."""
+def page_start(span, rid, step=0.025):
+    """When the /voice page would start playing reply `rid` (s on the events' clock), replaying its hold on the events:
+    the audio in hand, its arrival rate since the first piece, text_done (its length and the free speech rate) and
+    speech_done. None: it never had audio."""
+    pieces = []  # (t, ms)
+    for e in span:
+        if e["type"] == "response.audio.delta" and e["response_id"] == rid:
+            pieces.append((e["_t"], len(base64.b64decode(e["delta"])) // 2 * 1000 / RATE))
+    if not pieces:
+        return None
+    mine = [e for e in span if e.get("response_id") == rid]
+    t, end = pieces[0][0], max(e["_t"] for e in mine) + step
+    while t <= end:
+        seen = [e for e in mine if e["_t"] <= t]
+        have = sum(ms for at, ms in pieces if at <= t)
+        since = (t - pieces[0][0]) * 1000
+        types = {e["type"] for e in seen}
+        done = next((e for e in seen if e["type"] == "localrouter.response.text_done"), None)
+        if "localrouter.response.speech_done" in types or since >= (HOLD_CAP_MS if done else WRITING_CAP_MS):
+            return t
+        measured = (have - pieces[0][1]) / since if since >= RATE_MS else None
+        prior = (done.get("speech_rate") or 0) if done and not done.get("tool_calls") else 0
+        rate = max(measured or 0, prior) if prior >= KEEP_UP else measured
+        if rate is not None:
+            r = min(rate, 1)
+            if done:
+                need = max(START_MS, (done.get("chars") or 0) * MS_PER_CHAR * (1 - r) * MARGIN)
+            else:
+                need = START_MS if rate >= KEEP_UP else float("inf")
+            if have >= need:
+                return t
+        t += step
+    return end
+
+
+def gaps(arrivals, start, lead=0.1):
+    """Silences a player starting at `start` would make: each piece due when the one before it ends; one that comes
+    late restarts `lead` s after it came (the page's restart lead, 0.1 s at least). (count, total s, longest s)."""
+    due, n, total, worst = start, 0, 0.0, 0.0
+    for t, ms in arrivals:
+        if t > due:
+            g = t + lead - due
+            n, total, worst = n + 1, total + g, max(worst, g)
+            due = t + lead
+        due += ms / 1000
+    return n, total, worst
+
+
+def long_reply(sess, results, checks, max_start_s=3.0):
+    """A long reply (a typed turn, 20 s of speech or more) must stream: the /voice page's hold, replayed on its events,
+    starts it within max_start_s of the request and before its text is complete. The silences it then makes where speech
+    falls behind are reported (gaps). Held for its whole text (#122's voice.speak_written) it started at 5 to 7 s on
+    DGX-02, after the text was all on screen."""
     mark = len(sess.events)
     sess.ws.send({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": LONG_ASK}]}})
     t0 = time.monotonic()
@@ -365,23 +415,22 @@ def long_reply(sess, results, checks, start_s=0.2):
     rid = created["response"]["id"]
     done = sess.wait_for("response.done", 300, sess.index(created), lambda e: e["response"]["id"] == rid)
     span = sess.events[sess.index(created):sess.index(done) + 1]
-    arrivals, have = [], 0
-    for e in span:
-        if e["type"] == "response.audio.delta" and e["response_id"] == rid:
-            arrivals.append((e["_t"] - t0, have / RATE))
-            have += len(base64.b64decode(e["delta"])) // 2
-    text_done = next((e["_t"] - t0 for e in span if e["type"] == "localrouter.response.text_done" and e["response_id"] == rid), None)
-    first = arrivals[0][0] if arrivals else None
-    late = max((t - (first + start_s + a) for t, a in arrivals), default=None)
-    r = {"first_audio_s": None if first is None else round(first, 2), "text_done_s": None if text_done is None else round(text_done, 2),
-         "done_s": round(done["_t"] - t0, 2), "audio_s": round(have / RATE, 1), "pieces": len(arrivals),
-         "late_s": None if late is None else round(late, 2), "status": done["response"]["status"]}
+    arrivals = [(e["_t"] - t0, len(base64.b64decode(e["delta"])) // 2 * 1000 / RATE) for e in span
+                if e["type"] == "response.audio.delta" and e["response_id"] == rid]
+    at = lambda typ: next((round(e["_t"] - t0, 2) for e in span if e["type"] == typ and e.get("response_id") == rid), None)
+    start = page_start(span, rid)
+    start = None if start is None else start - t0
+    n, total, worst = gaps(arrivals, start) if start is not None else (None, None, None)
+    text_done = at("localrouter.response.text_done")
+    r = {"first_audio_s": round(arrivals[0][0], 2) if arrivals else None, "page_start_s": None if start is None else round(start, 2),
+         "text_done_s": text_done, "done_s": round(done["_t"] - t0, 2), "audio_s": round(sum(ms for _, ms in arrivals) / 1000, 1),
+         "gaps": n, "gap_total_s": None if total is None else round(total, 2), "gap_longest_s": None if worst is None else round(worst, 2),
+         "status": done["response"]["status"]}
     results["long_reply"] = r
     log("long reply:", r)
     checks.append({"check": "long reply: 15 s of speech or more", "ok": r["status"] == "completed" and r["audio_s"] >= 15, "detail": r})
-    checks.append({"check": f"long reply: plays from {start_s} s after its first audio to its end without running dry",
-                   "ok": late is not None and late <= 0.25, "detail": r})
-    checks.append({"check": "long reply: first audio within 40% of the response's time", "ok": first is not None and first <= 0.4 * r["done_s"], "detail": r})
+    checks.append({"check": f"long reply: the page starts it within {max_start_s} s", "ok": start is not None and start <= max_start_s, "detail": r})
+    checks.append({"check": "long reply: it starts before its text is complete", "ok": start is not None and text_done is not None and start < text_done, "detail": r})
     return r
 
 

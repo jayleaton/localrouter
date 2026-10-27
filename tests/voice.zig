@@ -245,8 +245,7 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     try testing.expectEqualStrings("generate_image", first.tools[0]); // an image model exists; generate_video, and edit_image (it edits) too
     try testing.expectEqual(@as(usize, 3), first.tools.len);
 
-    // Barge-in: talking over a long reply stops the audio at once and cancels the chat stream (still writing: its speech
-    // starts once the text is complete, voice.speak_written).
+    // Barge-in: talking over a long reply, while it is still written, stops the audio at once and cancels the chat stream.
     try turn(&w, a, 660, 900);
     _ = try w.until(a, "response.audio_transcript.delta", &seen);
     try w.audio(a, 400, 440);

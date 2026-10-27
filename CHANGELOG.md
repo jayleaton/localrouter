@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Voice: a reply speaks while it is written again. `voice.speak_written` is off by default (each sentence is spoken as
+  soon as it is complete), and the `/voice` page, the companion and the mobile app hold a reply whose text is still
+  being written at most 1 s, not until its text is complete. Held for its whole text, a long reply's voice began after
+  all of it was on screen (5 to 7 s on DGX-02). Where speech, sharing the GPU with the chat model, falls behind, the
+  reply pauses; `voice_e2e.py`'s long-reply check requires the start within 3 s and before the text is complete, and
+  reports the pauses.
+
 - Voice: a long reply streams again. Its speech starts once its text is written (`voice.speak_written`, on by
   default), not sentence by sentence beside the chat model: the two share the GPU, so on DGX-02 a six-sentence story
   took 10 to 12 s to write beside speech at 0.55x real time, and the `/voice` page and the companion held its start

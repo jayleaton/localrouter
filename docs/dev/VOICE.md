@@ -56,7 +56,7 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 ```json
 {"voice": {"remote": null, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
            "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
-           "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "speak_written": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
+           "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "speak_written": false, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
            "temperature": null}}
 ```
 
@@ -337,7 +337,13 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     gap in their first 2 s; after, none of the full-rate ones did.
   - Later underruns restart with a lead that grows by their lateness (0.1 up to 0.5 s), so a slow stream pauses
     rarely rather than stuttering.
-- **A reply is spoken once its text is written** (`voice.speak_written`, on by default). The speaker takes the reply's
+- **A reply speaks while it is written** (since 2026-10-27, after JJ's "it's not even streaming at all": the text was
+  all on screen before the voice began). `voice.speak_written` is off by default, so each sentence is spoken as soon
+  as it is complete, and the page holds a reply still being written at most 1 s (`WRITING_CAP_MS`; the mobile app's
+  `replyHold.ts` the same) instead of until its text is complete. Where speech, sharing the GPU with the chat model,
+  falls behind playback, the reply pauses; `voice_e2e.py`'s long-reply check reports those pauses (`gaps`,
+  `gap_total_s`) and requires the start within 3 s of the request and before the text is complete.
+- **With `voice.speak_written` on, a reply is spoken once its text is written** (#122, its default for a day). The speaker takes the reply's
   sentences only when its spoken text is complete (the chat stream ended, or a tool call began), still one speech job a
   sentence. Chat and speech share the GPU, so splitting it bought nothing: on DGX-02 a six-sentence story was written in
   9.7 to 11.6 s beside speech at 0.55x real time (the chat alone: 4.8 s), and the page held its start for the writing

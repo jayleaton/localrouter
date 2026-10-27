@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { HOLD_CAP_MS, ReplyHold, START_MS } from './replyHold'
+import { HOLD_CAP_MS, ReplyHold, START_MS, WRITING_CAP_MS } from './replyHold'
 
 describe('the reply start hold', () => {
   it('a written reply on a free GPU starts once 200 ms is in hand', () => {
@@ -11,7 +11,7 @@ describe('the reply start hold', () => {
     expect(hold.piece('a', 3, 100, 20)).toEqual([3]) // started: later pieces go straight out
   })
 
-  it('while the text is still written, a stream that keeps up starts; a slow one waits for the text', () => {
+  it('while the text is still written, a stream that keeps up starts; a slow one waits for the text at most 1 s', () => {
     const fast = new ReplyHold<number>()
     fast.piece('a', 0, 46, 0)
     expect(fast.piece('a', 1, 186, 125)).toEqual([])
@@ -25,10 +25,17 @@ describe('the reply start hold', () => {
     expect(slow.text('a', 400, null, false, 310)).toEqual([])
     // ...until all of its speech is in.
     expect(slow.speech('a', 400)).toEqual([0, 1, 2])
+
+    const long = new ReplyHold<number>()
+    long.piece('a', 0, 46, 0)
+    expect(long.piece('a', 1, 100, 200)).toEqual([]) // 0.5x, still being written
+    expect(long.tick(WRITING_CAP_MS - 1)).toEqual([])
+    expect(long.tick(WRITING_CAP_MS)).toEqual([0, 1]) // it speaks while it is written
   })
 
   it('never holds past the cap, and a picture being made needs more in hand', () => {
     const hold = new ReplyHold<number>()
+    hold.text('a', 400, null, false, 0)
     hold.piece('a', 0, 46, 0)
     expect(hold.tick(HOLD_CAP_MS - 1)).toEqual([])
     expect(hold.tick(HOLD_CAP_MS)).toEqual([0])
