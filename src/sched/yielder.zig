@@ -161,6 +161,15 @@ fn stateOf(pid: posix.pid_t) u8 {
     return if (close + 2 < text.len) text[close + 2] else 0;
 }
 
+/// Whether `pid` is stopped (or running, `stopped` false) within a second: a signal is delivered after kill returns.
+fn becomes(pid: posix.pid_t, stopped: bool) bool {
+    for (0..200) |_| {
+        if ((stateOf(pid) == 'T') == stopped) return true;
+        Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return false;
+}
+
 test "a lease stops the server; it runs again on release, when the last of two lets go, and when a lease runs out" {
     var child = try sleeper();
     defer {
@@ -171,20 +180,20 @@ test "a lease stops the server; it runs again on release, when the last of two l
     var y: Yielder = .{};
     defer y.deinit(testing.io);
     try testing.expect(y.hold(testing.io, pid, 1, std.time.ns_per_s));
-    try testing.expectEqual(@as(u8, 'T'), stateOf(pid));
+    try testing.expect(becomes(pid, true));
     try testing.expect(y.hold(testing.io, pid, 2, std.time.ns_per_s));
     y.release(testing.io, 1);
-    try testing.expectEqual(@as(u8, 'T'), stateOf(pid)); // 2 still holds it
+    try testing.expect(becomes(pid, true)); // 2 still holds it
     y.release(testing.io, 2);
-    try testing.expect(stateOf(pid) != 'T');
-    try testing.expect(y.hold(testing.io, pid, 3, 50 * std.time.ns_per_ms)); // a holder that never lets go
-    try testing.expectEqual(@as(u8, 'T'), stateOf(pid));
+    try testing.expect(becomes(pid, false));
+    try testing.expect(y.hold(testing.io, pid, 3, 300 * std.time.ns_per_ms)); // a holder that never lets go
+    try testing.expect(becomes(pid, true));
     for (0..100) |_| {
         if (!y.stopped(testing.io)) break;
         Io.sleep(testing.io, .fromMilliseconds(10), .awake) catch {};
     }
     try testing.expect(!y.stopped(testing.io));
-    try testing.expect(stateOf(pid) != 'T');
+    try testing.expect(becomes(pid, false));
     try testing.expectEqual(@as(u64, 2), y.stops);
 }
 
@@ -196,9 +205,9 @@ test "the daemon going away resumes a stopped server" {
     }
     var y: Yielder = .{};
     try testing.expect(y.hold(testing.io, child.id.?, 7, 10 * std.time.ns_per_s));
-    try testing.expectEqual(@as(u8, 'T'), stateOf(child.id.?));
+    try testing.expect(becomes(child.id.?, true));
     y.deinit(testing.io);
-    try testing.expect(stateOf(child.id.?) != 'T');
+    try testing.expect(becomes(child.id.?, false));
     try testing.expect(!y.hold(testing.io, child.id.?, 7, std.time.ns_per_s)); // closed
 }
 
