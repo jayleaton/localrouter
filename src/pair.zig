@@ -503,7 +503,7 @@ test "scopes: the default is all; none listed is voice and mcp; a list grants on
     const h = (try s.verify(io, a, &helper.token)).?;
     try testing.expect(h.allows("desktop_helper") and !h.allows("mcp") and !h.allows("voice"));
     const doc = try s.load(io, a);
-    try testing.expect(doc.devices[2].allows("approve") and doc.devices[2].allows("voice") and !doc.devices[2].allows("computer"));
+    try testing.expect(doc.devices[3].allows("approve") and doc.devices[3].allows("voice") and !doc.devices[3].allows("computer"));
     const changed = try s.setScopes(io, a, "phone", (try parseScopes(a, "voice,mcp,computer,approve")).?, 14);
     try testing.expectEqual(@as(usize, 1), changed.len);
     try testing.expect((try s.verify(io, a, &old.token)).?.allows("computer"));

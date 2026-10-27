@@ -312,7 +312,7 @@ test "service scopes: a wrong or missing scope is refused on every route class; 
         }
     }.of;
     const legacy = try tok(&d, a, "phone", "voice,mcp"); // the legacy profile: every service scope
-    const everything = try tok(&d, a, "companion", null); // no --scopes: all
+    const companion = try tok(&d, a, "companion", null); // no --scopes: all
     const coder = try tok(&d, a, "opencode", "inference,media,read");
     const other = try tok(&d, a, "deepseek", "media");
     const reader = try tok(&d, a, "dashboard", "read");
@@ -322,9 +322,9 @@ test "service scopes: a wrong or missing scope is refused on every route class; 
     const list = try pairCli(&d, a, &.{"list"});
     try testing.expect(has(list, "voice,mcp") and has(list, "companion") and has(list, "  all\n"));
     // A device paired without --scopes reaches every route class, manage and computer control's included.
-    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/models", null, everything));
-    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/computer/status", null, everything));
-    try testing.expect(std.mem.indexOf(u8, try toolNames(&d, a, everything), "load_model") != null);
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/models", null, companion));
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/computer/status", null, companion));
+    try testing.expect(std.mem.indexOf(u8, try toolNames(&d, a, companion), "load_model") != null);
 
     // Every route class: no token is 401, a token without the scope 403, the scope (or the legacy profile) gets through.
     const image = "{\"model\":\"tp\",\"prompt\":\"bars\",\"size\":\"256x256\",\"response_format\":\"url\"}";
