@@ -15,6 +15,11 @@ on:
       - src/voice/voice.html
       - .github/workflows/companion-mac.yml
   workflow_dispatch:
+    inputs:
+      release:
+        description: Also the Intel build, as a release makes it (no release is made)
+        type: boolean
+        default: false
   # A release (companion-release.yml): the same checks, plus the Intel build.
   workflow_call:
     inputs:
