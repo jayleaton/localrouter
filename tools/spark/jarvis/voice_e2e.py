@@ -350,68 +350,69 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
 
 
 LONG_ASK = "Tell me a short story about a lighthouse keeper, in about six sentences."
-# The /voice page's start hold (src/voice/voice.html: holdNeed, startOrWait), replayed on a reply's recorded events.
-START_MS, KEEP_UP, RATE_MS, HOLD_CAP_MS, WRITING_CAP_MS, MS_PER_CHAR, MARGIN = 200, 1.05, 250, 10000, 1000, 65, 1.25
+# The /voice page's start hold (src/voice/voice.html: holdNeed, rateOf), replayed on a reply's recorded events, as a
+# fresh page has it (no voice priors learned, no pause yet in the session).
+START_MS, HOLD_CAP_MS, MS_PER_CHAR, MARGIN_MS = 200, 30000, 65, 300
+RATE_WINDOW_MS, EWMA_ALPHA, RATE_HEADROOM, PRIOR_RATE = 150, 0.7, 0.5, 1.0
 
 
 def page_start(span, rid, step=0.025):
-    """When the /voice page would start playing reply `rid` (s on the events' clock), replaying its hold on the events:
-    the audio in hand, its arrival rate since the first piece, the text written so far, text_done (its length and the
-    free speech rate), speech_first and speech_done. None: it never had audio."""
-    pieces = []  # (t, ms)
-    for e in span:
-        if e["type"] == "response.audio.delta" and e["response_id"] == rid:
-            pieces.append((e["_t"], len(base64.b64decode(e["delta"])) // 2 * 1000 / RATE))
+    """When the /voice page would start playing reply `rid` (s on the events' clock): once the audio in hand covers the
+    rest at its arrival rate, rest x (1 - rate) + margin (the page's comment above START_MS). None: no audio."""
+    pieces = [(e["_t"], len(base64.b64decode(e["delta"])) // 2 * 1000 / RATE) for e in span
+              if e["type"] == "response.audio.delta" and e["response_id"] == rid]
     if not pieces:
         return None
     mine = [e for e in span if e.get("response_id") == rid]
-    t, end = pieces[0][0], max(e["_t"] for e in mine) + step
+    t0 = t = pieces[0][0]
+    end = max(e["_t"] for e in mine) + step
+    have, i = 0.0, 0
+    rate, var, at, frm = PRIOR_RATE, 0.0, t0, None
     while t <= end:
+        while i < len(pieces) and pieces[i][0] <= t:
+            have += pieces[i][1]
+            i += 1
+        if frm is None:
+            frm = have
+        if (t - at) * 1000 >= RATE_WINDOW_MS:
+            d = (have - frm) / ((t - at) * 1000) - rate
+            rate += EWMA_ALPHA * d
+            var = (1 - EWMA_ALPHA) * (var + EWMA_ALPHA * d * d)
+            at, frm = t, have
         seen = [e for e in mine if e["_t"] <= t]
-        have = sum(ms for at, ms in pieces if at <= t)
-        since = (t - pieces[0][0]) * 1000
-        types = {e["type"] for e in seen}
-        done = next((e for e in seen if e["type"] == "localrouter.response.text_done"), None)
-        if "localrouter.response.speech_done" in types or since >= (HOLD_CAP_MS if done else WRITING_CAP_MS):
+        if any(e["type"] == "localrouter.response.speech_done" for e in seen) or (t - t0) * 1000 >= HOLD_CAP_MS:
             return t
-        measured = (have - pieces[0][1]) / since if since >= RATE_MS else None
-        prior = (done.get("speech_rate") or 0) if done and not done.get("tool_calls") else 0
-        rate = max(measured or 0, prior) if prior >= KEEP_UP else measured
-        if rate is not None:
-            r = min(rate, 1)
-            if done:
-                need = max(START_MS, (done.get("chars") or 0) * MS_PER_CHAR * (1 - r) * MARGIN)
-            elif rate >= KEEP_UP:
-                need = START_MS
-            elif "localrouter.response.speech_first" in types:  # the text written so far, less what of it is in
-                written = sum(len(e.get("delta", "")) for e in seen if e["type"] == "response.audio_transcript.delta")
-                need = max(START_MS, max(0, written * MS_PER_CHAR - have) * (1 - r) * MARGIN)
-            else:
-                need = float("inf")
-            if have >= need:
-                return t
+        done = next((e for e in seen if e["type"] == "localrouter.response.text_done"), None)
+        free = (done.get("speech_rate") or None) if done and not done.get("tool_calls") else None
+        chars = (done.get("chars") or 0) if done else sum(len(e.get("delta", "")) for e in seen if e["type"] == "response.audio_transcript.delta")
+        rest = max(0.0, chars * MS_PER_CHAR - have)
+        rc = max(0.0, rate - RATE_HEADROOM * var ** 0.5)
+        if free and free > 1:
+            rc = max(rc, 1.0)
+        settled = done is not None and free is not None and free >= 1 and rc >= 1
+        if have >= max(START_MS, rest * (1 - min(rc, 1.0)) + (0 if settled else MARGIN_MS)):
+            return t
         t += step
     return end
 
 
-def gaps(arrivals, start, lead=0.1):
-    """Silences a player starting at `start` would make: each piece due when the one before it ends; one that comes
-    late restarts `lead` s after it came (the page's restart lead, 0.1 s at least). (count, total s, longest s)."""
-    due, n, total, worst = start, 0, 0.0, 0.0
+def underruns(arrivals, start, lead=0.01):
+    """How late each piece came for a player that starts at `start` (s) and plays them back to back (a late one restarts
+    the clock where it came): the lateness of every late piece, s."""
+    due, late = start + lead, []
     for t, ms in arrivals:
         if t > due:
-            g = t + lead - due
-            n, total, worst = n + 1, total + g, max(worst, g)
-            due = t + lead
+            late.append(t - due)
+            due = t
         due += ms / 1000
-    return n, total, worst
+    return late
 
 
-def long_reply(sess, results, checks, max_start_s=3.0):
-    """A long reply (a typed turn, 20 s of speech or more) must stream: the /voice page's hold, replayed on its events,
-    starts it within max_start_s of the request and before its text is complete. The silences it then makes where speech
-    falls behind are reported (gaps). Held for its whole text (#122's voice.speak_written) it started at 5 to 7 s on
-    DGX-02, after the text was all on screen."""
+def long_reply(sess, results, checks, max_late_s=0.05):
+    """A long reply (a typed turn, 20 s of speech or more) must play without a pause: the /voice page's start, replayed
+    on its events, leaves no piece more than max_late_s late. It reports when it starts (s from the request) and that
+    it starts before its text is complete. JJ, 2026-10-27: "rather than there being pauses, just wait another few
+    fractions of a second"."""
     mark = len(sess.events)
     sess.ws.send({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": LONG_ASK}]}})
     t0 = time.monotonic()
@@ -425,16 +426,17 @@ def long_reply(sess, results, checks, max_start_s=3.0):
     at = lambda typ: next((round(e["_t"] - t0, 2) for e in span if e["type"] == typ and e.get("response_id") == rid), None)
     start = page_start(span, rid)
     start = None if start is None else start - t0
-    n, total, worst = gaps(arrivals, start) if start is not None else (None, None, None)
+    late = underruns(arrivals, start) if start is not None else []
+    over = [x for x in late if x > max_late_s]
     text_done = at("localrouter.response.text_done")
     r = {"first_audio_s": round(arrivals[0][0], 2) if arrivals else None, "page_start_s": None if start is None else round(start, 2),
          "text_done_s": text_done, "done_s": round(done["_t"] - t0, 2), "audio_s": round(sum(ms for _, ms in arrivals) / 1000, 1),
-         "speech_first": at("localrouter.response.speech_first") is not None, "gaps": n, "gap_total_s": None if total is None else round(total, 2), "gap_longest_s": None if worst is None else round(worst, 2),
-         "status": done["response"]["status"]}
+         "speech_first": at("localrouter.response.speech_first") is not None, "underruns": len(over),
+         "underrun_total_s": round(sum(over), 2), "latest_s": round(max(late, default=0.0), 3), "status": done["response"]["status"]}
     results["long_reply"] = r
     log("long reply:", r)
     checks.append({"check": "long reply: 15 s of speech or more", "ok": r["status"] == "completed" and r["audio_s"] >= 15, "detail": r})
-    checks.append({"check": f"long reply: the page starts it within {max_start_s} s", "ok": start is not None and start <= max_start_s, "detail": r})
+    checks.append({"check": f"long reply: no underrun over {int(max_late_s * 1000)} ms", "ok": start is not None and not over, "detail": r})
     checks.append({"check": "long reply: it starts before its text is complete", "ok": start is not None and text_done is not None and start < text_done, "detail": r})
     return r
 

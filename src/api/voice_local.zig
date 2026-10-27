@@ -166,9 +166,8 @@ fn yieldChat(ptr: *anyopaque, model: []const u8, op: backend.Backend.Yield, hold
     if (app.cfg.voice.chat_url.len > 0) return false;
     var ref: routes.Refusal = .{};
     const i = routes.resolve(app, if (model.len > 0) model else null, .chat_completion, &ref) orelse return false;
-    const pid = sched.slots[i].tool.serverPid();
-    if (pid <= 0) return false;
-    return op == .check or sched.chat_yield.hold(app.io, pid, holder, yield_lease_ns);
+    if (op == .check) return sched.slots[i].tool.serverPid() > 0;
+    return sched.yieldChat(i, holder, yield_lease_ns); // never while other chat work waits (another session's)
 }
 
 fn paused(ptr: *anyopaque) bool {

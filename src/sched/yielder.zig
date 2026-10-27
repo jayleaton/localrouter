@@ -7,6 +7,10 @@
 //! when no lease is live, so a speaker that stalls or a session that goes away never leaves it stopped for longer than
 //! one lease. Only the server is stopped, not the worker that supervises it: a daemon that dies still reaches the
 //! worker, which kills the server (SIGKILL ends a stopped process).
+//!
+//! The server is shared: a pause stalls every request for it, not only the paused reply. So the scheduler pauses it only
+//! while nothing else waits on its lane, and ends a pause (`interrupt`) the moment anything is queued there: another
+//! session's reply, a computer-use step, a prime (scheduler.zig `yieldChat`).
 
 const std = @import("std");
 const Io = std.Io;
@@ -72,6 +76,14 @@ pub const Yielder = struct {
             h.* = .{};
         };
         _ = y.apply(io);
+    }
+
+    /// Every lease ends and the server runs now: other work waits for it.
+    pub fn interrupt(y: *Yielder, io: Io) void {
+        y.mutex.lockUncancelable(io);
+        defer y.mutex.unlock(io);
+        for (&y.holders) |*h| h.* = .{};
+        y.wake();
     }
 
     /// Whether a server is stopped now.
@@ -146,8 +158,8 @@ pub fn childOf(pid: posix.pid_t) posix.pid_t {
 
 const testing = std.testing;
 
-/// A child that sleeps: something to stop and resume.
-fn sleeper() !std.process.Child {
+/// A child that sleeps: something to stop and resume (tests).
+pub fn sleeper() !std.process.Child {
     return std.process.spawn(testing.io, .{ .argv = &.{ "sleep", "30" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
 }
 
@@ -162,7 +174,7 @@ fn stateOf(pid: posix.pid_t) u8 {
 }
 
 /// Whether `pid` is stopped (or running, `stopped` false) within a second: a signal is delivered after kill returns.
-fn becomes(pid: posix.pid_t, stopped: bool) bool {
+pub fn becomes(pid: posix.pid_t, stopped: bool) bool {
     for (0..200) |_| {
         if ((stateOf(pid) == 'T') == stopped) return true;
         Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};

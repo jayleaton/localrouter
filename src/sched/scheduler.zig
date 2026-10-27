@@ -148,6 +148,7 @@ pub const Scheduler = struct {
     gpu_lock_fd: posix.fd_t = -1, // the host's GPU lock while any tool is loaded (`holdGpuLock`); under `gate`
     speech: speech_gate.Holder = .{}, // held while a speech job runs: image and video workers pause between steps
     chat_yield: yielder.Yielder = .{}, // a voice reply's speech behind: the chat model's server is paused (yielder.zig)
+    yield_lane: Lane = .chat, // the lane of the tool `chat_yield` last paused: anything queued there ends the pause; under `mutex`
     lock_msg: [512]u8 = undefined,
     lock_len: usize = 0,
     hold_until_ns: i96 = 0, // displaced tools wait until this (a reservation's job ends it early); under `gate`
@@ -306,6 +307,24 @@ pub const Scheduler = struct {
         if (l.queue.len >= s.cfg.max_queue) return error.QueueFull;
         try l.queue.pushBack(s.gpa, item);
         l.cond.signal(s.io);
+        if (lane == s.yield_lane) s.chat_yield.interrupt(s.io); // a paused server would stall it: it runs now
+    }
+
+    /// Speech first: `holder` keeps tool `i`'s server paused for `lease_ns` more, but only while nothing else waits on
+    /// its lane. The server is shared, so a pause would stall another session's reply, a computer-use step or a prime;
+    /// with any of them queued the pause ends instead, and `push` ends it when one arrives. False: not paused.
+    pub fn yieldChat(s: *Scheduler, i: usize, holder: usize, lease_ns: i96) bool {
+        const pid = s.slots[i].tool.serverPid();
+        if (pid <= 0) return false;
+        const lane = s.laneOfTool(i);
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.yield_lane = lane;
+        if (s.lanes[index(lane)].queue.len > 0 or s.stopping) {
+            s.chat_yield.release(s.io, holder);
+            return false;
+        }
+        return s.chat_yield.hold(s.io, pid, holder, lease_ns);
     }
 
     /// Cancels a queued job at once, or ends the running one: early with the tool kept loaded when it offers that
@@ -1025,4 +1044,80 @@ test "victims during a call: a request outside the voice loop never takes a voic
     try t.expect(may(&video, &image, null, true));
     // A voice-loop model making room for another (speech for transcription) is not guarded against itself.
     try t.expect(may(&stt, &tts, null, false));
+}
+
+/// A chat model whose server is `pid`: only what `yieldChat` and `submit` ask of a tool.
+const FakeChat = struct {
+    cfg: config.ToolConfig = .{ .id = "chat", .kind = .chat },
+    pid: posix.pid_t,
+
+    const vtable: Tool.VTable = .{ .config = cfgOf, .needs = needsOf, .load = load, .generate = generate, .unload = none, .abort = none, .cancel = cancel, .state = state, .failure = failure, .server_pid = serverPid };
+    fn tool(f: *FakeChat) Tool {
+        return .{ .ptr = f, .vtable = &vtable };
+    }
+    fn me(p: *anyopaque) *FakeChat {
+        return @ptrCast(@alignCast(p));
+    }
+    fn cfgOf(p: *anyopaque) *const config.ToolConfig {
+        return &me(p).cfg;
+    }
+    fn needsOf(_: *anyopaque, _: *const Request) tool_mod.Needs {
+        return .{ .resident = 0, .working = 0 };
+    }
+    fn load(_: *anyopaque) tool_mod.Error!u64 {
+        return 0;
+    }
+    fn generate(_: *anyopaque, _: *const tool_mod.Job, _: tool_mod.Sink, _: std.mem.Allocator) tool_mod.Error!tool_mod.Output {
+        return error.GenerateFailed;
+    }
+    fn none(_: *anyopaque) void {}
+    fn cancel(_: *anyopaque) bool {
+        return false;
+    }
+    fn state(_: *anyopaque) tool_mod.State {
+        return .ready;
+    }
+    fn failure(_: *anyopaque) tool_mod.Failure {
+        return .{};
+    }
+    fn serverPid(p: *anyopaque) posix.pid_t {
+        return me(p).pid;
+    }
+};
+
+test "two sessions: one session's speech never pauses the chat model while another session's request waits for it" {
+    const t = std.testing;
+    var child = try yielder.sleeper();
+    defer {
+        _ = posix.system.kill(child.id.?, posix.SIG.KILL);
+        _ = child.wait(t.io) catch {};
+    }
+    const pid = child.id.?;
+    var fake: FakeChat = .{ .pid = pid };
+    var slots = [_]Slot{.{ .tool = fake.tool() }};
+    const cfg: Config = .{};
+    var table: jobs.Table = .{ .gpa = t.allocator };
+    defer table.deinit();
+    var s: Scheduler = .{ .io = t.io, .gpa = t.allocator, .cfg = &cfg, .slots = &slots, .table = &table };
+    defer s.deinit();
+    const a: usize = 1; // session A's reply, speaking
+    var job_b: jobs.Job = .{ .arena = .init(t.allocator), .id = "b", .tool = 0, .request = .{ .chat = .{ .body = "{}" } }, .dir = "", .created_at = 0 };
+    defer job_b.arena.deinit();
+
+    // A's speech is behind and nothing else waits: the chat model pauses for A.
+    try t.expect(s.yieldChat(0, a, 10 * std.time.ns_per_s));
+    try t.expect(yielder.becomes(pid, true));
+    // Session B (JJ's other device) asks the chat model: it runs again at once, not when A's lease runs out.
+    try s.submit(&job_b);
+    try t.expect(yielder.becomes(pid, false));
+    try t.expect(!s.chat_yield.stopped(t.io));
+    // While B's request waits, A's speech behind does not pause it again.
+    try t.expect(!s.yieldChat(0, a, 10 * std.time.ns_per_s));
+    try t.expect(!s.chat_yield.stopped(t.io));
+    // Once nothing waits, A may pause it again.
+    _ = s.lanes[index(.chat)].queue.popFront();
+    try t.expect(s.yieldChat(0, a, 10 * std.time.ns_per_s));
+    try t.expect(yielder.becomes(pid, true));
+    s.chat_yield.release(t.io, a);
+    try t.expect(yielder.becomes(pid, false));
 }
