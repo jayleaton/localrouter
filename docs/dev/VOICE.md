@@ -56,7 +56,7 @@ that can do it, as the HTTP API's refusals do. Defaults come from the daemon con
 ```json
 {"voice": {"remote": null, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
            "transcription_model": "", "voice": "", "instructions": "You are a helpful voice assistant...",
-           "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
+           "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "speak_written": true, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
            "temperature": null}}
 ```
 
@@ -337,7 +337,27 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     gap in their first 2 s; after, none of the full-rate ones did.
   - Later underruns restart with a lead that grows by their lateness (0.1 up to 0.5 s), so a slow stream pauses
     rarely rather than stuttering.
-- **Known limit: a longer reply still pauses near its start.** The chat model decodes the rest of the reply on the
+- **A reply is spoken once its text is written** (`voice.speak_written`, on by default). The speaker takes the reply's
+  sentences only when its spoken text is complete (the chat stream ended, or a tool call began), still one speech job a
+  sentence. Chat and speech share the GPU, so splitting it bought nothing: on DGX-02 a six-sentence story was written in
+  9.7 to 11.6 s beside speech at 0.55x real time (the chat alone: 4.8 s), and the page held its start for the writing
+  (below), or a client playing at once ran dry 3.8 to 4.7 s in. Written first, the chat has the GPU to itself, and
+  speech after it comes at 1.4x, so the reply plays from its first audio to its end. Measured with `voice_e2e.py
+  --smoke` (its long-reply check) and a typed story over `/v1/realtime`, on DGX-02 (Drama 3 NVFP4, Qwen3.8 27B):
+
+  | | first audio | text complete | response done | audio | late, playing from first audio + 0.2 s |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | before (Mae, 5 runs) | 1.1 to 1.6 s | 9.7 to 11.6 s | 27.7 to 52.0 s | 29 to 62 s | 3.4 to 4.7 s |
+  | after (Mae, 4 runs) | 6.7 to 7.5 s (12.5 s first after a restart) | 6.5 to 7.3 s (12.3 s) | 31.8 to 54.0 s | 35 to 65 s | none |
+  | after (Scarlette, a cloned voice, 3 runs) | 6.1 to 8.3 s | 5.9 to 7.3 s | 34.5 to 43.9 s | 40 to 52 s | none |
+
+  So a long reply starts 3 to 5 s sooner on the page, which held it to its text's end (and played it gap-free from
+  there). Short replies are written before their first audio either way: the smoke's turns had their first audio 1.07
+  to 1.45 s after the speech ended before and 1.07 to 1.36 s after. `false` speaks each sentence as soon as it is
+  complete, beside the chat model; that suits a box where speech keeps up while the chat decodes, and clients without a
+  start hold. The page's hold (below) stays: it still covers a preamble spoken while tool arguments are written, and a
+  picture or video being made.
+- **Known limit, with `voice.speak_written` false: a longer reply still pauses near its start.** The chat model decodes the rest of the reply on the
   same GPU while Drama 3 speaks the first sentence. Measured on DGX-01, with a 600-token chat decoding:
   - Drama 3 drops from 1.49 to 0.67 times real time;
   - the chat stream slows from 20.2 to 33.1 s.

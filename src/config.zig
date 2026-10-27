@@ -90,6 +90,10 @@ pub const Voice = struct {
     // thread: the speech model's first job after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm)
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
     // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
+    speak_written: bool = true, // a reply's speech starts once its spoken text is complete (the chat stream ended or a tool
+    // call began), not sentence by sentence while the chat model still writes: the two share the GPU, so a long reply
+    // was written in twice the time with speech at 0.55x real time (DGX-02), and a client held its start for the
+    // writing (10.4 s); alone, the chat writes it in 4.8 s and speech comes at 1.4x, so it plays from 5.2 s without a gap
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
     manage_models: bool = false, // offer list_models, reserve_for, unload_model and load_model to the chat model, with the

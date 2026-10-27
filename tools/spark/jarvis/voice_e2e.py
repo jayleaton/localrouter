@@ -332,10 +332,12 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
     text = "".join(e.get("delta", "") for e in span if e["type"] in ("response.audio_transcript.delta", "response.text.delta") and e.get("response_id") == rid)
     first_text = next((e["_t"] for e in span if e["type"] == "response.audio_transcript.delta" and e["response_id"] == rid), None)
     first_audio = next((e["_t"] for e in span if e["type"] == "response.audio.delta" and e["response_id"] == rid), None)
+    text_done = next((e["_t"] for e in span if e["type"] == "localrouter.response.text_done" and e["response_id"] == rid), None)
     ms = lambda t: None if t is None else round((t - t_end) * 1000)
     r = {"prompt": PROMPTS[name], "transcript": heard["transcript"], "reply": text, "status": done["response"]["status"],
          "speech_end_to_vad_stop_ms": ms(stopped["_t"]), "speech_end_to_transcript_ms": ms(heard["_t"]),
          "speech_end_to_first_text_ms": ms(first_text), "speech_end_to_first_audio_ms": ms(first_audio),
+         "speech_end_to_text_done_ms": ms(text_done),
          "reply_audio_s": round(len(sess.audio.get(rid, [])) / RATE, 2), "response_id": rid}
     results[name] = r
     log(f"{name}: heard {r['transcript']!r}; first audio {r['speech_end_to_first_audio_ms']} ms; reply {text[:100]!r}")
@@ -344,6 +346,42 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
     answered = r["status"] == "completed" and (not need_audio or (bool(text.strip()) and first_audio is not None))
     checks.append({"check": f"{name}: answered" + (", with audio" if need_audio else ""), "ok": answered,
                    "detail": r["status"]})
+    return r
+
+
+LONG_ASK = "Tell me a short story about a lighthouse keeper, in about six sentences."
+
+
+def long_reply(sess, results, checks, start_s=0.2):
+    """A long reply (a typed turn, 20 s of speech or more) must stream: a player that starts start_s after its first
+    audio plays it to the end without running dry, and that first audio comes well before the response is done. Before
+    voice.speak_written, speech shared the GPU with the chat model still writing and came at 0.55x real time, so a
+    client held the start for the writing (10.4 s on DGX-02) or ran dry 3.7 s into the reply."""
+    mark = len(sess.events)
+    sess.ws.send({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": LONG_ASK}]}})
+    t0 = time.monotonic()
+    sess.ws.send({"type": "response.create"})
+    created = sess.wait_for("response.created", 60, mark)
+    rid = created["response"]["id"]
+    done = sess.wait_for("response.done", 300, sess.index(created), lambda e: e["response"]["id"] == rid)
+    span = sess.events[sess.index(created):sess.index(done) + 1]
+    arrivals, have = [], 0
+    for e in span:
+        if e["type"] == "response.audio.delta" and e["response_id"] == rid:
+            arrivals.append((e["_t"] - t0, have / RATE))
+            have += len(base64.b64decode(e["delta"])) // 2
+    text_done = next((e["_t"] - t0 for e in span if e["type"] == "localrouter.response.text_done" and e["response_id"] == rid), None)
+    first = arrivals[0][0] if arrivals else None
+    late = max((t - (first + start_s + a) for t, a in arrivals), default=None)
+    r = {"first_audio_s": None if first is None else round(first, 2), "text_done_s": None if text_done is None else round(text_done, 2),
+         "done_s": round(done["_t"] - t0, 2), "audio_s": round(have / RATE, 1), "pieces": len(arrivals),
+         "late_s": None if late is None else round(late, 2), "status": done["response"]["status"]}
+    results["long_reply"] = r
+    log("long reply:", r)
+    checks.append({"check": "long reply: 15 s of speech or more", "ok": r["status"] == "completed" and r["audio_s"] >= 15, "detail": r})
+    checks.append({"check": f"long reply: plays from {start_s} s after its first audio to its end without running dry",
+                   "ok": late is not None and late <= 0.25, "detail": r})
+    checks.append({"check": "long reply: first audio within 40% of the response's time", "ok": first is not None and first <= 0.4 * r["done_s"], "detail": r})
     return r
 
 
@@ -588,6 +626,7 @@ def main():
     ap.add_argument("--leak-probe", type=int, default=20, help="streamed chat requests per variant in the reasoning-leak probe (0: none)")
     ap.add_argument("--smoke", action="store_true", help="a deployment smoke test: the warm-up and one turn, then barge-in; no tool, video, eviction or leak probe")
     ap.add_argument("--skip-barge", action="store_true", help="with --smoke: the turns only")
+    ap.add_argument("--skip-long", action="store_true", help="no long-reply streaming check (a typed six-sentence story)")
     ap.add_argument("--count-warmup", action="store_true", help="with --smoke: the first turn counts in the latency (the turn after another model's job)")
     ap.add_argument("--picture", action="store_true", help="with --smoke: then a spoken request for a picture (the tool call, the job, the spoken confirmation)")
     ap.add_argument("--picture-prompt", help="the picture request (default: the e2e's red fox)")
@@ -623,6 +662,9 @@ def main():
         # 2. Plain turns (the first warms every path and is reported apart).
         for name in ("warmup", "capital", "tips"):
             turn(sess, name, mic[name], turns, checks)
+            sess.pump(1.0)
+        if not args.skip_long:  # 3. A long reply streams.
+            long_reply(sess, results, checks)
             sess.pump(1.0)
         if not barge:
             if args.picture:
