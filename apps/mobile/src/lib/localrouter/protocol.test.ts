@@ -24,6 +24,7 @@ describe('server events', () => {
   it('parses what the app uses, ignores the rest and anything malformed', () => {
     expect(parseServerEvent('{"type":"localrouter.job.done","call_id":"c","job_id":"j","kind":"image","status":"completed","urls":["/v1/files/j/0.png"],"error":null}')).toMatchObject({ type: 'localrouter.job.done', urls: ['/v1/files/j/0.png'] })
     expect(parseServerEvent('{"type":"localrouter.response.text_done","item_id":"i","tool_calls":false,"chars":40,"speech_rate":null}')).toMatchObject({ speech_rate: null })
+    expect(parseServerEvent('{"type":"localrouter.response.speech_first","response_id":"r","item_id":"i"}')).toMatchObject({ item_id: 'i' })
     expect(parseServerEvent('{"type":"rate_limits.updated"}')).toBeNull()
     expect(parseServerEvent('{"type":"response.audio.delta"}')).toBeNull()
     expect(parseServerEvent('not json')).toBeNull()

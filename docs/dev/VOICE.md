@@ -343,6 +343,31 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   `replyHold.ts` the same) instead of until its text is complete. Where speech, sharing the GPU with the chat model,
   falls behind playback, the reply pauses; `voice_e2e.py`'s long-reply check reports those pauses (`gaps`,
   `gap_total_s`) and requires the start within 3 s of the request and before the text is complete.
+- **Speech first** (`voice.speech_first`, on by default; `src/sched/yielder.zig`). While a reply is written, the
+  session pauses its chat model's server (SIGSTOP; SIGCONT resumes it) whenever the reply's speech is under 2 s ahead
+  of real time (counted from its first audio) and a written sentence waits behind the one being spoken, until speech
+  is 3.5 s ahead, none waits, or the text is complete. Two processes on GB10 time-slice the GPU with no priority
+  between them (CHAT.md); beside a decoding chat model Drama 3 came at 0.55x real time on DGX-02, alone at 1.4x, and
+  the chat model writes about ten times faster than speech is spoken, so it keeps ahead even paused most of the time.
+  It is lossless: the server's decode resumes where it stopped. Only the server is stopped, not the worker that
+  supervises it (a dying daemon still reaches the worker, which kills it), and only on a lease that each piece of
+  speech renews (600 ms): a speaker that stalls lets it run again within that. It applies when the chat model is this
+  daemon's own server (`chat_url` unset, the model loaded here); elsewhere sentences are spoken beside it as before.
+  The session sends `localrouter.response.speech_first` `{response_id, item_id}` before the reply's first audio; the
+  page and the mobile app then start a reply still being written once the audio in hand covers the text written so
+  far (MS_PER_CHAR a character, less what of it is in) at the measured rate, still within the 1 s cap. Without the
+  sentence of lookahead, a sentence boundary early in the reply ran dry 0.1 to 0.6 s while the paused chat model
+  wrote the next one. Measured on DGX-02 (Drama 3 NVFP4, Qwen3.8 27B), a typed six-sentence story, a fresh session
+  each run, the page's start replayed on the events (`voice_e2e.py`'s long-reply check):
+
+  | | page start | text complete | pauses a reply: count, total, longest |
+  | --- | ---: | ---: | --- |
+  | spoken once written (#122), Mae x5, Scarlette x4 | 5.0 to 7.0 s | 4.6 to 6.7 s | none |
+  | beside the chat model (#123), Mae x5, Scarlette x4 | 2.0 to 2.3 s | 7.0 to 11.1 s | 13 to 26, 1.9 to 3.6 s, 0.43 s |
+  | speech first, Mae x5 | 1.9 to 2.3 s | 20.9 to 25.7 s | 0 to 2, 0 to 0.28 s, 0.18 s |
+  | speech first, Scarlette x4 | 2.0 to 2.8 s | 17.1 to 32.3 s | 0 to 7, 0 to 1.02 s, 0.19 s |
+
+  The response as a whole ends about as soon (22.7 to 41.4 s for 25 to 45 s of audio).
 - **With `voice.speak_written` on, a reply is spoken once its text is written** (#122, its default for a day). The speaker takes the reply's
   sentences only when its spoken text is complete (the chat stream ended, or a tool call began), still one speech job a
   sentence. Chat and speech share the GPU, so splitting it bought nothing: on DGX-02 a six-sentence story was written in

@@ -40,6 +40,7 @@ const Tool = tool_mod.Tool;
 const jobs = @import("jobs.zig");
 const memory = @import("memory.zig");
 const speech_gate = @import("speech_gate.zig");
+const yielder = @import("yielder.zig");
 const marker = @import("../media/marker.zig");
 const config = @import("../config.zig");
 const Config = config.Config;
@@ -146,6 +147,7 @@ pub const Scheduler = struct {
     stopping: bool = false,
     gpu_lock_fd: posix.fd_t = -1, // the host's GPU lock while any tool is loaded (`holdGpuLock`); under `gate`
     speech: speech_gate.Holder = .{}, // held while a speech job runs: image and video workers pause between steps
+    chat_yield: yielder.Yielder = .{}, // a voice reply's speech behind: the chat model's server is paused (yielder.zig)
     lock_msg: [512]u8 = undefined,
     lock_len: usize = 0,
     hold_until_ns: i96 = 0, // displaced tools wait until this (a reservation's job ends it early); under `gate`
@@ -226,6 +228,7 @@ pub const Scheduler = struct {
     pub fn deinit(s: *Scheduler) void {
         s.releaseGpuLock();
         s.speech.deinit();
+        s.chat_yield.deinit(s.io);
         for (&s.lanes) |*l| l.queue.deinit(s.gpa);
     }
 

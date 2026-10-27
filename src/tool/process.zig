@@ -18,6 +18,7 @@ const upstream = @import("upstream.zig");
 const Request = @import("request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 const speech_gate = @import("../sched/speech_gate.zig");
+const yielder = @import("../sched/yielder.zig");
 
 pub const Setup = struct {
     gpa: std.mem.Allocator,
@@ -75,6 +76,7 @@ pub const ProcessTool = struct {
             .cancel = cancel,
             .state = state,
             .failure = failure,
+            .server_pid = serverPid,
         } };
     }
 
@@ -103,6 +105,13 @@ pub const ProcessTool = struct {
 
     fn failure(ptr: *anyopaque) tool.Failure {
         return self(ptr).fail;
+    }
+
+    /// A loaded worker's own server (one it proxies to): the worker's child.
+    fn serverPid(ptr: *anyopaque) posix.pid_t {
+        const p = self(ptr);
+        if (p.st.load(.acquire) == .unloaded or p.port == 0) return 0;
+        return yielder.childOf(p.pid.load(.acquire));
     }
 
     /// Ends the running load or generate: a proxied request loses its connection (the worker and its model stay

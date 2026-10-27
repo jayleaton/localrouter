@@ -109,6 +109,7 @@ export const serverEventSchema = z.discriminatedUnion('type', [
     chars: z.number().default(0),
     speech_rate: z.number().nullable().default(null),
   }).loose(),
+  z.object({ type: z.literal('localrouter.response.speech_first'), item_id: z.string() }).loose(),
   z.object({ type: z.literal('localrouter.response.speech_done'), item_id: z.string() }).loose(),
   z.object({ type: z.literal('localrouter.job.created'), call_id: z.string().default(''), job_id: z.string(), kind: z.string().default('image') }).loose(),
   z.object({

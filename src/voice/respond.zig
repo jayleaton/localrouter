@@ -41,6 +41,12 @@ pub const Response = struct {
     // audio sent by then (for free_speech_rate).
     free_ns: i96 = 0,
     free_audio_at: u64 = 0,
+    // Speech first (`voice.speech_first`): the chat model can be paused while this reply's speech is behind (set when the
+    // speaker starts); `yielding`: it is, at this reply's hold. Both the speaker thread's alone.
+    speech_first: bool = false,
+    yielding: bool = false,
+    chat_model: []const u8 = "", // the request's ("": the default), for the speaker
+    taken: usize = 0, // sentences the speaker has taken from `queue` (under the session's mutex)
 
     const Chunk = struct { text: []const u8, text_end: usize };
 };
@@ -296,6 +302,7 @@ fn begin(s: *Session, r: *Response, ask: Task.Ask, req: *chat.Request, say: *bac
     r.id = s.newId(a, "resp") catch return false;
     r.item_id = s.newId(a, "item") catch return false;
     req.* = request(s, a, ask) catch return false;
+    r.chat_model = req.model orelse "";
     say.* = .{ .model = a.dupe(u8, s.settings.speech_model) catch return false, .voice = a.dupe(u8, s.settings.voice) catch return false };
     const prev = s.lastId();
     const it = s.addItem(.assistant, r.item_id) catch return false;
@@ -428,14 +435,39 @@ const Feed = struct {
     }
 };
 
+/// Speech first: while the reply's text is still written, the chat model is paused whenever its speech is less than
+/// yield_low_ms ahead of real time (counted from its first audio, as a client playing it at once hears it) and a
+/// written sentence waits behind the one being spoken, until it is yield_high_ms ahead, none waits, or the text is
+/// complete. Beside the decoding chat model Drama 3 comes at 0.55x real time on GB10, alone at 1.4x; the chat model
+/// writes faster than speech is spoken even paused most of the time.
+const yield_low_ms = 2000;
+const yield_high_ms = 3500;
+
 /// The speaker thread: one speech job a sentence, sent as 100 ms audio deltas unless the response was cancelled. With
-/// `voice.speak_written` (off by default) it starts once the spoken text is complete (Feed.endText): speech and the chat model share the
-/// GPU, so the chat writes the reply in about half the time alone, and speech then comes faster than it plays.
+/// speech first (`voice.speech_first`, the chat model this daemon's own) each sentence is spoken as soon as it is
+/// written, and the chat model yields the GPU while speech is behind (`steer`); without it, each sentence is spoken
+/// as soon as it is written beside the chat model, or, with `voice.speak_written` (off by default), once the spoken
+/// text is complete (Feed.endText), so the chat model writes it with the GPU to itself.
 fn speak(s: *Session, r: *Response, say: backend.Say) void {
+    defer if (r.yielding) {
+        _ = s.backend.yieldChat("", .release, @intFromPtr(r));
+    };
+    r.speech_first = s.voice.speech_first and s.backend.yieldChat(r.chat_model, .check, 0);
+    if (r.speech_first) {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        var tmp: std.heap.ArenaAllocator = .init(s.gpa);
+        defer tmp.deinit();
+        if (!r.stop.cancelled()) s.emit.send(tmp.allocator(), "localrouter.response.speech_first", .{ .response_id = r.id, .item_id = r.item_id });
+    }
     var next: usize = 0;
     while (true) {
         s.mutex.lockUncancelable(s.io);
-        while ((next >= r.queue.items.len or s.voice.speak_written) and !r.closed and !r.stop.cancelled()) r.cond.waitUncancelable(s.io, &s.mutex);
+        if (r.yielding and next >= r.queue.items.len and !r.closed) { // the next sentence is still to write: the chat model runs
+            r.yielding = false;
+            _ = s.backend.yieldChat("", .release, @intFromPtr(r));
+        }
+        while ((next >= r.queue.items.len or (s.voice.speak_written and !r.speech_first)) and !r.closed and !r.stop.cancelled()) r.cond.waitUncancelable(s.io, &s.mutex);
         if (r.stop.cancelled() or next >= r.queue.items.len) {
             defer s.mutex.unlock(s.io);
             if (r.stop.cancelled()) return;
@@ -448,6 +480,11 @@ fn speak(s: *Session, r: *Response, say: backend.Say) void {
         }
         const c = r.queue.items[next];
         next += 1;
+        r.taken = next;
+        if (r.yielding and next >= r.queue.items.len) { // nothing written behind it: the chat model writes the next one
+            r.yielding = false;
+            _ = s.backend.yieldChat("", .release, @intFromPtr(r));
+        }
         s.mutex.unlock(s.io);
         if (!sentence(s, r, say, c)) return;
     }
@@ -556,9 +593,34 @@ const Voice = struct {
         const rest = v.ready.items.len - at;
         std.mem.copyForwards(i16, v.ready.items[0..rest], v.ready.items[at..]);
         v.ready.shrinkRetainingCapacity(rest);
+        if (at > 0) steer(s, r);
         return true;
     }
 };
+
+/// Speech first, after each piece sent: the chat model pauses (or its pause is renewed) while the reply's speech is
+/// behind and its text still being written, and runs again once speech is ahead or the text is complete. The pause
+/// itself is outside the session's lock (it reads /proc and the scheduler).
+fn steer(s: *Session, r: *Response) void {
+    if (!r.speech_first) return;
+    const want = blk: {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        if (r.closed or r.stop.cancelled() or r.marks.first_audio == 0) break :blk false;
+        // the next sentence is written before the chat model pauses, so the speaker never waits for one while it is
+        // paused (a sentence boundary early in the reply ran dry 0.1 to 0.6 s on DGX-02 without it)
+        if (r.queue.items.len <= r.taken) break :blk false;
+        const played: i96 = @divTrunc(s.clock() - r.marks.first_audio, std.time.ns_per_ms);
+        const ahead = @as(i96, @intCast(r.audio_ms)) - played;
+        break :blk ahead < @as(i96, if (r.yielding) yield_high_ms else yield_low_ms);
+    };
+    if (want) {
+        r.yielding = s.backend.yieldChat(r.chat_model, .hold, @intFromPtr(r));
+    } else if (r.yielding) {
+        r.yielding = false;
+        _ = s.backend.yieldChat("", .release, @intFromPtr(r));
+    }
+}
 
 /// Under the lock: the done events, the tool calls, response.done; the session is free for the next response.
 fn finish(s: *Session, r: *Response, result: backend.Error!chat.Result, why: *backend.Why) void {

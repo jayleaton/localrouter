@@ -84,6 +84,7 @@ test {
     _ = @import("engines/qwen_image_tool.zig");
     _ = @import("engines/minimax_h3_tool.zig");
     _ = @import("sched/speech_gate.zig");
+    _ = @import("sched/yielder.zig");
     _ = @import("serve.zig");
     _ = @import("cli/gen.zig");
     _ = @import("cli/check.zig");

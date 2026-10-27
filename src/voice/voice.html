@@ -2472,7 +2472,7 @@ const V = {
   ws: null, ctx: null, mic: null, out: null, an: null, run: 0, muted: false, holding: false, holdStart: 0, tailUntil: 0,
   userSpeaking: false, thinking: false, resp: null, live: [], nextTime: 0, lead: 0.1, playRms: 0, micLevel: 0,
   retries: 0, retryTimer: 0,
-  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, freeRate: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), gaps: new Map(), rec: null,
+  held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, freeRate: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), speechFirst: new Set(), written: new Map(), gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
   pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
 };
@@ -2542,7 +2542,7 @@ function connect(my) {
     opened = true;
     V.conn = (V.conn || 0) + 1; // item ids start again on each connection (the recorder's reply spans are per connection)
     // A new server session numbers its items from 1 again: what was kept per item belongs to the old one.
-    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'got', 'freeRate']) V[k].clear();
+    for (const k of ['byItem', 'byCall', 'doneMs', 'cut', 'started', 'gaps', 'textDone', 'speechDone', 'chars', 'speechFirst', 'written', 'got', 'freeRate']) V[k].clear();
     V.holding = null;
     V.pendingTurn = null;
     if (V.retries) dbg('voice.reconnected', { after: V.retries });
@@ -2771,6 +2771,9 @@ function bargeIn(cancel) {
 //   the rate it is coming in (at least START_MS: Drama 3's 46 ms first piece alone ran dry at once; GEN_START_MS while
 //   a picture or video is being made);
 // - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
+// - or, while the text is still being written by a reply that puts its speech first (localrouter.response.speech_first:
+//   the server pauses the chat model while speech is less than about 2 s ahead), enough is in hand to play the text
+//   written so far at the rate it is coming in: its audio not yet received, from MS_PER_CHAR, x (1 - rate) x MARGIN;
 // - or all of the reply's speech is in (localrouter.response.speech_done);
 // - and never more than HOLD_CAP_MS after the first piece, or WRITING_CAP_MS while the text is still being written: a
 //   reply speaks while it is written (JJ, 2026-10-27: a long reply held for its whole text was "not streaming at all"),
@@ -2828,24 +2831,30 @@ function startOrWait(item) {
   const rate = prior >= KEEP_UP ? Math.max(measured ?? 0, prior) : measured;
   const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
   if (ready || since >= (V.textDone.has(item) ? HOLD_CAP_MS : WRITING_CAP_MS)) {
-    if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
+    if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item), speech_first: V.speechFirst.has(item) });
     return release(item, 0.01);
   }
   if (rate != null && V.holding !== item) {
     V.holding = item;
-    dbg('voice.hold', { item, have_ms: Math.round(have(item)), rate: +rate.toFixed(2), need_ms: Math.round(holdNeed(item, rate)) });
+    dbg('voice.hold', { item, have_ms: Math.round(have(item)), rate: +rate.toFixed(2), need_ms: Math.round(holdNeed(item, rate)), speech_first: V.speechFirst.has(item) });
   }
   clearTimeout(V.holdTimer);
   V.holdTimer = setTimeout(() => startOrWait(item), 25);
 }
 // Audio in hand that plays the reply to its end without running dry, at audio coming in at `rate`. While its text is
-// still being written, its length is unknown: only a stream keeping up starts (otherwise Infinity: wait for the text).
+// still being written, its length is unknown: only a stream keeping up starts (otherwise Infinity: wait for the text),
+// unless the reply puts its speech first: then the text written so far is what must not run dry, less what of it is in.
 // Once the text is complete (text_done, with its length), the reply's audio is about MS_PER_CHAR a character, and
 // playing E ms of it while it arrives at rate p never runs dry with E x (1 - p) in hand (MARGIN over that). A fast
 // stream needs START_MS; speech still sharing the GPU (tool arguments being written, a picture being made) needs more.
 function holdNeed(item, rate) {
   const r = Math.min(rate, 1);
-  if (!V.textDone.has(item)) return rate >= KEEP_UP ? startMs() : Infinity;
+  if (!V.textDone.has(item)) {
+    if (rate >= KEEP_UP) return startMs();
+    if (!V.speechFirst.has(item)) return Infinity;
+    const pending = Math.max(0, (V.written.get(item) || 0) * MS_PER_CHAR - ((V.got.get(item) || {}).ms || 0));
+    return Math.max(startMs(), pending * (1 - r) * MARGIN);
+  }
   const est = (V.chars.get(item) || 0) * MS_PER_CHAR;
   return Math.max(startMs(), est * (1 - r) * MARGIN);
 }
@@ -3202,6 +3211,9 @@ function handle(ev) {
       if (!ev.tool_calls && ev.speech_rate) V.freeRate.set(ev.item_id, ev.speech_rate);
       textDone(ev.item_id, ev.chars);
       break;
+    case 'localrouter.response.speech_first':
+      V.speechFirst.add(ev.item_id); // before its first audio: the start may come before the text is complete
+      break;
     case 'localrouter.response.speech_done': {
       V.speechDone.add(ev.item_id);
       // How fast this reply's speech came (all of it is in now): the next written reply's start can trust it.
@@ -3221,6 +3233,7 @@ function handle(ev) {
       V.thinking = false;
       const m = botMsg(ev.item_id);
       m.text += ev.delta || '';
+      if (ev.type === 'response.audio_transcript.delta') V.written.set(ev.item_id, (V.written.get(ev.item_id) || 0) + (ev.delta || '').length);
       V.lastBot = splitThink(m.text).answer;
       draw(m);
       break;

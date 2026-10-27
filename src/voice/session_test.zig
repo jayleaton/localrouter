@@ -27,9 +27,12 @@ const Fake = struct {
     no_inference: bool = false, // the session's device lacks the inference scope
     edit: std.atomic.Value(bool) = .init(false), // a model can edit pictures (image_edit)
     speech_cancelled: std.atomic.Value(bool) = .init(false),
+    can_yield: bool = false, // the chat model can be paused for speech (speech first)
+    yields: std.atomic.Value(u32) = .init(0), // holds taken or renewed
+    held: std.atomic.Value(bool) = .init(false), // a hold is in place now
 
     fn b(f: *Fake) backend.Backend {
-        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools } };
+        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools, .yield_chat = yieldChat } };
     }
 
     fn self(p: *anyopaque) *Fake {
@@ -160,6 +163,20 @@ const Fake = struct {
 
     fn offer(p: *anyopaque) backend.Offer {
         return .{ .image = true, .image_edit = self(p).edit.load(.acquire) };
+    }
+
+    fn yieldChat(p: *anyopaque, _: []const u8, op: backend.Backend.Yield, _: usize) bool {
+        const f = self(p);
+        switch (op) {
+            .check => return f.can_yield,
+            .hold => {
+                if (!f.can_yield) return false;
+                _ = f.yields.fetchAdd(1, .acq_rel);
+                f.held.store(true, .release);
+            },
+            .release => f.held.store(false, .release),
+        }
+        return true;
     }
 
     fn clientTools(p: *anyopaque, why: *backend.Why) bool {
@@ -432,6 +449,24 @@ test "a long reply is spoken once its text is complete (voice.speak_written); se
         try testing.expect(rig.fake.spoke.items.len >= 2); // still in sentences, the first on its own
         try testing.expectEqualStrings("This is one more sentence.", rig.fake.spoke.items[0]);
     }
+}
+
+test "speech first: the chat model yields while speech is behind; each sentence is spoken as it is written" {
+    var rig: Rig = undefined;
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0, .speak_written = true }); // speech first takes precedence
+    defer rig.stop();
+    rig.fake.can_yield = true;
+    rig.fake.speak_ms = 200; // speech slower than the writing: sentences wait behind the one being spoken
+    rig.heard("tell me something slow"); // 20 sentences, written over about 1.2 s
+    try rig.audio(600, true);
+    try rig.audio(700, false);
+    _ = try rig.rec.wait("response.done", 0);
+    const first = try rig.rec.wait("localrouter.response.speech_first", 0);
+    const first_audio = try rig.rec.wait("response.audio.delta", 0);
+    try testing.expect(first < first_audio); // told before any audio, so a client can start on it
+    try testing.expect(first_audio < try rig.rec.wait("localrouter.response.text_done", 0)); // spoken while written
+    try testing.expect(rig.fake.yields.load(.acquire) > 0); // the reply's speech was behind at its start
+    try testing.expect(!rig.fake.held.load(.acquire)); // and nothing stays paused after it
 }
 
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {

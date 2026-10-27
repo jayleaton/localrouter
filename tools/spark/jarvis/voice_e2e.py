@@ -356,8 +356,8 @@ START_MS, KEEP_UP, RATE_MS, HOLD_CAP_MS, WRITING_CAP_MS, MS_PER_CHAR, MARGIN = 2
 
 def page_start(span, rid, step=0.025):
     """When the /voice page would start playing reply `rid` (s on the events' clock), replaying its hold on the events:
-    the audio in hand, its arrival rate since the first piece, text_done (its length and the free speech rate) and
-    speech_done. None: it never had audio."""
+    the audio in hand, its arrival rate since the first piece, the text written so far, text_done (its length and the
+    free speech rate), speech_first and speech_done. None: it never had audio."""
     pieces = []  # (t, ms)
     for e in span:
         if e["type"] == "response.audio.delta" and e["response_id"] == rid:
@@ -381,8 +381,13 @@ def page_start(span, rid, step=0.025):
             r = min(rate, 1)
             if done:
                 need = max(START_MS, (done.get("chars") or 0) * MS_PER_CHAR * (1 - r) * MARGIN)
+            elif rate >= KEEP_UP:
+                need = START_MS
+            elif "localrouter.response.speech_first" in types:  # the text written so far, less what of it is in
+                written = sum(len(e.get("delta", "")) for e in seen if e["type"] == "response.audio_transcript.delta")
+                need = max(START_MS, max(0, written * MS_PER_CHAR - have) * (1 - r) * MARGIN)
             else:
-                need = START_MS if rate >= KEEP_UP else float("inf")
+                need = float("inf")
             if have >= need:
                 return t
         t += step
@@ -424,7 +429,7 @@ def long_reply(sess, results, checks, max_start_s=3.0):
     text_done = at("localrouter.response.text_done")
     r = {"first_audio_s": round(arrivals[0][0], 2) if arrivals else None, "page_start_s": None if start is None else round(start, 2),
          "text_done_s": text_done, "done_s": round(done["_t"] - t0, 2), "audio_s": round(sum(ms for _, ms in arrivals) / 1000, 1),
-         "gaps": n, "gap_total_s": None if total is None else round(total, 2), "gap_longest_s": None if worst is None else round(worst, 2),
+         "speech_first": at("localrouter.response.speech_first") is not None, "gaps": n, "gap_total_s": None if total is None else round(total, 2), "gap_longest_s": None if worst is None else round(worst, 2),
          "status": done["response"]["status"]}
     results["long_reply"] = r
     log("long reply:", r)
