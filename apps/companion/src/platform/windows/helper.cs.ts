@@ -545,6 +545,7 @@ namespace LocalRouterWin
                 case "semantic": return Json.Write(Semantic(a));
                 case "point": return Json.Write(PointFor(a));
                 case "click": return Json.Write(Click(a));
+                case "drag": return Json.Write(Drag(a));
                 case "select_all": return Json.Write(SelectAll(a));
                 case "type": return Json.Write(TypeText(a));
                 case "key": return Json.Write(Key(a));
@@ -1543,6 +1544,47 @@ namespace LocalRouterWin
             press.Add(Mouse(0x0002, 0, 0, 0));
             press.Add(Mouse(0x0004, 0, 0, 0));
             Send(press);
+            return CursorJson();
+        }
+
+        /**
+         * A drag with the real pointer (allowed for this step): move to the first point, press, move through the rest in
+         * small steps (apps such as Paint draw from the moves between), release at the last. path: "x,y;x,y;…" in
+         * screen pixels.
+         */
+        private static Dictionary<string, object> Drag(Dictionary<string, object> a)
+        {
+            IntPtr hwnd = Hwnd(a);
+            List<int[]> points = new List<int[]>();
+            foreach (string part in (Str(a, "path") ?? "").Split(';'))
+            {
+                string[] xy = part.Split(',');
+                if (xy.Length == 2) points.Add(new int[] { (int)Math.Round(double.Parse(xy[0], System.Globalization.CultureInfo.InvariantCulture)), (int)Math.Round(double.Parse(xy[1], System.Globalization.CultureInfo.InvariantCulture)) });
+            }
+            if (points.Count < 2) throw new LrError("BAD_DRAG", "");
+            InputGuard(hwnd);
+            Send(new List<Native.INPUT> { MoveTo(points[0][0], points[0][1]) });
+            Thread.Sleep(60);
+            InputGuard(hwnd);
+            Send(new List<Native.INPUT> { Mouse(0x0002, 0, 0, 0) });
+            try
+            {
+                for (int s = 1; s < points.Count; s++)
+                {
+                    for (int t = 1; t <= 8; t++)
+                    {
+                        int x = points[s - 1][0] + (points[s][0] - points[s - 1][0]) * t / 8;
+                        int y = points[s - 1][1] + (points[s][1] - points[s - 1][1]) * t / 8;
+                        Send(new List<Native.INPUT> { MoveTo(x, y) });
+                        Thread.Sleep(15);
+                    }
+                }
+            }
+            finally
+            {
+                // The button is never left down, whatever happened between.
+                Send(new List<Native.INPUT> { Mouse(0x0004, 0, 0, 0) });
+            }
             return CursorJson();
         }
 

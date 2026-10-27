@@ -56,6 +56,8 @@ pub fn screen(a: Action) Decision {
         if (a.name.len == 0) return .{ .verdict = .refused, .why = "a surface with no name" };
         return .{ .verdict = .auto }; // bringing a named app or tab forward changes nothing in it
     }
+    // A drag is always the real pointer, and a drop can move or delete: the person's to allow.
+    if (eql(a.kind, "drag")) return .{ .verdict = .tap, .why = "it drags with your mouse" };
     if (eql(a.kind, "press")) {
         if (eql(a.key, "space") or eql(a.key, "escape") or eql(a.key, "tab")) return .{ .verdict = .auto };
         if (!eql(a.key, "enter")) return .{ .verdict = .refused, .why = "a key other than Enter, Space, Escape or Tab" };
@@ -198,12 +200,12 @@ test "Enter: after a search box it runs; anywhere else it asks" {
     try t.expectEqual(Verdict.refused, screen(.{ .kind = "press", .key = "cmd+q" }).verdict);
 }
 
-test "scrolling and bringing a named surface forward run; unknown steps are refused" {
+test "scrolling and bringing a named surface forward run; a drag asks; unknown steps are refused" {
     try t.expectEqual(Verdict.auto, screen(.{ .kind = "scroll", .direction = "down" }).verdict);
     try t.expectEqual(Verdict.refused, screen(.{ .kind = "scroll", .direction = "sideways" }).verdict);
     try t.expectEqual(Verdict.auto, screen(.{ .kind = "surface", .what = "app", .name = "Safari" }).verdict);
     try t.expectEqual(Verdict.refused, screen(.{ .kind = "surface", .what = "app", .name = "" }).verdict);
-    try t.expectEqual(Verdict.refused, screen(.{ .kind = "drag" }).verdict);
+    try t.expectEqual(Verdict.tap, screen(.{ .kind = "drag" }).verdict);
     try t.expectEqual(Verdict.refused, screen(.{ .kind = "shell", .text = "rm -rf ~" }).verdict);
 }
 

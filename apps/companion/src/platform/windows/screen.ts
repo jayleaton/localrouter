@@ -239,6 +239,14 @@ export class WindowsScreen implements ScreenBackend {
         }
         return { mode: 'pointer', pointer, at: { x: at.x, y: at.y }, how: 'clicked into the field, selected its text, typed keys' }
       }
+      case 'drag': {
+        // Nothing drags through UI Automation: the real pointer, with the person's leave (the standing grant gives it).
+        if (!options.allowPointer) throw new NeedsPointer('dragging needs the real mouse: nothing drags through UI Automation')
+        if (action.path.length < 2) throw new Error('A drag needs a start and an end.')
+        const start = target(await call('point', { ref: checkRef(action.ref) }))
+        const path = action.path.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(';')
+        return { mode: 'pointer', pointer: pointShape(await call('drag', { hwnd: start.hwnd, path }), 'pointer'), at: action.path[0] }
+      }
       case 'scroll': {
         const ref = action.ref === undefined ? undefined : checkRef(action.ref)
         const where = ref ? { ref } : {}

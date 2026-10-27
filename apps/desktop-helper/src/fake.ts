@@ -62,7 +62,7 @@ export class FakeNotes implements ScreenBackend {
    */
   async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
     const ref = 'ref' in action ? action.ref : undefined
-    const pointer = ref !== undefined && this.pointerOnly.has(ref)
+    const pointer = action.kind === 'drag' || (ref !== undefined && this.pointerOnly.has(ref))
     if (pointer && !options.allowPointer) throw new NeedsPointer('that control draws itself and has no accessible action')
     this.actions.push(action)
     const mode = pointer ? 'pointer' : 'background'
@@ -94,6 +94,9 @@ export class FakeNotes implements ScreenBackend {
         return done(undefined)
       case 'scroll':
         return done({ x: 400, y: 300 })
+      case 'drag':
+        // Drawing needs the real pointer here as everywhere.
+        return done(action.path[action.path.length - 1])
     }
   }
 

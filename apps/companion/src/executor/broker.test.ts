@@ -4,6 +4,7 @@ import type { Card } from './broker.ts'
 import { Broker, CONTROL_OFF, DISABLED_MESSAGE, OWN_TARGET } from './broker.ts'
 import type { Answers, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 import type { Observation, ScreenAction } from '../../../desktop-helper/src/computer/types.ts'
+import { LocalStop } from '../../../desktop-helper/src/stop.ts'
 import { MemoryAudit } from './audit.ts'
 import { MemoryStanding, TestGate } from './testing.ts'
 import { fakeBroker } from './testing.ts'
@@ -381,6 +382,23 @@ describe('the standing grant (JJ, 2026-10-26: auto-approved; no permission windo
     expect(mac.desktop.modes).toContain('pointer')
     expect(audit.lines.filter((l) => l.event === 'act').every((l) => l.grant === 'standing')).toBe(true)
     expect(audit.lines.find((l) => l.event === 'grant' && (l.action as { label?: string }).label === 'Send')).toMatchObject({ grant: 'standing', would_ask: expect.stringMatching(/send/) })
+  })
+
+  it('Windows run 2026-10-27: a background-only task is never stopped by the person moving and clicking their own mouse', async () => {
+    let n = 0
+    // The person's mouse: somewhere new on every reading, and just clicked.
+    const pointer = async () => {
+      n += 1
+      return { x: 300 + ((n * 97) % 800), y: 200 + ((n * 53) % 500), sinceClickS: 0 }
+    }
+    // Time moves on between readings (a real task's steps take hundreds of milliseconds).
+    let clock = 1_000_000
+    const now = () => (clock += 300)
+    const watch = (abort: (reason: string) => void) => new LocalStop({ pointer, now, schedule: () => () => undefined }).watch(abort)
+    const { broker, mac } = fakeBroker([...SEND_GROCERIES], { standing: new MemoryStanding({ granted: true, askEach: false }), watch })
+    const outcome = await run(broker)
+    expect(outcome).toMatchObject({ status: 'done' })
+    expect(mac.desktop.modes.every((m) => m === 'background')).toBe(true)
   })
 
   it('kept across a restart or an update (a new broker over the same stored grant): no card at all', async () => {

@@ -50,6 +50,10 @@ export function screen(a: Action): Decision {
   switch (a.kind) {
     case 'scroll':
       return ['up', 'down', 'top', 'bottom'].includes(a.direction ?? '') ? auto : { verdict: 'refused', why: 'an unknown scroll direction' }
+    case 'drag':
+      // Always the real pointer (nothing drags through accessibility), and a drop can move or delete: the person's to
+      // allow, which the standing grant does.
+      return { verdict: 'tap', why: a.why ? `it drags with your mouse: ${a.why}` : 'it drags with your mouse' }
     case 'pointer':
       // The real pointer and keyboard for a step the background could not do: always the person's to allow.
       return { verdict: 'tap', why: a.why ? `it needs your mouse for a moment: ${a.why}` : 'it needs your mouse for a moment' }

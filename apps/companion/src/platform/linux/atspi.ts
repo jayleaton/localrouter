@@ -591,6 +591,14 @@ export class LinuxScreen implements ScreenBackend {
 
   async act(action: ScreenAction, options: ActOptions = {}): Promise<ActResult> {
     if (action.kind === 'press') return this.press(action.key, options)
+    if (action.kind === 'drag') {
+      // Nothing drags through AT-SPI: the real pointer, with the person's leave (the standing grant gives it). The path is
+      // in screen coordinates already (observed bounds are shifted by the window's origin).
+      if (!options.allowPointer) throw new NeedsPointer(this.injector.noPointer ?? 'dragging needs the real mouse: nothing drags through AT-SPI')
+      await this.injector.drag(action.path, options)
+      const last = action.path[action.path.length - 1]
+      return { mode: 'pointer', pointer: last, at: action.path[0] }
+    }
     const win = await this.compositorWindow()
     // AT-SPI first (an action or EditableText): the person's pointer and keyboard are never touched.
     const result = actShape(json((await this.call('act', { ...action, hint: hint(win) }, options.signal, win)).trim(), 'action result'))

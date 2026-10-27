@@ -46,4 +46,13 @@ describe('the visible virtual cursor (JJ: show where the agent acts without touc
     expect(html).toContain('window.lrCursor=')
     expect(html).toContain('window.lrHide=')
   })
+
+  it('a task start loads the window ahead of the first action (Windows run, 2026-10-27: no ring 167 ms in)', () => {
+    const warmed: string[] = []
+    const cursor = new VirtualCursor({ showAt: () => undefined, hide: () => undefined, close: () => undefined, warm: () => warmed.push('warm') })
+    cursor.ready()
+    expect(warmed).toEqual(['warm'])
+    // A surface without warm (the fake) is fine.
+    new VirtualCursor({ showAt: () => undefined, hide: () => undefined, close: () => undefined }).ready()
+  })
 })

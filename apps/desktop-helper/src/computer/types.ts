@@ -64,6 +64,12 @@ export type ScreenAction =
   | { kind: 'press'; key: 'enter' | 'escape' | 'tab' | 'space' }
   /** `ref`: the list or area to scroll (a control of this observation); the window's middle when absent. */
   | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom'; ref?: string }
+  /**
+   * Press the left button at `path[0]`, move through the points, release at the last (screen coordinates, as control
+   * bounds are): a line on a canvas, or one thing dropped onto another. `ref`: the control it starts on. Always the real
+   * pointer: no accessibility API drags, so the background refuses it (NeedsPointer) and the pointer fallback runs it.
+   */
+  | { kind: 'drag'; ref: string; path: Point[] }
 
 /**
  * How an action reached the app. `background`: without the person's real pointer, focus or keyboard (an accessibility
@@ -193,4 +199,10 @@ export interface PointerWatch {
    * reading becomes the expected position.
    */
   left(point?: Point | null): void
+  /**
+   * The helper did not use the real pointer after all (a background step, or the wait for the box is over): the
+   * pointer is the person's again at once, and only the corner stops the task (Windows run, 2026-10-27: a
+   * background-only Chrome task was stopped by JJ's own mouse).
+   */
+  released?(): void
 }

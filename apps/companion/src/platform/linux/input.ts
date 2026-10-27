@@ -31,6 +31,8 @@ export interface Injector {
   /** Why keys cannot be sent, when they cannot. */
   readonly noKeys?: string
   click(point: Point, options?: ActOptions): Promise<void>
+  /** Press at the first point, move through the rest, release at the last (a drag; see ScreenAction 'drag'). */
+  drag(path: Point[], options?: ActOptions): Promise<void>
   scroll(point: Point, direction: ScrollDirection, options?: ActOptions): Promise<void>
   key(key: Key, options?: ActOptions): Promise<void>
   /** Types plain text (no line breaks), in chunks, stopping between chunks when `signal` aborts. */
@@ -67,7 +69,16 @@ const aborted = (signal?: AbortSignal) => {
 
 const at = (p: Point) => [String(Math.round(p.x)), String(Math.round(p.y))]
 
-type PointerDriver = { name: string; click(p: Point, o?: ActOptions): Promise<void>; scroll(p: Point, d: ScrollDirection, o?: ActOptions): Promise<void> }
+type PointerDriver = { name: string; click(p: Point, o?: ActOptions): Promise<void>; drag?(path: Point[], o?: ActOptions): Promise<void>; scroll(p: Point, d: ScrollDirection, o?: ActOptions): Promise<void> }
+
+/** A drag's points with 8 small steps between each two, so apps that draw from the moves see a line. */
+export function dragSteps(path: Point[]): Point[] {
+  const out: Point[] = path.length ? [path[0]] : []
+  for (let s = 1; s < path.length; s += 1) {
+    for (let t = 1; t <= 8; t += 1) out.push({ x: Math.round(path[s - 1].x + ((path[s].x - path[s - 1].x) * t) / 8), y: Math.round(path[s - 1].y + ((path[s].y - path[s - 1].y) * t) / 8) })
+  }
+  return out
+}
 type KeyDriver = { name: string; key(k: Key, o?: ActOptions): Promise<void>; chunk(text: string, o?: ActOptions): Promise<void> }
 
 const XDOTOOL_KEYS: Record<Key, string> = { enter: 'Return', escape: 'Escape', tab: 'Tab', space: 'space', select_all: 'ctrl+a' }
@@ -77,6 +88,10 @@ function xdotoolPointer(runner: CommandRunner, xdotool: string): PointerDriver {
     name: 'xdotool',
     async click(p, o) {
       await runner.run(xdotool, ['mousemove', '--sync', ...at(p), 'click', '1'], { signal: o?.signal })
+    },
+    async drag(path, o) {
+      const [first, ...rest] = dragSteps(path)
+      await runner.run(xdotool, ['mousemove', '--sync', ...at(first), 'mousedown', '1', ...rest.flatMap((p) => ['mousemove', '--sync', ...at(p), 'sleep', '0.015']), 'mouseup', '1'], { signal: o?.signal })
     },
     async scroll(p, d, o) {
       await runner.run(xdotool, ['mousemove', '--sync', ...at(p), 'click', '--repeat', String(notches(d)), '--delay', '20', upward(d) ? '4' : '5'], { signal: o?.signal })
@@ -155,6 +170,16 @@ function swayPointer(runner: CommandRunner, swaymsg: string): PointerDriver {
       await seat(['set', ...at(p)], o)
       await seat(['press', 'button1'], o)
       await seat(['release', 'button1'], o)
+    },
+    async drag(path, o) {
+      const [first, ...rest] = dragSteps(path)
+      await seat(['set', ...at(first)], o)
+      await seat(['press', 'button1'], o)
+      try {
+        for (const p of rest) await seat(['set', ...at(p)], o)
+      } finally {
+        await seat(['release', 'button1'])
+      }
     },
     async scroll(p, d, o) {
       await seat(['set', ...at(p)], o)
@@ -350,6 +375,12 @@ export function chooseInjector(session: Session, runner: CommandRunner, options:
       if (!pointer) throw new Error(noPointer)
       aborted(o?.signal)
       await pointer.scroll(p, d, o)
+    },
+    async drag(path, o) {
+      if (!pointer) throw new Error(noPointer)
+      if (!pointer.drag) throw new Error(`Dragging is not supported with ${pointer.name} yet; with xdotool (X11) or sway it is.`)
+      aborted(o?.signal)
+      await pointer.drag(path, o)
     },
     async key(k, o) {
       if (!keys) throw new Error(noKeys)

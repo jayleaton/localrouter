@@ -40,3 +40,9 @@ describe('policy edges the fixture cannot carry', () => {
     }
   })
 })
+
+describe('a drag (Windows run, 2026-10-27: Paint)', () => {
+  it('is the person’s to allow, as any real-pointer step: the standing grant allows it, "Ask before each action" asks', () => {
+    expect(screen({ kind: 'drag', role: 'other', label: 'canvas (it draws itself)', why: 'to a stroke inside it' })).toEqual({ verdict: 'tap', why: 'it drags with your mouse: to a stroke inside it' })
+  })
+})
