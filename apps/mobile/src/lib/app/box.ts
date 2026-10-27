@@ -3,12 +3,13 @@ import { AppState, Platform } from 'react-native'
 import { fetch as expoFetch } from 'expo/fetch'
 
 import { normalizeBaseUrl, normalizeCode } from '@/lib/localrouter/address'
+import { defaultAssistant, fetchAssistant, saveAssistantName, type Assistant } from '@/lib/localrouter/assistant'
 import { ApiError, createApi, speechEngines, type Api, type Fetch, type SpeechEngine } from '@/lib/localrouter/api'
 import { Conversation, GENERATION_LIMITS, isGeneration } from '@/lib/localrouter/conversation'
 import { refusedVoice, sessionUpdate, type ClientEvent, type ServerEvent } from '@/lib/localrouter/protocol'
 import { RealtimeClient, type ConnectionStatus, type SocketFactory } from '@/lib/localrouter/realtime'
 
-import { conversationStorage, defaultSettings, pairingStorage, settingsStorage, type Pairing, type Settings } from './storage'
+import { assistantStorage, conversationStorage, defaultSettings, pairingStorage, settingsStorage, type Pairing, type Settings } from './storage'
 
 /*
  * The box this phone talks to: its pairing, the realtime session, the conversation and this phone's settings. One
@@ -26,12 +27,14 @@ export type BoxState = {
   /** The latest thing to tell the user (an error from the box, a refused voice), shown until dismissed. */
   notice: string | null
   engines: SpeechEngine[]
+  /** The assistant's name (a setting on the box, the last one it said while offline) and its default voice. */
+  assistant: Assistant
   settings: Settings
   /** The session is in a call (audio and server VAD). */
   call: boolean
 }
 
-let state: BoxState = { status: 'loading', pairing: null, connection: 'closed', paused: false, notice: null, engines: [], settings: defaultSettings(), call: false }
+let state: BoxState = { status: 'loading', pairing: null, connection: 'closed', paused: false, notice: null, engines: [], assistant: defaultAssistant(), settings: defaultSettings(), call: false }
 const listeners = new Set<() => void>()
 const voiceListeners = new Set<(event: ServerEvent) => void>()
 
@@ -59,6 +62,9 @@ export function useBox<T>(select: (state: BoxState) => T): T {
     () => select(state)
   )
 }
+
+/** The assistant's name, as the box says it ("Jarvis" until it says otherwise). */
+export const useAssistantName = () => useBox((box) => box.assistant.name)
 
 /** The conversation; its file URLs are rebased onto the paired box's address. */
 export const conversation = new Conversation((url) => api?.fileUrl(url) ?? url)
@@ -177,20 +183,49 @@ async function loadEngines() {
   }
 }
 
+function setAssistant(assistant: Assistant) {
+  set({ assistant })
+  assistantStorage.write(assistant)
+}
+
+/** The assistant's name from the box (an older box: the default; out of reach: the one already known). */
+export async function loadAssistant() {
+  const asked = api
+  if (!asked) return state.assistant
+  const assistant = await fetchAssistant(asked, state.assistant)
+  // A box forgotten or replaced meanwhile keeps its own name.
+  if (asked === api && JSON.stringify(assistant) !== JSON.stringify(state.assistant)) setAssistant(assistant)
+  return assistant
+}
+
+/**
+ * Renames the assistant on the box (an empty name restores the default). Throws what to tell the user: a refused
+ * name, a phone without the `manage` permission, an older box, or no connection.
+ */
+export async function renameAssistant(name: string) {
+  if (!api) throw new Error('No box is paired.')
+  const assistant = await saveAssistantName(api, name)
+  setAssistant(assistant)
+  return assistant
+}
+
 /** Restores the pairing, settings and conversation; connects if paired. Call once at start. */
 export async function initialize() {
-  const [pairing, settings, saved] = await Promise.all([pairingStorage.read(), settingsStorage.read(), conversationStorage.read()])
+  const [pairing, settings, saved, assistant] = await Promise.all([pairingStorage.read(), settingsStorage.read(), conversationStorage.read(), assistantStorage.read()])
   conversation.load(saved)
-  set({ settings, pairing, status: pairing ? 'paired' : 'unpaired' })
+  set({ settings, pairing, assistant, status: pairing ? 'paired' : 'unpaired' })
   if (pairing) {
     api = createApi({ baseUrl: pairing.baseUrl, token: pairing.token, fetch: fetchJson })
     connect()
     void loadEngines()
+    void loadAssistant()
   }
   AppState.addEventListener('change', (next) => {
     if (state.status !== 'paired') return
     if (next === 'active') {
       if (!client || client.status === 'failed') reconnect()
+      // Renamed on the box or from another device while this phone was away.
+      void loadAssistant()
     } else if (!state.call) {
       // Off screen without a call: nothing to listen to; the conversation is reseeded on return.
       disconnect()
@@ -221,9 +256,12 @@ export async function pair(baseUrlInput: string, codeInput: string, deviceName: 
   await pairingStorage.write(pairing)
   disconnect()
   api = createApi({ baseUrl, token: pairing.token, fetch: fetchJson })
-  set({ pairing, status: 'paired', notice: null })
+  // Another box has its own name: the default until it answers.
+  set({ pairing, status: 'paired', notice: null, ...(state.pairing?.baseUrl !== baseUrl ? { assistant: defaultAssistant() } : {}) })
   connect()
   void loadEngines()
+  // The setup step after pairing shows (and may change) the box's name, so it is known before pairing returns.
+  await loadAssistant()
 }
 
 /** Forgets the box (the token is deleted from the keychain; the operator revokes it with `localrouter pair revoke`). */
@@ -231,7 +269,8 @@ export async function forget() {
   disconnect()
   api = null
   await pairingStorage.remove()
-  set({ pairing: null, status: 'unpaired', engines: [] })
+  assistantStorage.remove()
+  set({ pairing: null, status: 'unpaired', engines: [], assistant: defaultAssistant() })
 }
 
 export function sendText(text: string) {

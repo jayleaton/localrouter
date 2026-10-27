@@ -92,6 +92,8 @@ export type ConnectionOptions = {
   runs: ComputerUseRuns
   /** Whether the person switched computer control off on this Mac (`localrouter-desktop disable`). */
   disabled: () => boolean
+  /** Each time the box welcomes the helper (at connect and after every reconnect). */
+  onWelcome?: () => void
   dial?: Dial
   random?: () => number
   log?: Logger
@@ -303,6 +305,7 @@ export class Connection {
     this.ready = true
     this.attempts = 0
     this.log.info('connection.welcome', { helper_id: this.helperId })
+    this.options.onWelcome?.()
   }
 
   private settle(frame: Fields) {

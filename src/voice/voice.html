@@ -447,7 +447,7 @@
 <body>
 <div class="app" id="app">
   <aside id="side" aria-label="Conversations">
-    <div class="brand"><span class="mark" aria-hidden="true"></span><div><b>Jarvis</b><small>LocalRouter, on this machine</small></div></div>
+    <div class="brand"><span class="mark" aria-hidden="true"></span><div><b id="brandName">Jarvis</b><small>LocalRouter, on this machine</small></div></div>
     <button class="btn primary new" id="newChat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
     <nav id="convs" aria-label="Conversation list"></nav>
     <div class="side-foot">
@@ -530,6 +530,7 @@
   <div class="db">
     <section class="sect" aria-labelledby="hChat">
       <h3 id="hChat">Chat</h3>
+      <label class="field"><span>Assistant name<small id="anameHint">What it is called on every device, and what it calls itself.</small></span><input id="aname" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Jarvis"></label>
       <label class="field"><span>Model</span><select id="chatmodel"></select></label>
       <label class="switch"><span>Reasoning<small>Think before answering (slower first word)</small></span><input type="checkbox" id="thinkSw"></label>
       <label class="switch"><span>Image and video tools<small>The model may make pictures and clips</small></span><input type="checkbox" id="tools"></label>
@@ -550,7 +551,7 @@
       <h3 id="hFree">Hands-free</h3>
       <label class="field"><span>Sensitivity</span><input type="range" id="sens" min="0" max="100" step="5">
         <span class="range-row"><span>Ignores more noise</span><span>Hears quiet speech</span></span></label>
-      <label class="field"><span>Wait before replying<small>Jarvis starts on your words only after you have been quiet this long in one go. Speak again and it starts over, so you can stop to think.</small></span>
+      <label class="field"><span>Wait before replying<small><span data-aname>Jarvis</span> starts on your words only after you have been quiet this long in one go. Speak again and it starts over, so you can stop to think.</small></span>
         <select id="wait"><option value="300">0.3 s</option><option value="500">0.5 s</option><option value="800">0.8 s</option><option value="1000">1 s</option><option value="1500">1.5 s</option><option value="2000">2 s</option><option value="3000">3 s</option><option value="4000">4 s</option><option value="5000">5 s</option></select></label>
       <label class="switch"><span>Echo guard<small>Ignore my own voice from the speaker</small></span><input type="checkbox" id="gate"></label>
     </section>
@@ -647,7 +648,15 @@ const $ = id => document.getElementById(id);
 const RATE = 24000;
 const CHUNK = 960; // 40 ms of 24 kHz samples a microphone message
 const LOUD = 250 / 32768; // a reply sample above this is audible (about -42 dBFS), as the daemon's timing counts it
-const DEFAULT_SYSTEM = "You are Jarvis, a helpful assistant running on the user's own machine. Be concise.";
+// What the assistant is called (GET /v1/assistant, one name per box), kept here so the page shows it offline too.
+const A = { name: 'Jarvis', voice: null };
+const defaultSystem = () => `You are ${A.name}, a helpful assistant running on the user's own machine. Be concise.`;
+// As the server's voice loop does (assistant.zig systemPrompt): {name} filled, and named when the text does not say it.
+function systemPrompt(text) {
+  const filled = text.split('{name}').join(A.name);
+  return filled.toLowerCase().includes(A.name.toLowerCase()) ? filled : `You are ${A.name}. ${filled}`;
+}
+const fileStem = () => A.name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'assistant';
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const I = {
   copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
@@ -762,6 +771,7 @@ const store = {
 };
 const S = Object.assign({ chatModel: '', think: false, speechModel: '', voices: {}, mode: 'vad', wait: 800, threshold: 0.5,
   tools: true, gate: true, logN: 300, key: '', instructions: '', maxTokens: 0, language: 'en' }, store.get('settings', {}));
+A.name = store.get('assistant', A.name);
 if (S.voice && S.speechModel && !S.voices[S.speechModel]) S.voices[S.speechModel] = S.voice; // the earlier single voice
 delete S.voice;
 delete S.silence; // the old "pause before I reply" (200 to 1500 ms): the wait starts again at its default
@@ -1069,9 +1079,9 @@ function skeleton(m) {
     el.setAttribute('aria-label', 'Generated media');
     col.append(Object.assign(document.createElement('div'), { className: 'cards' }), Object.assign(document.createElement('div'), { className: 'err' }));
   } else {
-    el.setAttribute('aria-label', `Jarvis, ${clock(m.at)}`);
+    el.setAttribute('aria-label', `${A.name}, ${clock(m.at)}`);
     const head = Object.assign(document.createElement('div'), { className: 'head' });
-    head.append(Object.assign(document.createElement('b'), { textContent: 'Jarvis' }), timeEl(m.at), Object.assign(document.createElement('span'), { className: 'via' }));
+    head.append(Object.assign(document.createElement('b'), { textContent: A.name }), timeEl(m.at), Object.assign(document.createElement('span'), { className: 'via' }));
     const think = Object.assign(document.createElement('details'), { className: 'think', hidden: true });
     think.innerHTML = `<summary>${I.bulb}<span></span>${I.chev}</summary><div class="tb"></div>`;
     think.addEventListener('toggle', () => { if (!think._auto) m.thinkOpen = think.open; think._auto = false; });
@@ -1107,7 +1117,7 @@ function drawNow(m) {
     if (think.open !== open) { think._auto = true; think.open = open; }
   }
   const body = el.querySelector('.md');
-  const html = answer ? md(answer) : m.streaming && !why ? '<span class="dots" aria-label="Jarvis is writing"><i></i><i></i><i></i></span>' : '';
+  const html = answer ? md(answer) : m.streaming && !why ? `<span class="dots" aria-label="${esc(A.name)} is writing"><i></i><i></i><i></i></span>` : '';
   if (body._html !== html) { body.innerHTML = html; body._html = html; }
   el.querySelector('.head .via').textContent = m.via === 'voice' ? '🎙 voice' : '';
   const foot = el.querySelector('.foot');
@@ -1164,7 +1174,7 @@ function card(x) {
   const f = Object.assign(document.createElement('figure'), { className: 'card' });
   const h = href(x.url);
   if (!h) return f;
-  const name = (x.kind === 'video' ? 'jarvis-video' : 'jarvis-image') + (x.kind === 'video' ? '.mp4' : '.png');
+  const name = `${fileStem()}-${x.kind === 'video' ? 'video.mp4' : 'image.png'}`;
   if (x.kind === 'video') {
     const v = Object.assign(document.createElement('video'), { controls: true, playsInline: true, preload: 'metadata' });
     v.setAttribute('aria-label', x.prompt || 'generated video');
@@ -1208,7 +1218,7 @@ function openMedia(x) {
   if (x.kind === 'video') { img.removeAttribute('src'); mediaSrc(h, u => { vid.src = u; vid.play().catch(() => {}); }); }
   else { vid.pause(); vid.removeAttribute('src'); mediaSrc(h, u => { img.src = u; }); img.alt = x.prompt || 'generated image'; }
   $('lbCap').textContent = x.prompt || (x.kind === 'video' ? 'Video' : 'Picture');
-  $('lbDl').download = x.kind === 'video' ? 'jarvis-video.mp4' : 'jarvis-image.png';
+  $('lbDl').download = `${fileStem()}-${x.kind === 'video' ? 'video.mp4' : 'image.png'}`;
   mediaSrc(h, u => { $('lbDl').href = u; });
   $('lbCopy').hidden = !x.prompt;
   renderLightboxVoice();
@@ -1282,7 +1292,7 @@ function reelCard(it) {
     cap.append(cp);
   }
   if (!waiting) {
-    const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, download: kind === 'video' ? 'jarvis-video.mp4' : 'jarvis-image.png' });
+    const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, download: `${fileStem()}-${kind === 'video' ? 'video.mp4' : 'image.png'}` });
     dl.setAttribute('aria-label', 'Download');
     mediaSrc(href(it.x.url), u => { dl.href = u; });
     cap.append(dl);
@@ -1384,6 +1394,39 @@ async function errorText(r) {
   try { const j = JSON.parse(t); return (j.error && j.error.message) || t; } catch { return t || `HTTP ${r.status}`; }
 }
 
+// ---------------------------------------------------------------- the assistant's name (GET, PATCH /v1/assistant)
+
+function renderName() {
+  document.title = A.name;
+  $('brandName').textContent = A.name;
+  for (const el of document.querySelectorAll('[data-aname]')) el.textContent = A.name;
+  $('aname').placeholder = A.name;
+  if (document.activeElement !== $('aname')) $('aname').value = A.name;
+  $('instructions').placeholder = `You are ${A.name}, a helpful assistant…`;
+  $('anameHint').textContent = 'What it is called on every device, and what it calls itself.' + (A.voice ? ` It speaks as ${A.voice.voice || 'the default voice'} (${A.voice.model}).` : '');
+  renderVoice(); // the message box's placeholder
+}
+function takeAssistant(j) {
+  A.name = j.name || 'Jarvis';
+  A.voice = j.voice || null;
+  store.set('assistant', A.name);
+  renderName();
+}
+async function loadAssistant() {
+  try {
+    const r = await api('/v1/assistant');
+    if (r.ok) takeAssistant(await r.json()); // an older box has no such route: the name stays Jarvis
+  } catch { /* offline: the name last seen */ }
+}
+async function saveAssistantName(value) {
+  const name = value.trim().replace(/\s+/g, ' ');
+  if (name === A.name) return;
+  const r = await api('/v1/assistant', { method: 'PATCH', json: { name } }).catch(e => ({ ok: false, status: 0, text: async () => e.message }));
+  if (r.ok) { takeAssistant(await r.json()); toast(`Your assistant is called ${A.name} now`); return; }
+  $('aname').value = A.name;
+  toast(r.status === 404 ? 'This box cannot rename its assistant yet: update LocalRouter on it' : r.status === 403 ? 'Renaming the assistant needs a device with the manage scope' : `Could not rename it: ${await errorText(r)}`);
+}
+
 // ---------------------------------------------------------------- computer control (docs/dev/COMPUTER.md)
 // A paired desktop helper works on the user's computer; anything that sends, buys, deletes, posts or types into a
 // field that is not a search box waits for a tap here. Screen text in the cards is untrusted: text nodes only.
@@ -1440,7 +1483,7 @@ function ccRender(st, cards) {
   for (const c of cards) {
     const card = ccEl('div', 'cc-card ask');
     card.setAttribute('role', 'alertdialog'); card.setAttribute('aria-label', 'Approve a computer action');
-    card.append(ccEl('h4', null, 'Jarvis asks to'), ccEl('p', 'what', c.action));
+    card.append(ccEl('h4', null, `${A.name} asks to`), ccEl('p', 'what', c.action));
     card.append(ccEl('p', 'where', [c.app, c.title, c.url].filter(Boolean).join(' · ')));
     if (c.kind === 'type') card.append(ccEl('pre', null, c.text));
     card.append(ccEl('p', 'why', `Why it asks: ${c.why}. For: ${c.goal}`));
@@ -1457,7 +1500,7 @@ function ccRender(st, cards) {
   }
   for (const t of running) {
     const card = ccEl('div', 'cc-card');
-    card.append(ccEl('h4', null, `Jarvis is using ${t.computer}`), ccEl('p', 'what', t.goal));
+    card.append(ccEl('h4', null, `${A.name} is using ${t.computer}`), ccEl('p', 'what', t.goal));
     card.append(ccEl('p', 'cc-step', t.waiting_for_approval ? 'Waiting for your OK' : (t.steps[t.steps.length - 1] || 'Starting…')));
     const row = ccEl('div', 'cc-row'), stop = ccEl('button', 'btn stop', 'Stop');
     stop.onclick = () => ccStop(t.task_id);
@@ -1571,7 +1614,7 @@ async function copyLog() {
 let busy = null; // {ctl} while a chat reply streams
 let FORCE_TOOL = null; // {name, tool}: the next round must call it (a video moved from a call)
 function apiMessages() {
-  const base = S.instructions.trim() || DEFAULT_SYSTEM;
+  const base = S.instructions.trim() ? systemPrompt(S.instructions.trim()) : defaultSystem();
   const msgs = [{ role: 'system', content: MM.enabled && S.tools ? `${base}\n\n${MM.text}` : base }];
   const list = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool' || (m.role === 'sys' && m.callId)));
   for (const m of list) {
@@ -1875,7 +1918,7 @@ async function checkPage() {
     if (pageSum === null) pageSum = h;
     else if (h !== pageSum && h !== pageNotified) {
       pageNotified = h; // once a version; in a call it says what a reload costs
-      toast(V.ws ? 'Jarvis was updated. Reload to get the new version (this ends the call)' : 'A new version of Jarvis is available', () => location.reload(), 'Reload', 10 * 60 * 1000);
+      toast(V.ws ? 'This page was updated. Reload to get the new version (this ends the call)' : 'A new version of this page is available', () => location.reload(), 'Reload', 10 * 60 * 1000);
       dbg('page.updated', { call: !!V.ws });
     }
   } catch {}
@@ -2369,7 +2412,7 @@ async function cloneSave(e) {
     $('cloneOut').replaceChildren();
     $('cloneWarn').replaceChildren();
     cloneSay('cloneNameNote', '');
-    cloneSay('cloneStatus', `Saved “${v.name || v.id}”: Jarvis speaks with it now.`);
+    cloneSay('cloneStatus', `Saved “${v.name || v.id}”: ${A.name} speaks with it now.`);
     cloneList();
   } catch (err) {
     cloneSay('cloneNameNote', err.message, true);
@@ -3357,7 +3400,7 @@ function renderVoice() {
   $('mic').setAttribute('aria-label', V.ws ? 'Open voice mode' : 'Start voice mode');
   $('vbar').hidden = !V.ws || V.open;
   $('vbarText').textContent = `Voice on · ${STATE_TEXT[s][0].toLowerCase()}`;
-  $('text').placeholder = V.ws ? 'Type, and hear the reply' : 'Message Jarvis';
+  $('text').placeholder = V.ws ? 'Type, and hear the reply' : `Message ${A.name}`;
   if (!V.open) return;
   const orb = $('orb');
   if (orb.dataset.state !== s) orb.dataset.state = s;
@@ -3449,6 +3492,7 @@ function openDrawer(section) {
   $('tools').checked = S.tools;
   $('maxtok').value = S.maxTokens || '';
   $('instructions').value = S.instructions;
+  $('aname').value = A.name;
   $('sens').value = Math.max(0, Math.min(100, sensFromThreshold()));
   $('wait').value = String(S.wait);
   $('gate').checked = S.gate;
@@ -3466,6 +3510,7 @@ $('tools').addEventListener('change', () => { S.tools = $('tools').checked; save
 $('gate').addEventListener('change', () => { S.gate = $('gate').checked; saveSettings(); });
 live('maxtok', e => { S.maxTokens = Number(e.value) || 0; });
 live('instructions', e => { S.instructions = e.value; });
+$('aname').addEventListener('change', () => saveAssistantName($('aname').value));
 live('sens', e => { S.threshold = Math.round((0.8 - Number(e.value) / 100 * 0.6) * 100) / 100; });
 live('key', e => { S.key = e.value.trim(); });
 live('logn', e => { S.logN = Number(e.value) || 300; });
@@ -3607,6 +3652,8 @@ renderControls();
 renderVoice();
 loadSkill();
 loadHostTools();
+renderName();
+loadAssistant();
 loadModels().then(pollTools);
 setInterval(pollTools, 4000);
 setInterval(watchJobs, 3000);

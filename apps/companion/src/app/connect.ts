@@ -4,10 +4,11 @@
  * wrong or expired code, a revoked token). Pure, so it is tested without Electron or a box; the main process gathers
  * the facts and the page only draws what this returns.
  */
+import { DEFAULT_ASSISTANT } from '../harness/assistant.ts'
 import { PlainHttpError } from '../harness/spark.ts'
 import type { Capabilities, WhoAmI } from '../harness/spark.ts'
 
-export type StepId = 'address' | 'code' | 'connection' | 'permissions' | 'control'
+export type StepId = 'address' | 'code' | 'connection' | 'assistant' | 'permissions' | 'control'
 export type StepStatus = 'todo' | 'active' | 'done' | 'warn' | 'error'
 export type ErrorKind = 'invalid_address' | 'unreachable' | 'refused' | 'timeout' | 'tls' | 'not_localrouter' | 'too_old' | 'code_format' | 'wrong_code' | 'revoked' | 'server'
 export type ConnectError = { kind: ErrorKind; title: string; hint: string; detail?: string }
@@ -43,6 +44,11 @@ export type ConnectInput = {
   permissions: Permissions
   /** The standing grant for computer control: given once here, in setup, never by a card over a task. */
   control?: { granted: boolean }
+  /**
+   * The assistant's name (the Spark's, as last read). `step`: the name step, asked once after this computer's first
+   * pairing ('ask' until answered, then 'done'); an install paired before it has none and is not asked.
+   */
+  assistant?: { name: string; step?: 'ask' | 'done' }
 }
 
 export type Step = { id: StepId; status: StepStatus; summary: string }
@@ -122,11 +128,15 @@ export function connectView(i: ConnectInput): ConnectView {
   else if (!i.connection.ok) connection = { id: 'connection', status: 'error', summary: i.connection.error.title }
   else connection = { id: 'connection', status: i.connection.warning ? 'warn' : 'done', summary: i.connection.warning ?? `Connected · ${i.connection.capabilities.filter((c) => c.ok).length} of ${i.connection.capabilities.length} features available` }
 
+  const name = i.assistant?.name || DEFAULT_ASSISTANT
+  const named: Step[] = []
+  if (i.assistant?.step === 'ask') named.push({ id: 'assistant', status: 'todo', summary: 'What should your assistant be called?' })
+  if (i.assistant?.step === 'done') named.push({ id: 'assistant', status: 'done', summary: `Called ${name}` })
   const p = permissionStep(i.permissions)
   const control: Step = i.control?.granted
-    ? { id: 'control', status: 'done', summary: 'Jarvis may use this computer, in the background; stop it any time' }
-    : { id: 'control', status: 'todo', summary: 'Let Jarvis use this computer: asked only here, once' }
-  const steps: Step[] = [address, code, connection, { id: 'permissions', ...p }, control]
+    ? { id: 'control', status: 'done', summary: `${name} may use this computer, in the background; stop it any time` }
+    : { id: 'control', status: 'todo', summary: `Let ${name} use this computer: asked only here, once` }
+  const steps: Step[] = [address, code, connection, ...named, { id: 'permissions', ...p }, control]
   // Warnings do not block: a connection that works with a caveat counts as done for what comes next.
   const first = steps.find((s) => s.status !== 'done' && s.status !== 'warn')
   if (first && first.status === 'todo') first.status = 'active'
@@ -254,7 +264,7 @@ export function classify(error: unknown, stage: Stage, timeoutS: number): Connec
     if (stage === 'code' && status === 401) return { kind: 'wrong_code', title: 'The Spark did not accept that code', hint: 'It is wrong, expired (codes last 10 minutes) or already used. Make a new one on the Spark and enter it here. After five wrong codes in 10 minutes the Spark drops every pending code.' }
     if (stage === 'code' && status === 400) return { kind: 'code_format', title: 'The Spark refused that code', hint: messageOf(error) }
     if (stage === 'connection' && (status === 401 || status === 403)) return { ...revoked(), detail: messageOf(error) }
-    if (status === 404 || status === 405) return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'Check the port: a Jarvis Spark answers on the https:// address `tailscale serve` gives it, usually :10443.', detail: `HTTP ${status}` }
+    if (status === 404 || status === 405) return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'Check the port: a LocalRouter Spark answers on the https:// address `tailscale serve` gives it, usually :10443.', detail: `HTTP ${status}` }
     return { kind: 'server', title: `The Spark answered with an error (HTTP ${status})`, hint: messageOf(error), detail: `HTTP ${status}` }
   }
   // fetch refuses the Fetch standard's blocked ports (9, 25, 6000...) before connecting.
@@ -356,7 +366,7 @@ export function peerNameFor(status: unknown, host: string): string | null {
   return null
 }
 
-/** The addresses to try for a peer: `tailscale serve`'s Jarvis port, then its default HTTPS port. */
+/** The addresses to try for a peer: `tailscale serve`'s LocalRouter port, then its default HTTPS port. */
 export function peerBases(p: TailnetPeer): string[] {
   return [`https://${p.dns}:10443`, `https://${p.dns}`]
 }

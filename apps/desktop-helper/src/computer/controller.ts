@@ -616,7 +616,7 @@ export type RunsOptions = {
   create: (session: Session) => ComputerUse
   /** Starts the local stop for one task; `abort` ends the task with the reason given. */
   watch?: (abort: (reason: string) => void) => TaskWatch | null
-  /** Called as a task starts (the "Jarvis is using your Mac" notice). */
+  /** Called as a task starts (the "<assistant> is using your Mac" notice). */
   onStart?: (task: ComputerTask) => void
   log: Logger
 }

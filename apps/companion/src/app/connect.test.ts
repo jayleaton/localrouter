@@ -61,6 +61,20 @@ describe('the Connect steps', () => {
     expect(statuses(connected)).toEqual({ address: 'done', code: 'done', connection: 'done', permissions: 'done', control: 'done' })
   })
 
+  it('asks the assistant’s name once, after a first pairing, and never an install paired before it', () => {
+    const at = { paired: true, base: 'https://spark.ts.net:10443', connection: ok, control: { granted: false } }
+    const asking = connectView(input({ ...at, assistant: { name: 'Jarvis', step: 'ask' } }))
+    expect(asking.current).toBe('assistant')
+    expect(asking.steps.map((s) => s.id)).toEqual(['address', 'code', 'connection', 'assistant', 'permissions', 'control'])
+    expect(asking.steps[3]).toMatchObject({ status: 'active', summary: 'What should your assistant be called?' })
+    const named = connectView(input({ ...at, assistant: { name: 'Friday', step: 'done' } }))
+    expect(named.steps[3]).toMatchObject({ id: 'assistant', status: 'done', summary: 'Called Friday' })
+    expect(named.steps[5]).toMatchObject({ id: 'control', summary: 'Let Friday use this computer: asked only here, once' })
+    const existing = connectView(input({ ...at, assistant: { name: 'Friday' } }))
+    expect(existing.steps.map((s) => s.id)).not.toContain('assistant')
+    expect(existing.current).toBe('control')
+  })
+
   it('the last step is the one consent for computer control, in setup: open until it is given, then done for good', () => {
     const notYet = input({ paired: true, base: 'https://spark.ts.net:10443', connection: ok, control: { granted: false } })
     expect(connectView(notYet).current).toBe('control')

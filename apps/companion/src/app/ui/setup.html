@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <span class="mark" aria-hidden="true"></span>
-  <div class="brand"><b>LocalRouter</b><small>Jarvis on this computer. The models run on your Spark; the tools, your history and every permission stay here.</small></div>
+  <div class="brand"><b>LocalRouter</b><small><span class="an">Jarvis</span> on this computer. The models run on your Spark; the tools, your history and every permission stay here.</small></div>
   <span class="pill" id="linkPill" data-s="offline"><span class="dot"></span><span id="linkText">Not connected</span></span>
 </header>
 
@@ -78,7 +78,7 @@
             <ul class="caps" id="caps"></ul>
           </div>
           <div class="actions">
-            <button class="btn primary" id="open">Open Jarvis</button>
+            <button class="btn primary" id="open">Open <span class="an">Jarvis</span></button>
             <button class="btn" id="check">Check again</button>
             <button class="btn" id="repair">Re-pair</button>
             <span class="grow"></span>
@@ -90,6 +90,24 @@
             <div class="actions"><button class="btn danger" id="disconnectYes">Disconnect</button><button class="btn" id="disconnectNo">Cancel</button></div>
           </div>
           <p class="note" id="checkedAt"></p>
+        </div>
+      </div>
+    </li>
+
+    <!-- After a first pairing only: the assistant's name, kept on the Spark for every device -->
+    <li class="step" id="step-assistant" data-s="todo" hidden>
+      <div class="badge"><span>4</span></div>
+      <div class="body">
+        <div class="head"><b>Your assistant’s name</b><span class="sum" id="sum-assistant"></span></div>
+        <div class="open" id="open-assistant" hidden>
+          <p>What should your assistant be called?</p>
+          <div class="field">
+            <input id="assistantName" maxlength="32" autocomplete="off" spellcheck="false" aria-label="Assistant name">
+            <button class="btn primary" id="saveAssistant">Continue</button>
+          </div>
+          <p class="note">The Spark keeps it, so every device paired with it shows and speaks the same name. Change it any time in Settings below.</p>
+          <p class="note" id="assistantStepNote" hidden></p>
+          <div class="alert" id="err-assistant" role="alert" hidden></div>
         </div>
       </div>
     </li>
@@ -133,9 +151,9 @@
     <li class="step" id="step-control" data-s="todo">
       <div class="badge"><span>5</span></div>
       <div class="body">
-        <div class="head"><b>Let Jarvis use this computer</b><span class="sum" id="sum-control"></span></div>
+        <div class="head"><b>Let <span class="an">Jarvis</span> use this computer</b><span class="sum" id="sum-control"></span></div>
         <div class="open" id="open-control">
-          <p class="note">Jarvis works in the background as a virtual mouse: your own mouse and keyboard stay yours, and it does not ask before each step. This is the only time LocalRouter asks. On a Mac, macOS may ask once now for LocalRouter to control System Events and your browser: allow it, and nothing asks again during a task. Stop it any time with <span class="stopKeys"><kbd>⌘⇧⎋</kbd>, the menu bar, or the top-left corner</span>.</p>
+          <p class="note"><span class="an">Jarvis</span> works in the background as a virtual mouse: your own mouse and keyboard stay yours, and it does not ask before each step. This is the only time LocalRouter asks. On a Mac, macOS may ask once now for LocalRouter to control System Events and your browser: allow it, and nothing asks again during a task. Stop it any time with <span class="stopKeys"><kbd>⌘⇧⎋</kbd>, the menu bar, or the top-left corner</span>.</p>
           <div class="actions"><button class="btn primary" id="grantControl">Let Jarvis use this computer</button></div>
         </div>
       </div>
@@ -144,12 +162,25 @@
 
   <h2 class="group">This computer</h2>
   <section class="card">
-    <label class="check"><input type="checkbox" id="control"> Let Jarvis control this computer</label>
-    <p class="note">Jarvis works in the background as a virtual mouse: your own mouse and keyboard stay yours, and nothing asks during a task (<span id="grantState">not allowed yet</span>). Every step is in the audit log. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
+    <label class="check"><input type="checkbox" id="control"> Let <span class="an">Jarvis</span> control this computer</label>
+    <p class="note"><span class="an">Jarvis</span> works in the background as a virtual mouse: your own mouse and keyboard stay yours, and nothing asks during a task (<span id="grantState">not allowed yet</span>). Every step is in the audit log. Stop any time: <span id="stopWords"><kbd>⌘⇧⎋</kbd>, the menu bar, or move the pointer to the top-left corner</span>.</p>
     <label class="check"><input type="checkbox" id="askEach"> Ask before each action</label>
     <p class="note">Off by default. On: anything that could send, buy, delete or post, type into a field that is not a search box, or use your mouse waits for your approval on screen, confirmed with <b id="presence"></b>.</p>
-    <button class="btn primary" id="allowControl">Let Jarvis use this computer</button>
+    <button class="btn primary" id="allowControl">Let <span class="an">Jarvis</span> use this computer</button>
     <button class="btn" id="revokeControl">Revoke computer control</button>
+  </section>
+
+  <section class="card">
+    <h3>Assistant</h3>
+    <label>Name
+      <div class="field">
+        <input id="assistantEdit" maxlength="32" autocomplete="off" spellcheck="false" aria-label="Assistant name">
+        <button class="btn" id="renameAssistant">Save</button>
+      </div>
+    </label>
+    <p class="note" id="assistantVoice" hidden></p>
+    <p class="note" id="assistantNote">Kept on the Spark: every device paired with it shows and speaks this name. Leave it empty for the default.</p>
+    <div class="alert" id="err-assistantEdit" role="alert" hidden></div>
   </section>
 
   <section class="card">
@@ -159,7 +190,7 @@
   </section>
 
   <section class="card">
-    <h3>Folders Jarvis may read</h3>
+    <h3>Folders <span class="an">Jarvis</span> may read</h3>
     <ul class="list" id="folders"></ul>
     <button class="btn" id="addFolder">Share a folder…</button>
   </section>

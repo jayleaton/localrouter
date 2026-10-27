@@ -6,11 +6,13 @@ tailnet: no account, relay or cloud service. Adapted from Sidebud's phone app (s
 
 ## What it does
 
-- **Voice.** "Hey Jarvis" (heard on the phone by its on-device recognizer; nothing leaves the phone until a call
-  opens) or **Talk** opens a call on `/v1/realtime`: PCM16 mono at 24 kHz both ways, the box's VAD ending each turn.
+- **Voice.** "Hey Jarvis" (or "hey" and the name you gave the assistant; heard on the phone by its on-device
+  recognizer, and nothing leaves the phone until a call opens) or **Talk** opens a call on `/v1/realtime`: PCM16 mono at 24 kHz both ways, the box's VAD ending each turn.
   **Wait before replying** (Settings, 0.3 to 5 s, default 0.8 s) is how long you can pause before it answers; talking
   again within it restarts the wait. Talk over a reply (or tap the wave) to interrupt it: playback stops on the phone
   at once and the box is told how much you heard. "Mute audio", "mute mic", "mute voice" and "end call" work hands-free.
+- **The assistant's name** is a setting on the box ("Jarvis" until you change it): the app asks for it once, after
+  pairing, and Settings changes it (with the `manage` permission). Every app and the wake phrase use it.
 - **The voice** is the one you pick in Settings from what the box's speech model lists; it stays until you change
   it (a voice the box no longer has falls back to its default, with a notice).
 - **Chat** uses the same session as text: typed messages during a call get spoken replies.

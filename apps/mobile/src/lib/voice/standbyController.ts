@@ -65,12 +65,23 @@ export function startStandbyController() {
   const stopVoice = subscribeVoice(reconcile)
   let paired = getBox().status
   let enabled = getBox().settings.enabled
+  let name = getBox().assistant.name
   const stopBox = subscribeBox(() => {
-    // Only the pairing and the voice switch decide listening.
+    // Only the pairing and the voice switch decide listening; a renamed assistant restarts standby with the new
+    // wake phrase (a call in progress keeps the old one until standby next starts).
     const box = getBox()
-    if (box.status === paired && box.settings.enabled === enabled) return
+    const renamed = box.assistant.name !== name
+    if (!renamed && box.status === paired && box.settings.enabled === enabled) return
     paired = box.status
     enabled = box.settings.enabled
+    name = box.assistant.name
+    if (renamed && getVoiceState().status === 'standby') {
+      void loadVoiceEngine().then(async (engine) => {
+        await engine?.stopStandby()
+        reconcile()
+      })
+      return
+    }
     reconcile()
   })
   const stopAppState = AppState.addEventListener('change', (next) => {

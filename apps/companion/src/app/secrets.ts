@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path/posix'
  * that satisfies LocalRouter's designated requirement.
  */
 /**
- * `computer_grant`: when the person said yes to "Let Jarvis control this computer?" (ISO time), or empty. Kept with
+ * `computer_grant`: when the person said yes to "Let <assistant> control this computer?" (ISO time), or empty. Kept with
  * the tokens so it survives restarts and updates the same way, and another program cannot grant it by editing a file.
  */
 export type Secrets = { token: string; legacy_token: string; computer_grant: string }

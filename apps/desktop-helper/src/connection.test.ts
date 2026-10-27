@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_ASSISTANT, startNotice } from './assistant.ts'
 import { DISABLED_MESSAGE, loadConfig, saveConfig, setDisabled } from './config.ts'
 import { ComputerUse, ComputerUseRuns } from './computer/controller.ts'
 import type { Answer, Question } from './computer/decisions.ts'
@@ -34,12 +35,14 @@ const c = (choice: string): Answer => ({ type: 'choice', choice, probability: 0.
 const WELCOME = { type: 'welcome', helper_id: 'mac_3f2a', limits: { max_steps: 15, timeout_ms: 90_000, approval_timeout_ms: 60_000 } }
 const START = { type: 'use.start', id: 'b2', task_id: 'task_1', goal: 'Search my notes for groceries', text: 'groceries', limits: { max_steps: 15, timeout_ms: 90_000 } }
 
-function setup(disabled: () => boolean = () => false) {
+function setup(disabled: () => boolean = () => false, onWelcome?: () => string) {
   const mac = fakeMac()
   const transport = fakeDial()
+  // As src/main.ts: the notice names the box's assistant, looked up again at each welcome.
+  let assistant = DEFAULT_ASSISTANT
   const runs = new ComputerUseRuns({
     create: (session) => new ComputerUse({ ...session, tabs: null, desktop: mac.desktop, dock: mac.dock, apps: mac.apps, log: silentLogger, settleMs: 0, sleep: async () => undefined }),
-    onStart: (task) => void mac.controls.notify('LocalRouter Desktop', `Jarvis is using your Mac: ${task.goal}. Move the pointer to the top-left corner to stop.`),
+    onStart: (task) => void mac.controls.notify('LocalRouter Desktop', startNotice(assistant, task.goal)),
     log: silentLogger,
   })
   const connection = new Connection({
@@ -50,6 +53,7 @@ function setup(disabled: () => boolean = () => false) {
     controls: mac.controls,
     runs,
     disabled,
+    ...(onWelcome ? { onWelcome: () => void (assistant = onWelcome()) } : {}),
     dial: transport.dial,
     random: () => 0,
     log: silentLogger,
@@ -102,8 +106,8 @@ async function serve(socket: FakeSocket, answer: (frame: Fields) => Fields | nul
 
 describe('Connection', () => {
   let current: ReturnType<typeof setup> | null = null
-  const make = (disabled?: () => boolean) => {
-    current = setup(disabled)
+  const make = (disabled?: () => boolean, onWelcome?: () => string) => {
+    current = setup(disabled, onWelcome)
     return current
   }
   beforeEach(() => {
@@ -131,6 +135,19 @@ describe('Connection', () => {
     expect(transport.sockets).toHaveLength(1)
     // The token never travels in a frame.
     expect(JSON.stringify(socket.sent)).not.toContain('secret-token')
+  })
+
+  it('asks for the assistant’s name at each welcome, and the task-start notice uses it', async () => {
+    let welcomes = 0
+    const { mac, welcomed } = make(undefined, () => {
+      welcomes += 1
+      return 'Friday'
+    })
+    const socket = await welcomed()
+    expect(welcomes).toBe(1)
+    send(socket, START)
+    await flush()
+    expect(mac.controls.notices).toEqual([{ title: 'LocalRouter Desktop', text: 'Friday is using your Mac: Search my notes for groceries. Move the pointer to the top-left corner to stop.' }])
   })
 
   it('ignores requests before the welcome', async () => {

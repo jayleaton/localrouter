@@ -1,6 +1,6 @@
 # LocalRouter Desktop
 
-LocalRouter Desktop is a small helper on your Mac that lets Jarvis, running on your LocalRouter box, use the Mac:
+LocalRouter Desktop is a small helper on your Mac that lets the assistant on your LocalRouter box (Jarvis unless it was renamed there) use the Mac:
 open and quit apps, change the volume, play the next track, switch dark mode, lock the screen, and do small tasks
 on screen (bring up a browser tab, type a search, click a button) one step at a time.
 
@@ -88,7 +88,7 @@ not node.
 
 ## Stopping it
 
-While a task runs, a notification says what Jarvis is doing on the Mac. You can always stop it on the Mac itself,
+While a task runs, a notification says what the assistant is doing on the Mac (by the name the box gives it). You can always stop it on the Mac itself,
 without the box:
 
 - move the pointer into the top-left corner of the main display (with displays arranged around it: the top-left corner of the screen arrangement, where the pointer stops);

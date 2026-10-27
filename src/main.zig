@@ -91,6 +91,7 @@ test {
     _ = @import("cli/mcp_stdio.zig");
     _ = @import("cli/pair.zig");
     _ = @import("pair.zig");
+    _ = @import("assistant.zig");
     _ = @import("api/pair.zig");
     _ = @import("api/inputs.zig");
     _ = @import("api/speech.zig");

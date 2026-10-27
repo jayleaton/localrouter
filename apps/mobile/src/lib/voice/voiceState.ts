@@ -6,7 +6,7 @@ import { useSyncExternalStore } from 'react'
  * - `off`: not listening (voice turned off, no mic permission, or the app is in the background without background
  *   listening). `error` says why when it was a failure.
  * - `standby`: listening on this phone for the wake phrase with the on-device recognizer. Nothing leaves the phone.
- *   `muted`: "mute audio" silenced it until the next wake phrase. `wakePhrase`: what to say ("hey jarvis");
+ *   `muted`: "mute audio" silenced it until the next wake phrase. `wakePhrase`: what to say ("hey <the assistant's name>");
  *   null when the wake phrase is off (or the recognizer is unavailable) and only Talk opens a call.
  * - `connecting`: a call is opening; what the user says meanwhile is kept for it.
  * - `live`: a call. `micOpen` is the mic gate (mute, hold-to-talk); `voiceMuted`: the assistant's voice is not

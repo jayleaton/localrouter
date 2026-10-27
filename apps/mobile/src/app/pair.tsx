@@ -8,7 +8,8 @@ import { Screen } from '@/components/screen'
 import { ThemedText } from '@/components/themed-text'
 import { ThemedView } from '@/components/themed-view'
 import { Palette, Spacing } from '@/constants/theme'
-import { pair, useBox } from '@/lib/app/box'
+import { getBox, pair, renameAssistant, useBox } from '@/lib/app/box'
+import { ASSISTANT_NAME_MAX, assistantNameError, normalizeAssistantName } from '@/lib/localrouter/assistant'
 
 const DEFAULT_DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android phone'
 
@@ -17,7 +18,8 @@ const param = (value: string | string[] | undefined) => (Array.isArray(value) ? 
 
 /**
  * Pairs this phone with a box: its address and the code `localrouter pair add` prints there. A pairing link
- * (`localrouter://pair?url=…&code=…`) opens this screen filled in.
+ * (`localrouter://pair?url=…&code=…`) opens this screen filled in. Once paired, it asks what the assistant should be
+ * called (a setting on the box). Only this screen asks, so a phone already paired before the setting is never asked.
  */
 export default function PairScreen() {
   const params = useLocalSearchParams<{ url?: string; code?: string }>()
@@ -35,6 +37,7 @@ function PairForm({ initialUrl, initialCode }: { initialUrl: string; initialCode
   const [deviceName, setDeviceName] = useState(DEFAULT_DEVICE_NAME)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [naming, setNaming] = useState(false)
 
   const submit = async () => {
     setBusy(true)
@@ -42,12 +45,15 @@ function PairForm({ initialUrl, initialCode }: { initialUrl: string; initialCode
     try {
       // An empty code is passed on: the box itself says whether it requires pairing.
       await pair(address, code, deviceName.trim() || DEFAULT_DEVICE_NAME)
-      router.replace('/home')
+      setBusy(false)
+      setNaming(true)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Pairing failed. Try again.')
       setBusy(false)
     }
   }
+
+  if (naming) return <NameStep onDone={() => router.replace('/home')} />
 
   return (
     <Screen>
@@ -97,6 +103,75 @@ function PairForm({ initialUrl, initialCode }: { initialUrl: string; initialCode
           </ThemedView>
 
           {paired ? <AppButton label="Back to my box" variant="secondary" accessibilityLabel="Back to my box" onPress={() => router.replace('/home')} disabled={busy} /> : null}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
+  )
+}
+
+/**
+ * After pairing: the assistant's name, filled in with the box's ("Jarvis" on a new box). Continue saves a changed
+ * name on the box. A phone without the `manage` permission, or an older box, keeps the box's name: the step says
+ * why and carries on with it.
+ */
+function NameStep({ onDone }: { onDone: () => void }) {
+  const assistant = useBox((box) => box.assistant)
+  const [name, setName] = useState(() => getBox().assistant.name)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const next = async () => {
+    const wanted = normalizeAssistantName(name)
+    if (!assistant.supported || !wanted || wanted === assistant.name) return onDone()
+    const invalid = assistantNameError(wanted)
+    if (invalid) return setError(invalid)
+    setBusy(true)
+    setError(null)
+    try {
+      await renameAssistant(wanted)
+      onDone()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Could not save the name. Try again.')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Screen>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <ThemedText type="title">What should your assistant be called?</ThemedText>
+          <ThemedText themeColor="textSecondary">
+            {assistant.supported
+              ? `The name is kept on your box, so every app uses it, and “Hey ${normalizeAssistantName(name) || assistant.name}” starts a call. You can change it later in Settings.`
+              : `This box is too old to rename the assistant, so it stays “${assistant.name}”. Update LocalRouter on the box to choose a name.`}
+          </ThemedText>
+          <ThemedView type="backgroundElement" style={styles.card}>
+            <View style={styles.field}>
+              <AppTextInput
+                label="Assistant name"
+                value={name}
+                onChangeText={(text) => {
+                  setName(text)
+                  setError(null)
+                }}
+                editable={assistant.supported && !busy}
+                maxLength={ASSISTANT_NAME_MAX + 8}
+                autoCapitalize="words"
+                autoCorrect={false}
+                returnKeyType="done"
+                onSubmitEditing={() => void next()}
+                testID="pair-assistant-name"
+              />
+            </View>
+            {error ? (
+              <ThemedText type="small" style={styles.error} selectable>
+                {error}
+              </ThemedText>
+            ) : null}
+            <AppButton label="Continue" accessibilityLabel="Continue" onPress={() => void next()} loading={busy} testID="pair-assistant-continue" />
+          </ThemedView>
+          {error ? <AppButton label={`Keep “${assistant.name}”`} variant="secondary" accessibilityLabel={`Keep the name ${assistant.name}`} onPress={onDone} disabled={busy} /> : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>

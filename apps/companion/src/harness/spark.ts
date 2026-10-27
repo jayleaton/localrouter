@@ -3,6 +3,9 @@
  * and decisions, job files, and the realtime socket. It holds the device token and adds it to every request; nothing
  * here decides what runs on this computer.
  */
+import { assistantOf } from './assistant.ts'
+import type { Assistant } from './assistant.ts'
+
 export type Fetch = typeof fetch
 
 export type Capabilities = {
@@ -116,6 +119,21 @@ export class Spark {
 
   whoami(): Promise<WhoAmI> {
     return this.json('/v1/pair')
+  }
+
+  /** The assistant's name on the box; null on a box from before the setting (404, 405, or 403 for the route). */
+  async assistant(): Promise<Assistant | null> {
+    const r = await this.request('/v1/assistant')
+    if (r.status === 404 || r.status === 405 || r.status === 403) return null
+    if (!r.ok) throw await errorOf(r)
+    return assistantOf(await r.json())
+  }
+
+  /** Renames the assistant on the box for every device (`manage` scope); an empty name is the default again. */
+  async renameAssistant(name: string): Promise<Assistant> {
+    const r = await this.request('/v1/assistant', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) })
+    if (!r.ok) throw await errorOf(r)
+    return assistantOf(await r.json())
   }
 
   /** One Chat Completions request (not streamed): the whole completion. */

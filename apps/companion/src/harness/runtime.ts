@@ -5,6 +5,7 @@ import type { Executor, MachineKind } from '../executor/executor.ts'
 import { BACKGROUND_NOTE } from '../executor/broker.ts'
 import type { Caller, PresenceGate } from '../executor/broker.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
+import { DEFAULT_ASSISTANT } from './assistant.ts'
 import { Journal } from './journal.ts'
 import { ClientToolsSession } from './realtime.ts'
 import type { SessionOptions } from './realtime.ts'
@@ -46,6 +47,8 @@ export type RuntimeOptions = {
    * gives it the Spark's decisions and takes them back on close, and never stops it. Without one it starts its own.
    */
   executor?: Executor
+  /** The assistant's name as the Spark keeps it (read each time a call's tool runs); the default without one. */
+  assistant?: () => string
 }
 
 export type Runtime = {
@@ -68,7 +71,18 @@ export function voiceRegistry(local: Tool[], picture: Tool[], handoff: VideoHand
 /** What computer use says on a computer that runs LocalRouter but has not paired with a Spark (yet, or any more). */
 export const UNPAIRED = 'LocalRouter is open on this computer but not paired with a Spark yet, so computer use has nothing to decide its steps: pair it on LocalRouter’s Connect page. Fixed controls (open or quit an app, volume, media, dark mode) and reading the screen work already.'
 
-export const VOICE_CALLER: Caller = { id: 'voice', name: 'Jarvis (voice)', kind: 'voice' }
+/** A call's tools as the requester the approvals and the audit name: "<assistant> (voice)", read when asked. */
+export function voiceCaller(assistant: () => string): Caller {
+  return {
+    id: 'voice',
+    kind: 'voice',
+    get name() {
+      return `${assistant() || DEFAULT_ASSISTANT} (voice)`
+    },
+  }
+}
+
+export const VOICE_CALLER: Caller = voiceCaller(() => DEFAULT_ASSISTANT)
 
 export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
   const spark = new Spark(o.base, o.token, o.fetch)
@@ -87,7 +101,8 @@ export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
       ...(o.log ? { log: o.log } : {}),
     }))
   if (shared) shared.broker.setDecider(decider)
-  const local = () => [...computerTools(executor.broker, VOICE_CALLER), ...fileTools(o.shared)]
+  const caller = o.assistant ? voiceCaller(o.assistant) : VOICE_CALLER
+  const local = () => [...computerTools(executor.broker, caller), ...fileTools(o.shared)]
   // Typed chat: this computer's tools and picture edits (the page makes its own pictures and videos, with their cards).
   const chat = new Registry().add(...local(), ...pictureTools(spark).filter((t) => t.name === 'edit_image'))
   const journal = new Journal(join(o.dir, 'conversations'))
