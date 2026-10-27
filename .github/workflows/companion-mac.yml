@@ -214,13 +214,21 @@ jobs:
           /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license > /dev/null
           limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
           limit 90 /usr/bin/arch -x86_64 "$bin" --version
-          set +e
-          limit 120 /usr/bin/arch -x86_64 "$bin" --smoke > "$RUNNER_TEMP/smoke-x64.txt" 2> "$RUNNER_TEMP/smoke-x64.err"
-          code=$?
-          set -e
-          smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke-x64.txt" | sed 's/^COMPANION_SMOKE //' || true)
-          echo "x64 smoke (exit $code): $smoke"
-          [ -n "$smoke" ] && [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] && [ "$(jq -r '.arch' <<< "$smoke")" = "x64" ] && [ "$code" -eq 0 ] || { tail -40 "$RUNNER_TEMP/smoke-x64.err"; echo "::error::x64 smoke not ok"; exit 1; }
+          # Rosetta translates each binary on its first launch (the app, its helpers, its frameworks): the first smoke
+          # can stall long enough for its first requests to fail (seen: the proxy's first two fetches, a 55 s stall). An
+          # Intel Mac runs the app natively. So a second launch may pass it; one whole pass is required.
+          for attempt in 1 2; do
+            set +e
+            limit 150 /usr/bin/arch -x86_64 "$bin" --smoke > "$RUNNER_TEMP/smoke-x64.txt" 2> "$RUNNER_TEMP/smoke-x64.err"
+            code=$?
+            set -e
+            smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke-x64.txt" | sed 's/^COMPANION_SMOKE //' || true)
+            echo "x64 smoke, launch $attempt (exit $code): $smoke"
+            if [ -n "$smoke" ] && [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] && [ "$(jq -r '.arch' <<< "$smoke")" = "x64" ] && [ "$code" -eq 0 ]; then exit 0; fi
+            tail -20 "$RUNNER_TEMP/smoke-x64.err"
+          done
+          echo "::error::x64 smoke not ok on two launches"
+          exit 1
         env:
           LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
           LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
