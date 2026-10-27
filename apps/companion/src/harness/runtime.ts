@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { chatDecider } from '../executor/decide.ts'
 import { startExecutor } from '../executor/executor.ts'
 import type { Executor, MachineKind } from '../executor/executor.ts'
+import { BACKGROUND_NOTE } from '../executor/broker.ts'
 import type { Caller, PresenceGate } from '../executor/broker.ts'
 import type { Logger } from '../../../desktop-helper/src/log.ts'
 import { Journal } from './journal.ts'
@@ -19,7 +20,7 @@ import { computerTools, fileTools, pictureTools, VideoHandoff } from './tools.ts
  */
 export const HARNESS_INSTRUCTIONS = [
   'You run inside the LocalRouter app on the user’s own computer, and its tools run there.',
-  'computer_control and computer_use act on this computer; anything that could send, buy, delete or post waits for the user to approve it on screen, so say that you are asking them.',
+  `computer_control and computer_use act on this computer. computer_use: ${BACKGROUND_NOTE}`,
   'A computer tool’s result says what really happened: tell the user what its `tell_user` says. When `done` is false the action did not happen: never say or imply that it did (nothing was typed, sent or opened), and say why.',
   'list_files and read_file see only the folders the user shared. generate_image makes a picture on their LocalRouter box and edit_image changes one; the user sees it when it is done.',
   'A video is never made during a call: generate_video gives you a question to ask first; follow what it returns.',

@@ -81,6 +81,25 @@ describe('WindowsScreen act', () => {
     expect(calls.map((c) => c.op)).toEqual(['semantic'])
   })
 
+  it('says where a background click, typing or scroll acted (the element’s centre), so the overlay ring shows there', async () => {
+    // Windows run, 2026-10-26: no ring 241 ms after a background click on Calculator; the reply had no point.
+    const { worker } = fakeWorker((c) => (c.args.kind === 'type' ? { done: true, how: 'value', focused: true, x: 410, y: 95 } : { done: true, how: 'invoke', x: 240.0, y: 80.0 }))
+    const screen = new WindowsScreen(worker)
+    expect(await screen.act({ kind: 'click', ref: REF })).toEqual({ mode: 'background', at: { x: 240, y: 80 } })
+    expect(await screen.act({ kind: 'type', ref: REF, text: 'x' })).toMatchObject({ mode: 'background', at: { x: 410, y: 95 } })
+    expect(await screen.act({ kind: 'scroll', direction: 'down', ref: REF })).toEqual({ mode: 'background', at: { x: 240, y: 80 } })
+    expect(HELPER_CS).toContain('done["x"] = Math.Round(box.X + box.Width / 2);')
+  })
+
+  it('a click on a field with no pattern (Chrome’s omnibox) is SetFocus in the background, never the pointer', async () => {
+    const { worker, calls } = fakeWorker(() => ({ done: true, how: 'focus' }))
+    expect(await new WindowsScreen(worker).act({ kind: 'click', ref: REF })).toEqual({ mode: 'background', how: 'focused through UI Automation' })
+    expect(calls.map((c) => c.op)).toEqual(['semantic'])
+    // The helper focuses Edit, Document and ComboBox, and any other element that takes the keyboard focus.
+    // A canvas (Pane, Custom, Image, Group) is never "clicked" by focusing it: that would draw nothing.
+    expect(HELPER_CS).toMatch(/type == ControlType\.ComboBox \|\| \(el\.Current\.IsKeyboardFocusable && !CanvasType\(type\)\)\)\s*\{\s*el\.SetFocus\(\);\s*return Done\(true, "focus"\);/)
+  })
+
   it('asks the person for their mouse when a control has no UI Automation pattern, then clicks there once allowed', async () => {
     const respond = (call: Call) => (call.op === 'semantic' ? { done: false, how: '' } : call.op === 'point' ? { hwnd: 1311234, x: 240, y: 80 } : { x: 240, y: 80 })
     const refused = fakeWorker(respond)

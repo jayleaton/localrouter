@@ -86,6 +86,9 @@ describe.runIf(REAL)('Linux, for real (Xvfb, openbox, at-spi, the GTK smoke wind
       const result = await platform.screen!.act({ kind: 'click', ref: press.ref })
       expect(result).toMatchObject({ mode: 'background' }) // never the real pointer
     }
+    // A click on the text box focuses it through AT-SPI (grab_focus), not the pointer and not its "activate" (Enter).
+    const search = find(await observe(), 'textbox', /^Search$/)!
+    expect(await platform.screen!.act({ kind: 'click', ref: search.ref })).toMatchObject({ mode: 'background', how: 'focused through AT-SPI', at: { x: expect.any(Number), y: expect.any(Number) } })
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect((await observe()).text).toContain('Pressed')
     // The real pointer is exactly where the "user" left it: the agent did not move it.

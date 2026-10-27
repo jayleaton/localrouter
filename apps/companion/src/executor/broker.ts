@@ -60,8 +60,33 @@ export type Card = {
 /** A person's presence, checked by the OS where it can be (Touch ID), for one approval. */
 export interface PresenceGate {
   readonly method: string
-  /** `waiting`: a sentence for the card while the OS check is open but not in front ("look for the Windows Security window"). */
-  verify(card: Card, waiting?: (text: string) => void): Promise<boolean>
+  /**
+   * Why the OS's own check is not the method right now ("Touch ID is not available: no fingerprint is enrolled"), or
+   * empty. Named on the card and in the audit, so the person knows what Approve will open and why.
+   */
+  readonly why?: string
+  /**
+   * `waiting`: a sentence for the card while the OS check is open but not in front ("look for the Windows Security
+   * window"). `signal`: aborted when the approval ends another way (a stop, Deny elsewhere, it ran out): the check's
+   * prompt or sheet is dismissed and it resolves false.
+   */
+  verify(card: Card, waiting?: (text: string) => void, signal?: AbortSignal): Promise<boolean>
+}
+
+/**
+ * The person's standing grant for computer control (JJ, 2026-10-26: "auto approved, and if it asks, once on first
+ * start-up"). With it, no step waits for a card: consequential clicks, typing, Enter and the real pointer all run, and
+ * the rails that are not prompts stay (the local stop, the overlay cursor, the audit). Without it a task is refused at
+ * once (CONTROL_OFF); the grant is given in setup, never by a card over a task. Settings' "Ask before each action"
+ * brings back a card per step.
+ */
+export interface Standing {
+  /** Whether the person granted computer control on this computer; kept across restarts and app updates. */
+  granted(): boolean
+  /** Keeps the grant (true, after the one consent) or clears it (false: "Revoke computer control"). */
+  set(granted: boolean): void
+  /** Settings' "Ask before each action" (off by default): a card per consequential step, as before the grant. */
+  askEachAction(): boolean
 }
 
 export type Limits = { maxSteps: number; timeoutMs: number; approvalTimeoutMs: number }
@@ -82,6 +107,8 @@ export type BrokerOptions = {
   approvalSurface?: () => string | null
   audit: Audit
   gate: PresenceGate
+  /** The standing grant; without it every consequential step asks (as "Ask before each action" does). */
+  standing?: Standing
   /** The local stop for one task (the pointer corner / takeover watch). */
   watch?: (abort: (reason: string) => void) => TaskWatch | null
   /** How the person stops a task on this computer, for the task-start notice ("Move the pointer to the top-left corner to stop."). */
@@ -122,8 +149,22 @@ export type BrokerEvent =
   /** The agent acted at `at` (global screen coordinates): the overlay cursor shows where, and whether it used the real pointer. */
   | { type: 'cursor'; task_id: string; mode: ActResult['mode']; at: { x: number; y: number }; kind: string }
   | { type: 'task'; task: TaskView }
+  /** A task was refused because computer control is not granted yet: the app says so in a notification, never a window. */
+  | { type: 'consent.needed'; goal: string; requester: string }
 
 export type Started = { ok: true; task_id: string; finished: Promise<ComputerOutcome> } | { ok: false; error: string }
+
+/**
+ * What a model is told about how computer use runs, in every tool description and the harness instructions (Mac run,
+ * 2026-10-26: Jarvis declined a task, believing it would take the person's real pointer). The server says the same.
+ */
+export const BACKGROUND_NOTE = 'It runs in the background as a virtual mouse: it leaves the user’s own mouse and keyboard alone, and they can keep working meanwhile. How each step is done is decided on the computer, never by you, so never decline it or ask the user how it should run. Steps are not approved one at a time: the user let Jarvis control the computer once; if a step still waits for them, the result says so.'
+
+/**
+ * Without the standing grant a task is refused at once (JJ, 2026-10-26: "stuck at permission windows"): no card ever
+ * waits over the person's work. The grant is given in LocalRouter's setup (or comes with an existing install).
+ */
+export const CONTROL_OFF = 'Computer control is off on this computer. Turn it on in LocalRouter → Settings (This computer).'
 
 export const DISABLED_MESSAGE = 'Computer control is switched off on this computer'
 export const NO_DECIDER = 'computer use needs the decision service on the Spark, which is not connected'
@@ -166,6 +207,8 @@ export class Broker {
   private readonly listeners = new Set<(event: BrokerEvent) => void>()
   private readonly waiters = new Map<string, () => void>()
   private readonly waitingNotes = new Map<string, string>()
+  /** The presence check open for an approval (Approve pressed, the OS prompt or sheet up), to dismiss it if the approval ends. */
+  private readonly checks = new Map<string, AbortController>()
   private readonly tasks: Task[] = []
   private active: Task | null = null
   private injecting = 0
@@ -238,6 +281,7 @@ export class Broker {
       ...(this.decider ? {} : { computer_use_unavailable: this.noDecider }),
       reads: { observe: Boolean(this.options.machine.screen), screenshot: Boolean(this.options.machine.screen?.screenshot) },
       presence: this.options.gate.method,
+      approvals: this.approvalMode(),
       limits: { max_steps: this.limits.maxSteps, timeout_ms: this.limits.timeoutMs, approval_timeout_ms: this.limits.approvalTimeoutMs },
       disabled: this.disabledFlag,
     }
@@ -257,13 +301,16 @@ export class Broker {
       if (this.isOwn(ctl.app)) return { ok: false, text: OWN_TARGET }
     }
     if (this.active) return { ok: false, text: `${this.name} is busy with another task; stop it first` }
+    if (d.verdict === 'tap' && this.approvalMode() === 'consent') return { ok: false, text: this.refuseUngranted(who, describe(ctl)) }
     const summary = describe(ctl)
     const task = this.newTask('control', who, summary)
     this.options.audit.record('task.start', { task_id: task.id, kind: 'control', control: ctl.kind, goal: clip(summary), requester: who.caller.name, caller: who.caller.kind })
     try {
       if (d.verdict === 'tap') {
-        const g = await this.awaitApproval(task, { step: 0, app: '', title: '', url: '', action: { kind: 'control', name: ctl.kind }, why: d.why })
-        if (!g.ok) return this.end(task, 'blocked', g.denied)
+        if (this.approvalMode() === 'each') {
+          const g = await this.awaitApproval(task, { step: 0, app: '', title: '', url: '', action: { kind: 'control', name: ctl.kind }, why: d.why })
+          if (!g.ok) return this.end(task, 'blocked', g.denied)
+        }
       }
       if (task.stopping) return this.end(task, 'stopped', task.reason || 'It was stopped.')
       const { done } = await this.machine.controls.run(ctl)
@@ -289,6 +336,7 @@ export class Broker {
     if (!decider) return { ok: false, error: this.noDecider }
     if (!this.machine.screen) return { ok: false, error: `${this.name} cannot read its screen: ${ACCESS_HINT}` }
     if (this.active) return { ok: false, error: `${this.name} is busy with another task; stop it first` }
+    if (this.approvalMode() === 'consent') return { ok: false, error: this.refuseUngranted(who, g) }
     const task = this.newTask('use', who, g, extra.taskId)
     this.options.audit.record('task.start', { task_id: task.id, kind: 'use', goal: clip(g), text: text === null ? null : textDigest(text), requester: who.caller.name, caller: who.caller.kind })
     const watch = this.options.watch?.((reason) => this.stop(task.id, 'this computer', reason)) ?? null
@@ -441,18 +489,28 @@ export class Broker {
     if (now - x.created_ms < this.minDwellMs) return this.refuseAnswer(id, by, 'That was too quick to be a deliberate approval: read the card, then approve.')
     // The OS check takes its own time (a PIN typed, a finger found): the card does not run out while it is open.
     this.store.hold(id, now + (this.options.presenceMs ?? PRESENCE_MS), now)
+    const gate = this.options.gate
+    this.options.audit.record('approval.verify', { approval_id: id, method: gate.method, ...(gate.why ? { why: gate.why } : {}) })
+    const check = new AbortController()
+    this.checks.set(id, check)
     let present = false
     try {
-      present = await this.options.gate.verify(this.card(x, now), (text) => {
-        this.waitingNotes.set(id, text)
-        const held = this.store.get(id, this.now())
-        if (held) this.emit({ type: 'approval.update', card: this.card(held, this.now()) })
-      })
+      present = await gate.verify(
+        this.card(x, now),
+        (text) => {
+          this.waitingNotes.set(id, text)
+          const held = this.store.get(id, this.now())
+          if (held) this.emit({ type: 'approval.update', card: this.card(held, this.now()) })
+        },
+        check.signal,
+      )
     } catch (error) {
       this.log.warn('approval.gate_failed', { error: messageOf(error) })
     } finally {
       this.waitingNotes.delete(id)
+      this.checks.delete(id)
     }
+    if (check.signal.aborted) return { ok: false, error: 'that approval ended while it was being confirmed', status: 409 }
     if (!present) return this.refuseAnswer(id, by, `Not approved: ${this.options.gate.method} did not confirm it was you.`)
     if (this.inputActive) return this.refuseAnswer(id, by, 'LocalRouter moved the pointer or typed while you approved, so it did not count.')
     const r = this.store.decide(id, true, `${by} (${this.options.gate.method})`, this.now())
@@ -527,6 +585,9 @@ export class Broker {
     if (act.kind === 'surface' ? this.isOwn(act.name) : this.isOwn(obs.app)) return deny(OWN_TARGET)
     let d = policy.screen(act)
     let judged: number | null = null
+    const standing = this.approvalMode() === 'standing'
+    // Under the standing grant nothing waits for a card, so a click is not judged either: the rules still refuse.
+    if (standing && (d.verdict === 'tap' || d.verdict === 'judge')) d = { verdict: 'auto', why: d.why }
     if (d.verdict === 'judge') {
       judged = await this.judge(task, request)
       d = policy.afterJudge(judged)
@@ -544,7 +605,7 @@ export class Broker {
       if (task.stopping) return deny('It was stopped.')
     }
     if (d.verdict === 'auto') {
-      this.options.audit.record('grant', { task_id: task.id, step: request.step, action: actionLog(act), app: clip(obs.app), judged })
+      this.options.audit.record('grant', { task_id: task.id, step: request.step, action: actionLog(act), app: clip(obs.app), judged, grant: standing ? 'standing' : 'rules', ...(standing && d.why ? { would_ask: d.why } : {}) })
       return { ok: true, grant: 'allow' }
     }
     const g = await this.awaitApproval(task, { step: request.step, app: obs.app, title: obs.title, url: obs.url ?? '', action: act, why: d.why })
@@ -612,6 +673,40 @@ export class Broker {
     return null
   }
 
+  /**
+   * How steps are approved here: `standing` (the person's grant: no cards), `consent` (no grant yet: tasks are refused
+   * at once), or `each` ("Ask before each action", or no standing grant support: a card per consequential step).
+   */
+  approvalMode(): 'standing' | 'consent' | 'each' {
+    const s = this.options.standing
+    if (!s || s.askEachAction()) return 'each'
+    return s.granted() ? 'standing' : 'consent'
+  }
+
+  /** "Revoke computer control": clears the standing grant; tasks are refused until it is given again in setup. */
+  revokeStanding(by: string) {
+    this.options.standing?.set(false)
+    this.options.audit.record('consent.revoked', { by })
+  }
+
+  /**
+   * The standing grant, given outside any task: `onboarding` (the setup step), `settings`, or `migrated` (an install
+   * already paired with the OS grants in place: those were the consent). Never asks anything itself.
+   */
+  grantStanding(source: 'onboarding' | 'settings' | 'migrated') {
+    if (!this.options.standing || this.options.standing.granted()) return
+    this.options.standing.set(true)
+    this.options.audit.record('consent.granted', { grant: 'standing', source })
+  }
+
+  /** Refused at once for want of the grant: audited, and the app told (a notification), never a card. */
+  private refuseUngranted(who: Requester, goal: string): string {
+    this.options.audit.record('deny', { requester: who.caller.name, goal: clip(goal), reason: 'computer control is not granted on this computer' })
+    this.emit({ type: 'consent.needed', goal: clip(goal), requester: who.caller.name })
+    return CONTROL_OFF
+  }
+
+  /** The one consent ("Let Jarvis control this computer?"), when there is no standing grant yet; kept once given. */
   private async awaitApproval(task: Task, b: Omit<Binding, 'executor' | 'task_id' | 'goal' | 'requester'>): Promise<Grant> {
     if (task.stopping) return { ok: false, denied: 'It was stopped.' }
     const nowhere = this.options.approvalSurface?.() ?? null
@@ -637,6 +732,12 @@ export class Broker {
       const settle = (t: Taken) => {
         if (timer) clearTimeout(timer)
         this.waiters.delete(id)
+        // Ended while its presence check is still open (stopped, denied elsewhere, ran out): dismiss the prompt.
+        const open = this.checks.get(id)
+        if (open) {
+          open.abort(t)
+          this.options.audit.record('approval.dismissed', { task_id: task.id, approval_id: id, method: this.options.gate.method, outcome: t })
+        }
         task.wake = null
         resolve(t)
       }
@@ -710,7 +811,7 @@ export class Broker {
 
   private card(x: Approval, now: number): Card {
     const b = x.binding
-    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method), waiting: this.waitingNotes.get(x.id) ?? '', expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
+    return { id: x.id, action: describeAction(b), kind: b.action.kind, text: b.action.text ?? '', app: b.app, title: b.title, url: b.url, why: b.why, goal: b.goal, requester: b.requester, confirm: confirmWith(this.options.gate.method, this.options.gate.why), waiting: this.waitingNotes.get(x.id) ?? '', expires_in_s: Math.max(0, Math.ceil((x.expires_ms - now) / 1000)), state: x.state }
   }
 
   private emit(event: BrokerEvent) {
@@ -751,7 +852,7 @@ export class Broker {
                 // How each action was done (background or pointer, a field focused before its value was set): the audit
                 // answers "did it focus the box first" without the screen's text or the typed text.
                 const r = (result && typeof result === 'object' ? result : { mode: 'background' }) as ActResult
-                this.options.audit.record('act', { task_id: this.active?.id ?? '', kind: a.kind, mode: r.mode, ...(r.how ? { how: r.how } : {}) })
+                this.options.audit.record('act', { task_id: this.active?.id ?? '', kind: a.kind, mode: r.mode, grant: this.approvalMode() === 'standing' ? 'standing' : 'each', ...(r.how ? { how: r.how } : {}) })
                 // The visible virtual cursor: where the agent acted, and whether it used the real pointer. No screen text.
                 if (r.at) this.emit({ type: 'cursor', task_id: this.active?.id ?? '', mode: r.mode, at: r.at, kind: a.kind })
                 return result
@@ -796,12 +897,15 @@ function actionLog(a: policy.Action) {
 export const PRESENCE_MS = 120_000
 
 /** What follows Approve, on the card before it is pressed, so an OS prompt (Windows Security, Touch ID) is expected. */
-export function confirmWith(method: string): string {
+export function confirmWith(method: string, why = ''): string {
   if (method === 'Windows Hello') return 'After Approve, Windows asks for your PIN, face or fingerprint (Windows Hello).'
   if (method === 'Touch ID') return 'After Approve, macOS asks for your fingerprint (Touch ID).'
-  if (method === 'a confirmation on this computer') return 'After Approve, LocalRouter asks you to confirm it once more.'
+  if (method === CONFIRMATION) return `After Approve, LocalRouter asks you to confirm it once more in its own window${why ? ` (${why})` : ''}.`
   return `After Approve, ${method} confirms it is you.`
 }
+
+/** The method when the OS has no check LocalRouter can use: its own confirmation sheet (weaker; see the README). */
+export const CONFIRMATION = 'a confirmation on this computer'
 
 /** The card's sentence: what exactly would happen, where. */
 export function describeAction(b: Binding): string {

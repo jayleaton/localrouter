@@ -6,7 +6,7 @@ import { array, boolean, json, nullable, number, object, oneOf, optional, string
 import { execRunner } from './runner.ts'
 import type { CommandRunner } from './runner.ts'
 import { CONTROL_ROLES, fitScale, NeedsPointer, SCREENSHOT_MAX_EDGE } from './types.ts'
-import type { ActOptions, ActResult, Observation, ObserveOptions, Point, PointerReading, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './types.ts'
+import type { ActOptions, ActResult, AutomationCheck, Observation, ObserveOptions, Point, PointerReading, Rect, ScreenAction, ScreenBackend, ScreenControl, Screenshot, ScreenshotOptions } from './types.ts'
 
 /**
  * Default runner for the computer-use backends. osascript prints the script's return value on
@@ -131,6 +131,47 @@ function postToPid(pid, event, dryrun) { if (dryrun) return; if (pid > 0) $.CGEv
 function keyToPid(pid, code) {
   var down = $.CGEventCreateKeyboardEvent($(), code, true), up = $.CGEventCreateKeyboardEvent($(), code, false);
   postToPid(pid, down, false); postToPid(pid, up, false);
+}
+// Text typed as Unicode keyboard events to one process (CGEventKeyboardSetUnicodeString), never as a keystroke Apple
+// Event: macOS never asks to let LocalRouter control another app in the middle of a task, and the keyboard layout
+// does not matter. At most 20 UTF-16 units an event (the event system cuts longer strings), never
+// splitting a surrogate pair; no modifier flags, so a key the person holds down does not turn the text into shortcuts.
+function typeText(pid, text, dryrun) {
+  var at = 0;
+  while (at < text.length) {
+    var end = Math.min(text.length, at + 20);
+    if (end < text.length && /[\\ud800-\\udbff]/.test(text.charAt(end - 1))) end -= 1;
+    var part = $(text.slice(at, end)), count = end - at, units = $.NSMutableData.dataWithLength(count * 2);
+    part.getCharactersRange(units.mutableBytes, $.NSMakeRange(0, count));
+    [true, false].forEach(function (down) {
+      var event = $.CGEventCreateKeyboardEvent($(), 0, down);
+      $.CGEventSetFlags(event, 0);
+      $.CGEventKeyboardSetUnicodeString(event, count, units.mutableBytes);
+      postToPid(pid, event, dryrun);
+    });
+    if (!dryrun) delay(0.02);
+    at = end;
+  }
+}
+// The app's own menu item for a Command shortcut (Edit › Select All is ⌘A, Paste ⌘V; ⇧⌘ is modifiers 1), pressed
+// through accessibility. Unlike a key code, this does not depend on the keyboard layout: key code 0 with Command is ⌘A
+// on a US layout but ⌘Q (quit) on AZERTY.
+function menuCommand(app, letter, modifiers) {
+  var bar = attr(app, 'AXMenuBar');
+  if (!bar) return false;
+  var menus = children(bar);
+  for (var i = 0; i < menus.length; i++) {
+    var lists = children(menus[i]);
+    for (var j = 0; j < lists.length; j++) {
+      var items = children(lists[j]);
+      for (var k = 0; k < items.length && k < 80; k++) {
+        if (String(plain(items[k], 'AXMenuItemCmdChar') || '').toUpperCase() === letter && plain(items[k], 'AXMenuItemCmdModifiers') === (modifiers || 0) && plain(items[k], 'AXEnabled') !== false) {
+          return $.AXUIElementPerformAction(items[k], $('AXPress')) === 0;
+        }
+      }
+    }
+  }
+  return false;
 }
 function mouse(type, point, dryrun) {
   var event = $.CGEventCreateMouseEvent($(), type, $.CGPointMake(point[0], point[1]), $.kCGMouseButtonLeft);
@@ -286,7 +327,7 @@ function middleOfWindow() {
 }
 var TEXT_ROLES = { AXTextField: 1, AXTextArea: 1, AXComboBox: 1, AXSearchField: 1 };
 // Controls whose AXPress is the click a person makes: pressed through accessibility, the pointer and the app in front
-// stay as they are (the "virtual cursor"). Rows, text and screenshot spots are clicked with the pointer.
+// stay as they are (the "virtual cursor"). Fields are focused (focusInPlace); the rest needs the person's mouse.
 var PRESS_ROLES = { AXButton: 1, AXLink: 1, AXCheckBox: 1, AXRadioButton: 1, AXMenuItem: 1, AXMenuButton: 1, AXPopUpButton: 1 };
 function pressable(el) {
   if (!PRESS_ROLES[plain(el, 'AXRole')]) return false;
@@ -295,6 +336,18 @@ function pressable(el) {
   var names = ObjC.castRefToObject(ref[0]);
   for (var i = 0; names && i < names.count; i++) if (ObjC.unwrap(names.objectAtIndex(i)) === 'AXPress') return true;
   return false;
+}
+// A click on a text field, or on any control whose AXFocused can be set, is what a click there does: it takes the
+// focus. Set through accessibility, so the pointer stays where the person left it (Chrome's omnibox has no AXPress).
+function focusable(el) {
+  if (TEXT_ROLES[plain(el, 'AXRole')]) return true;
+  var settable = Ref();
+  return $.AXUIElementIsAttributeSettable(el, $('AXFocused'), settable) === 0 && (settable[0] === true || settable[0] === 1);
+}
+function focusInPlace(el) {
+  if (!focusable(el)) return false;
+  if ($.AXUIElementSetAttributeValue(el, $('AXFocused'), $.NSNumber.numberWithBool(true)) !== 0) return false;
+  return true;
 }
 // The scroll view a person would scroll: the largest scroll or web area inside the window (not a sidebar), else null.
 function scrollArea(win) {
@@ -322,31 +375,14 @@ function hasFocus(app, el) {
   var c = center(focused), p = pair(el, 'AXPosition'), s = pair(el, 'AXSize');
   return Boolean(c && p && s && c[0] >= p[0] - 2 && c[0] <= p[0] + s[0] + 2 && c[1] >= p[1] - 2 && c[1] <= p[1] + s[1] + 2);
 }
-// The app's own menu item for a Command shortcut (Edit › Select All is ⌘A, Paste ⌘V), pressed through
-// accessibility. Unlike a key code, this does not depend on the keyboard layout: key code 0 with Command is ⌘A on a
-// US layout but ⌘Q (quit) on AZERTY.
-function menuCommand(app, letter) {
-  var bar = attr(app, 'AXMenuBar');
-  if (!bar) return false;
-  var menus = children(bar);
-  for (var i = 0; i < menus.length; i++) {
-    var lists = children(menus[i]);
-    for (var j = 0; j < lists.length; j++) {
-      var items = children(lists[j]);
-      for (var k = 0; k < items.length && k < 80; k++) {
-        if (String(plain(items[k], 'AXMenuItemCmdChar') || '').toUpperCase() === letter && plain(items[k], 'AXMenuItemCmdModifiers') === 0 && plain(items[k], 'AXEnabled') !== false) {
-          return $.AXUIElementPerformAction(items[k], $('AXPress')) === 0;
-        }
-      }
-    }
-  }
-  return false;
-}
-// A Command shortcut by its character: the menu item, else System Events, which maps the character to the key that
-// types it on the current layout.
+// A Command shortcut by its character, through the app's menu item only. An app without one is told as it is: a
+// keystroke Apple Event would make macOS ask for permission to control another app in the middle of a task.
+// \`events\`: macOS already lets LocalRouter send System Events key strokes (checked without asking), so the keystroke
+// that maps the character to the key on the current layout is still used where the app has no menu item.
 function command(app, letter, events) {
   if (menuCommand(app, letter)) return;
-  events.keystroke(letter.toLowerCase(), { using: 'command down' });
+  if (events) return void Application('System Events').keystroke(letter.toLowerCase(), { using: 'command down' });
+  throw new Error('LOCALROUTER_NO_MENU_COMMAND:' + letter + ':');
 }
 // Pastes text through the pasteboard, marked transient and concealed so clipboard managers do not keep it, then
 // puts back what the pasteboard held. For text the keyboard cannot type as is (other scripts, emoji, line breaks).
@@ -381,7 +417,6 @@ function paste(app, text, events) {
 }
 function run(argv) {
   var op = argv[0], payload = JSON.parse(argv[1] || '{}'), dryrun = payload.dryrun === true;
-  var events = Application('System Events');
   trusted();
   if (op === 'press') {
     // A key to the app's own process (CGEventPostToPid), not the global tap, so the person's keyboard is untouched.
@@ -418,7 +453,10 @@ function run(argv) {
   }
   if (op === 'keys') {
     if (/[\\r\\n]/.test(payload.text)) throw new Error('LOCALROUTER_NEWLINE');
-    if (!dryrun) events.keystroke(payload.text);
+    // System Events' keystroke only where macOS already allows it (checked without asking, payload.events); else to the
+    // process in front (the field 'focus' just clicked into), as Unicode key events: no Apple Event, so no prompt.
+    if (payload.events === true) { if (!dryrun) Application('System Events').keystroke(payload.text); }
+    else typeText($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier, String(payload.text), dryrun);
     return JSON.stringify({ mode: 'pointer' });
   }
   var spot = /^v:(-?[\\d.]+),(-?[\\d.]+)$/.exec(String(payload.ref || '')), point, el = null, ax = null;
@@ -432,11 +470,13 @@ function run(argv) {
   }
   if (op === 'value') return JSON.stringify({ value: el && plain(el, 'AXSubrole') !== 'AXSecureTextField' ? plain(el, 'AXValue') : null });
   if (op === 'paste') {
-    if (!dryrun) paste(ax || front().app, payload.text, events);
+    if (!dryrun) paste(ax || front().app, payload.text, payload.events === true);
     return 'ok';
   }
   if (op === 'click') {
-    if (el && pressable(el)) { if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ mode: 'background', at: point ? { x: point[0], y: point[1] } : null }); }
+    var at = point ? { x: point[0], y: point[1] } : null;
+    if (el && pressable(el)) { if (dryrun || $.AXUIElementPerformAction(el, $('AXPress')) === 0) return JSON.stringify({ mode: 'background', at: at }); }
+    if (el && (dryrun ? focusable(el) : focusInPlace(el))) return JSON.stringify({ mode: 'background', at: at, how: 'focused through accessibility' });
     if (payload.allow !== true) throw new Error('LOCALROUTER_NEEDS_POINTER:that control has no accessible action:');
     if (!point) throw new Error('LOCALROUTER_GONE');
     clickAt(point, dryrun);
@@ -455,7 +495,7 @@ function run(argv) {
     }
     // The text it holds is selected (to be replaced) only when there is any.
     var current = plain(el, 'AXValue');
-    if (typeof current === 'string' && current.length) command(ax, 'A', events);
+    if (typeof current === 'string' && current.length) command(ax, 'A', payload.events === true);
     return JSON.stringify({ mode: 'pointer', pointer: left, at: left });
   }
   throw new Error('LOCALROUTER_UNKNOWN_OP');
@@ -532,9 +572,9 @@ function actionPayload(action: ScreenAction): object {
   return { ref: action.ref }
 }
 
-// -1743 is the separate Automation prompt (permission to send Apple Events to System Events,
-// used for key presses and typed text). A refusal from the one app being read (LOCALROUTER_UNREACHABLE)
-// is not a missing permission: Accessibility is on, and that app has to be reopened.
+// -1743 is the separate Automation refusal (permission to send Apple Events to another app; the computer-use path
+// sends none to System Events, so this comes from an older helper or Chrome's tab search). A refusal from the one app
+// being read (LOCALROUTER_UNREACHABLE) is not a missing permission: Accessibility is on, and that app has to be reopened.
 const AUTOMATION = /-1743|Not authorized to send Apple events/i
 const ACCESSIBILITY = /LOCALROUTER_NO_ACCESSIBILITY|-1719|assistive access|not allowed/i
 export const UNREACHABLE = /LOCALROUTER_UNREACHABLE:([^:]+):/
@@ -664,7 +704,13 @@ export function landed(value: string | null, text: string): boolean {
   return squash(value).includes(squash(text))
 }
 
-export type DesktopOptions = { sleep?: (ms: number) => Promise<void>; tmp?: () => string }
+/** `automation`: whether macOS already lets LocalRouter send Apple Events to an app, asked without a prompt. */
+export type DesktopOptions = { sleep?: (ms: number) => Promise<void>; tmp?: () => string; automation?: AutomationCheck }
+
+const SCREEN_RECORDING_OFF = 'Screen Recording is off for LocalRouter, so no screenshot was taken.'
+
+/** The menu item each Command shortcut the act script presses stands for. */
+const MENU_ITEMS: Record<string, string> = { A: 'Select All', V: 'Paste' }
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 const stopped = (signal: AbortSignal) => new Error(typeof signal.reason === 'string' && signal.reason ? signal.reason : 'It was stopped.')
@@ -675,11 +721,18 @@ export class DesktopBackend implements ScreenBackend {
   private readonly runner: CommandRunner
   private readonly sleep: (ms: number) => Promise<void>
   private readonly tmp: () => string
+  private readonly automation: AutomationCheck | undefined
 
   constructor(runner: CommandRunner = jxaRunner, options: DesktopOptions = {}) {
     this.runner = runner
     this.sleep = options.sleep ?? pause
     this.tmp = options.tmp ?? (() => join(tmpdir(), `localrouter-screen-${process.pid}-${Date.now()}.png`))
+    this.automation = options.automation
+  }
+
+  /** System Events key strokes only where macOS already said yes; never a question during a task. */
+  private async systemEvents(): Promise<boolean> {
+    return this.automation ? this.automation.allowed('com.apple.systemevents').catch(() => false) : false
   }
 
   async observe(options: ObserveOptions = {}): Promise<Observation> {
@@ -697,9 +750,12 @@ export class DesktopBackend implements ScreenBackend {
   /**
    * For an app that refuses accessibility: its front window's text, read on this Mac from a screenshot
    * (Vision), as spots to click. The screenshot is deleted at once. `refused` is thrown when nothing
-   * could be read (no window, or no Screen Recording access, which leaves the screenshot blank).
+   * could be read (no window). Without Screen Recording no screenshot is taken at all: on recent macOS a capture
+   * without it can open the system's Screen Recording prompt in the middle of the task.
    */
   private async observeScreenshot(refused: Error): Promise<Observation> {
+    const recording = await macAccess(this.runner).then((access) => access.screenRecording, () => false)
+    if (!recording) throw new Error(`${refused.message} ${SCREEN_RECORDING_OFF} Reading its window from a screenshot needs it: allow LocalRouter in System Settings › Privacy & Security › Screen Recording, then try again.`)
     const front = frontWindowShape(json((await this.runner.run(...jxa(FRONT_WINDOW_SCRIPT))).trim(), 'front window'))
     if (!front.window) throw refused
     const window = front.window
@@ -744,14 +800,15 @@ export class DesktopBackend implements ScreenBackend {
       if (!landed(await this.readValue(ref, signal), text)) throw new Error('The text did not land in the text box, so it stopped.')
       return { mode: 'background', how: 'value set through accessibility' }
     }
-    const left = resultOf(await this.call(ACT_SCRIPT, ['focus', JSON.stringify({ ref, allow: true })], signal))
+    const events = await this.systemEvents()
+    const left = resultOf(await this.call(ACT_SCRIPT, ['focus', JSON.stringify({ ref, allow: true, events })], signal))
     if (KEYBOARD_TEXT.test(text)) {
       for (const chunk of chunks(text, KEY_CHUNK)) {
         if (signal?.aborted) throw stopped(signal)
-        await this.call(ACT_SCRIPT, ['keys', JSON.stringify({ text: chunk })], signal)
+        await this.call(ACT_SCRIPT, ['keys', JSON.stringify({ text: chunk, events })], signal)
       }
     } else {
-      await this.call(ACT_SCRIPT, ['paste', JSON.stringify({ ref, text })], signal)
+      await this.call(ACT_SCRIPT, ['paste', JSON.stringify({ ref, text, events })], signal)
     }
     await this.sleep(READBACK_MS)
     if (!landed(await this.readValue(ref, signal), text)) throw new Error('The text did not land in the text box, so it stopped.')
@@ -776,12 +833,13 @@ export class DesktopBackend implements ScreenBackend {
 
   /**
    * The front window as a PNG, scaled so its longer edge is at most `maxEdge` pixels (a Retina capture is twice the
-   * window's points). Needs Screen Recording: without it macOS returns the desktop instead of the window, so it is
-   * checked first. The file is deleted at once.
+   * window's points). Needs Screen Recording: without it macOS returns the desktop instead of the window (or opens its
+   * permission prompt), so it is checked first (CGPreflightScreenCaptureAccess, which never asks). The file is
+   * deleted at once.
    */
   async screenshot(options: ScreenshotOptions = {}): Promise<Screenshot> {
     const access = await macAccess(this.runner)
-    if (!access.screenRecording) throw new Error('A screenshot needs Screen Recording access. Allow LocalRouter in System Settings › Privacy & Security › Screen Recording, then try again.')
+    if (!access.screenRecording) throw new Error(`${SCREEN_RECORDING_OFF} A screenshot needs it: allow LocalRouter in System Settings › Privacy & Security › Screen Recording, then try again.`)
     const front = frontWindowShape(json((await this.call(FRONT_WINDOW_SCRIPT, [], options.signal)).trim(), 'front window'))
     if (!front.window) throw new Error('The app in front has no open window.')
     const window = front.window
@@ -815,7 +873,7 @@ export class DesktopBackend implements ScreenBackend {
 function resultOf(output: string): ActResult {
   const text = output.trim()
   if (!text.startsWith('{')) return { mode: 'background' }
-  let value: { mode?: unknown; at?: unknown; pointer?: unknown }
+  let value: { mode?: unknown; at?: unknown; pointer?: unknown; how?: unknown }
   try {
     value = JSON.parse(text) as typeof value
   } catch {
@@ -828,6 +886,7 @@ function resultOf(output: string): ActResult {
   const pointer = point(value.pointer)
   if (at) result.at = at
   if (pointer) result.pointer = pointer
+  if (typeof value.how === 'string' && value.how) result.how = value.how
   return result
 }
 
@@ -852,5 +911,10 @@ function explain(message: string): Error | null {
   if (needs) return new NeedsPointer(needs[1].trim() || 'it has no accessible action')
   if (message.includes('LOCALROUTER_NOT_FOCUSED')) return new Error('The text box did not take the typing focus, so nothing was typed.')
   if (message.includes('LOCALROUTER_NEWLINE')) return new Error('Line breaks are never typed as keys (a Return could send a message).')
+  const menu = message.match(/LOCALROUTER_NO_MENU_COMMAND:([A-Z]):/)
+  if (menu) {
+    const item = MENU_ITEMS[menu[1]] ?? `⌘${menu[1]}`
+    return new Error(`The app in front has no ${item} menu item (⌘${menu[1]}), so that was not done. LocalRouter only uses an app's own menu for it: pressing the shortcut through System Events would make macOS ask for permission in the middle of the task.`)
+  }
   return macAccessError(message)
 }

@@ -4,9 +4,10 @@
  * wrong or expired code, a revoked token). Pure, so it is tested without Electron or a box; the main process gathers
  * the facts and the page only draws what this returns.
  */
+import { PlainHttpError } from '../harness/spark.ts'
 import type { Capabilities, WhoAmI } from '../harness/spark.ts'
 
-export type StepId = 'address' | 'code' | 'connection' | 'permissions'
+export type StepId = 'address' | 'code' | 'connection' | 'permissions' | 'control'
 export type StepStatus = 'todo' | 'active' | 'done' | 'warn' | 'error'
 export type ErrorKind = 'invalid_address' | 'unreachable' | 'refused' | 'timeout' | 'tls' | 'not_localrouter' | 'too_old' | 'code_format' | 'wrong_code' | 'revoked' | 'server'
 export type ConnectError = { kind: ErrorKind; title: string; hint: string; detail?: string }
@@ -40,6 +41,8 @@ export type ConnectInput = {
   /** The last failed address check or pairing; a failed connection is in `connection`. */
   errors: Partial<Record<'address' | 'code', ConnectError>>
   permissions: Permissions
+  /** The standing grant for computer control: given once here, in setup, never by a card over a task. */
+  control?: { granted: boolean }
 }
 
 export type Step = { id: StepId; status: StepStatus; summary: string }
@@ -103,7 +106,10 @@ export function connectView(i: ConnectInput): ConnectView {
   else connection = { id: 'connection', status: i.connection.warning ? 'warn' : 'done', summary: i.connection.warning ?? `Connected · ${i.connection.capabilities.filter((c) => c.ok).length} of ${i.connection.capabilities.length} features available` }
 
   const p = permissionStep(i.permissions)
-  const steps: Step[] = [address, code, connection, { id: 'permissions', ...p }]
+  const control: Step = i.control?.granted
+    ? { id: 'control', status: 'done', summary: 'Jarvis may use this computer, in the background; stop it any time' }
+    : { id: 'control', status: 'todo', summary: 'Let Jarvis use this computer: asked only here, once' }
+  const steps: Step[] = [address, code, connection, { id: 'permissions', ...p }, control]
   // Warnings do not block: a connection that works with a caveat counts as done for what comes next.
   const first = steps.find((s) => s.status !== 'done' && s.status !== 'warn')
   if (first && first.status === 'todo') first.status = 'active'
@@ -221,6 +227,7 @@ export function classify(error: unknown, stage: Stage, timeoutS: number): Connec
   const detail = codes[codes.length - 1] ?? messageOf(error)
   const status = all.find((e) => e.status !== undefined)?.status
 
+  if (error instanceof PlainHttpError) return plainHttp(error)
   if (error instanceof AddressError) return { kind: 'invalid_address', title: 'That is not a Spark address', hint: `${error.message}. It looks like https://your-spark.your-tailnet.ts.net:10443.` }
   if (error instanceof CodeError) return { kind: 'code_format', title: 'That is not a pairing code', hint: 'A code is 8 letters and digits, like 7KQ2-M9XD, as `pair.sh add` printed it.' }
   if (status !== undefined) {
@@ -250,6 +257,18 @@ export function classify(error: unknown, stage: Stage, timeoutS: number): Connec
   if (codes.some((c) => c === 'ECONNRESET' || c === 'UND_ERR_SOCKET' || c.startsWith('HPE_')))
     return { kind: 'not_localrouter', title: 'The connection broke before LocalRouter answered', hint: 'Something else may be on that port, or it speaks HTTPS where you wrote http:// (or the other way round). Check the address.', detail }
   return { kind: 'unreachable', title: stage === 'code' ? 'Pairing failed' : 'The Spark did not answer', hint: messageOf(error), detail }
+}
+
+/** Why plain http:// to a LAN address is refused (by design), and the tailnet name to use instead when it is known. */
+function plainHttp(e: PlainHttpError): ConnectError {
+  const where = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|f[cd]|fe80:)/i.test(e.host) ? 'an address on your local network' : 'not this computer or a tailnet address'
+  const use = e.suggestion ? `Use its tailnet name instead: http://${e.suggestion}:${e.port}` : `Use the Spark’s tailnet name, like http://your-spark.your-tailnet.ts.net:${e.port}`
+  return {
+    kind: 'invalid_address',
+    title: 'Plain http:// works only over the tailnet',
+    hint: `${e.host} is ${where}. LocalRouter would send it the pairing code, its login token and what it reads from your screen unencrypted, so plain http:// is allowed only to this computer or over Tailscale, which encrypts it. ${use}, or the https:// address \`tailscale serve\` gives the Spark.`,
+    detail: `http://${e.host}:${e.port}`,
+  }
 }
 
 export class AddressError extends Error {}
@@ -298,6 +317,23 @@ export function tailnetPeers(status: unknown): TailnetPeer[] | null {
   }
   // Linux first: a Spark runs it; phones and other Macs are tried last.
   return peers.sort((a, b) => Number(b.os === 'linux') - Number(a.os === 'linux') || a.dns.localeCompare(b.dns))
+}
+
+/**
+ * The MagicDNS name of the online peer that owns `host` (an IP, as in `http://192.168.1.117:8190`), from `tailscale
+ * status --json`: a peer's `Addrs` and `CurAddr` are the "ip:port" endpoints it is reached at ("[ip]:port" for IPv6).
+ * Null when Tailscale is not running here or no online peer has that address: never a guess.
+ */
+export function peerNameFor(status: unknown, host: string): string | null {
+  const s = status as { BackendState?: string; Peer?: Record<string, { DNSName?: string; Online?: boolean; Addrs?: string[] | null; CurAddr?: string }> } | null
+  if (!s || s.BackendState !== 'Running') return null
+  const want = host.replace(/^\[|\]$/g, '').toLowerCase()
+  const ipOf = (endpoint: string) => endpoint.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase()
+  for (const p of Object.values(s.Peer ?? {})) {
+    const dns = (p.DNSName ?? '').replace(/\.$/, '')
+    if (p.Online && dns && [...(p.Addrs ?? []), p.CurAddr ?? ''].some((a) => a && ipOf(a) === want)) return dns
+  }
+  return null
 }
 
 /** The addresses to try for a peer: `tailscale serve`'s Jarvis port, then its default HTTPS port. */

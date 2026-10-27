@@ -52,15 +52,18 @@ export type AccessReport = {
   requirements: Requirement[]
 }
 
-export type PresenceOptions = { window?: number; waiting?: (text: string) => void }
+export type PresenceOptions = { window?: number; waiting?: (text: string) => void; signal?: AbortSignal }
 
 /** The person's presence for one approval, checked by the OS where it can be (Touch ID, Windows Hello). */
 export interface PlatformPresence {
   readonly method: string
+  /** After `available()` said no: why, in words ("Windows Hello is not set up for you"). */
+  readonly why?: string
   /**
    * Resolves true only when the OS confirmed the person; false when they cancelled or it failed. `window`: the app's
    * window handle, so the OS prompt opens over it (Windows: an HWND); `waiting`: called with a sentence for the card when
-   * the prompt is open but could not be brought in front of other windows.
+   * the prompt is open but could not be brought in front of other windows; `signal`: aborted when the approval ends
+   * another way, which cancels the OS prompt and resolves false.
    */
   verify(prompt: string, options?: PresenceOptions): Promise<boolean>
   /** Whether it can be used on this computer now (hardware enrolled, service running). */
@@ -86,6 +89,12 @@ export type Platform = {
   /** An OS presence check for approvals; null: the app's own confirmation dialog. */
   readonly presence: PlatformPresence | null
   access(): Promise<AccessReport>
+  /**
+   * macOS: the Automation grants computer use relies on, asked once from the app's setup (the one moment a "LocalRouter
+   * wants to control …" prompt may appear; during tasks nothing asks). Resolves each bundle id asked to macOS's
+   * status: 0 granted, -1743 denied, -1744 no answer, -600 not running (not asked), -1 could not be checked.
+   */
+  readonly automation?: { ask(): Promise<Record<string, number>> }
   /** Ends what the platform keeps running (Windows' PowerShell workers), when the executor stops. */
   close?(): void
 }

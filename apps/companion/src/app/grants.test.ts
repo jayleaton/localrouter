@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { grantStates, signingId } from './grants.ts'
+import { grantStates, micResetBeforeAsk, signingId } from './grants.ts'
 
 const all = (v: boolean) => ({ accessibility: v, screen: v, microphone: v })
 const SIGNED = signingId('identifier "com.localrouter.companion" and certificate leaf = H"ab12"')
@@ -35,5 +35,17 @@ describe('macOS grants across builds', () => {
   it('entries from before signatures were recorded, and an unreadable signature, call nothing stale', () => {
     expect(grantStates(all(false), null, { accessibility: '0.1.0@1761300000000', screen: '0.1.0@1761300000000' }, SIGNED)).toEqual({ state: { accessibility: 'not-granted', screen: 'not-granted', microphone: 'not-granted' }, grants: {} })
     expect(grantStates(all(false), null, { screen: ADHOC }, null).state.screen).toBe('not-granted')
+  })
+
+  it('no repeated prompts: a Microphone entry from an older signature is reset once and asked once; updates keep it (Mac run, 2026-10-26)', () => {
+    // The c44379c install: macOS failed to match the old Microphone entry and reported it as not granted.
+    expect(micResetBeforeAsk('not-determined')).toBe(true)
+    expect(micResetBeforeAsk('denied')).toBe(true)
+    // Asked once in setup: granted under the stable certificate, recorded under it.
+    const after = grantStates({ accessibility: true, screen: true, microphone: true }, { accessibility: true }, {}, SIGNED)
+    expect(after.grants.microphone).toBe(SIGNED)
+    // An update (a new build, same certificate): still granted, so nothing is reset and nothing asks.
+    expect(grantStates({ accessibility: true, screen: true, microphone: true }, { accessibility: true }, after.grants, SIGNED).state.microphone).toBe('granted')
+    expect(micResetBeforeAsk('granted')).toBe(false)
   })
 })

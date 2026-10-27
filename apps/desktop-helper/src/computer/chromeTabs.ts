@@ -2,9 +2,10 @@
 import { array, boolean, nullable, number, object, optional, string } from '../validate.ts'
 import { JXA_HELPERS, jxa, jxaRunner, macAccessError } from './desktop.ts'
 import type { CommandRunner } from './macControls.ts'
-import type { BrowserTab, BrowserTabs, TabGroup } from './types.ts'
+import type { AutomationCheck, BrowserTab, BrowserTabs, TabGroup } from './types.ts'
 
 const BUNDLE_ID = 'com.google.Chrome'
+const SYSTEM_EVENTS = 'com.apple.systemevents'
 
 /**
  * Every running process of the browser's bundle. Several can share one bundle: a headless Chrome that
@@ -105,31 +106,35 @@ function getFrom(pid, target) {
 
 /**
  * One process's tabs. Scripting gives titles and addresses; when that process refuses Apple Events
- * (Automation not allowed), the tab strip's titles are read through accessibility instead, without
- * addresses. argv: pid.
+ * (Automation not allowed), or macOS has not given its OK yet ("ax": no Apple Event is sent at all, since
+ * one would open macOS's "wants to control Google Chrome" prompt), the tab strip's titles are read through
+ * accessibility instead, without addresses. argv: pid, "events" | "ax".
  */
 const LIST_SCRIPT = `${JXA_HELPERS}${TAB_BUTTONS}${APPLE_EVENTS}
 function run(argv) {
   var pid = Number(argv[0]), tabs = [];
-  try {
-    var windows = every('cwin', null), all = every('CrTb', windows);
-    var titles = getFrom(pid, property('pnam', all)), urls = getFrom(pid, property('URL ', all)), active = getFrom(pid, property('acTI', windows));
-    for (var w = 0; w < titles.length; w++) {
-      for (var t = 0; t < titles[w].length; t++) {
-        tabs.push({ window: w, index: t, title: titles[w][t] || '', url: (urls[w] || [])[t] || '', active: active[w] === t + 1 });
+  if (argv[1] !== 'ax') {
+    try {
+      var windows = every('cwin', null), all = every('CrTb', windows);
+      var titles = getFrom(pid, property('pnam', all)), urls = getFrom(pid, property('URL ', all)), active = getFrom(pid, property('acTI', windows));
+      for (var w = 0; w < titles.length; w++) {
+        for (var t = 0; t < titles[w].length; t++) {
+          tabs.push({ window: w, index: t, title: titles[w][t] || '', url: (urls[w] || [])[t] || '', active: active[w] === t + 1 });
+        }
       }
+      return JSON.stringify(tabs);
+    } catch (scriptingRefused) {
+      tabs = [];
     }
-    return JSON.stringify(tabs);
-  } catch (scriptingRefused) {
-    trusted();
-    var list = attr(axApp(pid), 'AXWindows');
-    for (var w = 0; list && w < list.count; w++) {
-      tabButtons(list.objectAtIndex(w)).forEach(function (button, t) {
-        tabs.push({ window: w, index: t, title: tabTitle(button), url: '', active: plain(button, 'AXValue') === 1 });
-      });
-    }
-    return JSON.stringify(tabs);
   }
+  trusted();
+  var list = attr(axApp(pid), 'AXWindows');
+  for (var v = 0; list && v < list.count; v++) {
+    tabButtons(list.objectAtIndex(v)).forEach(function (button, t) {
+      tabs.push({ window: v, index: t, title: tabTitle(button), url: '', active: plain(button, 'AXValue') === 1 });
+    });
+  }
+  return JSON.stringify(tabs);
 }`
 const tabsSchema = {
   parse: (value: unknown): BrowserTab[] =>
@@ -177,11 +182,14 @@ function run(argv) {
  * without seeing the strip: the browser's own tab search (⇧⌘A in Chromium browsers), typing the name
  * and pressing Return. The window's title (from the window list, which needs no accessibility) says
  * which tab is in front before and after. Nothing is typed unless the search panel actually opened,
- * seen as a new window of that process. argv: pid, name. Returns { before, after, opened }.
+ * seen as a new window of that process. The panel is opened from Chrome's menu (Tab › Search Tabs…)
+ * through accessibility; only when that cannot be reached is ⇧⌘A pressed through System Events, and
+ * only with "events" (macOS already gave its OK: an Apple Event to System Events without it would open
+ * macOS's permission prompt mid-task). The name, Return and Escape are key events posted to Chrome's
+ * process (no Apple Event). argv: pid, name, "events" | "none" (absent: "events").
+ * Returns { before, after, opened, matched?, blocked? }.
  */
-const SEARCH_SCRIPT = `
-ObjC.import('AppKit');
-ObjC.import('CoreGraphics');
+const SEARCH_SCRIPT = `${JXA_HELPERS}
 function own(pid) {
   var list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0))) || [];
   return list.filter(function (w) { return w.kCGWindowOwnerPID === pid && w.kCGWindowLayer === 0; });
@@ -190,15 +198,21 @@ function own(pid) {
 // one over the tab strip on 2026-09-26), and reading one of those made every search look like it failed.
 function real(w) { return w.kCGWindowBounds.Width >= 200 && w.kCGWindowBounds.Height >= 150; }
 function title(pid, skip) { var main = own(pid).filter(function (w) { return real(w) && w.kCGWindowNumber !== skip; })[0]; return main ? String(main.kCGWindowName || '') : ''; }
+function openSearch(pid, events) {
+  try { if (menuCommand(axApp(pid), 'A', 1)) return true; } catch (error) { /* Chrome refuses accessibility: the shortcut */ }
+  if (!events) return false;
+  Application('System Events').keystroke('a', { using: ['command down', 'shift down'] });
+  return true;
+}
 function run(argv) {
-  var pid = Number(argv[0]), name = argv[1], events = Application('System Events');
+  var pid = Number(argv[0]), name = argv[1], events = argv[2] !== 'none';
   var running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
   if (!running || running.isNil()) throw new Error('LOCALROUTER_NO_CHROME');
   running.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
   for (var i = 0; i < 20 && $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier !== pid; i++) delay(0.05);
   if ($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier !== pid) throw new Error('LOCALROUTER_NOT_FRONT');
   var before = title(pid, -1), known = own(pid).map(function (w) { return w.kCGWindowNumber; });
-  events.keystroke('a', { using: ['command down', 'shift down'] });
+  if (!openSearch(pid, events)) return JSON.stringify({ before: before, after: before, opened: false, blocked: true });
   // The panel is a new real window of this process; the first open after Chrome comes forward can take
   // over a second.
   var panel = null;
@@ -208,22 +222,23 @@ function run(argv) {
   }
   if (!panel) return JSON.stringify({ before: before, after: before, opened: false });
   delay(0.2);
-  events.keystroke(name);
+  typeText(pid, name, false);
   delay(0.6);
-  events.keyCode(36);
+  keyToPid(pid, 36);
   delay(0.6);
   var still = own(pid).some(function (w) { return w.kCGWindowNumber === panel.kCGWindowNumber; });
   var after = title(pid, panel.kCGWindowNumber);
   // Nothing matched: the panel is still open, so Escape closes it.
-  if (still) events.keyCode(53);
+  if (still) keyToPid(pid, 53);
   return JSON.stringify({ before: before, after: after, opened: true, matched: !still });
 }`
-type SearchResult = { before: string; after: string; opened: boolean; matched?: boolean }
+type SearchResult = { before: string; after: string; opened: boolean; matched?: boolean; blocked?: boolean }
 const searchSchema = {
   parse: (value: unknown): SearchResult => {
     const result = object(value, 'tab search')
     const matched = optional(result.matched, 'tab search matched', boolean)
-    return { before: string(result.before, 'tab search before'), after: string(result.after, 'tab search after'), opened: boolean(result.opened, 'tab search opened'), ...(matched === undefined ? {} : { matched }) }
+    const blocked = optional(result.blocked, 'tab search blocked', boolean)
+    return { before: string(result.before, 'tab search before'), after: string(result.after, 'tab search after'), opened: boolean(result.opened, 'tab search opened'), ...(matched === undefined ? {} : { matched }), ...(blocked ? { blocked } : {}) }
   },
 }
 
@@ -265,17 +280,29 @@ const groupsSchema = {
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+/** `automation`: macOS's Automation grants, checked without asking; absent, Apple Events are sent as before. */
+export type ChromeTabsOptions = { automation?: AutomationCheck }
+
 /**
  * Google Chrome's tabs, from the Chrome process on screen (never launching Chrome), and switching by
- * clicking the tab strip, or by Chrome's tab search when that process cannot be read.
+ * clicking the tab strip, or by Chrome's tab search when that process cannot be read. With `automation`, an Apple
+ * Event goes to Chrome (or System Events) only when macOS already allowed it: otherwise the tabs are read from the
+ * tab strip through accessibility, so no "wants to control" prompt ever opens during a task.
  */
 export class ChromeTabs implements BrowserTabs {
   readonly browser = 'Google Chrome'
 
   private readonly runner: CommandRunner
+  private readonly automation: AutomationCheck | null
 
-  constructor(runner: CommandRunner = jxaRunner) {
+  constructor(runner: CommandRunner = jxaRunner, options: ChromeTabsOptions = {}) {
     this.runner = runner
+    this.automation = options.automation ?? null
+  }
+
+  /** Whether Apple Events may go to that app now: always without a check, else only with macOS's OK already given. */
+  private async may(bundleId: string): Promise<boolean> {
+    return !this.automation || (await this.automation.allowed(bundleId).catch(() => false))
   }
 
   /** The on-screen Chrome process, or null when no Chrome window can be on screen. */
@@ -287,7 +314,8 @@ export class ChromeTabs implements BrowserTabs {
     const target = await this.instance()
     if (!target) return []
     try {
-      return tabsSchema.parse(JSON.parse((await this.runner.run(...jxa(LIST_SCRIPT, [String(target.pid)]))).trim() || '[]'))
+      const mode = (await this.may(BUNDLE_ID)) ? 'events' : 'ax'
+      return tabsSchema.parse(JSON.parse((await this.runner.run(...jxa(LIST_SCRIPT, [String(target.pid), mode]))).trim() || '[]'))
     } catch (error) {
       throw macAccessError(messageOf(error)) ?? error
     }
@@ -324,13 +352,15 @@ export class ChromeTabs implements BrowserTabs {
     if (!target) throw new Error('Google Chrome is not open.')
     let result: SearchResult
     try {
-      result = searchSchema.parse(JSON.parse((await this.runner.run(...jxa(SEARCH_SCRIPT, [String(target.pid), name]))).trim()))
+      const mode = (await this.may(SYSTEM_EVENTS)) ? 'events' : 'none'
+      result = searchSchema.parse(JSON.parse((await this.runner.run(...jxa(SEARCH_SCRIPT, [String(target.pid), name, mode]))).trim()))
     } catch (error) {
       const message = messageOf(error)
       if (message.includes('LOCALROUTER_NOT_FRONT')) throw new Error('Google Chrome did not come to the front.')
       if (message.includes('LOCALROUTER_NO_CHROME')) throw new Error('Google Chrome is not open.')
       throw macAccessError(message) ?? error
     }
+    if (result.blocked) throw new Error("Chrome's tab search could not be opened: Chrome is not answering accessibility, and pressing its shortcut needs macOS's OK for LocalRouter to control System Events, which LocalRouter never asks for during a task (LocalRouter › Settings › This computer asks for it).")
     if (!result.opened) throw new Error("Chrome's tab search did not open.")
     // The panel closing on Return means a tab was chosen; the front window's title is then that tab's.
     if (result.matched === false) return null

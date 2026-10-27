@@ -9,14 +9,17 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
-import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
+import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
+import { migrates, StoredStanding } from './standing.ts'
+import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
 import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
 import type { Migration, Secrets } from './secrets.ts'
-import { grantStates, signingId } from './grants.ts'
+import { grantStates, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
+import { CONFIRMATION } from '../executor/broker.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
 import { LegacyBridge } from '../executor/legacy.ts'
 import { dataDir, executorSocket } from '../executor/paths.ts'
@@ -34,7 +37,7 @@ import { createPlatform } from '../platform/index.ts'
 import { stopShortcut } from '../platform/shortcut.ts'
 import type { PlatformPresence } from '../platform/types.ts'
 import type { Runtime } from '../harness/runtime.ts'
-import { normalizeBase, pair, Spark } from '../harness/spark.ts'
+import { normalizeBase, pair, PlainHttpError, Spark } from '../harness/spark.ts'
 import type { Fetch } from '../harness/spark.ts'
 
 /**
@@ -87,7 +90,7 @@ const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; automationAsked?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -193,33 +196,56 @@ function windowHandle(win: BrowserWindow | null): number | undefined {
 class AppPresenceGate implements PresenceGate {
   private os: PlatformPresence | null = null
   private osReady = false
+  /** Touch ID through localrouter-presence when the app ships it (dismissible, and it says why when unavailable). */
+  private readonly touch = process.platform === 'darwin' && existsSync(join(process.resourcesPath ?? '', PRESENCE_HELPER)) ? new TouchIdHelper({ file: join(process.resourcesPath ?? '', PRESENCE_HELPER) }) : null
+  private touchWhy = ''
 
   /** The running platform's check, once the executor has started; its availability is read once. */
   async use(presence: PlatformPresence | null) {
     this.os = presence
     this.osReady = presence ? await presence.available().catch(() => false) : false
+    await this.probe()
+  }
+
+  /** Why Touch ID cannot be used now (LAError's reason), read again before each check: a lid can close meanwhile. */
+  private async probe() {
+    if (!this.touch) return
+    const p = await this.touch.check()
+    this.touchWhy = p.available ? '' : p.why
+    log.info('presence.touch_id', { available: p.available, why: p.why })
+  }
+
+  private get touchId() {
+    return process.platform === 'darwin' && systemPreferences.canPromptTouchID()
   }
 
   get method() {
-    if (process.platform === 'darwin' && systemPreferences.canPromptTouchID()) return 'Touch ID'
+    if (this.touchId) return 'Touch ID'
     if (this.os && this.osReady) return this.os.method
-    return 'a confirmation on this computer'
+    return CONFIRMATION
   }
 
-  async verify(card: Card, waiting?: (text: string) => void): Promise<boolean> {
-    if (process.platform === 'darwin' && systemPreferences.canPromptTouchID()) {
-      try {
-        await systemPreferences.promptTouchID(`let Jarvis ${card.action}`.slice(0, 200))
-        return true
-      } catch {
-        return false
-      }
+  /** On a fallback, why the OS check is not used, so the card and the audit name it. */
+  get why() {
+    if (this.method !== CONFIRMATION) return ''
+    if (process.platform === 'darwin') return this.touchWhy || 'Touch ID is not available on this Mac right now'
+    if (this.os) return this.os.why ?? `${this.os.method} is not available`
+    return ''
+  }
+
+  async verify(card: Card, waiting?: (text: string) => void, signal?: AbortSignal): Promise<boolean> {
+    const prompt = `let Jarvis ${card.action}`.slice(0, 200)
+    if (this.touchId) {
+      // The helper's prompt is dismissed when the approval ends another way; Electron's (a dev build) cannot be.
+      if (this.touch) return this.touch.verify(prompt, signal)
+      return systemPreferences.promptTouchID(prompt).then(() => !signal?.aborted, () => false)
     }
     if (this.os && this.osReady) {
       // The app's window owns the OS prompt (Windows Hello opens over it, not behind it).
       const window = windowHandle(mainWindow)
-      return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200), { ...(window !== undefined ? { window } : {}), ...(waiting ? { waiting } : {}) }).catch(() => false)
+      return this.os.verify(`Let Jarvis ${card.action}`.slice(0, 200), { ...(window !== undefined ? { window } : {}), ...(waiting ? { waiting } : {}), ...(signal ? { signal } : {}) }).catch(() => false)
     }
+    void this.probe()
     const where = [card.app, card.title, card.url].filter(Boolean).join(' · ')
     const options = {
       type: 'warning' as const,
@@ -229,9 +255,12 @@ class AppPresenceGate implements PresenceGate {
       noLink: true,
       message: `Let Jarvis ${card.action}?`,
       detail: `${where}\n${card.kind === 'type' ? `Text: ${card.text}\n` : ''}Why it asks: ${card.why}\nFor: ${card.goal}\nAsked by: ${card.requester}`,
+      // A stop, or the approval ending another way, closes the sheet (it must have a parent window to be closable).
+      ...(signal ? { signal } : {}),
     }
-    const r = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options)
-    return r.response === 1
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+    const r = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options)
+    return r.response === 1 && !signal?.aborted
   }
 }
 
@@ -256,18 +285,33 @@ let virtualCursor: VirtualCursor | null = null
 function cursor(): VirtualCursor {
   if (virtualCursor) return virtualCursor
   let win: BrowserWindow | null = null
+  // The page loads after the window is built: the first ring of a task waits for it instead of being dropped (Windows
+  // run, 2026-10-26: no ring 241 ms after a background click).
+  let loaded = false
+  let pending: string | null = null
   const build = (): BrowserWindow => {
+    loaded = false
     const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds
     const bounds = screen.getAllDisplays().reduce((b, d) => ({ x: Math.min(b.x, d.bounds.x), y: Math.min(b.y, d.bounds.y), right: Math.max(b.right, d.bounds.x + d.bounds.width), bottom: Math.max(b.bottom, d.bounds.y + d.bounds.height) }), { x: area.x, y: area.y, right: area.x + area.width, bottom: area.y + area.height })
     const w = new BrowserWindow({ x: bounds.x, y: bounds.y, width: bounds.right - bounds.x, height: bounds.bottom - bounds.y, frame: false, transparent: true, resizable: false, movable: false, focusable: false, skipTaskbar: true, hasShadow: false, show: false, webPreferences: { contextIsolation: true } })
     w.setIgnoreMouseEvents(true)
     w.setAlwaysOnTop(true, 'screen-saver')
     if (process.platform === 'darwin') w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    w.webContents.once('did-finish-load', () => {
+      loaded = true
+      if (pending) run(pending)
+      pending = null
+    })
     void w.loadURL(`data:text/html,${encodeURIComponent(overlayHtml())}`)
     return w
   }
   const run = (js: string) => {
-    if (win && !win.isDestroyed()) void win.webContents.executeJavaScript(js).catch(() => undefined)
+    if (!win || win.isDestroyed()) return
+    if (!loaded) {
+      pending = js
+      return
+    }
+    void win.webContents.executeJavaScript(js).catch(() => undefined)
   }
   const surface: Surface = {
     showAt: (x, y, mode) => {
@@ -305,12 +349,43 @@ let executor: Executor | null = null
 
 export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark: pair it on the Connect page.'
 
+/** The person's grant for computer control, kept with the tokens; "Ask before each action" is a setting. */
+const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => saveSecrets(s) }, () => settings?.askEachAction === true)
+
+/**
+ * An install already set up (paired, with the OS grants computer control needs) that never decided gets the standing
+ * grant at start with no card: that setup was the consent (JJ, 2026-10-26). Audited as `source: migrated`.
+ */
+async function migrateStanding() {
+  if (!executor || !standing.undecided) return
+  const access = await executor.built.platform.access().catch(() => null)
+  if (!migrates({ paired: Boolean(settings.base && loadSecrets().token), undecided: standing.undecided, os: process.platform, access })) return
+  executor.broker.grantStanding('migrated')
+  log.info('consent.migrated', { os: process.platform })
+}
+
+/**
+ * macOS: the Automation grants (System Events, and Chrome when it runs), asked once, from setup, where the person
+ * pressed the button: the one moment a "LocalRouter wants to control…" prompt may come. During tasks nothing asks.
+ */
+async function askAutomationOnce() {
+  const automation = executor?.built.platform.automation
+  if (!automation || settings.automationAsked) return
+  const answers = await automation.ask().catch(() => ({}))
+  settings = { ...settings, automationAsked: new Date().toISOString() }
+  saveSettings(settings)
+  log.info('automation.asked', answers)
+}
+
 async function startLocalExecutor(): Promise<void> {
   if (executor) return
-  executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
+  executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, standing, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
   executor.broker.setDecider(null, UNPAIRED)
   await gate.use(executor.built.platform.presence)
+  await migrateStanding()
   executor.broker.on((e) => {
+    // Refused for want of the grant: a notification only, never a window over the person's work.
+    if (e.type === 'consent.needed' && Notification.isSupported()) new Notification({ title: 'Computer control is off', body: `Jarvis asked to ${e.goal.slice(0, 80)}. Turn computer control on in LocalRouter → Settings.` }).show()
     if (e.type === 'approval') {
       showMain()
       if (Notification.isSupported()) new Notification({ title: 'Jarvis asks for your OK', body: `${e.card.action}. Approve it in LocalRouter.` }).show()
@@ -320,7 +395,11 @@ async function startLocalExecutor(): Promise<void> {
     // The OS check is open behind other windows: say where it is, in a notification as well as on the card.
     if (e.type === 'approval.update' && e.card.waiting && Notification.isSupported()) new Notification({ title: 'Windows Hello is waiting', body: e.card.waiting }).show()
     // The visible virtual cursor: show where the agent acted; let go of the overlay when the task ends.
-    if (e.type === 'cursor') cursor().show({ x: e.at.x, y: e.at.y, mode: e.mode })
+    if (e.type === 'cursor') {
+      // Windows and Linux report screen pixels; the overlay is placed in Electron's DIPs (a 150 % display differs).
+      const at = process.platform === 'darwin' ? e.at : screen.screenToDipPoint(e.at)
+      cursor().show({ x: at.x, y: at.y, mode: e.mode })
+    }
     if (e.type === 'task' && e.task.status !== 'running') cursor().end()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()
@@ -517,6 +596,8 @@ function registerIpc() {
       if (!supportsApp(caps)) errors.address = tooOld()
       else draft = { base: b, server: serverOf(caps), repair: Boolean(runtime) && b === settings.base }
     } catch (error) {
+      // A LAN address over plain http://: name the same Spark's tailnet address, when Tailscale knows it.
+      if (error instanceof PlainHttpError) error.suggestion = peerNameFor(await tailscaleStatus().catch(() => null), error.host)
       errors.address = classify(error, 'address', CHECK_S)
     }
     return { ...(await state()), link_code: errors.address ? null : linkCode }
@@ -561,7 +642,8 @@ function registerIpc() {
     await stopRuntime()
     settings = { ...settings, base: '', device: null, legacy: false }
     saveSettings(settings)
-    saveSecrets({ token: '', legacy_token: '' })
+    // The person's grant for computer control is theirs, not the Spark's: it stays until revoked in Settings.
+    saveSecrets({ ...loadSecrets(), token: '', legacy_token: '' })
     draft = null
     connection = null
     errors = {}
@@ -591,10 +673,9 @@ function registerIpc() {
   setup('setup:permission', async (kind) => {
     if (process.platform !== 'darwin') return state()
     if (kind === 'microphone') {
-      // Denied (or held by an older build's entry that macOS reports as denied): macOS never asks again by itself, so
-      // this app's entry is reset first and macOS shows its prompt.
-      const status = systemPreferences.getMediaAccessStatus('microphone')
-      if (status === 'denied' || status === 'restricted') await resetGrant('Microphone')
+      // Not granted now (denied, or an older build's entry that no longer matches this signature): macOS never asks
+      // again by itself, so this app's entry is reset first and macOS shows its prompt, once (grants.ts).
+      if (micResetBeforeAsk(systemPreferences.getMediaAccessStatus('microphone'))) await resetGrant('Microphone')
       await systemPreferences.askForMediaAccess('microphone')
     }
     if (kind === 'accessibility') {
@@ -641,6 +722,26 @@ function registerIpc() {
   setup('setup:control', (on) => {
     executor?.broker.setDisabled(!on)
     refreshTray()
+    return state()
+  })
+  // "Ask before each action" (off by default): a card per consequential step instead of the standing grant.
+  setup('setup:askEach', (on) => {
+    settings = { ...settings, askEachAction: Boolean(on) }
+    saveSettings(settings)
+    return state()
+  })
+  // The one consent, in setup (the onboarding step, or Settings): never a card over a task. On a Mac it also asks the
+  // Automation grants once, here, so no "wants to control" prompt can come up during a task.
+  setup('setup:grantControl', async (from) => {
+    if (!executor) return state()
+    executor.broker.grantStanding(from === 'settings' ? 'settings' : 'onboarding')
+    await askAutomationOnce()
+    return state()
+  })
+  // "Revoke computer control": the standing grant is cleared; tasks are refused until it is given again here.
+  setup('setup:revokeControl', () => {
+    if (executor) executor.broker.revokeStanding('settings')
+    else standing.set(false)
     return state()
   })
   setup('setup:export', async () => {
@@ -749,12 +850,13 @@ const timed = (s: number): Fetch => (input, init) => {
   return fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, limit]) : limit })
 }
 
-/** The Spark's base URL from what was typed, or an AddressError saying why not. */
+/** The Spark's base URL from what was typed, or an AddressError (a PlainHttpError for http:// to a LAN host) saying why not. */
 function sparkBase(text: string): string {
   if (!text) throw new AddressError('Enter the address your Spark answers on')
   try {
     return normalizeBase(text)
   } catch (error) {
+    if (error instanceof PlainHttpError) throw error
     throw new AddressError(error instanceof Error && !/invalid url/i.test(error.message) ? error.message : 'That does not read as an address')
   }
 }
@@ -826,12 +928,17 @@ async function state() {
     shared: settings.shared,
     legacy: { enabled: settings.legacy, connected: legacy?.status.connected ?? false },
     presence: gate.method,
+    presence_why: gate.why,
     secrets: secretsWhere(),
     control: executor ? !executor.broker.disabled : false,
+    approvals: executor?.broker.approvalMode() ?? 'consent',
+    control_granted: standing.granted(),
+    ask_each: settings.askEachAction === true,
+    granted_since: standing.since,
     machine: machineKind(),
     permissions: permissionState,
     stop_words: executor?.built.platform.pointer ? `${STOP.words}, the tray menu, or move the pointer to the top-left corner` : `${STOP.words} or the tray menu`,
-    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState }), draft, connection, errors },
+    connect: { ...connectView({ paired: Boolean(runtime), base: settings.base, draft, connection, errors, permissions: permissionState, control: { granted: standing.granted() } }), draft, connection, errors },
     stale_message: STALE_GRANT,
     callers,
     mcp: { command: mcpLauncher(process.resourcesPath ?? '', process.platform), socket: executorSocket(dir) },
@@ -1055,6 +1162,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
   }
   if (r.outcome === 'migrated') {
     memorySecrets = (await keychain.get()) ?? { ...EMPTY }
+    await migrateStanding()
     if (o.interactive) {
       await startRuntimeFromSettings().catch((error: unknown) => log.error('runtime.start_failed', { error: error instanceof Error ? error.message : String(error) }))
       refreshTray()
@@ -1133,7 +1241,7 @@ async function secretsSelftest() {
     } else if (op === 'load' || op === 'save') {
       await initSecrets()
       if (op === 'save') {
-        await persistSecrets({ token: value, legacy_token: '' })
+        await persistSecrets({ ...EMPTY, token: value })
         await initSecrets()
       }
       out.ok = true

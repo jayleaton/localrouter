@@ -566,6 +566,7 @@ namespace LocalRouterWin
                 case "access": return Json.Write(Access());
                 case "hello_start": return Json.Write(HelloStart(a));
                 case "hello_wait": return Json.Write(HelloWait(a));
+                case "hello_cancel": return Json.Write(HelloCancel());
                 default: throw new LrError("UNKNOWN_OP", op);
             }
         }
@@ -629,7 +630,10 @@ namespace LocalRouterWin
             return d;
         }
 
-        /** Waits (up to ms) for the started prompt's answer: one of UserConsentVerificationResult's names. */
+        /**
+         * Waits (up to ms) for the started prompt's answer: one of UserConsentVerificationResult's names, or "Pending"
+         * when it is still open (the app polls in short waits, so it can cancel the prompt between them).
+         */
         private static Dictionary<string, object> HelloWait(Dictionary<string, object> a)
         {
             if (helloOp == null || helloInfo == null) throw new LrError("UNKNOWN_OP", "hello_wait without hello_start");
@@ -645,10 +649,10 @@ namespace LocalRouterWin
             Dictionary<string, object> d = D();
             if (status == 0)
             {
-                helloInfo.Cancel();
-                d["result"] = "Canceled";
+                d["result"] = "Pending";
+                return d;
             }
-            else if (status == 1)
+            if (status == 1)
             {
                 int result;
                 Check(helloOp.GetResults(out result), "results");
@@ -660,6 +664,24 @@ namespace LocalRouterWin
                 helloInfo.GetErrorCode(out code);
                 d["result"] = status == 2 ? "Canceled" : "Error";
                 d["code"] = string.Format("0x{0:X8}", code);
+            }
+            helloInfo.Close();
+            helloOp = null;
+            helloInfo = null;
+            return d;
+        }
+
+        /** Cancels the open prompt (the approval ended another way): Windows closes the Windows Security window. */
+        private static Dictionary<string, object> HelloCancel()
+        {
+            Dictionary<string, object> d = D();
+            d["cancelled"] = false;
+            if (helloInfo == null) return d;
+            int status;
+            if (helloInfo.GetStatus(out status) == 0 && status == 0)
+            {
+                helloInfo.Cancel();
+                d["cancelled"] = true;
             }
             helloInfo.Close();
             helloOp = null;
@@ -942,6 +964,24 @@ namespace LocalRouterWin
             return null;
         }
 
+        /** The kinds of element that may be a surface drawing itself, with nothing inside it to read or invoke. */
+        private static bool CanvasType(ControlType type)
+        {
+            return type == ControlType.Pane || type == ControlType.Custom || type == ControlType.Image || type == ControlType.Group;
+        }
+
+        /** A canvas: a canvas-kind element of at least 120×120 px and a tenth of the window, with no children at all. */
+        private static bool Canvas(AutomationElement el, ControlType type, System.Windows.Rect r, Native.RECT wr)
+        {
+            if (!CanvasType(type) || r.Width < 120 || r.Height < 120) return false;
+            double window = Math.Max(1.0, (double)(wr.Right - wr.Left) * (wr.Bottom - wr.Top));
+            if (r.Width * r.Height < window / 10) return false;
+            try { return el.FindFirst(TreeScope.Children, Automation.ControlViewCondition) == null; }
+            catch (ElementNotAvailableException) { return false; }
+            catch (COMException) { return false; }
+            catch (InvalidOperationException) { return false; }
+        }
+
         /** Controls whose children are not worth the walk's budget: their own name is their label. */
         private static bool Leaf(ControlType type)
         {
@@ -1027,6 +1067,9 @@ namespace LocalRouterWin
                         bool readOnly = valued && CachedBool(el, ValuePattern.IsReadOnlyProperty);
                         bool password = CachedBool(el, AutomationElement.IsPasswordProperty);
                         string role = RoleOf(type, valued && !readOnly);
+                        // A surface that draws itself (Paint's canvas, a game, a map): offered as a place to click, so
+                        // the step reaches the pointer fallback instead of the task ending stuck with nothing to choose.
+                        if (role == null && Canvas(el, type, r, wr)) role = "other";
                         if (role == "textbox" && type == ControlType.Edit && valued && readOnly && !password)
                         {
                             // A read-only edit is text on the page (a label, a status line), not a field to type into.
@@ -1038,6 +1081,7 @@ namespace LocalRouterWin
                         {
                             string label = name;
                             if (label.Length == 0) { try { label = el.Cached.HelpText ?? ""; } catch (InvalidOperationException) { } }
+                            if (role == "other") label = label.Length > 0 ? label + " (a canvas: it draws itself)" : "canvas (it draws itself)";
                             label = Clip(label, 100);
                             if (role != "row" || label.Length > 0)
                             {
@@ -1162,14 +1206,24 @@ namespace LocalRouterWin
             }
             else el = Resolve(Str(a, "ref"), out hwnd);
             NotElevated(hwnd);
+            // Where it acted, read before acting (a click may close the element): the overlay ring shows it there.
+            System.Windows.Rect box = System.Windows.Rect.Empty;
+            try { box = el.Current.BoundingRectangle; } catch (ElementNotAvailableException) { } catch (COMException) { }
+            Dictionary<string, object> done;
             try
             {
-                if (kind == "click") return SemanticClick(el);
-                if (kind == "type") return SemanticType(el, Str(a, "text") ?? "", Str(a, "label") ?? "");
-                if (kind == "scroll") return SemanticScroll(el, Str(a, "direction"), !Has(a, "ref"));
+                if (kind == "click") done = SemanticClick(el);
+                else if (kind == "type") done = SemanticType(el, Str(a, "text") ?? "", Str(a, "label") ?? "");
+                else if (kind == "scroll") done = SemanticScroll(el, Str(a, "direction"), !Has(a, "ref"));
+                else throw new LrError("UNKNOWN_OP", kind);
             }
             catch (ElementNotAvailableException) { throw new LrError("GONE", ""); }
-            throw new LrError("UNKNOWN_OP", kind);
+            if (!box.IsEmpty && box.Width > 0 && box.Height > 0)
+            {
+                done["x"] = Math.Round(box.X + box.Width / 2);
+                done["y"] = Math.Round(box.Y + box.Height / 2);
+            }
+            return done;
         }
 
         /** How long a click's pattern call may take before it counts as done and still running. */
@@ -1226,10 +1280,11 @@ namespace LocalRouterWin
                         if (ec.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) ec.Expand(); else ec.Collapse();
                     }, "expand");
                 }
+                // No pattern: a click on a field, or on anything that takes the keyboard focus, only focuses it
+                // (Chrome's omnibox is an Edit with no Invoke). SetFocus, never the pointer.
                 ControlType type = el.Current.ControlType;
-                if (type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox)
+                if (type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox || (el.Current.IsKeyboardFocusable && !CanvasType(type)))
                 {
-                    // Clicking into a field only focuses it.
                     el.SetFocus();
                     return Done(true, "focus");
                 }

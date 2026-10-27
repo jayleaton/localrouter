@@ -9,7 +9,7 @@ import { stopShortcut } from '../platform/shortcut.ts'
 import type { Built, PlatformChoice } from '../platform/index.ts'
 import { FileAudit } from './audit.ts'
 import { Broker } from './broker.ts'
-import type { PresenceGate } from './broker.ts'
+import type { PresenceGate, Standing } from './broker.ts'
 import { auditPath, callersPath, executorSocket, identityPath } from './paths.ts'
 import { Enrollment, ExecutorServer } from './server.ts'
 
@@ -43,6 +43,8 @@ export type ExecutorOptions = {
   machine: MachineKind
   decider: Decider | null
   gate: PresenceGate
+  /** The person's standing grant for computer control (BrokerOptions.standing). */
+  standing?: Standing
   /** The app's own process and window names, never targets. */
   ownApps?: string[]
   /** Why nobody can approve right now (no window shows approval cards), or null: see BrokerOptions.approvalSurface. */
@@ -70,6 +72,7 @@ export async function startExecutor(o: ExecutorOptions): Promise<Executor> {
     decider: o.decider,
     audit: new FileAudit(auditPath(o.dir)),
     gate: o.gate,
+    ...(o.standing ? { standing: o.standing } : {}),
     ...(stop ? { watch: (abort: (reason: string) => void) => stop.watch(abort) } : {}),
     ownApps: o.ownApps ?? ['LocalRouter', 'Electron'],
     ...(o.approvalSurface ? { approvalSurface: o.approvalSurface } : {}),

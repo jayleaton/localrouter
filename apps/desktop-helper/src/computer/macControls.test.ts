@@ -1,7 +1,7 @@
 // Ported from SideBud (github.com/jayleaton/sidebud @70da540, apps/companion/src/computer/macControls.test.ts), reused in LocalRouter with the owner's permission.
 import { describe, expect, it } from 'vitest'
 import { ControlError, MacControls, parseControl, plistNames, resolveInstalled } from './macControls.ts'
-import type { CommandRunner, InstalledApp } from './macControls.ts'
+import type { CommandRunner, InstalledApp, MacControlsOptions } from './macControls.ts'
 
 type Call = { file: string; args: string[] }
 
@@ -13,7 +13,7 @@ const TREE: Record<string, string[]> = {
 }
 
 /** Fake runner: `respond` picks stdout from the joined script text; every call is recorded. */
-function harness(respond: (script: string, argv: string[]) => string | Error = () => '') {
+function harness(respond: (script: string, argv: string[]) => string | Error = () => '', extra: Partial<MacControlsOptions> = {}) {
   const calls: Call[] = []
   const reads: string[] = []
   let now = 0
@@ -40,6 +40,7 @@ function harness(respond: (script: string, argv: string[]) => string | Error = (
     // No real Info.plist is read (on a Mac, /Applications holds the machine's own apps).
     readText: async () => '',
     now: () => now,
+    ...extra,
   })
   return { controls, calls, reads, advance: (ms: number) => (now += ms) }
 }
@@ -173,6 +174,44 @@ describe('MacControls', () => {
     await controls.activate('Notes')
     expect(calls).toEqual([{ file: 'open', args: ['-a', 'Notes'] }])
     await expect(controls.activate('-n')).rejects.toMatchObject({ code: 'invalid' })
+  })
+})
+
+describe('MacControls and macOS’s permission prompts', () => {
+  const sent = (calls: Call[]) => calls.map((call) => call.args.join(' '))
+
+  it('lists running apps from NSWorkspace in its own process, with no Apple Event to System Events', async () => {
+    const { controls, calls } = harness((script) => (script.includes('runningApplications') ? '["Finder","Google Chrome","Finder"]\n' : new Error('not this')))
+    expect(await controls.running()).toEqual(['Finder', 'Google Chrome', 'Finder'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0].args.slice(0, 2)).toEqual(['-l', 'JavaScript'])
+    expect(calls[0].args[3]).toContain('activationPolicy')
+    expect(sent(calls).join()).not.toMatch(/System Events|tell application/)
+  })
+
+  it('without macOS’s OK never sends the Apple Event: dark mode, locking, Spotify and quitting are refused in words', async () => {
+    const asked: string[] = []
+    const automation = { allowed: async (id: string) => (asked.push(id), false) }
+    const { controls, calls } = harness((script) => (script.includes('is running') ? 'true\n' : script.includes('bundleIdentifier') ? 'com.tinyspeck.slackmacgap\n' : ''), { automation })
+    const refused = (control: Parameters<MacControls['run']>[0]) => controls.run(control).then(() => null, (error: unknown) => error as ControlError)
+    const dark = await refused({ kind: 'dark_mode', action: 'toggle' })
+    expect(dark).toBeInstanceOf(ControlError)
+    expect(dark).toMatchObject({ code: 'unavailable', message: 'macOS needs your OK once for LocalRouter to control System Events: LocalRouter › Settings › This computer asks for it.' })
+    expect(await refused({ kind: 'lock_screen' })).toMatchObject({ code: 'unavailable' })
+    expect(await refused({ kind: 'media', action: 'play', player: 'Spotify' })).toMatchObject({ message: expect.stringContaining('to control Spotify') })
+    expect(await refused({ kind: 'volume', action: 'up', target: 'Music' })).toMatchObject({ message: expect.stringContaining('to control Music') })
+    expect(await refused({ kind: 'quit_app', app: 'Slack' })).toMatchObject({ code: 'unavailable', message: expect.stringContaining('quit Slack yourself') })
+    expect(asked).toEqual(['com.apple.systemevents', 'com.apple.systemevents', 'com.spotify.client', 'com.apple.Music', 'com.tinyspeck.slackmacgap'])
+    // Only checks that send no Apple Event ran: whether an app runs, and the bundle id of the one to quit.
+    expect(sent(calls).join('\n')).not.toMatch(/System Events|tell application|sound volume|to quit/)
+    // System volume is StandardAdditions in osascript's own process: no prompt, so no check.
+    expect(await controls.run({ kind: 'volume', action: 'mute', target: 'system' })).toEqual({ done: 'Muted.' })
+  })
+
+  it('with macOS’s OK the control runs as before', async () => {
+    const { controls, calls } = harness((script) => (script.includes('dark mode') ? 'true\n' : ''), { automation: { allowed: async (id) => id === 'com.apple.systemevents' } })
+    expect(await controls.run({ kind: 'dark_mode', action: 'on' })).toEqual({ done: 'Dark mode is on.' })
+    expect(sent(calls).join()).toContain('tell application "System Events" to tell appearance preferences')
   })
 })
 

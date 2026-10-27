@@ -1,0 +1,61 @@
+import { describe, expect, it } from 'vitest'
+import { CONTROL_OFF } from '../executor/broker.ts'
+import { fakeBroker } from '../executor/testing.ts'
+import { EMPTY, parseSecrets } from './secrets.ts'
+import { migrates, StoredStanding } from './standing.ts'
+
+/** The stored blob as the keychain helper or safeStorage keeps it: JSON text, read back by whichever build runs next. */
+function storedAs(text: string) {
+  const box = { text }
+  return { box, store: { load: () => parseSecrets(box.text), save: (s: typeof EMPTY) => void (box.text = JSON.stringify(s)) } }
+}
+
+const app = { caller: { id: 'app', name: 'LocalRouter', kind: 'app' as const } }
+const granted = { accessibility: true, input: true, screen_recording: true }
+
+/** One "send the Groceries note" task; the cards it showed and how it ended. */
+async function task(standing: StoredStanding) {
+  const { broker } = fakeBroker(['c4', 'c3', 'done'], { standing })
+  const cards: string[] = []
+  broker.on((e) => void (e.type === 'approval' && cards.push(e.card.action)))
+  const started = broker.startUse(app, 'send the Groceries note', null)
+  return { cards, outcome: started.ok ? (await started.finished).status : started.error, broker }
+}
+
+describe('the standing grant, stored with the tokens (JJ, 2026-10-26: no permission window during a task)', () => {
+  it('an install already paired with the OS grants is migrated: granted at start with no card, and tasks just run', async () => {
+    const { box, store } = storedAs(JSON.stringify({ token: 'lr_tok', legacy_token: '' }))
+    const standing = new StoredStanding(store, () => false, () => new Date('2026-10-26T23:00:00Z'))
+    expect(migrates({ paired: true, undecided: standing.undecided, os: 'darwin', access: granted })).toBe(true)
+    standing.set(true)
+    expect(JSON.parse(box.text)).toEqual({ token: 'lr_tok', legacy_token: '', computer_grant: '2026-10-26T23:00:00.000Z' })
+    expect(await task(standing)).toMatchObject({ cards: [], outcome: 'done' })
+    // Not paired, or a grant missing (Screen Recording on a Mac), or already decided: no migration.
+    expect(migrates({ paired: false, undecided: true, os: 'darwin', access: granted })).toBe(false)
+    expect(migrates({ paired: true, undecided: true, os: 'darwin', access: { ...granted, screen_recording: false } })).toBe(false)
+    expect(migrates({ paired: true, undecided: true, os: 'win32', access: { ...granted, screen_recording: false } })).toBe(true)
+    expect(migrates({ paired: true, undecided: false, os: 'darwin', access: granted })).toBe(false)
+  })
+
+  it('given once (onboarding): a restart and an update (a new build reading the same blob) never ask', async () => {
+    const { box, store } = storedAs(JSON.stringify({ token: 'lr_tok', legacy_token: '' }))
+    new StoredStanding(store, () => false).set(true)
+    expect(await task(new StoredStanding(storedAs(box.text).store, () => false))).toMatchObject({ cards: [], outcome: 'done' })
+    const newer = storedAs(JSON.stringify({ ...JSON.parse(box.text), some_later_field: 'x' }))
+    expect(await task(new StoredStanding(newer.store, () => false))).toMatchObject({ cards: [], outcome: 'done' })
+  })
+
+  it('not given yet: a task is refused at once with no card; revoked: refused, and never migrated back on', async () => {
+    const fresh = new StoredStanding(storedAs(JSON.stringify({ token: '', legacy_token: '' })).store, () => false)
+    expect(await task(fresh)).toEqual(expect.objectContaining({ cards: [], outcome: CONTROL_OFF }))
+    const { box, store } = storedAs(JSON.stringify({ token: 'lr_tok', legacy_token: '', computer_grant: '2026-10-26T21:40:00.000Z' }))
+    const standing = new StoredStanding(store, () => false)
+    expect(standing.since).toBe('2026-10-26T21:40:00.000Z')
+    standing.set(false)
+    expect(JSON.parse(box.text).token).toBe('lr_tok')
+    expect(standing.granted()).toBe(false)
+    expect(standing.since).toBeNull()
+    expect(migrates({ paired: true, undecided: standing.undecided, os: 'darwin', access: granted })).toBe(false)
+    expect(await task(standing)).toEqual(expect.objectContaining({ cards: [], outcome: CONTROL_OFF }))
+  })
+})

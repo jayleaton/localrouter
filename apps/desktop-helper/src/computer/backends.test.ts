@@ -95,12 +95,39 @@ describe('ChromeTabs', () => {
   it('switches with Chrome’s tab search, typing the name only as argv, and reports the title now in front', async () => {
     const found = chromeRunner(() => JSON.stringify({ before: 'Sidebud · Computer', after: 'blink-182 - YouTube', opened: true }))
     expect(await new ChromeTabs(found.runner).search('YouTube')).toBe('blink-182 - YouTube')
-    expect(found.calls[1]?.argv).toEqual(['502', 'YouTube'])
+    expect(found.calls[1]?.argv).toEqual(['502', 'YouTube', 'events'])
     expect(found.calls[1]?.script).not.toContain('YouTube')
     const nothing = chromeRunner(() => JSON.stringify({ before: 'Sidebud · Computer', after: 'Sidebud · Computer', opened: true }))
     expect(await new ChromeTabs(nothing.runner).search('YouTube')).toBeNull()
     const closed = chromeRunner(() => JSON.stringify({ before: 'x', after: 'x', opened: false }))
     await expect(new ChromeTabs(closed.runner).search('YouTube')).rejects.toThrow("Chrome's tab search did not open.")
+  })
+})
+
+describe('ChromeTabs with macOS’s Automation check', () => {
+  const no = { allowed: async () => false }
+
+  it('without macOS’s OK sends Chrome no Apple Event: the tab strip is read through accessibility', async () => {
+    const tabs = [{ window: 0, index: 0, title: 'Inbox', url: '', active: true }]
+    const { runner, calls } = chromeRunner(() => JSON.stringify(tabs))
+    const asked: string[] = []
+    expect(await new ChromeTabs(runner, { automation: { allowed: async (id) => (asked.push(id), false) } }).list()).toEqual(tabs)
+    expect(asked).toEqual(['com.google.Chrome'])
+    expect(calls[1]?.argv).toEqual(['502', 'ax'])
+    const yes = chromeRunner(() => '[]')
+    await new ChromeTabs(yes.runner, { automation: { allowed: async () => true } }).list()
+    expect(yes.calls[1]?.argv).toEqual(['502', 'events'])
+  })
+
+  it('tab search without the OK for System Events never presses its shortcut through it, and says why when the menu is out of reach', async () => {
+    const found = chromeRunner(() => JSON.stringify({ before: 'a', after: 'blink-182 - YouTube', opened: true, matched: true }))
+    expect(await new ChromeTabs(found.runner, { automation: no }).search('YouTube')).toBe('blink-182 - YouTube')
+    expect(found.calls[1]?.argv).toEqual(['502', 'YouTube', 'none'])
+    // The name, Return and Escape go to Chrome's process as key events; System Events only on the "events" branch.
+    expect(found.calls[1]?.script).toContain('typeText(pid, name, false)')
+    expect(found.calls[1]?.script).toContain("if (!events) return false;\n  Application('System Events')")
+    const blocked = chromeRunner(() => JSON.stringify({ before: 'a', after: 'a', opened: false, blocked: true }))
+    await expect(new ChromeTabs(blocked.runner, { automation: no }).search('YouTube')).rejects.toThrow(/needs macOS's OK for LocalRouter to control System Events, which LocalRouter never asks for during a task/)
   })
 })
 
@@ -191,6 +218,103 @@ describe('DesktopBackend', () => {
     expect(await new DesktopBackend(allowed.runner).act({ kind: 'click', ref: '0.1' }, { allowPointer: true })).toEqual({ mode: 'pointer', pointer: { x: 5, y: 6 }, at: { x: 5, y: 6 } })
     expect(allowed.calls[0]?.argv).toEqual(['click', JSON.stringify({ ref: '0.1', allow: true })])
     expect(SCRIPTS.act).toContain("AXUIElementPerformAction(el, $('AXPress'))")
+  })
+
+  it('the act script: a click on a field with no AXPress (Chrome’s omnibox) focuses it through AXFocused, never the pointer', () => {
+    // The real act script, run with a stand-in AX bridge: the element's role, its actions and whether AXFocused is settable.
+    type El = { role: string; actions?: string[]; focusSettable?: boolean; setRefused?: boolean }
+    const act = (el: El, payload: Record<string, unknown> = { ref: '0.1' }) => {
+      const log: string[] = []
+      const $ = Object.assign((s: string) => s, {
+        AXUIElementCopyActionNames: (_e: El, ref: unknown[]) => ((ref[0] = { count: (el.actions ?? []).length, objectAtIndex: (i: number) => (el.actions ?? [])[i] }), 0),
+        AXUIElementPerformAction: (_e: El, name: string) => (log.push(`perform ${name}`), 0),
+        AXUIElementIsAttributeSettable: (_e: El, _name: string, ref: unknown[]) => ((ref[0] = el.focusSettable === true), 0),
+        AXUIElementSetAttributeValue: (_e: El, name: string, value: unknown) => (log.push(`set ${name}=${String(value)}`), el.setRefused ? -25205 : 0),
+        NSNumber: { numberWithBool: (b: boolean) => b },
+      })
+      const ObjC = { import: () => undefined, unwrap: (x: unknown) => x, castRefToObject: (x: unknown) => x }
+      const stubs = `
+function trusted() {}
+function front() { return { win: {}, app: {} }; }
+function resolve() { return __el; }
+function center() { return [40, 50]; }
+function plain(e, name) { return name === 'AXRole' ? e.role : undefined; }
+function clickAt() { __log.push('pointer click'); }
+return run;`
+      const run = new Function('$', 'ObjC', 'Ref', 'Application', 'delay', '__el', '__log', `${SCRIPTS.act}\n${stubs}`)($, ObjC, () => [], () => ({}), () => undefined, el, log) as (argv: string[]) => string
+      try {
+        return { out: JSON.parse(run(['click', JSON.stringify(payload)])) as Record<string, unknown>, log }
+      } catch (error) {
+        return { error: (error as Error).message, log }
+      }
+    }
+    // Chrome's omnibox: an AXTextField with no AXPress. Focused in the background.
+    expect(act({ role: 'AXTextField', actions: ['AXShowMenu'] })).toEqual({ out: { mode: 'background', at: { x: 40, y: 50 }, how: 'focused through accessibility' }, log: ['set AXFocused=true'] })
+    // Any other control whose AXFocused is settable (a web group with a tabindex): the same.
+    expect(act({ role: 'AXGroup', focusSettable: true }).out).toMatchObject({ mode: 'background', how: 'focused through accessibility' })
+    // A button is pressed, not focused.
+    expect(act({ role: 'AXButton', actions: ['AXPress'] })).toEqual({ out: { mode: 'background', at: { x: 40, y: 50 } }, log: ['perform AXPress'] })
+    // Nothing to press and nothing to focus (or the app refused the focus): only then the mouse is asked for.
+    expect(act({ role: 'AXImage' }).error).toMatch(/LOCALROUTER_NEEDS_POINTER/)
+    expect(act({ role: 'AXTextField', setRefused: true }).error).toMatch(/LOCALROUTER_NEEDS_POINTER/)
+    expect(act({ role: 'AXImage' }, { ref: '0.1', allow: true })).toEqual({ out: { mode: 'pointer', pointer: { x: 40, y: 50 }, at: { x: 40, y: 50 } }, log: ['pointer click'] })
+    // With the mouse allowed, a field is still focused in the background: the pointer is the last resort.
+    expect(act({ role: 'AXTextField' }, { ref: '0.1', allow: true }).log).toEqual(['set AXFocused=true'])
+  })
+
+  it('the act script sends no Apple Event unless macOS already allows it: typed text is Unicode key events posted to the front app’s process', () => {
+    // System Events appears only behind payload.events / events (allowed already, checked without asking).
+    const unguarded = SCRIPTS.act.split('\n').filter((line) => /\bApplication\(|\.keystroke\(|\.keyCode\(/.test(line) && !/\bevents\b/.test(line))
+    expect(unguarded).toEqual([])
+    const posted: Array<{ pid: number; down: boolean; text: string; flags: number }> = []
+    const opened: string[] = []
+    type Units = { units: string }
+    const $ = Object.assign((s = '') => ({ length: s.length, getCharactersRange: (into: Units) => { into.units = s } }), {
+      NSWorkspace: { sharedWorkspace: { frontmostApplication: { processIdentifier: 4242 } } },
+      NSMutableData: { dataWithLength: () => ({ mutableBytes: { units: '' } }) },
+      NSMakeRange: (at: number, length: number) => ({ at, length }),
+      CGEventCreateKeyboardEvent: (_source: unknown, _code: number, down: boolean) => ({ down, text: '', flags: -1 }),
+      CGEventSetFlags: (event: { flags: number }, flags: number) => { event.flags = flags },
+      CGEventKeyboardSetUnicodeString: (event: { text: string }, count: number, units: Units) => { event.text = units.units.slice(0, count) },
+      CGEventPostToPid: (pid: number, event: { down: boolean; text: string; flags: number }) => posted.push({ pid, ...event }),
+      kCGHIDEventTap: 0,
+    })
+    const ObjC = { import: () => undefined, unwrap: (x: unknown) => x, castRefToObject: (x: unknown) => x }
+    const run = new Function('$', 'ObjC', 'Ref', 'Application', 'delay', `${SCRIPTS.act}\nfunction trusted() {}\nreturn run;`)($, ObjC, () => [], (name: string) => (opened.push(name), { keystroke: () => undefined }), () => undefined) as (argv: string[]) => string
+    const text = `${'x'.repeat(19)}👋 and more text`
+    expect(JSON.parse(run(['keys', JSON.stringify({ text })]))).toEqual({ mode: 'pointer' })
+    expect(opened).toEqual([])
+    // Down and up per chunk, to the front app's pid, no modifiers, at most 20 UTF-16 units, never half an emoji.
+    expect(posted.every((event) => event.pid === 4242 && event.flags === 0)).toBe(true)
+    expect(posted.map((event) => event.down)).toEqual([true, false, true, false])
+    expect(posted.filter((event) => event.down).map((event) => event.text)).toEqual(['x'.repeat(19), '👋 and more text'])
+    expect(posted.filter((event) => event.down).map((event) => event.text).join('')).toBe(text)
+    // Where macOS already allows System Events (JJ's Mac), its keystroke is kept: the path that worked there.
+    posted.length = 0
+    expect(JSON.parse(run(['keys', JSON.stringify({ text: 'hi', events: true })]))).toEqual({ mode: 'pointer' })
+    expect(opened).toEqual(['System Events'])
+    expect(posted).toEqual([])
+  })
+
+  it('selects or pastes only through the app’s own menu: without the menu item it stops and says why, never a keystroke', async () => {
+    const opened: string[] = []
+    const $ = Object.assign((s: string) => s, { NSNumber: { numberWithBool: (b: boolean) => b } })
+    const ObjC = { import: () => undefined, unwrap: (x: unknown) => x, castRefToObject: (x: unknown) => x }
+    const stubs = `
+function trusted() {}
+function front() { return { win: {}, app: {} }; }
+function resolve() { return {}; }
+function center() { return [40, 50]; }
+function clickAt() {}
+function hasFocus() { return true; }
+function attr() { return null; }
+function plain(e, name) { return name === 'AXValue' ? 'old text' : undefined; }
+return run;`
+    const run = new Function('$', 'ObjC', 'Ref', 'Application', 'delay', `${SCRIPTS.act}\n${stubs}`)($, ObjC, () => [], (name: string) => opened.push(name), () => undefined) as (argv: string[]) => string
+    expect(() => run(['focus', JSON.stringify({ ref: '0.1', allow: true })])).toThrow('LOCALROUTER_NO_MENU_COMMAND:A:')
+    expect(opened).toEqual([])
+    const { runner } = fakeRunner(() => new Error('execution error: Error: LOCALROUTER_NO_MENU_COMMAND:A: (-2700)'))
+    await expect(new DesktopBackend(runner).act({ kind: 'type', ref: '0.1', text: 'x' }, { allowPointer: true })).rejects.toThrow(/^The app in front has no Select All menu item \(⌘A\), so that was not done\..*System Events would make macOS ask/)
   })
 
   it('fails a typing step whose text did not land, without repeating the text', async () => {
@@ -299,6 +423,7 @@ describe('DesktopBackend', () => {
   it('reads an app that refuses accessibility from a screenshot of its front window, as text spots to click', async () => {
     const window = { id: 86, x: 50, y: 30, w: 2000, h: 1400, title: 'blink-182 - YouTube' }
     const { runner, calls } = fakeRunner((call) => {
+      if (call.script.includes('CGPreflightScreenCaptureAccess')) return '{"accessibility":true,"screenRecording":true,"host":""}'
       if (call.file === 'screencapture') return ''
       if (call.script.includes('LOCALROUTER_UNREACHABLE') && call.script.includes('AXMainWindow') && !call.script.includes('CGWindowListCopyWindowInfo')) return new Error('execution error: Error: Error: LOCALROUTER_UNREACHABLE:Google Chrome: (-2700)')
       if (call.script.includes('VNRecognizeTextRequest')) return JSON.stringify([{ text: 'Search', x: 0.25, y: 0.88, w: 0.1, h: 0.02 }, { text: '•', x: 0.1, y: 0.5, w: 0.01, h: 0.01 }, { text: 'blink-182 - YouTube', x: 0.8, y: 0.97, w: 0.1, h: 0.02 }])
@@ -314,12 +439,24 @@ describe('DesktopBackend', () => {
 
   it('says why when an app refuses accessibility and its screenshot shows nothing', async () => {
     const { runner } = fakeRunner((call) => {
+      if (call.script.includes('CGPreflightScreenCaptureAccess')) return '{"accessibility":true,"screenRecording":true,"host":""}'
       if (call.file === 'screencapture') return ''
       if (call.script.includes('VNRecognizeTextRequest')) return '[]'
       if (call.script.includes('AXMainWindow') && !call.script.includes('CGWindowListCopyWindowInfo')) return new Error('LOCALROUTER_UNREACHABLE:Google Chrome:')
       return JSON.stringify({ app: 'Google Chrome', window: { id: 1, x: 0, y: 0, w: 10, h: 10, title: '' } })
     })
     await expect(new DesktopBackend(runner).observe()).rejects.toThrow(/^Google Chrome is refusing to show its window/)
+  })
+
+  it('never runs screencapture without Screen Recording (it could open the system prompt mid-task), and says so', async () => {
+    const { runner, calls } = fakeRunner((call) => {
+      if (call.script.includes('CGPreflightScreenCaptureAccess')) return '{"accessibility":true,"screenRecording":false,"host":""}'
+      if (call.script.includes('AXMainWindow') && !call.script.includes('CGWindowListCopyWindowInfo')) return new Error('LOCALROUTER_UNREACHABLE:Google Chrome:')
+      return JSON.stringify({ app: 'Google Chrome', window: { id: 1, x: 0, y: 0, w: 900, h: 700, title: '' } })
+    })
+    await expect(new DesktopBackend(runner).observe()).rejects.toThrow(/^Google Chrome is refusing to show its window.*Screen Recording is off for LocalRouter, so no screenshot was taken/)
+    await expect(new DesktopBackend(runner).screenshot()).rejects.toThrow(/^Screen Recording is off for LocalRouter/)
+    expect(calls.some((call) => call.file === 'screencapture')).toBe(false)
   })
 
   it('passes other failures through unchanged', async () => {
@@ -347,6 +484,8 @@ describe('DockApps', () => {
     expect(calls[1].args[3]).not.toContain('Google Chrome')
     expect(await dock.activate('Zed')).toBe('opened')
     expect(calls.at(-1)).toEqual({ file: 'open', args: ['-a', 'Zed'] })
+    // No Apple Event: the Dock is read through accessibility and clicked with CGEvent, `open -a` is LaunchServices.
+    for (const call of calls) expect(call.args.join(' ')).not.toMatch(/System Events|\bApplication\(|tell application/)
   })
 })
 

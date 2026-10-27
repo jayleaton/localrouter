@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseControl } from '../../../desktop-helper/src/computer/macControls.ts'
+import { BACKGROUND_NOTE, CONTROL_OFF } from '../executor/broker.ts'
 import type { Broker, Caller } from '../executor/broker.ts'
 import type { Tool, ToolContext } from './registry.ts'
 import type { McpResult, Spark } from './spark.ts'
@@ -17,7 +18,7 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
   return [
     {
       name: 'computer_control',
-      description: 'Run one fixed control on the user’s computer: {"kind":"open_app","app"}, {"kind":"quit_app","app"}, {"kind":"volume","action":"up|down|mute|unmute|set","level"?,"target":"system|Spotify|Music"}, {"kind":"media","action":"play|pause|next|previous","player":"Spotify|Music"}, {"kind":"dark_mode","action":"on|off|toggle"}, {"kind":"lock_screen"}. Locking asks the user on screen first.',
+      description: 'Run one fixed control on the user’s computer: {"kind":"open_app","app"}, {"kind":"quit_app","app"}, {"kind":"volume","action":"up|down|mute|unmute|set","level"?,"target":"system|Spotify|Music"}, {"kind":"media","action":"play|pause|next|previous","player":"Spotify|Music"}, {"kind":"dark_mode","action":"on|off|toggle"}, {"kind":"lock_screen"}. It runs at once.',
       parameters: { type: 'object', properties: { control: { type: 'object', description: 'the control, as above' } }, required: ['control'], additionalProperties: false },
       async run(args, ctx) {
         const r = await broker.control({ caller, utterance: ctx.utterance }, parseControl(args.control))
@@ -26,16 +27,20 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
     },
     {
       name: 'computer_use',
-      description: 'Do a small task on the user’s computer screen toward a goal (at most 15 steps). Anything that could send, buy, delete, post or type into a field that is not a search box waits for the user to approve it on their screen: tell them so. Pass any exact text to type as `text`, never invent it.',
+      description: `Do a small task on the user’s computer screen toward a goal (at most 15 steps). ${BACKGROUND_NOTE} Pass any exact text to type as \`text\`, never invent it.`,
       parameters: { type: 'object', properties: { goal: { type: 'string', description: 'what to do, in the user’s words', maxLength: 1000 }, text: { type: 'string', description: 'exact text to type, if any', maxLength: 4000 } }, required: ['goal'], additionalProperties: false },
       async run(args, ctx) {
         const started = broker.startUse({ caller, utterance: ctx.utterance }, String(args.goal), typeof args.text === 'string' ? args.text : null)
-        if (!started.ok) return { done: false, tell_user: `I could not do that on your computer: ${started.error}`, status: 'refused', reason: started.error }
+        if (!started.ok) return { done: false, tell_user: `I could not do that on your computer: ${started.error} Nothing is waiting for you on screen.`, status: started.error === CONTROL_OFF ? 'control_off' : 'refused', reason: started.error }
         const stop = () => broker.stop(started.task_id, 'the conversation', 'The conversation moved on, so it stopped.')
         ctx.signal.addEventListener('abort', stop, { once: true })
         try {
           const outcome = await Promise.race([started.finished, new Promise<null>((r) => setTimeout(() => r(null), waitMs))])
-          if (!outcome) return { done: false, tell_user: 'It is still working on that and has not finished: it is not done yet.', status: 'running', task_id: started.task_id }
+          if (!outcome) {
+            // The real state, never a guess: a card is waiting only when the task says so (an opt-in "Ask before each action").
+            const waiting = Boolean(broker.task(started.task_id)?.waiting_for_approval)
+            return { done: false, tell_user: waiting ? 'It is waiting for your OK on the card in LocalRouter; nothing is done until you answer it.' : 'It is still working on that and has not finished: it is not done yet.', status: 'running', task_id: started.task_id }
+          }
           return { done: outcome.status === 'done', tell_user: tellUser(String(args.goal), outcome), status: outcome.status, reason: outcome.reason, steps_taken: outcome.steps, where: outcome.surface }
         } finally {
           ctx.signal.removeEventListener('abort', stop)
@@ -48,21 +53,23 @@ export function computerTools(broker: Broker, caller: Caller, waitMs = 150_000):
 /**
  * The sentence the reply gives the user about a computer task, from its real outcome: only `done` is a success.
  * Blocked, stuck, stopped, failed and unavailable each say it did not happen and why (a model once reported text
- * "typed" after the approval expired and nothing was typed), with what it did get done before that.
+ * "typed" after the approval expired and nothing was typed), with what it did get done before that. An ended task
+ * leaves nothing waiting on screen, and says so (Mac run, 2026-10-26: "an approval dialog is waiting" after it closed).
  */
 export function tellUser(goal: string, outcome: { status: string; reason: string; steps: string[] }): string {
   const did = outcome.steps.length ? ` What it did before that: ${outcome.steps.join('; ')}.` : ''
+  const nothing = ' Nothing is waiting for you on screen.'
   switch (outcome.status) {
     case 'done':
       return outcome.steps.length ? `Done: ${outcome.steps.join('; ')}.` : 'Done.'
     case 'blocked':
-      return `It did not do it: ${outcome.reason || 'it was not allowed.'}${did}`
+      return `It did not do it: ${outcome.reason || 'it was not allowed.'}${did}${nothing}`
     case 'stopped':
-      return `It stopped before finishing: ${outcome.reason || 'it was stopped.'}${did}`
+      return `It stopped before finishing: ${outcome.reason || 'it was stopped.'}${did}${nothing}`
     case 'unavailable':
-      return `It could not do that on this computer: ${outcome.reason}`
+      return `It could not do that on this computer: ${outcome.reason}${nothing}`
     default:
-      return `It did not manage to ${goal.replace(/[.\s]+$/, '')}: ${outcome.reason || 'it got stuck.'}${did}`
+      return `It did not manage to ${goal.replace(/[.\s]+$/, '')}: ${outcome.reason || 'it got stuck.'}${did}${nothing}`
   }
 }
 
