@@ -90,7 +90,16 @@
     const field = key && key.closest('label');
     if (field) field.hidden = true;
     const style = document.createElement('style');
-    style.textContent = 'label.field:has(#key){display:none}';
+    style.textContent = 'label.field:has(#key){display:none}' +
+      '.top .lr-beta{flex:none;padding:2px 8px;border-radius:999px;border:1px solid var(--amber);background:var(--amber-soft);' +
+      'color:var(--text);font-size:10.5px;font-weight:700;letter-spacing:.6px;line-height:16px;text-transform:uppercase;cursor:default}';
     document.head.appendChild(style);
+    // The desktop app is a beta: a small permanent pill after the conversation's title, in the top bar's own row, so it
+    // takes its own space (the title ellipsizes first) and never covers a control.
+    const title = document.querySelector('.top #title');
+    if (title) {
+      const beta = Object.assign(document.createElement('span'), { className: 'lr-beta', textContent: 'Beta', title: 'LocalRouter for desktop is in beta' });
+      title.after(beta);
+    }
   });
 })();

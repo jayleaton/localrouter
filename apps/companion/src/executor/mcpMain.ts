@@ -12,7 +12,7 @@ import { ExecutorClient } from './server.ts'
  *
  * `LOCALROUTER_EXECUTOR_SOCKET` names another socket (default: the app's data folder).
  */
-const VERSION = '0.1.0'
+const VERSION = '0.1.0-beta.1'
 const token = process.env.LOCALROUTER_EXECUTOR_TOKEN?.trim() ?? ''
 const client = new ExecutorClient(process.env.LOCALROUTER_EXECUTOR_SOCKET?.trim() || executorSocket(dataDir()), token)
 const call = async (op: string, args: Record<string, unknown>) => {

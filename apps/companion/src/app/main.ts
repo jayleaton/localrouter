@@ -278,8 +278,10 @@ class AppPresenceGate implements PresenceGate {
 
 const gate = new AppPresenceGate()
 const STOP = stopShortcut(process.platform)
-/** The tray's icon off macOS (a menu bar title needs none): an empty image is invisible in a Windows or Linux tray. */
-const TRAY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAg0lEQVR42u2XSw4AERBE3cfVHMLNzc5iMj41tCqiEuv3QvTHud3iQ4q1swKaGmeuDAD+FGGAx0UmwnEJAzgmYQTPEkx4XcLw6vueYhG8fAuowDtDAgi8lV8S2wj05gqcK3DuL6AXIqVSzGtG9HYsMZBIjGT0oVRiLJdYTGRWM4nl1DIPCdZ3uuZOWEUAAAAASUVORK5CYII='
+/** The tray's icon off macOS (a menu bar title needs none), with tray@2x.png beside it; build/, copied by the build. */
+const TRAY_ICON = join(__dirname, 'tray.png')
+/** The window icon on Linux (macOS and Windows take the bundle's and the executable's own). */
+const WINDOW_ICON = process.platform === 'linux' ? { icon: join(__dirname, 'icon.png') } : {}
 
 // ------------------------------------------------------------------ the runtime
 
@@ -1113,7 +1115,7 @@ function harden(win: BrowserWindow) {
 function showMain() {
   if (!runtime) return showSetup()
   if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = new BrowserWindow({ width: 1180, height: 820, minWidth: 420, minHeight: 520, title: 'LocalRouter', show: false, webPreferences })
+    mainWindow = new BrowserWindow({ width: 1180, height: 820, minWidth: 420, minHeight: 520, title: 'LocalRouter', show: false, ...WINDOW_ICON, webPreferences })
     harden(mainWindow)
     mainWindow.once('ready-to-show', () => mainWindow?.show())
     mainWindow.on('closed', () => {
@@ -1129,7 +1131,7 @@ function showMain() {
 
 function showSetup() {
   if (setupWindow && !setupWindow.isDestroyed()) return setupWindow.focus()
-  setupWindow = new BrowserWindow({ width: 720, height: 820, title: 'LocalRouter settings', show: false, webPreferences })
+  setupWindow = new BrowserWindow({ width: 720, height: 820, title: 'LocalRouter settings', show: false, ...WINDOW_ICON, webPreferences })
   harden(setupWindow)
   setupWindow.once('ready-to-show', () => setupWindow?.show())
   setupWindow.on('closed', () => {
@@ -1219,7 +1221,7 @@ async function smoke() {
     runtime = await startRuntime({ base: `http://127.0.0.1:${(echo.address() as AddressInfo).port}`, token: 'smoke-token', dir, name: 'smoke', machine: 'fake', gate: { method: 'none (smoke)', verify: async () => false }, shared: () => [], executor: local })
     const win = new BrowserWindow({ show: false, webPreferences })
     await win.loadURL(`${ORIGIN}/voice.html`)
-    result.page = await win.webContents.executeJavaScript('({ shim: window.__companionShim === true, bridge: typeof (window.companion && window.companion.realtime && window.companion.realtime.open) === "function", title: document.title, socket: String(WebSocket.name) })')
+    result.page = await win.webContents.executeJavaScript('({ shim: window.__companionShim === true, bridge: typeof (window.companion && window.companion.realtime && window.companion.realtime.open) === "function", title: document.title, socket: String(WebSocket.name), beta: (document.querySelector(".top .lr-beta") || {}).textContent || "" })')
     result.status = await win.webContents.executeJavaScript('fetch("/v1/computer/status").then(r => r.json()).then(s => ({ computers: s.computers.length, placement: s.computers[0] && s.computers[0].placement }))')
     result.proxy = await win.webContents.executeJavaScript('fetch("/v1/models").then(r => r.status)')
     result.voices = await win.webContents.executeJavaScript(`(async () => {
@@ -1236,6 +1238,8 @@ async function smoke() {
     result.executor = caps.ok ? caps.result : caps.error
     result.secrets = process.platform === 'darwin' ? 'keychain helper (see --secrets-selftest)' : safeStorage.isEncryptionAvailable() ? 'safeStorage' : 'this run only'
     result.presence = gate.method
+    // The icons the build copies beside main.cjs (the bundle's and the executable's own are checked by the CI jobs).
+    result.icons = { tray: nativeImage.createFromPath(TRAY_ICON).getSize(), window: nativeImage.createFromPath(join(__dirname, 'icon.png')).getSize() }
     // The settings window: its page draws the steps, and a closed port is named as refused through the IPC.
     const setupWin = new BrowserWindow({ show: false, webPreferences })
     await setupWin.loadURL(`${ORIGIN}/setup.html`)
@@ -1247,7 +1251,8 @@ async function smoke() {
       })
     })
     result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind }))`)
-    const page = result.page as { shim: boolean; bridge: boolean }
+    const page = result.page as { shim: boolean; bridge: boolean; beta: string }
+    const icons = result.icons as { tray: { width: number }; window: { width: number } }
     const status = result.status as { computers: number; placement: string }
     const setupPage = result.setup as { version: string; error: string }
     type Echo = { method: string; url: string; type: string; bytes: number; clip: boolean; auth: string }
@@ -1255,7 +1260,8 @@ async function smoke() {
     const voices = v.post.method === 'POST' && v.post.url === '/v1/voices' && v.post.type.startsWith('multipart/form-data; boundary=') && v.post.clip && v.post.bytes > 4104 &&
       v.patch.method === 'PATCH' && v.patch.bytes === 13 && v.del.method === 'DELETE' && v.del.bytes === 0 && v.list.url === '/v1/voices?model=m' && v.list.auth === 'Bearer smoke-token'
     const unpaired = result.unpaired as { answered: boolean; computer_use: boolean | null; says: string }
-    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused'
+    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused' &&
+      page.beta === 'Beta' && icons.tray.width === 32 && icons.window.width === 1024
     // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
     const native = await createPlatform('native', { dataDir: dir })
     result.native = await native.platform.access().then(
@@ -1443,7 +1449,7 @@ if (process.argv.includes('--version')) {
     buildMenu()
     settings = loadSettings()
     await initSecrets()
-    tray = new Tray(process.platform === 'darwin' ? nativeImage.createEmpty() : nativeImage.createFromDataURL(TRAY_ICON))
+    tray = new Tray(process.platform === 'darwin' ? nativeImage.createEmpty() : nativeImage.createFromPath(TRAY_ICON))
     tray.setToolTip('LocalRouter')
     if (!globalShortcut.register(STOP.accelerator, () => stopAll('the keyboard'))) log.warn('stop_shortcut.unavailable', { accelerator: STOP.accelerator })
     try {

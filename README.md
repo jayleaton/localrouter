@@ -58,6 +58,14 @@ a failure, do what it says and run it again. Models already on the box are reuse
 claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp
 ```
 
+## Desktop app (beta)
+
+**LocalRouter for desktop** brings Jarvis to your Mac, Windows or Linux computer: chat and calls with your box's
+models, and, after your approval, control of that computer. **[Download it from the Releases
+page](https://github.com/jayleaton/localrouter/releases)**: a `.dmg` for Apple silicon or Intel Macs, an installer for
+Windows, an AppImage or `.deb` for Linux. The builds are not notarized (macOS) or code-signed (Windows); each release's
+notes say how to open them. More in [apps/companion](apps/companion/README.md).
+
 ## Measured on a DGX Spark
 
 DGX-01, NVIDIA GB10, 2026-10-22. Only figures we measured are listed.

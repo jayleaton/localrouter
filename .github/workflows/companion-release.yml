@@ -1,0 +1,80 @@
+name: Companion release
+# The desktop app's downloads: a companion-v<version> tag (or a manual run, which makes the tag on this commit) builds
+# and checks every package through the macOS and Linux/Windows workflows, then attaches them to a GitHub Release,
+# marked pre-release while the version is one (0.1.0-beta.1). Notes: apps/companion/release-notes.md.
+on:
+  push:
+    tags:
+      - companion-v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, companion-v<apps/companion/package.json version>; made on this commit if it does not exist
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: companion-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: the tag names the package's version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(node -p 'require("./apps/companion/package.json").version')
+          [ "$TAG" = "companion-v$version" ] || { echo "::error::tag $TAG does not match apps/companion/package.json ($version): want companion-v$version"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  mac:
+    needs: version
+    uses: ./.github/workflows/companion-mac.yml
+    with:
+      release: true
+    secrets: inherit
+  desktop:
+    needs: version
+    uses: ./.github/workflows/companion-desktop.yml
+  release:
+    needs: [version, mac, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: LocalRouter-*
+          path: release
+          merge-multiple: true
+      - name: the files (each platform's, by name)
+        run: |
+          ls -la release
+          for f in "LocalRouter-$VERSION-arm64.dmg" "LocalRouter-$VERSION-arm64.zip" "LocalRouter-$VERSION-x64.dmg" "LocalRouter-$VERSION-x64.zip"; do
+            [ -f "release/$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          ls release/*.exe > /dev/null && ls release/*.AppImage > /dev/null && ls release/*.deb > /dev/null
+          (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: the release (pre-release for a pre-release version; files replaced on a re-run)
+        run: |
+          sed "s/{{VERSION}}/$VERSION/g" apps/companion/release-notes.md > "$RUNNER_TEMP/notes.md"
+          case "$VERSION" in *-*) pre=--prerelease ;; *) pre= ;; esac
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "LocalRouter for desktop $VERSION" --notes-file "$RUNNER_TEMP/notes.md" $pre
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "LocalRouter for desktop $VERSION" --notes-file "$RUNNER_TEMP/notes.md" $pre
+          fi
+          gh release view "$TAG" --json url,isPrerelease,assets --jq '"\(.url) prerelease=\(.isPrerelease)", (.assets[] | "\(.name) \(.size)")' | tee -a "$GITHUB_STEP_SUMMARY"

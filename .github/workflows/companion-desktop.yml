@@ -1,6 +1,8 @@
 name: Companion (Linux, Windows)
 on:
   push:
+    # Branches only: a companion-v* tag builds through companion-release.yml.
+    branches: ['**']
     paths:
       - apps/companion/**
       - apps/desktop-helper/**
@@ -13,6 +15,8 @@ on:
       - src/voice/voice.html
       - .github/workflows/companion-desktop.yml
   workflow_dispatch:
+  # A release (companion-release.yml): the same checks and packages.
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -93,9 +97,34 @@ jobs:
           tools=$(tr -d '\r' < "$RUNNER_TEMP/mcp.txt" | jq -c 'select(.id == 2) | [.result.tools[].name]')
           echo "tools: $tools"
           [ "$(jq 'index("computer_use") != null and index("computer_observe") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list lacks computer_use or computer_observe"; exit 1; }
-      - name: package contents (deb metadata)
+      - name: package contents (deb metadata, its icons are the LocalRouter mark)
         if: matrix.target == 'linux'
-        run: dpkg-deb -I out/*.deb
+        run: |
+          dpkg-deb -I out/*.deb
+          dpkg-deb -c out/*.deb | grep -E 'usr/share/icons/hicolor/.*/apps/localrouter\.png' || { echo "::error::no LocalRouter icon in the deb"; exit 1; }
+          command -v compare > /dev/null || { sudo apt-get update > /dev/null; sudo apt-get install -y imagemagick > /dev/null; }
+          mkdir -p "$RUNNER_TEMP/deb" && dpkg-deb -x out/*.deb "$RUNNER_TEMP/deb"
+          icon=$(ls -S "$RUNNER_TEMP"/deb/usr/share/icons/hicolor/*/apps/localrouter.png | head -1)
+          size=$(identify -format %w "$icon")
+          convert build/icon.png -resize "${size}x${size}" "$RUNNER_TEMP/want.png"
+          rmse=$({ compare -metric RMSE "$icon" "$RUNNER_TEMP/want.png" null: 2>&1 || true; } | sed -n 's/.*(\(.*\))/\1/p')
+          echo "deb icon $icon ($size px) against build/icon.png: RMSE $rmse"
+          awk -v r="$rmse" 'BEGIN { exit !(r != "" && r < 0.05) }' || { echo "::error::the deb's icon is not build/icon.png"; exit 1; }
+      - name: the exe's icon is build/icon.ico (not Electron's)
+        if: matrix.target == 'win'
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $exe = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path out/win-unpacked/LocalRouter.exe).Path).ToBitmap()
+          $ico = (New-Object System.Drawing.Icon((Resolve-Path build/icon.ico).Path, 32, 32)).ToBitmap()
+          $diff = 0
+          for ($x = 0; $x -lt 32; $x++) { for ($y = 0; $y -lt 32; $y++) {
+            $a = $exe.GetPixel($x, $y); $b = $ico.GetPixel($x, $y)
+            $diff += [math]::Abs($a.R - $b.R) + [math]::Abs($a.G - $b.G) + [math]::Abs($a.B - $b.B) + [math]::Abs($a.A - $b.A)
+          } }
+          $mean = $diff / (32 * 32 * 4)
+          "exe icon against build/icon.ico at 32 px: mean difference $mean (of 255)"
+          if ($mean -gt 8) { Write-Error "LocalRouter.exe does not carry build/icon.ico"; exit 1 }
       - name: job summary
         if: always()
         run: |
