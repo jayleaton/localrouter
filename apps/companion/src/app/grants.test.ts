@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { grantStates, micResetBeforeAsk, signingId } from './grants.ts'
+import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 
 const all = (v: boolean) => ({ accessibility: v, screen: v, microphone: v })
 const SIGNED = signingId('identifier "com.localrouter.companion" and certificate leaf = H"ab12"')
@@ -47,5 +47,15 @@ describe('macOS grants across builds', () => {
     // An update (a new build, same certificate): still granted, so nothing is reset and nothing asks.
     expect(grantStates({ accessibility: true, screen: true, microphone: true }, { accessibility: true }, after.grants, SIGNED).state.microphone).toBe('granted')
     expect(micResetBeforeAsk('granted')).toBe(false)
+  })
+})
+
+describe('the Microphone asked once at start (Mac run, 2026-10-27: the stale entry stayed and nothing asked)', () => {
+  it('not granted: reset and ask once per signing identity, never again under it; granted or unsigned: never', () => {
+    expect(micAskAtStart({ status: 'not-determined', identity: 'sig:a' })).toBe(true)
+    expect(micAskAtStart({ status: 'denied', identity: 'sig:a', askedFor: 'sig:a' })).toBe(false)
+    expect(micAskAtStart({ status: 'denied', identity: 'sig:b', askedFor: 'sig:a' })).toBe(true)
+    expect(micAskAtStart({ status: 'granted', identity: 'sig:a' })).toBe(false)
+    expect(micAskAtStart({ status: 'not-determined', identity: null })).toBe(false)
   })
 })

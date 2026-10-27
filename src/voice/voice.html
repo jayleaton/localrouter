@@ -210,6 +210,11 @@
   #vbarText { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
   /* ------------------------------------------------ voice mode */
+  #keyAsk { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); padding: 16px; width: min(360px, 90vw); }
+  #keyAsk p { margin: 0 0 10px; }
+  #keyAsk input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .keyAskRow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .keyAskRow button { padding: 6px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--raised); color: var(--text); }
   #vm { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; }
   .vm-main { flex: 1; min-width: 0; display: flex; flex-direction: column;
              padding: calc(8px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
@@ -510,6 +515,14 @@
  </aside>
 </section>
 
+<!-- The API key, asked in the page: the browser’s prompt box does not exist in the LocalRouter app (Electron). -->
+<dialog id="keyAsk" aria-labelledby="keyAskTitle">
+  <form method="dialog">
+    <p id="keyAskTitle">This LocalRouter needs an API key:</p>
+    <input id="keyAskInput" type="password" autocomplete="off" spellcheck="false" aria-labelledby="keyAskTitle">
+    <div class="keyAskRow"><button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Use this key</button></div>
+  </form>
+</dialog>
 <dialog class="drawer" id="drawer" aria-labelledby="drawerTitle">
   <div class="dh"><h2 id="drawerTitle">Settings</h2><button class="icon-btn" id="drawerClose" aria-label="Close settings"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
   <div class="db">
@@ -1320,10 +1333,24 @@ async function api(path, opts = {}) {
   if (opts.json !== undefined) { headers['content-type'] = 'application/json'; opts.body = JSON.stringify(opts.json); }
   const r = await fetch(path, { method: opts.method || (opts.body ? 'POST' : 'GET'), headers, body: opts.body, signal: opts.signal, cache: opts.cache });
   if (r.status === 401 && !opts.retried) {
-    const k = prompt('This LocalRouter needs an API key:', S.key || '');
+    const k = await askKey();
     if (k) { S.key = k.trim(); saveSettings(); return api(path, Object.assign({}, opts, { retried: true })); }
   }
   return r;
+}
+// One question at a time, however many requests got a 401 together; null when cancelled.
+let keyAsking = null;
+function askKey() {
+  if (keyAsking) return keyAsking;
+  const d = $('keyAsk'), input = $('keyAskInput');
+  input.value = S.key || '';
+  keyAsking = new Promise(resolve => {
+    d.addEventListener('close', () => { keyAsking = null; resolve(d.returnValue === 'ok' ? input.value : null); }, { once: true });
+    d.returnValue = '';
+    d.showModal();
+    input.focus();
+  });
+  return keyAsking;
 }
 async function errorText(r) {
   const t = await r.text().catch(() => '');

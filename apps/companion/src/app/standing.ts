@@ -49,11 +49,28 @@ export class StoredStanding implements Standing {
 }
 
 /**
- * An install that is already paired, with the OS grants computer control needs in place (macOS: Accessibility and
- * Screen Recording), and that never decided: that setup was the consent (JJ, 2026-10-26), so it gets the standing
- * grant at start with no card. Revoked in Settings, it is not migrated back.
+ * An install that has been paired (ever: a token the box has since revoked still counts, Mac run 2026-10-27), with the
+ * OS grants computer control needs in place (macOS: Accessibility and Screen Recording), and that never decided: that
+ * setup was the consent (JJ, 2026-10-26), so it gets the standing grant with no card, at start and again after every
+ * pairing. Revoked in Settings, it is not migrated back.
  */
 export function migrates(i: { paired: boolean; undecided: boolean; os: string; access: Pick<AccessReport, 'accessibility' | 'input' | 'screen_recording'> | null }): boolean {
   const a = i.access
   return i.paired && i.undecided && a !== null && a.accessibility && a.input && (i.os !== 'darwin' || a.screen_recording)
+}
+
+/** Paired at some point: an address kept, a token kept (even one revoked since), or a pairing recorded. */
+export function everPaired(i: { base: string; token: string; pairedAt?: string }): boolean {
+  return Boolean(i.base || i.token || i.pairedAt)
+}
+
+/**
+ * Settings › "Let Jarvis control this computer": ticked only when control is on AND the person allowed it, so a ticked
+ * box never sits next to "not allowed yet". Ticking it grants (`grant`) as well as turning control on; unticking pauses.
+ */
+export function controlBox(i: { enabled: boolean; granted: boolean }): boolean {
+  return i.enabled && i.granted
+}
+export function controlTicked(on: boolean, granted: boolean): { enable: boolean; grant: boolean } {
+  return { enable: on, grant: on && !granted }
 }
