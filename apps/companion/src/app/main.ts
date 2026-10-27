@@ -11,7 +11,7 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { controlBox, controlTicked, everPaired, migrates, StoredStanding } from './standing.ts'
+import { controlBox, controlTicked, everPaired, migrationDecision, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
 import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
 import type { Migration, Secrets } from './secrets.ts'
@@ -356,13 +356,20 @@ const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => sa
  * An install already set up (paired, with the OS grants computer control needs) that never decided gets the standing
  * grant at start with no card: that setup was the consent (JJ, 2026-10-26). Audited as `source: migrated`.
  */
-async function migrateStanding() {
-  if (!executor || !standing.undecided) return
+async function migrateStanding(when: 'launch' | 'pairing' | 'permissions') {
+  if (!executor || standing.decision !== 'undecided') return
   const access = await executor.built.platform.access().catch(() => null)
-  if (!migrates({ paired: everPaired({ base: settings.base, token: loadSecrets().token, pairedAt: settings.pairedAt }), undecided: standing.undecided, os: process.platform, access })) return
+  const app = process.platform === 'darwin' ? { accessibility: systemPreferences.isTrustedAccessibilityClient(false), screen_recording: systemPreferences.getMediaAccessStatus('screen') === 'granted' } : null
+  const d = migrationDecision({ grant: standing.decision, everPaired: everPaired({ base: settings.base, token: loadSecrets().token, pairedAt: settings.pairedAt }), os: process.platform, access, app })
+  // Logged when it changes (state() polls this on the setup page), always at launch and on a pairing.
+  const key = `${d.eligible}:${d.reason}`
+  if (when !== 'permissions' || key !== lastMigrate) log.info('consent.migrate', { ...d, when, executor: access ? { accessibility: access.accessibility, screen_recording: access.screen_recording } : null, app })
+  lastMigrate = key
+  if (!d.eligible) return
   executor.broker.grantStanding('migrated')
-  log.info('consent.migrated', { os: process.platform })
+  log.info('consent.migrated', { os: process.platform, when })
 }
+let lastMigrate = ''
 
 /**
  * macOS: the Automation grants (System Events, and Chrome when it runs), asked once, from setup, where the person
@@ -382,7 +389,7 @@ async function startLocalExecutor(): Promise<void> {
   executor = await startExecutor({ dir, name: settings.name, machine: machineKind(), decider: null, gate, standing, listen: true, ownApps: ['LocalRouter', 'Electron'], approvalSurface: () => (runtime ? null : NO_APPROVAL_WINDOW), log })
   executor.broker.setDecider(null, UNPAIRED)
   await gate.use(executor.built.platform.presence)
-  await migrateStanding()
+  await migrateStanding('launch')
   executor.broker.on((e) => {
     // Refused for want of the grant: a notification only, never a window over the person's work.
     if (e.type === 'consent.needed' && Notification.isSupported()) new Notification({ title: 'Computer control is off', body: `Jarvis asked to ${e.goal.slice(0, 80)}. Turn computer control on in LocalRouter → Settings.` }).show()
@@ -614,7 +621,7 @@ function registerIpc() {
       saveSettings(settings)
       saveSecrets({ ...loadSecrets(), token: p.token })
       // A pairing (first, or again after the box revoked the token) reruns the migration: never a step left at "not allowed".
-      await migrateStanding()
+      await migrateStanding('pairing')
       draft = null
       errors = {}
       await startRuntimeFromSettings()
@@ -943,6 +950,8 @@ async function discoverSparks(): Promise<{ tailnet: 'running' | 'off'; found: Ar
 
 async function state() {
   const permissionState = await permissions()
+  // Permissions granted after launch (the setup page polls this): the migration is decided again.
+  await migrateStanding('permissions')
   const callers = executor?.enrollment.list().map((c) => ({ id: c.id, name: c.name, created: c.created })) ?? []
   return {
     version: VERSION,
@@ -1187,7 +1196,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
   }
   if (r.outcome === 'migrated') {
     memorySecrets = (await keychain.get()) ?? { ...EMPTY }
-    await migrateStanding()
+    await migrateStanding('launch')
     if (o.interactive) {
       await startRuntimeFromSettings().catch((error: unknown) => log.error('runtime.start_failed', { error: error instanceof Error ? error.message : String(error) }))
       refreshTray()

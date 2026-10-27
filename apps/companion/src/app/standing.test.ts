@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CONTROL_OFF } from '../executor/broker.ts'
 import { fakeBroker } from '../executor/testing.ts'
 import { EMPTY, parseSecrets } from './secrets.ts'
-import { controlBox, controlTicked, everPaired, migrates, StoredStanding } from './standing.ts'
+import { controlBox, controlTicked, everPaired, migrates, migrationDecision, StoredStanding } from './standing.ts'
 
 /** The stored blob as the keychain helper or safeStorage keeps it: JSON text, read back by whichever build runs next. */
 function storedAs(text: string) {
@@ -85,5 +85,32 @@ describe('the standing grant, stored with the tokens (JJ, 2026-10-26: no permiss
     expect(controlTicked(true, true)).toEqual({ enable: true, grant: false })
     // Unticking pauses control; it is not a revoke.
     expect(controlTicked(false, true)).toEqual({ enable: false, grant: false })
+  })
+
+  it('Mac run 2026-10-27 (e634493): granted in setup but not in the helper’s check → migrated anyway; only a Revoke blocks it', () => {
+    const helperSaysNo = { accessibility: true, input: true, screen_recording: false }
+    const appSaysYes = { accessibility: true, screen_recording: true }
+    expect(migrationDecision({ grant: 'undecided', everPaired: true, os: 'darwin', access: helperSaysNo, app: appSaysYes })).toEqual({ eligible: true, reason: 'paired before, OS permissions granted, never revoked' })
+    // The helper could not answer at all: the app's own answers are enough.
+    expect(migrationDecision({ grant: 'undecided', everPaired: true, os: 'darwin', access: null, app: appSaysYes }).eligible).toBe(true)
+    // An earlier "not eligible" is not kept: decided afresh each time (here: not paired yet, then paired).
+    expect(migrationDecision({ grant: 'undecided', everPaired: false, os: 'darwin', access: granted, app: appSaysYes })).toEqual({ eligible: false, reason: 'never paired' })
+    expect(migrationDecision({ grant: 'undecided', everPaired: true, os: 'darwin', access: granted, app: appSaysYes }).eligible).toBe(true)
+    // The reasons it does not, for the log.
+    expect(migrationDecision({ grant: 'revoked', everPaired: true, os: 'darwin', access: granted, app: appSaysYes })).toEqual({ eligible: false, reason: 'revoked in Settings' })
+    expect(migrationDecision({ grant: 'undecided', everPaired: true, os: 'darwin', access: helperSaysNo, app: { accessibility: true, screen_recording: false } }).reason).toBe('Screen Recording not granted')
+    expect(migrationDecision({ grant: 'undecided', everPaired: true, os: 'win32', access: { accessibility: true, input: true, screen_recording: false }, app: null }).eligible).toBe(true)
+  })
+
+  it('the stored state the decision reads: only an explicit Revoke is "revoked"', () => {
+    const { store } = storedAs(JSON.stringify({ token: 'lr_tok', legacy_token: '' }))
+    const standing = new StoredStanding(store, () => false)
+    expect(standing.decision).toBe('undecided')
+    standing.set(true)
+    expect(standing.decision).toBe('granted')
+    standing.set(false)
+    expect(standing.decision).toBe('revoked')
+    // An older build's empty value (the 2026-10-26 consent card, never answered) is undecided, not a refusal.
+    expect(new StoredStanding(storedAs(JSON.stringify({ token: 'x', legacy_token: '', computer_grant: '' })).store, () => false).decision).toBe('undecided')
   })
 })
