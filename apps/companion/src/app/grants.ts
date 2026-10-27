@@ -59,3 +59,13 @@ export function grantStates(said: Record<Permission, boolean>, works: { accessib
 export function micResetBeforeAsk(status: string): boolean {
   return status !== 'granted'
 }
+
+/**
+ * Whether to reset and ask for the Microphone by itself, once, at start (Mac run, 2026-10-27: the stale entry was still
+ * there and nothing asked, because the Microphone was only asked from its button). The mismatch cannot be read without
+ * the TCC database, so: not granted now, under a signing identity that can be read, and not asked yet under this one.
+ * Asked once per identity, so a person who says no is not asked again until a differently signed build.
+ */
+export function micAskAtStart(i: { status: string; identity: string | null; askedFor?: string }): boolean {
+  return micResetBeforeAsk(i.status) && i.identity !== null && i.askedFor !== i.identity
+}

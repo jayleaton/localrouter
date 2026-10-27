@@ -11,11 +11,11 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
 import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
-import { migrates, StoredStanding } from './standing.ts'
+import { controlBox, controlTicked, everPaired, migrates, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
 import { EMPTY, HELPER, KeychainHelper, run as runCommand, loadSecrets as loadStoredSecrets, MIGRATION_TIMEOUT_MS, migrateLegacy } from './secrets.ts'
 import type { Migration, Secrets } from './secrets.ts'
-import { grantStates, micResetBeforeAsk, signingId } from './grants.ts'
+import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -90,7 +90,7 @@ const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 
 /** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; automationAsked?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; automationAsked?: string; pairedAt?: string; micAskedFor?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -359,7 +359,7 @@ const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => sa
 async function migrateStanding() {
   if (!executor || !standing.undecided) return
   const access = await executor.built.platform.access().catch(() => null)
-  if (!migrates({ paired: Boolean(settings.base && loadSecrets().token), undecided: standing.undecided, os: process.platform, access })) return
+  if (!migrates({ paired: everPaired({ base: settings.base, token: loadSecrets().token, pairedAt: settings.pairedAt }), undecided: standing.undecided, os: process.platform, access })) return
   executor.broker.grantStanding('migrated')
   log.info('consent.migrated', { os: process.platform })
 }
@@ -610,9 +610,11 @@ function registerIpc() {
       if (!c) throw new CodeError('not a code')
       const nm = String(name || settings.name).trim() || settings.name
       const p = await pair(draft.base, c, nm, timed(PAIR_S))
-      settings = { ...settings, base: draft.base, device: p.device, name: nm }
+      settings = { ...settings, base: draft.base, device: p.device, name: nm, pairedAt: new Date().toISOString() }
       saveSettings(settings)
       saveSecrets({ ...loadSecrets(), token: p.token })
+      // A pairing (first, or again after the box revoked the token) reruns the migration: never a step left at "not allowed".
+      await migrateStanding()
       draft = null
       errors = {}
       await startRuntimeFromSettings()
@@ -719,8 +721,14 @@ function registerIpc() {
     await startRuntimeFromSettings()
     return state()
   })
-  setup('setup:control', (on) => {
-    executor?.broker.setDisabled(!on)
+  // The box is ticked only when control is on and allowed (controlBox); ticking it once also grants.
+  setup('setup:control', async (on) => {
+    const t = controlTicked(Boolean(on), standing.granted())
+    executor?.broker.setDisabled(!t.enable)
+    if (t.grant && executor) {
+      executor.broker.grantStanding('settings')
+      await askAutomationOnce()
+    }
     refreshTray()
     return state()
   })
@@ -822,6 +830,23 @@ async function permissions() {
 }
 
 /** `tccutil reset` for this app only: runs as the user, no admin. What it said, and whether it worked. */
+/**
+ * macOS: an older build's Microphone entry that no longer matches this signature never prompts again by itself, so
+ * once per signing identity, when the Microphone is not granted, the app's own entry is reset (`tccutil reset
+ * Microphone com.localrouter.companion`) and macOS asks, at start, never during a task.
+ */
+async function askMicOnce() {
+  if (process.platform !== 'darwin') return
+  const identity = await signingIdentity()
+  const status = systemPreferences.getMediaAccessStatus('microphone')
+  if (!micAskAtStart({ status, identity, askedFor: settings.micAskedFor })) return
+  settings = { ...settings, micAskedFor: identity ?? undefined }
+  saveSettings(settings)
+  const reset = await resetGrant('Microphone')
+  const granted = await systemPreferences.askForMediaAccess('microphone')
+  log.info('microphone.asked', { before: status, reset: reset.ok, granted })
+}
+
 function resetGrant(service: 'Accessibility' | 'ScreenCapture' | 'Microphone'): Promise<{ ok: boolean; text: string }> {
   return new Promise((resolve) => {
     execFile('/usr/bin/tccutil', ['reset', service, BUNDLE_ID], { timeout: 10_000 }, (error, stdout, stderr) => {
@@ -930,7 +955,7 @@ async function state() {
     presence: gate.method,
     presence_why: gate.why,
     secrets: secretsWhere(),
-    control: executor ? !executor.broker.disabled : false,
+    control: executor ? controlBox({ enabled: !executor.broker.disabled, granted: standing.granted() }) : false,
     approvals: executor?.broker.approvalMode() ?? 'consent',
     control_granted: standing.granted(),
     ask_each: settings.askEachAction === true,
@@ -1303,6 +1328,7 @@ if (process.argv.includes('--version')) {
     refreshTray()
     if (runtime) showMain()
     else showSetup()
+    void askMicOnce().catch((error: unknown) => log.warn('microphone.ask_failed', { error: error instanceof Error ? error.message : String(error) }))
     log.info('app.started', { version: VERSION, secrets: secretsStore, keychain: keychainHelperShipped ? 'helper (Chromium on its mock keychain)' : 'safeStorage', log: LOG_FILE })
     void moveLegacySecrets().catch((error: unknown) => log.error('secrets.migration.failed', { error: error instanceof Error ? error.message : String(error) }))
   })

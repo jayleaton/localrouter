@@ -124,6 +124,12 @@ Spark's own web page keep using this Mac through the same local rules (pair a se
 If the old LaunchAgent helper (`apps/desktop-helper`, `com.localrouter.desktop`) is installed, remove it first
 (`node src/main.ts uninstall-agent` in its checkout), so two programs never drive the same Mac.
 
+**Microphone after an update (one time).** A Microphone grant made under an older, differently signed build no longer
+matches (Console: `Failed to match existing code requirement … kTCCServiceMicrophone`) and macOS never asks again by
+itself. LocalRouter now runs `tccutil reset Microphone com.localrouter.companion` and asks once at start when the
+Microphone is not granted, once per signing identity. If that prompt was dismissed, run the same command yourself and
+reopen LocalRouter.
+
 ## Install on Linux or Windows (unsigned builds)
 
 Download `LocalRouter-linux-x64` or `LocalRouter-windows-x64` from the latest green **Companion (Linux, Windows)** run
