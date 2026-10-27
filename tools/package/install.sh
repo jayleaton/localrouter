@@ -105,7 +105,13 @@ step "checks"
 command -v nvidia-smi > /dev/null || die "no nvidia-smi: this needs an NVIDIA GPU and its driver"
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | sed 's/^/  gpu: /'
 command -v docker > /dev/null || die "no docker"
-docker info --format '{{json .Runtimes}}' | grep -q nvidia || die "Docker has no nvidia runtime (install the NVIDIA Container Toolkit)"
+# --gpus reaches the GPU through Docker's nvidia runtime, or (no runtime registered, as on DGX-02) through CDI: Docker
+# reads CDI specs and nvidia-ctk has written the GPU's (nvidia.com/gpu=all)
+gpu_docker() {
+    grep -q nvidia <<< "$(docker info --format '{{json .Runtimes}}')" && return 0
+    [[ $(docker info --format '{{len .CDISpecDirs}}' 2> /dev/null) -gt 0 ]] && grep -qx nvidia.com/gpu=all <<< "$(nvidia-ctk cdi list 2> /dev/null)"
+}
+gpu_docker || die "Docker has neither the nvidia runtime nor a CDI spec for the GPU (install the NVIDIA Container Toolkit, then: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker)"
 command -v zstd > /dev/null || die "no zstd"
 root=$(docker info --format '{{.DockerRootDir}}')
 need_gb=$(($(stat -c %s "$image") * 3 / 1000000000 + 1))   # the unpacked layers, with room to spare
