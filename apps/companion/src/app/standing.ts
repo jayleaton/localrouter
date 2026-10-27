@@ -28,6 +28,11 @@ export class StoredStanding implements Standing {
     return Boolean(v) && !v.startsWith(REVOKED)
   }
 
+  /** For the migration: only `revoked` (an explicit Revoke) blocks it. */
+  get decision(): 'undecided' | 'granted' | 'revoked' {
+    return this.granted() ? 'granted' : this.undecided ? 'undecided' : 'revoked'
+  }
+
   /** Never granted nor revoked: an install the migration may grant. */
   get undecided(): boolean {
     return !this.store.load().computer_grant
@@ -57,6 +62,29 @@ export class StoredStanding implements Standing {
 export function migrates(i: { paired: boolean; undecided: boolean; os: string; access: Pick<AccessReport, 'accessibility' | 'input' | 'screen_recording'> | null }): boolean {
   const a = i.access
   return i.paired && i.undecided && a !== null && a.accessibility && a.input && (i.os !== 'darwin' || a.screen_recording)
+}
+
+type Access = Pick<AccessReport, 'accessibility' | 'input' | 'screen_recording'>
+
+/**
+ * The migration's decision and why, for the log (`consent.migrate`). Only an explicit Revoke blocks it: no earlier
+ * "not eligible" is kept, so it is decided afresh at every launch, pairing and permission change.
+ *
+ * `access`: the executor's report (a helper process: on a Mac an osascript child, whose Screen Recording answer is not
+ * always the app's). `app`: the app's own in-process answers (macOS: AXIsProcessTrusted and the Screen Recording
+ * status), the same ones setup shows as granted (Mac run, 2026-10-27: both granted there, yet no migration). Either
+ * saying yes counts.
+ */
+export function migrationDecision(i: { grant: 'undecided' | 'granted' | 'revoked'; everPaired: boolean; os: string; access: Access | null; app?: { accessibility: boolean; screen_recording: boolean } | null }): { eligible: boolean; reason: string } {
+  if (i.grant === 'granted') return { eligible: false, reason: 'already granted' }
+  if (i.grant === 'revoked') return { eligible: false, reason: 'revoked in Settings' }
+  if (!i.everPaired) return { eligible: false, reason: 'never paired' }
+  const ax = Boolean(i.access?.accessibility || i.app?.accessibility)
+  const input = Boolean(i.access?.input || (i.os === 'darwin' && i.app?.accessibility))
+  const sr = Boolean(i.access?.screen_recording || i.app?.screen_recording)
+  if (!ax || !input) return { eligible: false, reason: 'Accessibility not granted' }
+  if (i.os === 'darwin' && !sr) return { eligible: false, reason: 'Screen Recording not granted' }
+  return { eligible: true, reason: 'paired before, OS permissions granted, never revoked' }
 }
 
 /** Paired at some point: an address kept, a token kept (even one revoked since), or a pairing recorded. */
