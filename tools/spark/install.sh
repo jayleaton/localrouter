@@ -84,7 +84,13 @@ for m in $MODELS; do [[ $m == image || $m == video ]] || die "MODELS has '$m': u
 step "checks"
 command -v nvidia-smi > /dev/null || die "no nvidia-smi: this needs an NVIDIA GPU and its driver"
 command -v docker > /dev/null || die "no docker"
-docker info --format '{{json .Runtimes}}' | grep -q nvidia || die "Docker has no nvidia runtime (install the NVIDIA Container Toolkit)"
+# --gpus reaches the GPU through Docker's nvidia runtime, or (no runtime registered, as on DGX-02) through CDI: Docker
+# reads CDI specs and nvidia-ctk has written the GPU's (nvidia.com/gpu=all)
+gpu_docker() {
+    grep -q nvidia <<< "$(docker info --format '{{json .Runtimes}}')" && return 0
+    [[ $(docker info --format '{{len .CDISpecDirs}}' 2> /dev/null) -gt 0 ]] && grep -qx nvidia.com/gpu=all <<< "$(nvidia-ctk cdi list 2> /dev/null)"
+}
+gpu_docker || die "Docker has neither the nvidia runtime nor a CDI spec for the GPU (install the NVIDIA Container Toolkit, then: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker)"
 [[ ${WEIGHTS_ONLY:-0} == 1 ]] || docker compose version > /dev/null 2>&1 || die "no 'docker compose' (the compose plugin)"
 mkdir -p "$LOCALROUTER_HOME" 2> /dev/null || sudo install -d -o "$(id -u)" -g "$(id -g)" "$LOCALROUTER_HOME"
 free_gb=$(df -BG --output=avail "$LOCALROUTER_HOME" | tail -1 | tr -dc 0-9)

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The GPU Docker preflight (`tools/spark/install.sh`, `tools/package/install.sh`, the `jarvis-gb10` profile's `docker`
+  prerequisite) also accepts Docker reaching the GPU through CDI (an `nvidia.com/gpu=all` spec from `nvidia-ctk`, no
+  `nvidia` runtime registered), as on DGX-02: `--gpus all` works there, and the check refused it.
 - Voice cloning for Drama 3: `POST /v1/voices` makes a voice from recordings of one person (10 to 60 s, uploaded or
   recorded in the `/voice` page and the companion, with a "this is my voice" confirmation), `GET /v1/voices` lists
   every voice, `PATCH`/`DELETE /v1/voices/{id}` name and remove one. Clips are trimmed, cut at pauses, levelled and
