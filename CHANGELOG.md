@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The MiniMax H3 pack build (`python -m stk_twin.h3.build`, `tools/spark/prepare.sh`) moves the DiT's block linears to
+  the GPU once instead of holding a host and a device copy: 53.4 GiB at the peak instead of over 65 GiB (it was stopped
+  at 5 GiB free beside the warm Jarvis set on DGX-02), and the pack is byte-identical to the pins
+  (`tools/twin/packs/built/minimax-h3.json`, 6/6 files).
 - The GPU Docker preflight (`tools/spark/install.sh`, `tools/package/install.sh`, the `jarvis-gb10` profile's `docker`
   prerequisite) also accepts Docker reaching the GPU through CDI (an `nvidia.com/gpu=all` spec from `nvidia-ctk`, no
   `nvidia` runtime registered), as on DGX-02: `--gpus all` works there, and the check refused it.
