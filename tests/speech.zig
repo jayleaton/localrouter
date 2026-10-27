@@ -217,7 +217,10 @@ test "speech to text: uploads decode to 16 kHz mono, response formats, limits an
     const r = try transcribe(&d, a, &.{.{ .name = "model", .value = "ears" }}, exact);
     try expectStatus(r, .ok, &.{});
     const t = try std.json.parseFromSliceLeaky(T, a, r.body, .{});
-    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "testpattern heard 1500 ms of audio, hash {x}", .{std.hash.Wyhash.hash(0, exact[44..])}), t.text);
+    // no language sent: the server's stt.language (en); language=auto: the model detects it
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "testpattern heard 1500 ms of audio, hash {x}, language en", .{std.hash.Wyhash.hash(0, exact[44..])}), t.text);
+    const detected = try std.json.parseFromSliceLeaky(T, a, (try transcribe(&d, a, &.{ .{ .name = "model", .value = "ears" }, .{ .name = "language", .value = "auto" } }, exact)).body, .{});
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "testpattern heard 1500 ms of audio, hash {x}", .{std.hash.Wyhash.hash(0, exact[44..])}), detected.text);
     try testing.expectEqualStrings("duration", t.usage.type);
     try testing.expectEqual(@as(u64, 2), t.usage.seconds);
 

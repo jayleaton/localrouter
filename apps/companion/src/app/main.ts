@@ -18,6 +18,7 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
+import { DEFAULT_LANGUAGE, languageChoices, parseSettings, settingsText, sttLanguage } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import { CONFIRMATION } from '../executor/broker.ts'
 import type { Card, PresenceGate } from '../executor/broker.ts'
@@ -89,8 +90,11 @@ if (keychainHelperShipped && !needsRealKeychain) app.commandLine.appendSwitch('u
 const UI_DIR = join(__dirname, 'ui')
 const PRELOAD = join(__dirname, 'preload.cjs')
 
-/** `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one). */
-type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; askEachAction?: boolean; automationAsked?: string; pairedAt?: string; micAskedFor?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
+/**
+ * `grants`: the build each macOS permission was last seen working in (to tell a stale grant from a revoked one).
+ * `language`: what a call's speech to text hears (a Whisper code, or "auto"), one per computer: the voice page's too.
+ */
+type Settings = { base: string; device: { id: string; name: string } | null; name: string; shared: string[]; legacy: boolean; language: string; askEachAction?: boolean; automationAsked?: string; pairedAt?: string; micAskedFor?: string; grants?: Partial<Record<Permission, string>>; secretsMigration?: Migration }
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'lr', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } }])
 
@@ -105,17 +109,19 @@ let secretsStore: 'keychain' | 'legacy' | 'none' = 'none'
 let keychain: KeychainHelper | null = null
 
 function loadSettings(): Settings {
-  const dflt: Settings = { base: '', device: null, name: computerName(), shared: [], legacy: false }
+  const dflt: Settings = { base: '', device: null, name: computerName(), shared: [], legacy: false, language: DEFAULT_LANGUAGE }
+  let text: string | null = null
   try {
-    return { ...dflt, ...(JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<Settings>) }
+    text = readFileSync(settingsPath(), 'utf8')
   } catch {
-    return dflt
+    // No file yet: the defaults.
   }
+  return parseSettings(text, dflt)
 }
 
 function saveSettings(s: Settings) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  writeFileSync(settingsPath(), `${JSON.stringify(s, null, 1)}\n`, { mode: 0o600 })
+  writeFileSync(settingsPath(), settingsText(s), { mode: 0o600 })
 }
 
 /**
@@ -517,6 +523,7 @@ function registerIpc() {
     const owner = e.sender
     // The page keeps the one conversation (typed and spoken) and mirrors it into the journal (`host:save`).
     const s = runtime.session({
+      language: settings.language,
       onEvent: (ev) => {
         if (owner.isDestroyed() || !pageView(ev)) return
         // When this process had each piece of speech, so the page can tell a slow box from a slow hop to it.
@@ -585,6 +592,13 @@ function registerIpc() {
   host('host:save', (conversation, items) => {
     if (!runtime || typeof conversation !== 'string' || !Array.isArray(items)) return 0
     return runtime.journal.mirror(conversation, items as PageItem[])
+  })
+  // The language a call hears: the page's picker reads and writes this computer's setting (Settings shows it too).
+  host('host:language', () => settings.language)
+  host('host:setLanguage', (v) => {
+    settings = { ...settings, language: sttLanguage(v) }
+    saveSettings(settings)
+    return settings.language
   })
   host('host:prepareVideo', () => (runtime ? prepareVideo(runtime.spark) : { ok: false, text: 'not paired' }))
   host('host:restoreVoice', () => (runtime ? restoreVoice(runtime.spark) : { ok: false, text: 'not paired' }))
@@ -747,6 +761,12 @@ function registerIpc() {
     return state()
   })
   // "Ask before each action" (off by default): a card per consequential step instead of the standing grant.
+  setup('setup:language', (v) => {
+    settings = { ...settings, language: sttLanguage(v) }
+    saveSettings(settings)
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('host:language', settings.language)
+    return state()
+  })
   setup('setup:askEach', (on) => {
     settings = { ...settings, askEachAction: Boolean(on) }
     saveSettings(settings)
@@ -975,6 +995,8 @@ async function state() {
     approvals: executor?.broker.approvalMode() ?? 'consent',
     control_granted: standing.granted(),
     ask_each: settings.askEachAction === true,
+    language: settings.language,
+    languages: languageChoices(),
     granted_since: standing.since,
     machine: machineKind(),
     permissions: permissionState,

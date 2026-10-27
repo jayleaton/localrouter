@@ -154,6 +154,7 @@ pub const Config = struct {
     gpu_lock: []const u8 = "", // the host's GPU lock: the scheduler holds it (shared) while any tool is loaded, against GPU users outside LocalRouter
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
     voice: Voice = .{},
+    stt: Stt = .{},
     pairing: Pairing = .{},
     computer: Computer = .{},
     topology: Topology = .{},
@@ -163,6 +164,21 @@ pub const Config = struct {
         for (c.tools) |*t| if (std.mem.eql(u8, t.id, id)) return t;
         return null;
     }
+
+    /// The language a transcription runs in (voice turns, `/v1/audio/transcriptions`, MCP): the caller's, else
+    /// `stt.language`; "auto" (from either) is "": the model detects it. Language detection on a 1 to 2 s turn is
+    /// unreliable (a clean "Stop." came back as Italian and as Korean), so the server's default is a language.
+    pub fn sttLanguage(c: *const Config, asked: []const u8) []const u8 {
+        const l = std.mem.trim(u8, asked, " \t");
+        const chosen = if (l.len > 0) l else std.mem.trim(u8, c.stt.language, " \t");
+        return if (std.ascii.eqlIgnoreCase(chosen, "auto")) "" else chosen;
+    }
+};
+
+/// Speech to text everywhere: `language` is what a transcription runs in when its caller names none (a Whisper code
+/// such as "en"; "auto": detect it on each request).
+pub const Stt = struct {
+    language: []const u8 = "en",
 };
 
 /// A tool id per capability, `{"text_to_image": "qwen-image-2.1-turbo"}`: requests that name no model use it. Unset:
@@ -218,6 +234,21 @@ fn chatDefaults(arena: std.mem.Allocator, text: []const u8, c: *Config) !void {
         if (v.object.get("keep_loaded") == null) t.keep_loaded = true;
     }
     c.tools = tools;
+}
+
+test "transcriptions run in the caller's language, else stt.language; auto detects" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const d = try parse(arena.allocator(), "{}");
+    try std.testing.expectEqualStrings("en", d.sttLanguage(""));
+    try std.testing.expectEqualStrings("de", d.sttLanguage("de"));
+    try std.testing.expectEqualStrings("", d.sttLanguage("auto"));
+    try std.testing.expectEqualStrings("", d.sttLanguage(" Auto "));
+    const ja = try parse(arena.allocator(), "{\"stt\": {\"language\": \"ja\"}}");
+    try std.testing.expectEqualStrings("ja", ja.sttLanguage(""));
+    try std.testing.expectEqualStrings("en", ja.sttLanguage("en"));
+    const auto = try parse(arena.allocator(), "{\"stt\": {\"language\": \"auto\"}}");
+    try std.testing.expectEqualStrings("", auto.sttLanguage(""));
 }
 
 test "a chat tool is kept loaded at the highest default priority unless its config says otherwise" {

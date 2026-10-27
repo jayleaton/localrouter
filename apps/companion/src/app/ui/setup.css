@@ -16,7 +16,7 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 500 14.5px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; background: none; border: 0; padding: 0; }
 button:disabled { opacity: .45; cursor: default; }
 :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 10px; }
@@ -30,8 +30,8 @@ kbd { border: 1px solid var(--border); border-radius: 6px; padding: 0 5px; backg
 .btn:hover:not(:disabled) { filter: brightness(1.05); }
 .btn.busy { opacity: .7; cursor: progress; }
 .link { color: var(--amber); font-weight: 600; font-size: 13px; }
-input:not([type=checkbox]) { min-height: 38px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg); width: 100%; }
-input:focus { border-color: var(--amber); outline: none; box-shadow: 0 0 0 3px var(--amber-soft); }
+input:not([type=checkbox]), select { min-height: 38px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg); width: 100%; }
+input:focus, select:focus { border-color: var(--amber); outline: none; box-shadow: 0 0 0 3px var(--amber-soft); }
 input[type=checkbox] { accent-color: var(--amber); width: 16px; height: 16px; }
 
 /* ------------------------------------------------ header */

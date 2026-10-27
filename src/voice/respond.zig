@@ -129,8 +129,7 @@ fn warm(s: *Session) void {
     const a = tmp.allocator();
     s.mutex.lockUncancelable(s.io);
     const st = &s.settings;
-    const language = if (st.language.len > 0) st.language else s.heardLanguage();
-    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .greedy = s.voice.greedy_transcripts };
+    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, st.language) catch "", .greedy = s.voice.greedy_transcripts };
     s.mutex.unlock(s.io);
     const silence = a.alloc(i16, 16_000) catch return;
     @memset(silence, 0);
@@ -189,14 +188,13 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
         return completed(s, a, h.item_id, early, &why);
     };
     const st = &s.settings;
-    const language = if (st.language.len > 0) st.language else s.heardLanguage(); // no detection pass on each turn
-    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "", .greedy = s.voice.greedy_transcripts };
+    // the session's language, else the server's stt.language (never the last turn's detection: one short turn heard as
+    // another language held every later turn in it)
+    const o: backend.Hear = .{ .model = a.dupe(u8, st.transcription_model) catch "", .language = a.dupe(u8, st.language) catch "", .prompt = a.dupe(u8, st.transcription_prompt) catch "", .greedy = s.voice.greedy_transcripts };
     s.mutex.unlock(s.io);
     var worker_ms: u64 = 0;
-    var detected: []const u8 = "";
     var heard = o;
     heard.worker_ms = &worker_ms;
-    heard.detected = &detected;
     const began = s.clock();
     const text: backend.Error![]const u8 = if (resample.resample(a, h.pcm, session.rate, 16_000)) |pcm16|
         s.backend.transcribe(a, pcm16, heard, &s.close_stop, &why)
@@ -204,7 +202,6 @@ fn hear(s: *Session, h: Task.Hearing, pass: Pass) void {
         error.OutOfMemory;
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
-    s.noteLanguage(detected);
     s.last_heard_ns = s.clock();
     switch (pass) {
         .partial => {

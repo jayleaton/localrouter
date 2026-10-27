@@ -129,8 +129,6 @@ pub const Session = struct {
     // whole turn, so when the wait ends the transcript is ready and only the answer is left. It is only the turn's words:
     // nothing considers them before the wait ends.
     early: ?Early = null,
-    language_buf: [16]u8 = undefined, // the language the last transcript was in: the next one's, if the session sets none
-    language_len: usize = 0,
 
     /// A session; it sends session.created and starts its worker.
     pub fn create(gpa: std.mem.Allocator, io: Io, b: backend.Backend, out: backend.Out, voice: config.Voice, chat_model: []const u8) !*Session {
@@ -414,17 +412,6 @@ pub const Session = struct {
     fn dropEarly(s: *Session) void {
         if (s.early) |e| e.free(s.gpa);
         s.early = null;
-    }
-
-    /// The language to transcribe in when the session sets none: the one the last transcript was in.
-    pub fn heardLanguage(s: *const Session) []const u8 {
-        return s.language_buf[0..s.language_len];
-    }
-
-    pub fn noteLanguage(s: *Session, language: []const u8) void {
-        if (language.len == 0 or language.len > s.language_buf.len) return;
-        @memcpy(s.language_buf[0..language.len], language);
-        s.language_len = language.len;
     }
 
     fn endTurn(s: *Session) void {

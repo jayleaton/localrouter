@@ -213,6 +213,10 @@ function render(s) {
   $('control').disabled = !s.paired;
   $('presence').textContent = s.presence_why ? `${s.presence} (${s.presence_why})` : s.presence;
   $('askEach').checked = s.ask_each;
+  if ($('language').options.length !== s.languages.length) {
+    $('language').replaceChildren(...s.languages.map((l) => Object.assign(document.createElement('option'), { value: l.code, textContent: l.name })));
+  }
+  $('language').value = s.language;
   $('grantState').textContent = s.granted_since ? `you allowed it on ${new Date(s.granted_since).toLocaleString()}` : 'not allowed yet: a task is refused until you allow it';
   $('revokeControl').hidden = !s.control_granted;
   $('allowControl').hidden = s.control_granted;
@@ -337,6 +341,7 @@ for (const b of document.querySelectorAll('[data-reset]')) b.onclick = () => gua
 $('relaunch').onclick = () => api.relaunch();
 $('control').onchange = () => guarded(() => api.control($('control').checked));
 $('askEach').onchange = () => guarded(() => api.askEach($('askEach').checked));
+$('language').onchange = () => guarded(() => api.language($('language').value));
 $('revokeControl').onclick = () => guarded(() => api.revokeControl());
 $('grantControl').onclick = () => guarded(() => api.grantControl('onboarding'), $('grantControl'), 'Asking macOS…');
 $('allowControl').onclick = () => guarded(() => api.grantControl('settings'), $('allowControl'));

@@ -305,7 +305,7 @@ pub fn startTranscription(app: *App, a: std.mem.Allocator, b: TranscriptionArgs,
         }
         return null;
     };
-    const lang = std.ascii.allocLowerString(a, std.mem.trim(u8, b.language, " ")) catch "";
+    const lang = std.ascii.allocLowerString(a, app.cfg.sttLanguage(b.language)) catch "";
     const r: request.Request = .{ .transcription = .{ .audio = "audio.wav", .duration_ms = decoded.ms, .language = lang, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed orelse routes.randomSeed(app.io) } };
     return routes.enqueue(app, tool, r, &.{.{ .name = "audio.wav", .data = decoded.wav }}, owner, why);
 }

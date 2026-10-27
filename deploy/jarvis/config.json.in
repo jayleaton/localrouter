@@ -5,6 +5,7 @@
  "defaults": {"chat_completion": "qwen3.8-27b", "text_to_speech": "fishaudio/drama-3",
               "speech_to_text": "whisper-large-v3-turbo", "text_to_image": "qwen-image-2.1-turbo",
               "text_to_video": "minimax-h3", "typed_decision": "knowline-4b"},
+ "stt": {"language": "en"},
  "voice": {
   "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none", "top_p": 0.8},
   "temperature": 0.7,
