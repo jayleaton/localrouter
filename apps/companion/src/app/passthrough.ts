@@ -33,7 +33,10 @@ export async function proxy(spark: Pick<Spark, 'request'> | null, req: Request, 
     }
     return new Response(r.body, { status: r.status, headers: out })
   } catch (error) {
-    return failure(502, `the Spark did not answer: ${error instanceof Error ? error.message : String(error)}`)
+    // fetch's own message is only "fetch failed": the reason (refused, reset, closed, a timeout) is its cause.
+    const cause = error instanceof Error && error.cause ? (error.cause as { code?: string; message?: string }) : null
+    const why = cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''
+    return failure(502, `the Spark did not answer: ${error instanceof Error ? error.message : String(error)}${why}`)
   }
 }
 
