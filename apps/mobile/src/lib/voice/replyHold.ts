@@ -7,7 +7,8 @@
  *   it at the rate it comes in (at least START_MS; GEN_START_MS while a picture or video is being made);
  * - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
  * - or all of the reply's speech is in (`localrouter.response.speech_done`);
- * - and never more than HOLD_CAP_MS after the first piece.
+ * - and never more than HOLD_CAP_MS after the first piece, or WRITING_CAP_MS while the text is still being written:
+ *   a reply speaks while it is written, at the cost of a pause where speech falls behind.
  * A short reply on a free GPU is written before its first audio and starts as soon as it would have.
  */
 
@@ -16,6 +17,8 @@ export const GEN_START_MS = 500
 export const KEEP_UP = 1.05
 export const RATE_MS = 250
 export const HOLD_CAP_MS = 10_000
+/** While the text is still being written, a reply starts at most this long after its first piece. */
+export const WRITING_CAP_MS = 1_000
 /** A written reply's audio is about this long per character. */
 export const MS_PER_CHAR = 65
 const MARGIN = 1.25
@@ -108,7 +111,8 @@ export class ReplyHold<T> {
     const prior = this.textDone.has(item) && !this.generating() ? this.freeRate.get(item) || this.lastRate : 0
     const rate = prior >= KEEP_UP ? Math.max(measured ?? 0, prior) : measured
     const ready = this.speechDone.has(item) || (rate !== null && held.haveMs >= this.need(item, rate))
-    if (!ready && now - held.firstAt < HOLD_CAP_MS) return []
+    const cap = this.textDone.has(item) ? HOLD_CAP_MS : WRITING_CAP_MS
+    if (!ready && now - held.firstAt < cap) return []
     this.held.delete(item)
     this.started.add(item)
     return held.pieces

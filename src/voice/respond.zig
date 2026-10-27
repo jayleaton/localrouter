@@ -429,7 +429,7 @@ const Feed = struct {
 };
 
 /// The speaker thread: one speech job a sentence, sent as 100 ms audio deltas unless the response was cancelled. With
-/// `voice.speak_written` it starts once the spoken text is complete (Feed.endText): speech and the chat model share the
+/// `voice.speak_written` (off by default) it starts once the spoken text is complete (Feed.endText): speech and the chat model share the
 /// GPU, so the chat writes the reply in about half the time alone, and speech then comes faster than it plays.
 fn speak(s: *Session, r: *Response, say: backend.Say) void {
     var next: usize = 0;

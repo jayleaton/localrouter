@@ -2772,9 +2772,11 @@ function bargeIn(cancel) {
 //   a picture or video is being made);
 // - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
 // - or all of the reply's speech is in (localrouter.response.speech_done);
-// - and never more than HOLD_CAP_MS after the first piece.
+// - and never more than HOLD_CAP_MS after the first piece, or WRITING_CAP_MS while the text is still being written: a
+//   reply speaks while it is written (JJ, 2026-10-27: a long reply held for its whole text was "not streaming at all"),
+//   at the cost of a pause where speech, sharing the GPU with the chat model, falls behind.
 // A short reply on a free GPU is written before its first audio comes and starts as soon as it would have.
-const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000, MS_PER_CHAR = 65, MARGIN = 1.25;
+const START_MS = 200, GEN_START_MS = 500, KEEP_UP = 1.05, RATE_MS = 250, HOLD_CAP_MS = 10000, WRITING_CAP_MS = 1000, MS_PER_CHAR = 65, MARGIN = 1.25;
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
 const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
 function decode(b64) {
@@ -2825,7 +2827,7 @@ function startOrWait(item) {
   const prior = V.textDone.has(item) && !generating() ? (V.freeRate.get(item) || V.lastRate) : 0;
   const rate = prior >= KEEP_UP ? Math.max(measured ?? 0, prior) : measured;
   const ready = V.speechDone.has(item) || (rate != null && have(item) >= holdNeed(item, rate));
-  if (ready || since >= HOLD_CAP_MS) {
+  if (ready || since >= (V.textDone.has(item) ? HOLD_CAP_MS : WRITING_CAP_MS)) {
     if (V.holding === item) dbg('voice.held', { item, ms: Math.round(since), have_ms: Math.round(have(item)), rate: rate == null ? null : +rate.toFixed(2), written: V.textDone.has(item) });
     return release(item, 0.01);
   }
