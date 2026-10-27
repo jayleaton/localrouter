@@ -142,6 +142,11 @@ def build_dir(root, vpins):
     return os.path.join(root, vpins["build"]["dir"] if vpins else os.path.join("build", "tensorfold"))
 
 
+def git_checkouts(root, pins, vpins):
+    """The git checkouts under ROOT that fetch.sh --check and this script read: upstream's, and the engine build's."""
+    return [os.path.join(root, pins["upstream"]["dir"]), build_dir(root, vpins)]
+
+
 def layout(root, vpins=None):
     """The paths the worker derives from its weights (ROOT) when no option overrides them."""
     return {"pilot": os.path.join(root, "launcher", "pilot.py"),
@@ -165,9 +170,55 @@ def read_json(path):
         return json.load(f)
 
 
+def git_env(*paths, base=None):
+    """The environment for this script's read-only git calls on PATHS: each a safe.directory (git refuses a checkout
+    another user owns, as when the qualify runs as root on assets fetched by the owner), and no optional locks (git
+    status does not rewrite the index of a checkout that is not ours)."""
+    env = dict(os.environ if base is None else base)
+    n = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+    for p in paths:
+        env[f"GIT_CONFIG_KEY_{n}"], env[f"GIT_CONFIG_VALUE_{n}"] = "safe.directory", os.path.realpath(p)
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def ownership_note(path, uid=None):
+    """Why git may refuse PATH: it is owned by another user than this run's (None: same owner, or no such path)."""
+    uid = os.getuid() if uid is None else uid
+    try:
+        owner = os.stat(path).st_uid
+    except OSError:
+        return None
+    if owner == uid:
+        return None
+    return f"{path} is owned by uid {owner} and this run is uid {uid}: git refuses such a checkout (dubious ownership)"
+
+
 def git_head(path):
-    r = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=60)
-    return r.stdout.strip() if r.returncode == 0 else None
+    """The checkout's HEAD and None, or None and why not (PATH itself must be the checkout: a plain directory inside
+    another repository is not)."""
+    r = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel", "HEAD"], capture_output=True, text=True,
+                       timeout=60, env=git_env(path))
+    if r.returncode == 0:
+        top, head = (r.stdout.splitlines() + ["", ""])[:2]
+        if os.path.realpath(top) != os.path.realpath(path):
+            return None, f"{path} is not a git checkout (it is inside {top})"
+        return head, None
+    why = (r.stderr.strip().splitlines() or [f"git exit {r.returncode}"])[0]
+    note = ownership_note(path) if "dubious ownership" in r.stderr else None
+    return None, f"{why}{'; ' + note if note else ''}"
+
+
+def gpu_lock_problem(lock):
+    """Why the config's gpu_lock cannot be held (None: it can)."""
+    if not lock:
+        return ("the config has no gpu_lock: set its top-level \"gpu_lock\" to the host's GPU lock file (the one the "
+                "daemon holds), or to an empty file made for this host")
+    if not os.path.isfile(lock):
+        return f"the config's gpu_lock {lock!r} is not an existing file"
+    return None
 
 
 def gpu_name():
@@ -315,12 +366,14 @@ def assets(args):
         rep.add(f"{key}_in_root", os.path.realpath(paths[key]) == os.path.realpath(expected[key]),
                 path=paths[key], expected=expected[key])
     lock = cfg.get("gpu_lock") or ""
-    rep.add("gpu_lock", bool(lock) and os.path.isfile(lock), gpu_lock=lock)
+    problem = gpu_lock_problem(lock)
+    rep.add("gpu_lock", problem is None, gpu_lock=lock, error=problem)
     rep.add("qualification_path", bool(tool.get("qualification")), qualification=tool.get("qualification"))
     with open(os.path.join(args.out, "fetch-check.log"), "w") as log:
         t = time.monotonic()
         r = subprocess.run([os.path.join(HERE, "fetch.sh"), root, "--variant", variant, "--check"], stdout=log,
-                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                           env=git_env(*git_checkouts(root, pins, vpins)))
     rep.add("pinned_files_sha256", r.returncode == 0, exit=r.returncode, seconds=time.monotonic() - t,
             log="fetch-check.log", variant=variant, files=len((vpins or pins)["checkpoint"]["files"]))
     engine_path = engine_record(root, vpins)
@@ -337,8 +390,8 @@ def assets(args):
     else:
         rep.add("engine_upstream_commit", engine.get("upstream_commit") == pins["upstream"]["commit"],
                 engine=engine.get("upstream_commit"), pinned=pins["upstream"]["commit"])
-    head = git_head(build_dir(root, vpins))
-    rep.add("build_checkout_head", head == want, head=head, pinned=want)
+    head, why = git_head(build_dir(root, vpins))
+    rep.add("build_checkout_head", head == want, head=head, pinned=want, error=why)
     native = paths["native_bin"]
     rep.add("engine_native_bin", os.path.realpath(engine.get("native_bin") or "/nonexistent") ==
             os.path.realpath(native), engine=engine.get("native_bin"), tool=native)
@@ -432,8 +485,9 @@ def e2e(args):
     held = None
     exited = False
     try:
-        if not lock or not os.path.isfile(lock):
-            rep.add("gpu_lock", False, error=f"the config's gpu_lock {lock!r} is not an existing file")
+        problem = gpu_lock_problem(lock)
+        if problem:
+            rep.add("gpu_lock", False, error=problem)
             return 1
         held = hold_shared(lock)
         if not rep.add("host_gpu_lock", held is not None, gpu_lock=lock, mode="shared",
@@ -781,8 +835,9 @@ def bench(args):
         digest = kw.sha256_file(corpus) if os.path.isfile(corpus) else None
         if not rep.add("corpus_sha256", digest == CORPUS_SHA256, corpus=corpus, sha256=digest, expected=CORPUS_SHA256):
             return 1
-        if not lock or not os.path.isfile(lock):
-            rep.add("gpu_lock", False, error=f"the config's gpu_lock {lock!r} is not an existing file")
+        problem = gpu_lock_problem(lock)
+        if problem:
+            rep.add("gpu_lock", False, error=problem)
             return 1
         held = hold_shared(lock)
         if not rep.add("host_gpu_lock", held is not None, gpu_lock=lock, mode="shared",
@@ -966,12 +1021,13 @@ def accuracy(args):
         return finish(1)
     runtime = os.path.realpath(args.reference)
     py = os.path.join(runtime, "venv", "bin", "python")
-    head = git_head(os.path.join(runtime, "sglang-omni"))
+    head, why = git_head(os.path.join(runtime, "sglang-omni"))
     engine = os.path.join(root, "build", "tensorfold")
     missing = [p for p in (py, os.path.join(engine, "zig-out/oracle/bin/tf-drama-backbone-oracle"),
                            os.path.join(engine, "zig-out/oracle/bin/tf-drama-tower-oracle")) if not os.path.isfile(p)]
     if missing or head != revision:
-        report["error"] = f"the reference runtime or the oracle tools are not ready: missing {missing}, sglang-omni at {head}"
+        report["error"] = (f"the reference runtime or the oracle tools are not ready: missing {missing}, sglang-omni at "
+                           f"{head or why}")
         return finish(1)
     lock = (read_json(args.config).get("gpu_lock") or "")
     checkpoint = tool_paths(tool)["checkpoint"]

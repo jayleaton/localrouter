@@ -78,7 +78,13 @@ pinned() { # kind: the plan's lines of that kind, without the kind
 read -r url commit updir <<< "$(pinned repo)"
 up=$root/$updir
 if [ -e "$up" ]; then
-  git -C "$up" rev-parse --git-dir >/dev/null 2>&1 || die "$up exists and is not a git checkout"
+  if ! err=$(git -C "$up" rev-parse --git-dir 2>&1 >/dev/null); then
+    # git refuses a checkout another user owns: say so (qualify.py passes safe.directory for its own read-only checks)
+    case $err in *"dubious ownership"*)
+      die "$up is owned by uid $(stat -c %u "$up") and this run is uid $(id -u): git refuses it (dubious ownership); run as its owner, or with GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$up" ;;
+    esac
+    die "$up exists and is not a git checkout"
+  fi
   [ -z "$(git -C "$up" status --porcelain --untracked-files=no)" ] || die "$up has local changes; refusing to use it"
 elif [ "$check" = 1 ]; then
   die "$up is missing; run fetch.sh ROOT first"
