@@ -9,7 +9,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
-import { AddressError, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
+import { AddressError, callRefusal, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
 import { controlBox, controlTicked, everPaired, migrationDecision, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
@@ -518,6 +518,12 @@ function registerIpc() {
   ipcMain.handle('rt:open', async (e) => {
     if (!fromPage(e, 'voice.html')) throw new Error('not allowed')
     if (!runtime) throw new Error('LocalRouter is not paired with a Spark yet: open Settings')
+    // A box that keeps calls to itself says so in discovery: said once here, before a call that could only fail.
+    const refusal = await new Spark(settings.base, '', timed(3)).capabilities().then((caps) => callRefusal(caps, settings.base), () => null)
+    if (refusal) {
+      log.info('voice.refused', { reason: refusal })
+      throw new Error(refusal)
+    }
     if (process.platform === 'darwin') await systemPreferences.askForMediaAccess('microphone').catch(() => false)
     const id = `rt${++seq}`
     const owner = e.sender
@@ -929,7 +935,7 @@ async function checkConnection() {
   try {
     const spark = new Spark(settings.base, loadSecrets().token, timed(CHECK_S))
     const [caps, who] = await Promise.all([spark.capabilities(), spark.whoami()])
-    connection = connectionOf(caps, who, Date.now())
+    connection = connectionOf(caps, who, Date.now(), settings.base)
   } catch (error) {
     connection = { ok: false, at: Date.now(), error: classify(error, 'connection', CHECK_S) }
   }

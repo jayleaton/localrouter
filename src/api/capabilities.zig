@@ -215,7 +215,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .path = "/v1/realtime",
             .transport = "websocket",
             .profile = "openai-realtime-beta",
-            .remote = cfg.voice.remote,
+            .remote = @import("../config.zig").remoteCalls(cfg.*),
             .audio = .{ .format = "pcm16", .sample_rate = 24000, .channels = 1 },
             .turn_detection = [_][]const u8{ "server_vad", "none" },
             .modalities = [_][]const u8{ "audio", "text" },

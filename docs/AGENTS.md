@@ -401,8 +401,10 @@ call arrives once, complete, as `response.function_call_arguments.done`; return 
 another response began is refused, and `localrouter.function_call.cancelled` tells you when a call stops waiting
 ([VOICE.md](dev/VOICE.md#client-tool-execution), example in `examples/realtime-client-tools/`). Only
 `pcm16` and `server_vad` are offered; anything else is an `error` event naming the field, and the session stays open.
-By default both endpoints answer this machine only (the operator sets `voice.remote` to open them; browsers need HTTPS
-for the microphone off loopback). With pairing on, `/v1/realtime` also needs a token: `Authorization: Bearer`, a
+Both endpoints answer other machines when `voice.remote` is on: unset, it is on when the daemon listens beyond loopback
+(`host` `all`, `tailscale` or a LAN address) with `pairing.required`, so each call still needs a paired token, and off
+otherwise (this machine only; `realtime.remote` in `/v1/capabilities` says which; browsers need HTTPS for the
+microphone off loopback). With pairing on, `/v1/realtime` also needs a token: `Authorization: Bearer`, a
 `Sec-WebSocket-Protocol` entry `openai-insecure-api-key.<token>` beside `realtime` (the OpenAI browser SDK's), or
 `?api_key=<token>`, of a device with `inference`; without one the upgrade is refused with a 401 (403 without the
 scope). The session's picture and video tools need `media`, its model tools `manage`. Details: `docs/dev/VOICE.md`.

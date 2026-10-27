@@ -136,6 +136,20 @@ export class Spark {
     return j.result ?? { content: [], isError: true }
   }
 
+  /**
+   * Why the box refuses this computer's realtime socket: a plain GET of the route answers its refusal (401, 403) with
+   * the reason before any upgrade, which a WebSocket client never sees. Null when it does not refuse, or cannot say.
+   */
+  async realtimeRefusal(): Promise<string | null> {
+    try {
+      const r = await this.request('/v1/realtime')
+      if (r.status !== 401 && r.status !== 403) return null
+      return (await errorOf(r)).message
+    } catch {
+      return null
+    }
+  }
+
   /** `wss://…/v1/realtime` and the subprotocols that carry the token (no token in the URL). */
   realtime(model?: string): { url: string; protocols: string[] } {
     const u = new URL('/v1/realtime', this.base)

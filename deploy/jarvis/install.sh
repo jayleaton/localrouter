@@ -48,8 +48,9 @@ if [ -n "$TOPOLOGY" ]; then # one node of several: its tools checked, every node
   for t in $TOOLS; do [[ " $mine " == *" $t "* ]] || die "TOOLS has '$t'; node $NODE runs: $mine"; done
   [ "$PORT" = "$(topo_port "$TOPOLOGY" "$NODE")" ] || die "PORT is $PORT; the topology gives node $NODE port $(topo_port "$TOPOLOGY" "$NODE")"
   topo=$(topo_block "$TOPOLOGY" "$NODE")
-  # the front listens on loopback (nothing but tailscale serve connects to it, and /v1/realtime serves loopback
-  # peers only); any other node on its first address, where the front reaches it
+  # the front listens on loopback (nothing but tailscale serve connects to it); any other node on its first address,
+  # where the front reaches it. With HOST beyond loopback and pairing on, /v1/realtime answers other machines too
+  # (voice.remote unset: config.voiceRemote), each call with a paired token
   [ "$(topo_role "$TOPOLOGY" "$NODE")" = front ] || { front=0; listen=$(topo_addr "$TOPOLOGY" "$NODE"); }
   listen=${HOST:-$listen}
   addrs=$(ip -o -4 addr show 2> /dev/null || true)

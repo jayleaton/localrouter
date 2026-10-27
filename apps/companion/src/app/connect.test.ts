@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import type { Server as HttpServer, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AddressError, capabilitiesOf, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerNameFor, tailnetPeers, tailscaleCandidates } from './connect.ts'
+import { AddressError, callRefusal, capabilitiesOf, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerNameFor, tailnetPeers, tailscaleCandidates } from './connect.ts'
 import type { ConnectInput, Connection } from './connect.ts'
 import { normalizeBase, pair, PlainHttpError, Spark } from '../harness/spark.ts'
 import type { Capabilities } from '../harness/spark.ts'
@@ -23,6 +23,23 @@ const caps: Capabilities = {
 const ok: Connection = connectionOf(caps, { required: true, paired: true, device: { id: 'd1', name: 'Mac', scopes: ['inference', 'media', 'read'] } }, 1)
 const input = (over: Partial<ConnectInput>): ConnectInput => ({ paired: false, base: '', draft: null, connection: null, errors: {}, permissions: granted, control: { granted: true }, ...over })
 const statuses = (i: ConnectInput) => Object.fromEntries(connectView(i).steps.map((s) => [s.id, s.status]))
+
+describe('calls a box keeps to itself', () => {
+  const local = { ...caps, realtime: { ...caps.realtime, remote: false } }
+  it('are refused before they start from another computer, with what to change on the box', () => {
+    expect(callRefusal(local, 'http://100.111.125.210:8190')).toMatch(/answers voice calls from itself only: set "voice": \{"remote": true\}/)
+    const row = capabilitiesOf(local, ['inference'], 'http://dgx-02:8190').find((r) => r.id === 'voice')
+    expect(row).toMatchObject({ ok: false, detail: 'answered on the Spark itself only: voice.remote is off there' })
+  })
+  it('go ahead on the box itself, when it serves other machines, or when it does not say', () => {
+    expect(callRefusal(local, 'http://127.0.0.1:8190')).toBeNull()
+    expect(callRefusal(local, 'http://localhost:8190')).toBeNull()
+    expect(callRefusal(local, 'http://[::1]:8190')).toBeNull()
+    expect(callRefusal({ ...caps, realtime: { ...caps.realtime, remote: true } }, 'http://dgx-02:8190')).toBeNull()
+    expect(callRefusal(caps, 'https://dgx-01.tail.ts.net:10443')).toBeNull()
+    expect(capabilitiesOf(caps, ['inference'], 'http://dgx-02:8190').find((r) => r.id === 'voice')?.ok).toBe(true)
+  })
+})
 
 describe('the Connect steps', () => {
   it('walks address, code, connection, permissions in order', () => {

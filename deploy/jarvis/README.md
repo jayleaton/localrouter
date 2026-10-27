@@ -98,7 +98,9 @@ set -a; . kits/spark-1/node.env; set +a; deploy/jarvis/install.sh && deploy/jarv
   ones it does not serve). It adds the `topology` block with `self` set to the node, and sets `machine` to the node id.
 - **Where it listens.** A node that is not the front listens on its first address, a ConnectX-7 link, where the front
   reaches it (`HOST` overrides it). It gets no `tailscale serve`, and `start.sh` waits for its own models only. The
-  front listens on `127.0.0.1` as before: `/v1/realtime` serves loopback peers only.
+  front listens on `127.0.0.1` as before, behind `tailscale serve`. A daemon that listens beyond loopback (`HOST`, or
+  `--host all`) with pairing on serves `/voice` and `/v1/realtime` to other machines too (`voice.remote` unset is on
+  then; set it `false` to keep calls local), each call needing a paired token.
 - **The front's token.** Turn on pairing on every node (`PAIRING_REQUIRED=1`). On each node that is not the front,
   make a token with `deploy/jarvis/pair.sh token front --scopes manage`, and put it in the front's `token_file`.
 - **Checks.** `tools/install/doctor.sh --profile jarvis-gb10 --topology FILE --node ID` checks the link and the other

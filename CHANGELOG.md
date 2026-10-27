@@ -9,6 +9,15 @@
   call in that language, so clear English came back as other languages. The `/voice` page and the companion have a
   **Language** setting (English by default, Auto-detect, or any of Whisper's languages), kept per device and sent as
   each call's transcription language.
+- Voice calls from other machines are on by default where they are gated: with `voice.remote` unset, a daemon that
+  listens beyond loopback (`host` `all`, `tailscale` or an address) with `pairing.required` serves `/voice` and
+  `/v1/realtime` to them (each call still needs a paired token with `inference`); without pairing, or on loopback,
+  calls stay on the machine (behind `tailscale serve` every peer is loopback, as before). Discovery's
+  `realtime.remote` now says whether a call that reaches the daemon is served (true behind a loopback-only listener).
+  A daemon on the network with calls kept local refused the companion's socket with a 403 its WebSocket never showed,
+  so a call said "voice dropped" and retried 8 times: the companion now reads the box's reason after a socket closes
+  unopened and says it once (a box that is restarting is still retried), and refuses a call up front, and marks Voice
+  calls in the Connect window, when discovery reports `realtime.remote: false` for a box that is not this computer.
 - Voice cloning no longer refuses loud, mastered uploads as noisy. Each clip is heard whole by the transcription
   model, whose Silero detector says where the speech is, and the background is measured only between the words (not
   measured, and passed, when there is too little of it); upstream's quietest-tenth rule read loudness-normalised or

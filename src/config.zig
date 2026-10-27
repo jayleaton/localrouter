@@ -68,7 +68,7 @@ pub fn laneOf(t: *const ToolConfig) Lane {
 
 /// The voice loop (`/voice`, `/v1/realtime`, docs/dev/VOICE.md): where the chat model is and the session defaults.
 pub const Voice = struct {
-    remote: bool = false, // serve /voice and /v1/realtime to non-loopback peers too
+    remote: ?bool = null, // serve /voice and /v1/realtime to non-loopback peers too; null: `Config.voiceRemote`
     chat_url: []const u8 = "", // an OpenAI-compatible base URL ending in /v1; "": this daemon
     chat_api_key: []const u8 = "", // sent as a bearer token to chat_url (with chat_url unset: the session's own token)
     chat_model: []const u8 = "", // "": this daemon's chat_completion default (with chat_url unset), else the server's
@@ -213,6 +213,24 @@ pub const default_tools = [_]ToolConfig{
 pub const chat_priority: i32 = 100;
 
 /// Parses a JSON config; the result lives in `arena`.
+/// Whether /voice and /v1/realtime answer non-loopback peers: `voice.remote` when set; else on when the daemon listens
+/// beyond loopback with pairing required (each call still needs a paired device's token with its scope), off otherwise
+/// (behind `tailscale serve` every peer is loopback anyway). Without pairing a listening microphone endpoint stays local.
+pub fn voiceRemote(c: Config) bool {
+    return c.voice.remote orelse (c.pairing.required and !loopbackHost(c.host));
+}
+
+/// Discovery's `realtime.remote`: whether a call from another machine that reaches the daemon is served. True behind a
+/// loopback-only listener too, where a proxy such as `tailscale serve` decides who reaches it (its peers are loopback).
+pub fn remoteCalls(c: Config) bool {
+    return voiceRemote(c) or loopbackHost(c.host);
+}
+
+/// `host` (as `bind.resolve` takes it) is a loopback address or name.
+fn loopbackHost(host: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(host, "localhost") or std.mem.startsWith(u8, host, "127.") or std.mem.eql(u8, host, "::1");
+}
+
 pub fn parse(arena: std.mem.Allocator, text: []const u8) !Config {
     var c = try std.json.parseFromSliceLeaky(Config, arena, text, .{ .ignore_unknown_fields = false, .allocate = .alloc_always });
     try chatDefaults(arena, text, &c);
@@ -321,7 +339,27 @@ test "lanes: speech kinds default to realtime, a tool may name its lane; voice s
     try std.testing.expectEqual(Lane.decide, laneOf(c.tool("jev").?));
     try std.testing.expectEqualStrings("http://127.0.0.1:9/v1", c.voice.chat_url);
     try std.testing.expectEqual(@as(u32, 0), c.voice.partial_interval_ms);
-    try std.testing.expect(!c.voice.remote);
+    try std.testing.expect(c.voice.remote == null and !voiceRemote(c));
+}
+
+test "voice answers remote peers by default only beyond loopback with pairing required" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect(!voiceRemote(try parse(a, "{}"))); // loopback, no pairing
+    try std.testing.expect(!voiceRemote(try parse(a, "{\"host\": \"all\"}"))); // open, but nothing gates it
+    try std.testing.expect(!voiceRemote(try parse(a, "{\"host\": \"localhost\", \"pairing\": {\"required\": true}}")));
+    try std.testing.expect(!voiceRemote(try parse(a, "{\"host\": \"127.0.0.1\", \"pairing\": {\"required\": true}}")));
+    try std.testing.expect(voiceRemote(try parse(a, "{\"host\": \"all\", \"pairing\": {\"required\": true}}")));
+    try std.testing.expect(voiceRemote(try parse(a, "{\"host\": \"tailscale\", \"pairing\": {\"required\": true}}")));
+    try std.testing.expect(voiceRemote(try parse(a, "{\"host\": \"192.168.1.117\", \"pairing\": {\"required\": true}}")));
+    // set: as set
+    try std.testing.expect(!voiceRemote(try parse(a, "{\"host\": \"all\", \"pairing\": {\"required\": true}, \"voice\": {\"remote\": false}}")));
+    try std.testing.expect(voiceRemote(try parse(a, "{\"voice\": {\"remote\": true}}")));
+    // discovery: false only for a daemon on the network that keeps calls to itself
+    try std.testing.expect(remoteCalls(try parse(a, "{}")));
+    try std.testing.expect(!remoteCalls(try parse(a, "{\"host\": \"all\"}")));
+    try std.testing.expect(remoteCalls(try parse(a, "{\"host\": \"all\", \"pairing\": {\"required\": true}}")));
 }
 
 test "the default host is loopback; host accepts the keywords" {

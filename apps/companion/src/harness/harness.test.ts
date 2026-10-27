@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Journal } from './journal.ts'
-import { ClientToolsSession, pageView } from './realtime.ts'
+import { ClientToolsSession, pageView, RealtimeRefused } from './realtime.ts'
 import type { SocketLike } from './realtime.ts'
 import { check, Registry } from './registry.ts'
 import type { Tool } from './registry.ts'
@@ -119,6 +119,49 @@ function fakeBox(mode: 'client' | 'server' = 'client') {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 20))
+
+/** A socket the box closes before it opens, as a refused upgrade looks to a WebSocket client (1006, no reason). */
+const unopened = () => {
+  const socket: SocketLike = { readyState: 0, onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} }
+  queueMicrotask(() => socket.onclose?.({ code: 1006, reason: '' }))
+  return socket
+}
+
+describe('a realtime socket the box refuses', () => {
+  const refusing = (why: string | null) => Object.assign(new Spark('http://100.64.0.2:8190', 't'), { realtimeRefusal: async () => why })
+  const voiceOnly = 'the voice endpoints answer this machine only; the operator can open them with voice.remote in the config'
+
+  it('fails once with the box’s reason and is not reported as a dropped connection to retry', async () => {
+    const closes: string[] = []
+    const s = new ClientToolsSession({ spark: refusing(voiceOnly), registry: new Registry(), dial: unopened, onClose: (r) => void closes.push(r) })
+    const err = await s.connect().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(RealtimeRefused)
+    expect((err as Error).message).toBe(`the Spark refused the call: ${voiceOnly}`)
+    await flush()
+    expect(closes).toEqual([])
+  })
+
+  it('a socket that fails without a refusal (the box restarting) still closes for the caller to retry', async () => {
+    const closes: string[] = []
+    const s = new ClientToolsSession({ spark: refusing(null), registry: new Registry(), dial: unopened, onClose: (r) => void closes.push(r) })
+    await expect(s.connect()).rejects.toThrow(/the realtime session closed \(1006\)/)
+    await flush()
+    expect(closes).toEqual(['1006'])
+  })
+
+  it('reads the refusal from a plain GET of the route', async () => {
+    const answers: Record<string, Response> = {
+      '403': new Response(JSON.stringify({ error: { message: voiceOnly, type: 'invalid_request_error' } }), { status: 403 }),
+      '401': new Response(JSON.stringify({ error: { message: 'this device is not paired', type: 'invalid_request_error' } }), { status: 401 }),
+      '400': new Response(JSON.stringify({ error: { message: 'not a WebSocket upgrade' } }), { status: 400 }),
+    }
+    const why = async (status: string) => new Spark('http://100.64.0.2:8190', 't', async () => answers[status] as Response).realtimeRefusal()
+    expect(await why('403')).toBe(voiceOnly)
+    expect(await why('401')).toBe('this device is not paired')
+    expect(await why('400')).toBeNull()
+    expect(await new Spark('http://100.64.0.2:8190', 't', async () => { throw new Error('ECONNREFUSED') }).realtimeRefusal()).toBeNull()
+  })
+})
 
 describe('realtime in client tool mode', () => {
   const ran: string[] = []

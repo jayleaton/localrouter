@@ -58,7 +58,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `models` | `list` (`/v1/models`), the `kinds` and `capabilities` this box's models have, `licenses` (`[{id, license}]`, `license` as `/v1/models` gives it, omitted when unknown) |
 | `chat` | `available`, `api` (`chat_completions`), `path`, `models`, `stream`, `stream_usage`, `tools`, `tool_choice`, `response_format`, `reasoning` (the field reasoning arrives in, and how to switch it off), `input` (`text`), `n` (1), `cancel` |
 | `responses` | `available`, `api` (`responses`), `path`, `models`, `stream`, `store` (false), `previous_response_id` (false), `input` (`text`), `items`, `roles`, `tools` (`function`), `tool_choice`, `text_format`, `reasoning` (`effort`, the `summary` values taken, the `item` content type, `encrypted_content`: false), `events` (what a stream sends), `cancel` |
-| `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether non-loopback peers are served), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
+| `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether a call from another machine that reaches the daemon is served: false only when it listens beyond loopback with `voice.remote` off; true behind a loopback-only listener, where a proxy such as `tailscale serve` decides), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
 | `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
@@ -197,9 +197,10 @@ turn's output items back as they came, and checks each stream as a client reads 
 
 `ws://<host>:8190/v1/realtime` (`wss://` behind `tailscale serve`) speaks the OpenAI Realtime API's **beta** event
 vocabulary over a WebSocket, JSON text frames only (a binary frame is an `error`). Audio is pcm16, 24 kHz, mono, base64,
-both ways. Offer the subprotocol `realtime`. `?model=` sets the chat model. By default the route answers loopback peers
-only (`realtime.remote` in discovery; the operator's `voice.remote`); behind `tailscale serve` every peer arrives as
-loopback.
+both ways. Offer the subprotocol `realtime`. `?model=` sets the chat model. The route answers other machines when
+`realtime.remote` in discovery is true (the operator's `voice.remote`; unset, it is on when the daemon listens beyond
+loopback with pairing required, off otherwise); behind `tailscale serve` every peer arrives as loopback. Off, the
+upgrade is refused with a 403 saying so: a client should show that reason once rather than reconnect.
 
 **Client events** (anything else is an `error` with code `unknown_event_type`; the session stays open):
 

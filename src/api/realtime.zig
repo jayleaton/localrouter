@@ -1,12 +1,14 @@
 //! The voice endpoints (docs/dev/VOICE.md): `GET /v1/realtime`, upgraded to a WebSocket that speaks the OpenAI Realtime
 //! API's events (`voice/session.zig`), and `GET /voice`, the built-in browser client. Both answer loopback peers
-//! only unless `voice.remote` is set; with `pairing.required` the socket also needs a paired device's token with the
+//! only unless `config.voiceRemote` (`voice.remote`, by default on when the daemon listens beyond loopback with
+//! pairing required); with `pairing.required` the socket also needs a paired device's token with the
 //! inference scope (or the legacy voice: `pair.zig`), and the session's tools need that device's scopes (`voice_local.zig`).
 
 const std = @import("std");
 const Io = std.Io;
 const h = @import("http.zig");
 const routes = @import("routes.zig");
+const config = @import("../config.zig");
 const ws = @import("../voice/ws.zig");
 const Session = @import("../voice/session.zig").Session;
 const Local = @import("voice_local.zig").Local;
@@ -137,10 +139,10 @@ pub fn isLoopback(addr: Io.net.IpAddress) bool {
 }
 
 fn allowed(app: *App, conn: *const h.Conn) bool {
-    return app.cfg.voice.remote or isLoopback(conn.stream.socket.address);
+    return config.voiceRemote(app.cfg.*) or isLoopback(conn.stream.socket.address);
 }
 
-const refused = "the voice endpoints answer this machine only; the operator can open them with voice.remote in the config";
+const refused = "the voice endpoints answer this machine only; the operator can open them with voice.remote in the config (on by default when the daemon listens beyond loopback with pairing required)";
 
 /// GET /voice: the page.
 pub fn page(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator) !void {
