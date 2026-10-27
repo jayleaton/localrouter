@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { HOLD_CAP_MS, MARGIN_MS, ReplyHold, START_MS, type VoicePriors } from './replyHold'
+import { HOLD_CAP_MS, MARGIN_MS, OBSERVE_MS, ReplyHold, START_MS, type VoicePriors } from './replyHold'
 
 /** Feeds `item` a first piece of `firstMs` at 0, then `ms` every 150 ms; returns when (and with what) it started. */
 function stream(hold: ReplyHold<number>, firstMs: number, ms: number, until = 200) {
@@ -35,20 +35,16 @@ describe('the reply start hold', () => {
     expect(started!.have).toBe(1_287.5)
   })
 
-  it('a stream at 1x or more still being written starts once the margin is in hand', () => {
+  it('a reply still being written is watched for OBSERVE_MS before it starts, however fast it comes', () => {
     const hold = new ReplyHold<number>()
     hold.written('a', 2_000)
     hold.piece('a', 0, 46, 0)
-    expect(hold.piece('a', 1, 210, 150)).toEqual([]) // 1.4x, but 256 ms is short of the 300 ms margin
-    expect(hold.piece('a', 2, 210, 300)).toEqual([0, 1, 2]) // 466 ms in hand
-
-    // While a picture is being made, GEN_START_MS: 466 ms is not enough, 676 is.
-    const busy = new ReplyHold<number>(() => true)
-    busy.written('a', 2_000)
-    busy.piece('a', 0, 46, 0)
-    busy.piece('a', 1, 210, 150)
-    expect(busy.piece('a', 2, 210, 300)).toEqual([])
-    expect(busy.piece('a', 3, 210, 450)).toEqual([0, 1, 2, 3])
+    for (let k = 1; k * 150 < OBSERVE_MS; k++) expect(hold.piece('a', k, 210, 150 * k)).toEqual([]) // 1.4x
+    expect(hold.tick(OBSERVE_MS)).toHaveLength(11) // then the rate allows it at once
+    // Its text complete meanwhile: no wait.
+    const done = new ReplyHold<number>()
+    done.text('a', 30, 1.4, false, 0)
+    expect(done.piece('a', 0, START_MS, 0)).toEqual([0])
   })
 
   it('all of the reply speech in starts it, and it never holds past the cap', () => {
@@ -68,11 +64,8 @@ describe('the reply start hold', () => {
   it('after a pause, the session next replies need more in hand, until a new session', () => {
     const hold = new ReplyHold<number>()
     hold.gap(100) // the margin grows by 200 ms: 500 ms
-    hold.written('a', 2_000)
-    hold.piece('a', 0, 46, 0)
-    hold.piece('a', 1, 210, 150)
-    expect(hold.piece('a', 2, 210, 300)).toEqual([]) // 466 ms is not enough now
-    expect(hold.piece('a', 3, 210, 450)).toEqual([0, 1, 2, 3])
+    hold.text('a', 40, null, false, 0) // 2600 ms at 0.25x: in hand >= (2600 - in hand) x 0.75 + 500, about 1429 ms
+    expect(stream(hold, 50, 37.5)!.have).toBe(1_437.5) // 1287.5 with the usual margin
     expect(hold.margin).toBe(MARGIN_MS + 200)
 
     hold.reset() // a barge-in keeps it

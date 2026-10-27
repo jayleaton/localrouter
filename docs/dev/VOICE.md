@@ -362,6 +362,13 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     tips, one sentence; a fresh session each), parameters chosen among those with no piece over 50 ms late in any
     reply, validated on a third of them held out: long replies started 1.8 to 3.3 s after the request (the best start
     with hindsight was 1.1 to 2.3 s), two-tip replies 1.3 to 2.0 s, one sentence 0.15 s after its first audio.
+  - Measured live on DGX-02 the next night (84 long replies, Mae and Scarlette, typed and spoken, ten prompts, a fresh
+    session each; `voice_e2e.py`'s replay of the page on each), that rule left a pause in 16 of them (0.07 to 0.5 s
+    each): in the first second a long reply's speech often comes at real time, and slows once the chat model writes
+    its next sentences beside it. So a reply whose text is still being written is now watched for 1.6 s from its
+    first piece before it may start (`OBSERVE_MS`): 3 of the 84 then pause (0.07 to 0.4 s, each after 35 s or more of
+    speech), long replies start 3.5 s after the request on average instead of 3.2 (the best start with hindsight: 2.7),
+    and short ones, written before the wait ends, start as before (0.9 s on average after the turn).
     `voice_e2e.py` replays the same rule on its long reply and fails on any underrun over 50 ms.
 - **Speech first** (`voice.speech_first`, on by default; `src/sched/yielder.zig`). While a reply is written, the
   session pauses its chat model's server (SIGSTOP; SIGCONT resumes it) whenever the reply's speech is under 2 s ahead

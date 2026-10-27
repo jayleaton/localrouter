@@ -12,6 +12,9 @@
  *   voice's rate on its last replies, less RATE_HEADROOM of its spread; once the text is complete with the GPU free,
  *   the server's measure of speech with the GPU to itself (text_done's speech_rate, else the last reply's) counts;
  * - margin: MARGIN_MS, and more for the rest of the session after a pause (`gap`).
+ * While the text is still being written, the rate is first watched for OBSERVE_MS from the first piece: in the first
+ * second the speech of a long reply often comes at real time, and slows once the chat model writes its next sentences
+ * beside it; a start trusted on that first second ran dry in 16 of 84 long DGX-02 replies (3 of 84 with the wait).
  * A slow stream starts later, in proportion: at a quarter of real time, three quarters of the rest must be in hand. A
  * short reply written on a free GPU needs START_MS (no margin); all of a reply's speech in (speech_done) starts it.
  * Never more than HOLD_CAP_MS after the first piece.
@@ -23,6 +26,8 @@ export const HOLD_CAP_MS = 30_000
 /** A reply's audio is at least about this long per character. */
 export const MS_PER_CHAR = 65
 export const MARGIN_MS = 300
+/** A reply whose text is still being written is not started before its speech has come for this long. */
+export const OBSERVE_MS = 1_600
 /** A pause adds twice its length to the margin for the rest of the session, up to this. */
 export const MARGIN_UP_MAX_MS = 2_000
 const RATE_WINDOW_MS = 150
@@ -183,6 +188,7 @@ export class ReplyHold<T> {
   private need(item: string, held: Held<T>, now: number) {
     const r = this.rateOf(item, held, now)
     const done = this.textDone.has(item)
+    if (!done && now - held.firstAt < OBSERVE_MS) return Infinity // still watching its rate
     const free = done && !this.generating() ? this.freeRate.get(item) || this.lastRate || 0 : 0
     const chars = done ? (this.textDone.get(item) ?? 0) : (this.writtenChars.get(item) ?? 0)
     const rest = Math.max(0, chars * r.mpc - (this.got.get(item)?.ms ?? 0))

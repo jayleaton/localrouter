@@ -2819,12 +2819,15 @@ function bargeIn(cancel) {
 //   voice's rate on its last replies, less RATE_HEADROOM of its spread; once the text is complete with the GPU free, the
 //   server's measure of speech with the GPU to itself (text_done's speech_rate, else the last reply's) counts;
 // - margin: MARGIN_MS, and more for the rest of the session after a pause (V.marginUp; schedule).
+// While the text is still being written, the rate is first watched for OBSERVE_MS from the first piece: in the first
+// second the speech of a long reply often comes at real time, and slows once the chat model writes its next sentences
+// beside it; a start trusted on that first second ran dry in 16 of 84 long DGX-02 replies (3 of 84 with the wait).
 // A slow stream starts later, in proportion: at a quarter of real time, three quarters of the rest must be in hand. A
 // short reply written on a free GPU needs START_MS (no margin); all of a reply's speech in (speech_done) starts it.
 // Replayed on 30 DGX-02 replies (Mae, Scarlette; one sentence to 46 s): no pause in any, long ones started 1.8 to 3.3 s
 // after the request (`voice_e2e.py` replays this rule).
 const START_MS = 200, GEN_START_MS = 500, HOLD_CAP_MS = 30000, MS_PER_CHAR = 65, MARGIN_MS = 300, RATE_WINDOW_MS = 150,
-  EWMA_ALPHA = 0.7, RATE_HEADROOM = 0.5, PRIOR_RATE = 1.0;
+  EWMA_ALPHA = 0.7, RATE_HEADROOM = 0.5, PRIOR_RATE = 1.0, OBSERVE_MS = 1600;
 const generating = () => !!cur && cur.msgs.some(m => m.role === 'tool' && !m.gone && !(m.media && m.media.length) && !m.error);
 const startMs = () => S.startMs ?? (generating() ? GEN_START_MS : START_MS);
 function decode(b64) {
@@ -2908,6 +2911,7 @@ function startOrWait(item) {
 // Audio in hand that plays the rest of the reply to its end without running dry (see the comment above START_MS).
 function holdNeed(item) {
   const r = rateOf(item), done = V.textDone.has(item);
+  if (!done && performance.now() - (V.firstAt.get(item) || performance.now()) < OBSERVE_MS) return Infinity; // still watching its rate
   const free = done && !generating() ? (V.freeRate.get(item) || V.lastRate || null) : null;
   const chars = done ? (V.chars.get(item) || 0) : (V.written.get(item) || 0);
   const rest = Math.max(0, chars * r.mpc - ((V.got.get(item) || {}).ms || 0));

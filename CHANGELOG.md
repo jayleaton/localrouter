@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Voice: a long reply is watched for 1.6 s before it starts. In the first second its speech often comes at real time
+  and slows once the chat model writes its next sentences, so the start the rate allowed then still paused in 16 of
+  84 long replies measured live on DGX-02; with the wait, 3 (each 0.07 to 0.4 s, 35 s or more in). Long replies start
+  about 0.3 s later (3.5 s after the request on average); short ones as before.
+
 - Voice: speech first no longer stalls other sessions. The chat model's server is shared, so it is paused only while
   nothing else waits on the chat lane, and a request queued there (another session or device, a computer-use step, a
   prime) resumes it at once. Before, a second device's request waited behind a reply's paused chat model (6 and 17 s
