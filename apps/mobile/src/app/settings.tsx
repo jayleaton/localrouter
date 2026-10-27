@@ -5,12 +5,13 @@ import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native'
 import { AppButton } from '@/components/app-button'
 import { ChevronIcon } from '@/components/icons'
 import { Screen } from '@/components/screen'
+import { AssistantNameField } from '@/components/settings/assistant-name-field'
 import { SettingsCard, SwitchRow } from '@/components/settings/settings-card'
 import { SpeechPickers } from '@/components/settings/speech-pickers'
 import { WaitStepper } from '@/components/settings/wait-stepper'
 import { ThemedText } from '@/components/themed-text'
 import { Palette, Spacing } from '@/constants/theme'
-import { forget, newConversation, reconnect, useBox, type BoxState } from '@/lib/app/box'
+import { forget, newConversation, reconnect, useAssistantName, useBox, type BoxState } from '@/lib/app/box'
 import { updateVoiceSettings, useVoiceSettings } from '@/lib/voice/standbyController'
 
 const CONNECTION_TEXT: Record<BoxState['connection'], string> = {
@@ -21,12 +22,13 @@ const CONNECTION_TEXT: Record<BoxState['connection'], string> = {
   closed: 'Not connected',
 }
 
-/** The paired box, voice on this phone, the conversation, and about. */
+/** The paired box, the assistant's name, voice on this phone, the conversation, and about. */
 export default function SettingsScreen() {
   const router = useRouter()
   const pairing = useBox((box) => box.pairing)
   const connection = useBox((box) => box.connection)
   const paused = useBox((box) => box.paused)
+  const name = useAssistantName()
   const voice = useVoiceSettings()
   const [leaving, setLeaving] = useState(false)
 
@@ -94,6 +96,12 @@ export default function SettingsScreen() {
           )}
         </SettingsCard>
 
+        {pairing ? (
+          <SettingsCard title="Assistant">
+            <AssistantNameField />
+          </SettingsCard>
+        ) : null}
+
         <SettingsCard title="Voice">
           <SwitchRow
             label="Voice on"
@@ -102,7 +110,7 @@ export default function SettingsScreen() {
             testID="voice-enabled"
             note="This phone listens for the wake phrase itself; nothing leaves the phone until you say it or tap Talk."
           />
-          <SwitchRow label="Wake phrase “Hey Jarvis”" value={voice.wakeWord} onChange={(wakeWord) => updateVoiceSettings({ wakeWord })} disabled={!voice.enabled} testID="voice-wake-word" note="Off: only Talk opens a call." />
+          <SwitchRow label={`Wake phrase “Hey ${name}”`} value={voice.wakeWord} onChange={(wakeWord) => updateVoiceSettings({ wakeWord })} disabled={!voice.enabled} testID="voice-wake-word" note="Off: only Talk opens a call." />
           <SwitchRow
             label="Keep listening in the background"
             value={voice.background}
@@ -125,7 +133,7 @@ export default function SettingsScreen() {
         <SettingsCard title="About">
           <ThemedText>LocalRouter mobile</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">
-            Chat, voice, pictures and videos with Jarvis on your own LocalRouter box. The app’s design is adapted from SideBud.
+            Chat, voice, pictures and videos with {name} on your own LocalRouter box. The app’s design is adapted from SideBud.
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" selectable>
             github.com/jayleaton/localrouter

@@ -2,6 +2,7 @@ import { File, Paths } from 'expo-file-system'
 import * as SecureStore from 'expo-secure-store'
 import { z } from 'zod'
 
+import { parseAssistant, type Assistant } from '@/lib/localrouter/assistant'
 import { WAIT_DEFAULT_MS } from '@/lib/localrouter/protocol'
 
 /** The box this phone is paired with. The token stays in the keychain, never in the documents folder. */
@@ -66,6 +67,9 @@ export const settingsStorage = jsonFile<Settings>('settings.json', (raw) => {
   const parsed = settingsSchema.safeParse(raw ?? {})
   return parsed.success ? parsed.data : defaultSettings()
 })
+
+/** The assistant's name as the box last said it (the box keeps the setting), so the app shows it offline. */
+export const assistantStorage = jsonFile<Assistant>('assistant.json', parseAssistant)
 
 /** The conversation is kept on the phone (the box keeps a session's history only while it is open). */
 export const conversationStorage = jsonFile<unknown>('conversation.json', (raw) => raw)

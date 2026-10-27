@@ -220,13 +220,30 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     try testing.expect(std.mem.indexOf(u8, vstate.body, "\"status\":\"in_progress\"") != null);
     _ = try d.call(a, .DELETE, try std.fmt.allocPrint(a, "/v1/videos/{s}", .{vid}), null);
 
+    // The assistant's name: Jarvis on a box that never set one, renamed by a client, and introduced by name.
+    const Named = struct { name: []const u8, default_name: []const u8, custom: bool, voice: ?struct { model: []const u8, voice: []const u8 } };
+    const fresh = try d.call(a, .GET, "/v1/assistant", null);
+    try testing.expectEqual(std.http.Status.ok, fresh.status);
+    const before = try std.json.parseFromSliceLeaky(Named, a, fresh.body, .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("Jarvis", before.name);
+    try testing.expect(!before.custom);
+    try testing.expectEqualStrings("mouth", before.voice.?.model);
+    try testing.expectEqual(std.http.Status.bad_request, (try d.call(a, .PATCH, "/v1/assistant", "{\"name\": \"Fri\\nday\"}")).status);
+    const renamed = try d.call(a, .PATCH, "/v1/assistant", "{\"name\": \"  Friday \"}");
+    try testing.expectEqual(std.http.Status.ok, renamed.status);
+    const after = try std.json.parseFromSliceLeaky(Named, a, (try d.call(a, .GET, "/v1/assistant", null)).body, .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("Friday", after.name);
+    try testing.expectEqualStrings("Jarvis", after.default_name);
+    try testing.expect(after.custom);
+
     var w: Ws = undefined;
     try w.open(io, a, d.port, "realtime, openai-beta.realtime-v1");
     defer w.close();
     try testing.expect(std.mem.indexOf(u8, w.head, "101 Switching Protocols") != null);
     try testing.expect(std.ascii.findIgnoreCase(w.head, "sec-websocket-protocol: realtime") != null);
     var seen: std.ArrayList(std.json.Value) = .empty;
-    _ = try w.until(a, "session.created", &seen);
+    const created = try w.until(a, "session.created", &seen);
+    try testing.expect(std.mem.startsWith(u8, created.object.get("session").?.object.get("instructions").?.string, "You are Friday, "));
 
     // One spoken turn: VAD ends it, the fake STT hears "hello there", the reply streams back as text and speech.
     try turn(&w, a, 440, 900);
@@ -242,6 +259,8 @@ test "voice: a spoken turn over the WebSocket, barge-in, a tool call that makes 
     const first = (try chat.stats(&d, a))[0];
     try testing.expect(first.completed);
     try testing.expectEqualStrings("hello there", first.messages[first.messages.len - 1].object.get("content").?.string);
+    try testing.expectEqualStrings("system", first.messages[0].object.get("role").?.string);
+    try testing.expect(std.mem.startsWith(u8, first.messages[0].object.get("content").?.string, "You are Friday, a helpful voice assistant"));
     try testing.expectEqualStrings("generate_image", first.tools[0]); // an image model exists; generate_video, and edit_image (it edits) too
     try testing.expectEqual(@as(usize, 3), first.tools.len);
 

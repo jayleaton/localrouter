@@ -44,7 +44,7 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
 3. On the Spark, make a pairing code (ten minutes, single use):
    `deploy/jarvis/pair.sh add "JJ's MacBook"` (no `--scopes`: every feature, voice cloning and computer control
    included; add `--scopes LIST` to narrow it)
-4. LocalRouter's first window, **Connect**, walks four steps:
+4. LocalRouter's first window, **Connect**, walks these steps:
    1. **Spark address**: the `https://<spark>.<tailnet>.ts.net:10443` one `tailscale serve` gives the box (the Mac must
       be on the tailnet). If Tailscale runs on the Mac, the app asks each online peer's MagicDNS name for
       `/v1/capabilities` and offers the LocalRouter boxes it finds (one found and nothing typed: filled in).
@@ -55,17 +55,21 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
       pictures, video, speech, transcription, decisions, MCP), checked when the window opens and again on focus.
       **Re-pair** trades a new code for a new token (the old one works until then; revoke its entry on the Spark).
       **Disconnect** forgets the Spark on this Mac.
-   4. **Permissions**: **Microphone** (for calls), **Accessibility** (to control the Mac) and **Screen Recording** (for
+   4. **Your assistant's name** (after this computer's first pairing only): what the assistant is called, prefilled
+      with the Spark's ("Jarvis" on a fresh box). The Spark keeps it (`PATCH /v1/assistant`, which needs the `manage`
+      scope), so every device paired with it shows and speaks the same name; Settings › Assistant changes it later.
+      A box from before the setting keeps "Jarvis". The app caches the name, so it shows while the Spark is offline.
+   5. **Permissions**: **Microphone** (for calls), **Accessibility** (to control the Mac) and **Screen Recording** (for
       apps that hide their window from accessibility). Add LocalRouter in each System Settings list, then quit and
-      reopen LocalRouter. macOS asks about **Automation** (System Events, Chrome, Music…) the first time Jarvis uses
-      each app.
+      reopen LocalRouter. macOS asks about **Automation** (System Events, Chrome, Music…) the first time the assistant
+      uses each app.
 
    Each failure says what it was and what to do: an address that does not resolve or answer (Tailscale off, wrong
    name, nothing on that port, no answer within 8 s), a certificate the Mac does not trust (an IP address instead of
    the `.ts.net` name, an expired certificate, HTTP on an HTTPS port), something that is not LocalRouter, a box too old
    for the app, a code that is not a code (checked here, so a typo never counts toward the box's five wrong codes), a
    wrong, expired or used code, and a token the box no longer accepts.
-5. **Open Jarvis**: the familiar page. Call with the mic button, chat, generations appear in the reel. Ask it to do
+5. **Open Jarvis** (or the name you gave it): the familiar page. Call with the mic button, chat, generations appear in the reel. Ask it to do
    something on the Mac ("open Safari", "search my notes for groceries"); anything consequential shows an approval
    card in the page and Touch ID confirms it. **Stop**: the card's Stop button, ⌘⇧⎋, the menu bar's **LR** menu, or
    the pointer in the top-left corner of the screen.
@@ -77,7 +81,7 @@ tool calls) as context. Typed chat has the same tools as a call: `computer_contr
 journal too (`~/Library/Application Support/LocalRouter/conversations/conv_page_*.jsonl`).
 
 **Pictures on a call, videos in the chat.** A call makes pictures (they appear in the reel). A video is never started
-on a call: it takes minutes and pauses the voice models, so Jarvis asks whether to end the call and make it. This is
+on a call: it takes minutes and pauses the voice models, so the assistant asks whether to end the call and make it. This is
 the harness's rule, not the prompt's: on a call `generate_video` only records the request, and
 `end_call_and_make_video` works only after the person answered with a clear yes. Then the call ends (its transcript
 already in the chat), the app makes room on the box (`reserve_for`), the chat makes the video with its progress card,
@@ -118,7 +122,7 @@ Accessibility), Settings shows *macOS kept a permission from an older LocalRoute
 pane, reset LocalRouter's entry (`tccutil reset Accessibility com.localrouter.companion`, as you, no admin), and quit
 and reopen. By hand: in the list select LocalRouter, remove it with −, add it with +, reopen the app.
 
-Settings (⌘,) also shares folders Jarvis may read, adds other harnesses (MCP, below), lets the phone app and the
+Settings (⌘,) also renames the assistant, shares folders it may read, adds other harnesses (MCP, below), lets the phone app and the
 Spark's own web page keep using this Mac through the same local rules (pair a second code with
 `--scopes desktop_helper`), and exports conversations for switching harness.
 

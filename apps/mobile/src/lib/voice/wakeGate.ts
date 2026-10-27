@@ -3,7 +3,7 @@
  * on-device recognizer is the largest standby drain when it hears every
  * chunk, silence included; behind this gate it hears only sound that rises
  * above the room's noise floor, with the chunks just before it (pre-roll)
- * so the start of "hey jarvis" is not clipped. After a quiet spell the gate
+ * so the start of the wake phrase is not clipped. After a quiet spell the gate
  * closes and the recognizer is told to go idle.
  */
 

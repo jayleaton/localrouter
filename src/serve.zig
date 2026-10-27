@@ -140,6 +140,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     defer app.voice.deinit(gpa);
     try app.cloned.init(io, gpa, try std.fs.path.join(arena, &.{ cfg.data_dir, "voices" })); // cloned voices (voices.zig)
     defer app.cloned.deinit();
+    app.assistant.init(io, gpa, cfg.data_dir, cfg.assistant.name); // the assistant's name (assistant.zig)
     app.plan = &plan;
     if (plan.multi and plan.front) {
         cluster.refresh = .{ .ctx = &scheduler, .f = refreshSlot };

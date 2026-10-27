@@ -41,7 +41,7 @@ needs instead (`--scopes LIST` on `token` or `add`; `pair scopes` changes it lat
 | `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
 | `decisions` | `POST /v1/systemone` | `decide` | |
 | `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager`, `/v1/voices` | `list_models`, `list_voices` | `list_models` |
-| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice) | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
+| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice); `PATCH /v1/assistant` (its name; `GET` needs only a paired device) | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
 
 Any of these opens `/mcp`, whose `tools/list` then shows only the tools the token may call; a tool outside its scopes
 is a tool error naming the scope. Changing which models are loaded always needs `manage`: no other scope implies it.

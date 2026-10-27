@@ -77,6 +77,8 @@ const routed = [_]Route{
     .{ .method = .POST, .path = "/v1/tools/release", .route = "POST /v1/tools/*" },
     .{ .method = .GET, .path = "/v1/voices", .route = "GET /v1/voices" },
     .{ .method = .POST, .path = "/v1/voices", .route = "POST, PATCH, DELETE /v1/voices/*" },
+    .{ .method = .GET, .path = "/v1/assistant", .route = "GET /v1/assistant" },
+    .{ .method = .PATCH, .path = "/v1/assistant", .route = "PATCH /v1/assistant" },
     .{ .method = .GET, .path = "/v1/jobs/x", .route = "/v1/jobs/*, /v1/files/*, /v1/videos/*" },
 };
 const always = [_]Guard{
@@ -91,6 +93,7 @@ fn scopeOf(n: pair.Need) []const u8 {
         .realtime => "inference (or legacy voice)",
         .mcp => "mcp or any service scope; each tool then needs its own",
         .owned => "any paired device; the job must be its own",
+        .paired => "any paired device",
     };
 }
 

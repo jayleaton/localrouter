@@ -9,7 +9,7 @@ import { VoiceCommands } from '../../../modules/voice-commands/src'
 import { EchoGate, echoReference, type PlayedSegment } from './echoGate'
 import { floatToPcm16, pcm16Base64ToFloat, pcm16ToBase64, silenceBase64 } from './pcm'
 import { ReplyHold } from './replyHold'
-import { DEFAULT_VOICE_COMMAND_PHRASES, lastCommand, type VoiceCommandPhrases } from './voiceCommands'
+import { DEFAULT_VOICE_COMMAND_PHRASES, lastCommand, voiceCommandPhrases, type VoiceCommandPhrases } from './voiceCommands'
 import { getVoiceState, setVoiceState as setState, type CallActivity } from './voiceState'
 import { WakeGate } from './wakeGate'
 
@@ -65,6 +65,7 @@ let opening: Promise<void> | null = null
 let listeningInBackground = false
 /** Bumped whenever standby starts or stops, so late native callbacks from an earlier run are ignored. */
 let generation = 0
+/** The spoken commands for this standby: "hey <name>" with the assistant's name when it started (a rename restarts it). */
 let commandPhrases: VoiceCommandPhrases = DEFAULT_VOICE_COMMAND_PHRASES
 let commands: { remove(): void; audio(peak: number): void; newStretch(): void } | null = null
 const wakeGate = new WakeGate<Float32Array>({ chunkMs: (STANDBY_CHUNK_SAMPLES / RATE) * 1_000 })
@@ -531,6 +532,7 @@ async function openStandby(background: boolean) {
     wakeGate.reset()
     listeningInBackground = background
     if (background && Platform.OS === 'android') await CallSession?.startStandby?.().catch(() => undefined)
+    commandPhrases = voiceCommandPhrases(getBox().assistant.name)
     setState(standby(false, null))
     if (await listenForCommands(commandPhrases)) {
       const state = getVoiceState()

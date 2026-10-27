@@ -39,6 +39,7 @@ pub const App = struct {
     pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
     computer: ?*desktop.Service = null, // computer control (desktop.zig); null when the config switches it off
     cloned: @import("../voices.zig").Store = .{}, // cloned voices (`voices.zig`, `api/voices.zig`)
+    assistant: @import("../assistant.zig").Store = .{}, // the assistant's name (`assistant.zig`, `api/assistant.zig`)
     plan: ?*const @import("../topology.zig").Plan = null, // where each tool runs (a multi-node topology); null: here
 
     /// Why tool `c` is refused on this machine until it is qualified here (`engine.unqualified`), or null; a tool that
@@ -99,6 +100,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .GET and eql(p, "/v1/skills/model-manager")) return h.jsonValue(req, a, .ok, .{ .enabled = app.cfg.voice.tools and app.cfg.voice.manage_models, .text = @import("../voice/skill.zig").model_skill });
     if (eql(p, "/v1/voices")) return voices.route(app, req, a, host, ctype, "", caller);
     if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
+    if (eql(p, "/v1/assistant")) return @import("assistant.zig").route(app, req, a);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
     if (std.mem.startsWith(u8, p, "/v1/node/")) return @import("node.zig").route(app, req, a, p["/v1/node/".len..], caller);
@@ -119,6 +121,7 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
     if (eql(p, "/v1/realtime")) return .realtime;
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/skills/model-manager"))) return .read;
     if (m == .GET and (eql(p, "/v1/voices") or starts(u8, p, "/v1/voices/"))) return .read; // creating, renaming and deleting a voice: manage
+    if (m == .GET and eql(p, "/v1/assistant")) return .paired; // every client shows the name; renaming it: manage
     if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
     if (eql(p, "/v1/systemone")) return .decisions;
     if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or starts(u8, p, "/v1/audio/")) return .media;
@@ -146,7 +149,8 @@ test "every route class needs its scope; only the open routes need none; an unna
         .{ .POST, "/v1/models", .manage },           .{ .GET, "/v1/something-new", .manage },
         .{ .GET, "/v1/voices", .read },              .{ .GET, "/v1/voices/JJ", .read },
         .{ .POST, "/v1/voices", .manage },           .{ .PATCH, "/v1/voices/draft-1", .manage },
-        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/node/status", .manage },
+        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/assistant", .paired },
+        .{ .PATCH, "/v1/assistant", .manage },       .{ .GET, "/v1/node/status", .manage },
         .{ .POST, "/v1/node/jobs", .manage },
     };
     for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));

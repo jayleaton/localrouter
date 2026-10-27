@@ -255,6 +255,23 @@ model's `voices` (`/v1/models`, MCP `list_voices`) and spoken there in speech re
 `seconds_in`, `seconds_kept`, `speech_left_out_s`, `references`, `snr_db` (null: not measured), `background` (`noise`
 or `music`), `warnings`) and `references` (each `text`, `seconds`, `frames`, `level_dbfs`, `gain_db`, `snr_db`). Creating, renaming and deleting need `manage`; listing needs `read`.
 
+## The assistant's name
+
+```bash
+curl -s $BASE/assistant      # {"object": "assistant", "name": "Jarvis", "default_name": "Jarvis", "custom": false, "voice": {"model", "voice"}}
+curl -s -X PATCH $BASE/assistant -H 'content-type: application/json' -d '{"name": "Friday"}'   # manage scope
+```
+
+What the user calls their assistant, one name per box, chosen when they set up a client and changed in any client's
+settings: every client shows it, and a voice session introduces itself with it. `voice.instructions` may hold `{name}`
+for it (the default does: "You are {name}, a helpful voice assistant..."); instructions that do not mention the name,
+the daemon's or a session's own, get "You are <name>." before them, from the next turn after a rename. Until one is
+set it is the config's `assistant.name` ("Jarvis"); a set name is kept in `<data_dir>/assistant.json`, and
+`{"name": ""}` goes back to the config's. A name is 1 to 32 characters: letters (any script), digits, spaces,
+apostrophes, hyphens and full stops, with at least one letter or digit; spaces are trimmed and runs of them made one,
+and anything else is a 400. `voice` is the voice a call speaks in when it names none (null without a speech model), a
+hint for a client to show beside the name. Reading it needs any paired device; renaming needs `manage`.
+
 ## Transcriptions (OpenAI Audio API)
 
 ```bash

@@ -18,7 +18,7 @@ function meta(message: UserMessage | AssistantMessage) {
   return null
 }
 
-/** One conversation line: the user's on the right in amber, Jarvis's on the left. */
+/** One conversation line: the user's on the right in amber, the assistant's on the left. */
 export function MessageBubble({ message }: { message: UserMessage | AssistantMessage }) {
   const theme = useTheme()
   const mine = message.role === 'user'

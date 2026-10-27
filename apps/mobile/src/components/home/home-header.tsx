@@ -5,7 +5,7 @@ import { BrandMark } from '@/components/brand-mark'
 import { GearIcon } from '@/components/icons'
 import { ThemedText } from '@/components/themed-text'
 import { Palette, Spacing } from '@/constants/theme'
-import { reconnect, useBox, type BoxState } from '@/lib/app/box'
+import { reconnect, useAssistantName, useBox, type BoxState } from '@/lib/app/box'
 
 /** The pill's words and colour for the connection; a paused voice model is the one non-connection state. */
 function pill(connection: BoxState['connection'], paused: boolean) {
@@ -21,6 +21,7 @@ export function HomeHeader() {
   const router = useRouter()
   const connection = useBox((box) => box.connection)
   const paused = useBox((box) => box.paused)
+  const name = useAssistantName()
   const { text, tone } = pill(connection, paused)
   return (
     <View style={styles.header}>
@@ -31,7 +32,7 @@ export function HomeHeader() {
             LocalRouter
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.tagline}>
-            Jarvis on your own box
+            {name} on your own box
           </ThemedText>
         </View>
       </View>

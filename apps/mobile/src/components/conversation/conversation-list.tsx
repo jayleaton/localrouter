@@ -5,6 +5,7 @@ import { MessageBubble } from '@/components/conversation/message-bubble'
 import { GenerationCard } from '@/components/media/generation-card'
 import { ThemedText } from '@/components/themed-text'
 import { Palette, Spacing } from '@/constants/theme'
+import { useAssistantName } from '@/lib/app/box'
 import { isGeneration, type Message } from '@/lib/localrouter/conversation'
 
 const SUGGESTIONS = ['Make a picture of a fox in the snow', 'What can you do?', 'Make a short video of waves on a beach']
@@ -46,10 +47,11 @@ export function ConversationList({ messages, onSend, onOpen, onRetry, onRefresh 
 }
 
 function Suggestions({ onSend }: { onSend: (text: string) => void }) {
+  const name = useAssistantName()
   return (
     <View style={styles.empty}>
       <ThemedText themeColor="textSecondary" style={styles.center}>
-        Talk or type to Jarvis. Ask a question, or ask for a picture or a video.
+        Talk or type to {name}. Ask a question, or ask for a picture or a video.
       </ThemedText>
       {SUGGESTIONS.map((text) => (
         <Pressable

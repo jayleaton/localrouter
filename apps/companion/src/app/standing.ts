@@ -93,7 +93,7 @@ export function everPaired(i: { base: string; token: string; pairedAt?: string }
 }
 
 /**
- * Settings › "Let Jarvis control this computer": ticked only when control is on AND the person allowed it, so a ticked
+ * Settings › "Let <assistant> control this computer": ticked only when control is on AND the person allowed it, so a ticked
  * box never sits next to "not allowed yet". Ticking it grants (`grant`) as well as turning control on; unticking pauses.
  */
 export function controlBox(i: { enabled: boolean; granted: boolean }): boolean {

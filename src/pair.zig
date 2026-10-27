@@ -48,7 +48,7 @@ pub const Device = struct {
         const legacy = d.allows("voice") or d.allows("mcp");
         return switch (n) {
             .realtime => d.allows("voice") or d.allows("inference"),
-            .owned => true,
+            .owned, .paired => true,
             .mcp => d.allows("mcp") or d.anyService(),
             .inference, .media, .decisions, .read, .manage => legacy or d.allows(@tagName(n)),
         };
@@ -70,12 +70,13 @@ pub const Need = enum {
     realtime, // /v1/realtime: `inference` (or the legacy `voice`)
     mcp, // /mcp itself: the legacy `mcp` or any service scope; each tool then needs its own
     owned, // a job's state, outputs and files: any paired device, and the job must be its own (api/pair.zig `Caller.sees`)
+    paired, // any paired device: GET /v1/assistant
 
     /// The scopes that satisfy it, for a refusal.
     pub fn scopes(n: Need) []const u8 {
         return switch (n) {
             .realtime => "inference",
-            .owned => "any",
+            .owned, .paired => "any",
             .mcp => "inference, media, decisions, read or manage",
             else => @tagName(n),
         };
@@ -542,7 +543,7 @@ test "service scopes: each grants only its own; the legacy profile keeps everyth
     for ([_][]const u8{ "desktop_helper", "computer", "approve" }) |s| {
         const one = [_][]const u8{s};
         const d = dev(&one);
-        for (std.enums.values(Need)) |n| try testing.expectEqual(n == .owned, d.grants(n));
+        for (std.enums.values(Need)) |n| try testing.expectEqual(n == .owned or n == .paired, d.grants(n));
     }
     // A service scope grants itself and /mcp; only inference opens /v1/realtime; nothing else implies manage.
     for (service_scopes, service) |s, own| {

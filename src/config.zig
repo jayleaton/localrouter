@@ -79,7 +79,9 @@ pub const Voice = struct {
     speech_models: []const []const u8 = &.{ "fishaudio/drama-3", "kitten-tts-2" }, // in order; one that fails to serve falls through to the next; none: the text_to_speech default
     transcription_model: []const u8 = "", // "": the speech_to_text default
     voice: []const u8 = "", // "": the speech model's default voice
-    instructions: []const u8 = "You are a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
+    // `{name}` is the assistant's name (`assistant.name`, or the one set over /v1/assistant); instructions that do not
+    // mention the name get "You are <name>." before them (assistant.zig `systemPrompt`)
+    instructions: []const u8 = "You are {name}, a helpful voice assistant running on the user's own machine. Answer in short, natural spoken sentences without markdown, lists or emoji.",
     partial_interval_ms: u32 = 0, // a partial transcript per this much new speech; 0 (default): none, since a partial
     // on a non-streaming STT model (Whisper) can hold the turn's final transcript back by a whole decode
     early_stt_ms: u32 = 150, // quiet after speech that starts transcribing the turn so far (reused when the wait ends with
@@ -113,7 +115,12 @@ pub const Pairing = struct {
     // loopback
 };
 
-/// Computer control (docs/dev/COMPUTER.md): Jarvis using a paired desktop helper's computer. Its routes need device
+/// The assistant (src/assistant.zig): `name` is what it is called until a client sets another over /v1/assistant.
+pub const Assistant = struct {
+    name: []const u8 = @import("assistant.zig").default_name,
+};
+
+/// Computer control (docs/dev/COMPUTER.md): the assistant using a paired desktop helper's computer. Its routes need device
 /// pairing; without it they refuse.
 pub const Computer = struct {
     enabled: bool = true, // the /v1/desktop and /v1/computer routes and the computer tools exist
@@ -160,6 +167,7 @@ pub const Config = struct {
     local_files: []const []const u8 = &.{}, // directories whose audio files MCP tools may read by path (`transcribe_audio` path); none by default: the API has no auth
     gpu_lock: []const u8 = "", // the host's GPU lock: the scheduler holds it (shared) while any tool is loaded, against GPU users outside LocalRouter
     defaults: Defaults = .{}, // the model a request that names none goes to, per capability
+    assistant: Assistant = .{},
     voice: Voice = .{},
     stt: Stt = .{},
     pairing: Pairing = .{},
@@ -376,6 +384,13 @@ test "the default host is loopback; host accepts the keywords" {
     try std.testing.expectEqualStrings("127.0.0.1", d.host);
     const t = try parse(arena.allocator(), "{\"host\": \"tailscale\"}");
     try std.testing.expectEqualStrings("tailscale", t.host);
+}
+
+test "the assistant is Jarvis unless the config names it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("Jarvis", (try parse(arena.allocator(), "{}")).assistant.name);
+    try std.testing.expectEqualStrings("Ava", (try parse(arena.allocator(), "{\"assistant\": {\"name\": \"Ava\"}}")).assistant.name);
 }
 
 test "pairing is off unless the config requires it" {
