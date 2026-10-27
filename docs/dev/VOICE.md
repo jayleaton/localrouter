@@ -343,10 +343,26 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     rarely rather than stuttering.
 - **A reply speaks while it is written** (since 2026-10-27, after JJ's "it's not even streaming at all": the text was
   all on screen before the voice began). `voice.speak_written` is off by default, so each sentence is spoken as soon
-  as it is complete, and the page holds a reply still being written at most 1 s (`WRITING_CAP_MS`; the mobile app's
-  `replyHold.ts` the same) instead of until its text is complete. Where speech, sharing the GPU with the chat model,
-  falls behind playback, the reply pauses; `voice_e2e.py`'s long-reply check reports those pauses (`gaps`,
-  `gap_total_s`) and requires the start within 3 s of the request and before the text is complete.
+  as it is complete. #123 also capped the page's hold on a reply still being written at 1 s, which left pauses where
+  speech, sharing the GPU with the chat model, fell behind; the start below replaced that cap.
+- **No pause inside a reply: the start waits for it** (JJ, 2026-10-27, on #124's short pauses: "rather than there
+  being pauses, just wait another few fractions of a second"). The page (and the companion with it, and the mobile
+  app's `replyHold.ts`) starts a held reply once the audio in hand plays the rest without running dry at the rate it
+  comes in: `in hand >= rest x (1 - rate) + margin`.
+  - `rest`: the audio still to come for the text written so far (the whole text after `text_done`), at the voice's
+    audio per character (learned per voice in the browser from its last replies, with 15% to spare; 65 ms at least).
+  - `rate`: an EWMA (alpha 0.7) of the arrival rate over 150 ms windows from the first piece, seeded with the voice's
+    rate on its last replies (1.0 on a fresh page), less half its standard deviation; 1 once the text is complete with
+    the GPU free and the server's free rate above real time.
+  - `margin`: 300 ms, none for a written reply on a free GPU (a short one starts on 200 ms in hand, as before). After a
+    pause the session's next replies need twice its length more (up to 2 s).
+  - A slow stream starts later in proportion: at a quarter of real time, three quarters of the rest must be in hand.
+    #123's 1 s cap on the hold is gone; the absolute cap is 30 s; `speech_done` starts a reply at once.
+  - Fitted on 30 recorded DGX-02 replies with speech first (Mae and Scarlette; a story, an explainer, a history, two
+    tips, one sentence; a fresh session each), parameters chosen among those with no piece over 50 ms late in any
+    reply, validated on a third of them held out: long replies started 1.8 to 3.3 s after the request (the best start
+    with hindsight was 1.1 to 2.3 s), two-tip replies 1.3 to 2.0 s, one sentence 0.15 s after its first audio.
+    `voice_e2e.py` replays the same rule on its long reply and fails on any underrun over 50 ms.
 - **Speech first** (`voice.speech_first`, on by default; `src/sched/yielder.zig`). While a reply is written, the
   session pauses its chat model's server (SIGSTOP; SIGCONT resumes it) whenever the reply's speech is under 2 s ahead
   of real time (counted from its first audio) and a written sentence waits behind the one being spoken, until speech
@@ -357,6 +373,10 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
   supervises it (a dying daemon still reaches the worker, which kills it), and only on a lease that each piece of
   speech renews (600 ms): a speaker that stalls lets it run again within that. It applies when the chat model is this
   daemon's own server (`chat_url` unset, the model loaded here); elsewhere sentences are spoken beside it as before.
+  The server is shared by every session and request, so a pause is only ever taken while nothing else waits on the
+  chat lane, and anything queued there (another session's reply, from JJ's second device; a computer-use step; a
+  prime) ends it at once (`Scheduler.yieldChat`, and `push` interrupts it). #124 lacked this: on DGX-02, 2026-10-27,
+  a second session's request waited 6 and 17 s for its first token behind long replies whose chat model was paused.
   The session sends `localrouter.response.speech_first` `{response_id, item_id}` before the reply's first audio; the
   page and the mobile app then start a reply still being written once the audio in hand covers the text written so
   far (MS_PER_CHAR a character, less what of it is in) at the measured rate, still within the 1 s cap. Without the

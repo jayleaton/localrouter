@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Voice: speech first no longer stalls other sessions. The chat model's server is shared, so it is paused only while
+  nothing else waits on the chat lane, and a request queued there (another session or device, a computer-use step, a
+  prime) resumes it at once. Before, a second device's request waited behind a reply's paused chat model (6 and 17 s
+  for a first token on DGX-02).
+
+- Voice: no pauses inside a reply. The `/voice` page, the companion and the mobile app start a reply once the audio in
+  hand plays the rest without running dry at the rate it is coming in (`rest x (1 - rate) + 300 ms`; the rate an EWMA
+  of the arrival, less half its spread, seeded per voice from its last replies; the rest from the text written so far
+  at the voice's audio per character), so a slower stream starts later in proportion instead of pausing. #123's 1 s
+  cap on the hold is gone. After a pause, the session's next replies need more in hand. On 30 recorded DGX-02 replies:
+  no pause in any; long replies start 1.8 to 3.3 s after the request, two-sentence ones 1.3 to 2.0 s, one sentence as
+  before. `voice_e2e.py`'s long-reply check replays the rule and fails on any underrun over 50 ms.
+
 - Voice: speech first. While a reply is written, the daemon pauses its own chat model's server (SIGSTOP, lossless:
   its decode resumes where it stopped) whenever the reply's speech is under 2 s ahead of real time and a written
   sentence waits, until it is 3.5 s ahead (`voice.speech_first`, on by default; a lease each piece of speech renews, so

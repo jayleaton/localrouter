@@ -1,41 +1,48 @@
 /*
- * When a reply's audio may start (ported from the box's web client, docs/dev/VOICE.md "Playback start"). Speech
- * usually comes faster than it plays, but not while it shares the GPU with the chat model writing the rest of the
- * reply, or with a picture being made (0.5 to 0.9x real time on DGX-01). A reply's length is not known until it is
- * written, so no fixed buffer covers that. The start waits until:
- * - the text is complete (`localrouter.response.text_done`, with its length) and enough is in hand to play all of
- *   it at the rate it comes in (at least START_MS; GEN_START_MS while a picture or video is being made);
- * - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
- * - or, while the text is still being written by a reply that puts its speech first
- *   (`localrouter.response.speech_first`: the server pauses the chat model while speech is less than about 2 s ahead),
- *   enough is in hand to play the text written so far at the rate it comes in: its audio not yet received, from
- *   MS_PER_CHAR, x (1 - rate) x MARGIN;
- * - or all of the reply's speech is in (`localrouter.response.speech_done`);
- * - and never more than HOLD_CAP_MS after the first piece, or WRITING_CAP_MS while the text is still being written:
- *   a reply speaks while it is written, at the cost of a pause where speech falls behind.
- * A short reply on a free GPU is written before its first audio and starts as soon as it would have.
+ * When a reply's audio may start (ported from the box's web client, src/voice/voice.html, the comment above START_MS).
+ * A reply's audio plays back to back to its end without a pause: rather than pausing, it waits a little longer to
+ * start. Speech comes faster than it plays with the GPU to itself (1.4x on DGX-02), slower beside the chat model
+ * writing the reply (0.55x; the server's speech first keeps it about level) or a picture being made. So the start
+ * waits until the audio in hand plays the rest without running dry at the rate it comes in:
+ *   in hand >= remaining x (1 - rate) + margin
+ * - remaining: the audio still to come for the text written so far (the whole text once
+ *   `localrouter.response.text_done` gives its length), at the voice's ms a character (learned per voice, MS_PER_CHAR
+ *   at least);
+ * - rate: an EWMA (EWMA_ALPHA) of the arrival rate over RATE_WINDOW_MS windows from the first piece, seeded with the
+ *   voice's rate on its last replies, less RATE_HEADROOM of its spread; once the text is complete with the GPU free,
+ *   the server's measure of speech with the GPU to itself (text_done's speech_rate, else the last reply's) counts;
+ * - margin: MARGIN_MS, and more for the rest of the session after a pause (`gap`).
+ * A slow stream starts later, in proportion: at a quarter of real time, three quarters of the rest must be in hand. A
+ * short reply written on a free GPU needs START_MS (no margin); all of a reply's speech in (speech_done) starts it.
+ * Never more than HOLD_CAP_MS after the first piece.
  */
 
 export const START_MS = 200
 export const GEN_START_MS = 500
-export const KEEP_UP = 1.05
-export const RATE_MS = 250
-export const HOLD_CAP_MS = 10_000
-/** While the text is still being written, a reply starts at most this long after its first piece. */
-export const WRITING_CAP_MS = 1_000
-/** A written reply's audio is about this long per character. */
+export const HOLD_CAP_MS = 30_000
+/** A reply's audio is at least about this long per character. */
 export const MS_PER_CHAR = 65
-const MARGIN = 1.25
+export const MARGIN_MS = 300
+/** A pause adds twice its length to the margin for the rest of the session, up to this. */
+export const MARGIN_UP_MAX_MS = 2_000
+const RATE_WINDOW_MS = 150
+const EWMA_ALPHA = 0.7
+const RATE_HEADROOM = 0.5
+const PRIOR_RATE = 1.0
 
-type Held<T> = { pieces: T[]; firstAt: number; haveMs: number; firstMs: number }
+/** What the start learns per voice across replies: its arrival rate and its audio a character. */
+export type VoicePrior = { rate?: number; mpc?: number }
+export type VoicePriors = Map<string, VoicePrior>
+
+type Held<T> = { pieces: T[]; firstAt: number; haveMs: number }
+/** An item's arrival rate (EWMA and its spread) since the last window, and its audio a character. */
+type Rate = { rate: number; v: number; at: number; from: number; mpc: number }
 
 export class ReplyHold<T> {
   private held = new Map<string, Held<T>>()
   private started = new Set<string>()
   private textDone = new Map<string, number>()
   private speechDone = new Set<string>()
-  /** Replies whose speech the server puts first (their start need not wait for the text to be complete). */
-  private speechFirsts = new Set<string>()
   /** Characters of each reply's spoken text written so far. */
   private writtenChars = new Map<string, number>()
   /** The server's measure of how fast speech comes with the GPU to itself (text_done's speech_rate). */
@@ -43,25 +50,41 @@ export class ReplyHold<T> {
   /** How fast the last fully received reply's speech came. */
   private lastRate = 0
   private got = new Map<string, { first: number; ms: number; firstMs: number }>()
+  private rates = new Map<string, Rate>()
+  /** Added to the margin after a pause, for the rest of the session. */
+  private marginUp = 0
 
-  /** `generating`: a picture or video is being made (speech shares the GPU with it). */
-  constructor(private readonly generating: () => boolean = () => false) {}
+  /**
+   * `generating`: a picture or video is being made (speech shares the GPU with it). `voice`: the voice speaking now,
+   * the key of its learned prior in `priors` (kept by the caller, across sessions).
+   */
+  constructor(
+    private readonly generating: () => boolean = () => false,
+    private readonly voice: () => string = () => '',
+    private readonly priors: VoicePriors = new Map(),
+  ) {}
 
-  /** A new session or a barge-in: everything held is dropped. */
-  reset() {
+  /** A barge-in drops everything held; a new session (`session`) also starts at the usual margin. */
+  reset(session = false) {
     this.held.clear()
     this.started.clear()
     this.textDone.clear()
     this.speechDone.clear()
-    this.speechFirsts.clear()
     this.writtenChars.clear()
     this.freeRate.clear()
     this.got.clear()
+    this.rates.clear()
+    if (session) this.marginUp = 0
   }
 
   /** Whether some reply's start is still being held (the engine then calls `tick` every 25 ms). */
   get holding() {
     return this.held.size > 0
+  }
+
+  /** The margin a reply not yet settled needs on top of what its rate needs. */
+  get margin() {
+    return MARGIN_MS + this.marginUp
   }
 
   /** A piece of `item`'s audio of `ms` arrived: the pieces to schedule now (it alone once the reply has started). */
@@ -70,19 +93,14 @@ export class ReplyHold<T> {
     got.ms += ms
     this.got.set(item, got)
     if (this.started.has(item)) return [piece]
-    const held = this.held.get(item) ?? { pieces: [], firstAt: now, haveMs: 0, firstMs: ms }
+    const held = this.held.get(item) ?? { pieces: [], firstAt: now, haveMs: 0 }
     held.pieces.push(piece)
     held.haveMs += ms
     this.held.set(item, held)
     return this.check(item, now)
   }
 
-  /** `localrouter.response.speech_first`, before the reply's first audio. */
-  speechFirst(item: string) {
-    this.speechFirsts.add(item)
-  }
-
-  /** `chars` more of the reply's spoken text were written (`response.audio_transcript.delta`); only raises the need. */
+  /** `chars` more of the reply's spoken text were written (`response.audio_transcript.delta`). */
   written(item: string, chars: number) {
     this.writtenChars.set(item, (this.writtenChars.get(item) ?? 0) + chars)
   }
@@ -98,8 +116,15 @@ export class ReplyHold<T> {
     const got = this.got.get(item)
     const span = got ? now - got.first : 0
     if (got && span > 300) this.lastRate = (got.ms - got.firstMs) / span
+    this.learn(item, now) // this voice's rate and audio a character, for the next replies' start
     this.got.delete(item)
+    this.rates.delete(item)
     return this.check(item, now)
+  }
+
+  /** Playback ran dry mid-reply for `ms`: the session's next replies start with more in hand. */
+  gap(ms: number) {
+    this.marginUp = Math.min(MARGIN_UP_MAX_MS, this.marginUp + 2 * ms)
   }
 
   /** Re-checks every held reply (time passing changes the measured rate and the cap). */
@@ -111,35 +136,69 @@ export class ReplyHold<T> {
     return this.generating() ? GEN_START_MS : START_MS
   }
 
-  /** Audio ms per wall ms since the first piece (the first piece not counted), once RATE_MS has passed; else null. */
-  private arrivalRate(held: Held<T>, now: number) {
-    const since = now - held.firstAt
-    return since < RATE_MS ? null : (held.haveMs - held.firstMs) / since
+  private learn(item: string, now: number) {
+    const got = this.got.get(item)
+    if (!got) return
+    const span = now - got.first
+    const chars = this.textDone.get(item) ?? 0
+    const key = this.voice()
+    const prior = this.priors.get(key) ?? {}
+    if (span > 300) {
+      const rate = (got.ms - got.firstMs) / span
+      prior.rate = prior.rate === undefined ? rate : 0.5 * prior.rate + 0.5 * rate
+    }
+    if (chars > 20) prior.mpc = prior.mpc === undefined ? got.ms / chars : 0.5 * prior.mpc + 0.5 * (got.ms / chars)
+    this.priors.set(key, prior)
   }
 
-  private need(item: string, rate: number) {
-    const chars = this.textDone.get(item)
-    if (chars === undefined) {
-      if (rate >= KEEP_UP) return this.startMs()
-      if (!this.speechFirsts.has(item)) return Infinity
-      // The text written so far, less the audio of it already in (held or played).
-      const pending = Math.max(0, (this.writtenChars.get(item) ?? 0) * MS_PER_CHAR - (this.got.get(item)?.ms ?? 0))
-      return Math.max(this.startMs(), pending * (1 - Math.min(rate, 1)) * MARGIN)
+  /**
+   * The item's arrival rate: each RATE_WINDOW_MS window from the first piece (that piece not counted) into an EWMA
+   * with its spread, seeded with the voice's rate on its last replies; and its audio a character: the voice's on its
+   * last replies with 15% to spare, MS_PER_CHAR at least.
+   */
+  private rateOf(item: string, held: Held<T>, now: number) {
+    let r = this.rates.get(item)
+    if (!r) {
+      const p = this.priors.get(this.voice()) ?? {}
+      r = {
+        rate: p.rate === undefined ? PRIOR_RATE : Math.min(1.2, Math.max(0.5, p.rate)),
+        v: 0,
+        at: held.firstAt,
+        from: held.haveMs,
+        mpc: Math.max(MS_PER_CHAR, 1.15 * (p.mpc ?? 0)),
+      }
+      this.rates.set(item, r)
     }
-    return Math.max(this.startMs(), chars * MS_PER_CHAR * (1 - Math.min(rate, 1)) * MARGIN)
+    if (now - r.at >= RATE_WINDOW_MS) {
+      const d = (held.haveMs - r.from) / (now - r.at) - r.rate
+      r.rate += EWMA_ALPHA * d
+      r.v = (1 - EWMA_ALPHA) * (r.v + EWMA_ALPHA * d * d)
+      r.at = now
+      r.from = held.haveMs
+    }
+    return r
+  }
+
+  /** Audio in hand that plays the rest of the reply to its end without running dry (see the header comment). */
+  private need(item: string, held: Held<T>, now: number) {
+    const r = this.rateOf(item, held, now)
+    const done = this.textDone.has(item)
+    const free = done && !this.generating() ? this.freeRate.get(item) || this.lastRate || 0 : 0
+    const chars = done ? (this.textDone.get(item) ?? 0) : (this.writtenChars.get(item) ?? 0)
+    const rest = Math.max(0, chars * r.mpc - (this.got.get(item)?.ms ?? 0))
+    let rate = Math.max(0, r.rate - RATE_HEADROOM * Math.sqrt(r.v))
+    if (free > 1) rate = Math.max(rate, 1)
+    const settled = done && free >= 1 && rate >= 1 // written, and speech has the GPU to itself: no margin
+    return Math.max(this.startMs(), rest * (1 - Math.min(rate, 1)) + (settled ? 0 : this.margin))
   }
 
   private check(item: string, now: number): T[] {
     const held = this.held.get(item)
     if (!held) return []
-    const measured = this.arrivalRate(held, now)
-    // A reply already written, with the GPU free, comes from here on as fast as speech does with the GPU to itself.
-    const prior = this.textDone.has(item) && !this.generating() ? this.freeRate.get(item) || this.lastRate : 0
-    const rate = prior >= KEEP_UP ? Math.max(measured ?? 0, prior) : measured
-    const ready = this.speechDone.has(item) || (rate !== null && held.haveMs >= this.need(item, rate))
-    const cap = this.textDone.has(item) ? HOLD_CAP_MS : WRITING_CAP_MS
-    if (!ready && now - held.firstAt < cap) return []
+    const ready = this.speechDone.has(item) || held.haveMs >= this.need(item, held, now)
+    if (!ready && now - held.firstAt < HOLD_CAP_MS) return []
     this.held.delete(item)
+    this.rates.delete(item)
     this.started.add(item)
     return held.pieces
   }

@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest'
 
-import { HOLD_CAP_MS, ReplyHold, START_MS, WRITING_CAP_MS } from './replyHold'
+import { HOLD_CAP_MS, MARGIN_MS, ReplyHold, START_MS, type VoicePriors } from './replyHold'
+
+/** Feeds `item` a first piece of `firstMs` at 0, then `ms` every 150 ms; returns when (and with what) it started. */
+function stream(hold: ReplyHold<number>, firstMs: number, ms: number, until = 200) {
+  let have = firstMs
+  if (hold.piece('a', 0, firstMs, 0).length) return { k: 0, have }
+  for (let k = 1; k < until; k++) {
+    have += ms
+    if (hold.piece('a', k, ms, 150 * k).length) return { k, have }
+  }
+  return null
+}
 
 describe('the reply start hold', () => {
-  it('a written reply on a free GPU starts once 200 ms is in hand', () => {
+  it('a short reply written on a free GPU starts with START_MS in hand, no margin', () => {
     const hold = new ReplyHold<number>()
     expect(hold.text('a', 30, 1.4, false, 0)).toEqual([])
     expect(hold.piece('a', 1, 100, 0)).toEqual([])
@@ -11,99 +22,95 @@ describe('the reply start hold', () => {
     expect(hold.piece('a', 3, 100, 20)).toEqual([3]) // started: later pieces go straight out
   })
 
-  it('while the text is still written, a stream that keeps up starts; a slow one waits for the text at most 1 s', () => {
-    const fast = new ReplyHold<number>()
-    fast.piece('a', 0, 46, 0)
-    expect(fast.piece('a', 1, 186, 125)).toEqual([])
-    expect(fast.piece('a', 2, 186, 250)).toEqual([0, 1, 2]) // 372 ms of audio in 250 ms: 1.49x
-
-    const slow = new ReplyHold<number>()
-    slow.piece('a', 0, 46, 0)
-    slow.piece('a', 1, 100, 200)
-    expect(slow.piece('a', 2, 100, 300)).toEqual([]) // 0.67x and length unknown: wait
-    // Written now, 400 chars at 65 ms each: needs 26 s x (1 - 0.67) x 1.25 in hand, so it still waits...
-    expect(slow.text('a', 400, null, false, 310)).toEqual([])
-    // ...until all of its speech is in.
-    expect(slow.speech('a', 400)).toEqual([0, 1, 2])
-
-    const long = new ReplyHold<number>()
-    long.piece('a', 0, 46, 0)
-    expect(long.piece('a', 1, 100, 200)).toEqual([]) // 0.5x, still being written
-    expect(long.tick(WRITING_CAP_MS - 1)).toEqual([])
-    expect(long.tick(WRITING_CAP_MS)).toEqual([0, 1]) // it speaks while it is written
+  it('a slow stream of a long written text waits for the rest x (1 - rate) + margin, and starts once that is in hand', () => {
+    // 40 chars (2600 ms) at 0.25x: in hand >= (2600 - in hand) x 0.75 + 300, about 1286 ms.
+    const hold = new ReplyHold<number>()
+    hold.text('a', 40, null, false, 0)
+    const started = stream(hold, 50, 37.5)
+    expect(started).not.toBeNull()
+    expect(started!.have).toBeGreaterThanOrEqual((2_600 - started!.have) * 0.75 + MARGIN_MS)
+    // Not before: one piece earlier was short of it.
+    const before = started!.have - 37.5
+    expect(before).toBeLessThan((2_600 - before) * 0.75 + MARGIN_MS)
+    expect(started!.have).toBe(1_287.5)
   })
 
-  it('a reply putting its speech first starts before its text is done, once the written text cannot run dry', () => {
+  it('a stream at 1x or more still being written starts once the margin is in hand', () => {
     const hold = new ReplyHold<number>()
-    hold.speechFirst('a')
-    hold.written('a', 12)
-    hold.written('a', 8) // 20 chars written: about 1300 ms of audio
-    hold.piece('a', 0, 46, 0)
-    hold.piece('a', 1, 100, 200)
-    // 0.67x: the 1054 ms written but not yet in need 1054 x (1 - 0.67) x 1.25 = 439 ms in hand; 246 is not enough.
-    expect(hold.piece('a', 2, 100, 300)).toEqual([])
-    // 0.75x: 954 ms still to come need 298 ms in hand; 346 is.
-    expect(hold.piece('a', 3, 100, 400)).toEqual([0, 1, 2, 3])
-
-    // More written before that piece raises the need: 40 chars (2600 ms) at 0.75x want 704 ms in hand.
-    const more = new ReplyHold<number>()
-    more.speechFirst('a')
-    more.written('a', 40)
-    more.piece('a', 0, 46, 0)
-    more.piece('a', 1, 100, 200)
-    more.piece('a', 2, 100, 300)
-    expect(more.piece('a', 3, 100, 400)).toEqual([])
-  })
-
-  it('without speech first, a slow reply still being written waits for its text, however little is written, up to the writing cap', () => {
-    const hold = new ReplyHold<number>()
-    hold.written('a', 20)
-    hold.piece('a', 0, 46, 0)
-    hold.piece('a', 1, 100, 200)
-    hold.piece('a', 2, 100, 300)
-    expect(hold.piece('a', 3, 100, 400)).toEqual([])
-    expect(hold.tick(WRITING_CAP_MS - 1)).toEqual([])
-    expect(hold.tick(WRITING_CAP_MS)).toEqual([0, 1, 2, 3]) // it speaks while it is written
-
-    const written = new ReplyHold<number>()
-    written.piece('a', 0, 46, 0)
-    written.piece('a', 1, 100, 200)
-    written.piece('a', 2, 100, 250)
-    // Written before the cap, and speech now has the GPU to itself at 1.4x: START_MS in hand is enough.
-    expect(written.text('a', 20, 1.4, false, 300)).toEqual([0, 1, 2])
-  })
-
-  it('a reply putting its speech first that keeps up starts with START_MS in hand, however much is written', () => {
-    const hold = new ReplyHold<number>()
-    hold.speechFirst('a')
     hold.written('a', 2_000)
     hold.piece('a', 0, 46, 0)
-    expect(hold.piece('a', 1, 186, 125)).toEqual([])
-    expect(hold.piece('a', 2, 186, 250)).toEqual([0, 1, 2]) // 1.49x, 418 ms in hand
+    expect(hold.piece('a', 1, 210, 150)).toEqual([]) // 1.4x, but 256 ms is short of the 300 ms margin
+    expect(hold.piece('a', 2, 210, 300)).toEqual([0, 1, 2]) // 466 ms in hand
 
-    // While a picture is being made, GEN_START_MS: 418 ms is not enough, 604 is.
+    // While a picture is being made, GEN_START_MS: 466 ms is not enough, 676 is.
     const busy = new ReplyHold<number>(() => true)
-    busy.speechFirst('a')
     busy.written('a', 2_000)
     busy.piece('a', 0, 46, 0)
-    busy.piece('a', 1, 186, 125)
-    expect(busy.piece('a', 2, 186, 250)).toEqual([])
-    expect(busy.piece('a', 3, 186, 375)).toEqual([0, 1, 2, 3])
+    busy.piece('a', 1, 210, 150)
+    expect(busy.piece('a', 2, 210, 300)).toEqual([])
+    expect(busy.piece('a', 3, 210, 450)).toEqual([0, 1, 2, 3])
   })
 
-  it('never holds past the cap, and a picture being made needs more in hand', () => {
+  it('all of the reply speech in starts it, and it never holds past the cap', () => {
     const hold = new ReplyHold<number>()
     hold.text('a', 400, null, false, 0)
     hold.piece('a', 0, 46, 0)
-    expect(hold.tick(HOLD_CAP_MS - 1)).toEqual([])
-    expect(hold.tick(HOLD_CAP_MS)).toEqual([0])
+    expect(hold.piece('a', 1, 100, 400)).toEqual([])
+    expect(hold.speech('a', 500)).toEqual([0, 1])
 
-    const busy = new ReplyHold<number>(() => true)
-    busy.text('a', 10, 1.4, false, 0)
-    busy.piece('a', 0, START_MS, 0)
-    // The free rate is not trusted while the GPU is shared, and nothing more came: wait.
-    expect(busy.tick(300)).toEqual([])
-    // 1.33x since the first piece, so the length no longer matters, but 500 ms (not 200) must be in hand: 600 is.
-    expect(busy.piece('a', 1, 400, 300)).toEqual([0, 1])
+    const capped = new ReplyHold<number>()
+    capped.text('a', 400, null, false, 0)
+    capped.piece('a', 0, 46, 0)
+    expect(capped.tick(HOLD_CAP_MS - 1)).toEqual([])
+    expect(capped.tick(HOLD_CAP_MS)).toEqual([0])
+  })
+
+  it('after a pause, the session next replies need more in hand, until a new session', () => {
+    const hold = new ReplyHold<number>()
+    hold.gap(100) // the margin grows by 200 ms: 500 ms
+    hold.written('a', 2_000)
+    hold.piece('a', 0, 46, 0)
+    hold.piece('a', 1, 210, 150)
+    expect(hold.piece('a', 2, 210, 300)).toEqual([]) // 466 ms is not enough now
+    expect(hold.piece('a', 3, 210, 450)).toEqual([0, 1, 2, 3])
+    expect(hold.margin).toBe(MARGIN_MS + 200)
+
+    hold.reset() // a barge-in keeps it
+    expect(hold.margin).toBe(MARGIN_MS + 200)
+    hold.gap(5_000)
+    expect(hold.margin).toBe(MARGIN_MS + 2_000) // at most 2 s more
+    hold.reset(true)
+    expect(hold.margin).toBe(MARGIN_MS)
+
+    // A short reply written on a free GPU still needs START_MS only.
+    hold.gap(500)
+    hold.text('b', 30, 1.4, false, 0)
+    expect(hold.piece('b', 0, START_MS, 0)).toEqual([0])
+  })
+
+  it('a voice that learned a longer audio a character needs more in hand', () => {
+    // 20 chars at 0.5x, seeded with a 0.5 rate: 65 ms a char starts at 650 ms in hand, 130 (x 1.15 to spare) at 1250.
+    const plain = new ReplyHold<number>(() => false, () => 'v', new Map([['v', { rate: 0.5 }]]))
+    plain.text('a', 20, null, false, 0)
+    expect(stream(plain, 50, 75)?.have).toBe(650)
+
+    const slow = new ReplyHold<number>(() => false, () => 'v', new Map([['v', { rate: 0.5, mpc: 130 }]]))
+    slow.text('a', 20, null, false, 0)
+    expect(stream(slow, 50, 75)?.have).toBe(1_250)
+  })
+
+  it('learns the voice rate and audio a character when all of a reply speech is in', () => {
+    const priors: VoicePriors = new Map()
+    const hold = new ReplyHold<number>(() => false, () => 'm:v', priors)
+    hold.text('a', 40, null, false, 0)
+    hold.piece('a', 0, 200, 0)
+    hold.piece('a', 1, 4_000, 1_000)
+    hold.speech('a', 1_000)
+    expect(priors.get('m:v')).toEqual({ rate: 4, mpc: 105 })
+    hold.text('b', 40, null, false, 2_000)
+    hold.piece('b', 0, 200, 2_000)
+    hold.piece('b', 1, 2_000, 3_000)
+    hold.speech('b', 3_000)
+    expect(priors.get('m:v')).toEqual({ rate: 3, mpc: 80 }) // half the last, half this one
   })
 })

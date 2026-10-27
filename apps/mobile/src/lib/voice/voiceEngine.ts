@@ -8,7 +8,7 @@ import { CallSession } from '../../../modules/call-session/src'
 import { VoiceCommands } from '../../../modules/voice-commands/src'
 import { EchoGate, echoReference, type PlayedSegment } from './echoGate'
 import { floatToPcm16, pcm16Base64ToFloat, pcm16ToBase64, silenceBase64 } from './pcm'
-import { ReplyHold } from './replyHold'
+import { ReplyHold, type VoicePriors } from './replyHold'
 import { DEFAULT_VOICE_COMMAND_PHRASES, lastCommand, voiceCommandPhrases, type VoiceCommandPhrases } from './voiceCommands'
 import { getVoiceState, setVoiceState as setState, type CallActivity } from './voiceState'
 import { WakeGate } from './wakeGate'
@@ -99,7 +99,13 @@ let lead = MIN_LEAD_S
 let playbackEndsAt = 0
 /** A reply is still coming (between its first audio and `response.done`): a gap in it is still the reply. */
 let replyOpen = false
-const hold = new ReplyHold<Piece>(() => conversation.messages.some((m) => isGeneration(m) && m.status === 'working'))
+/** What the reply start learned of each voice (its arrival rate and audio a character), kept while the app runs. */
+const voicePriors: VoicePriors = new Map()
+const voiceKey = () => {
+  const { speechModel, voices } = getBox().settings
+  return `${speechModel}:${voices[speechModel] ?? ''}`
+}
+const hold = new ReplyHold<Piece>(() => conversation.messages.some((m) => isGeneration(m) && m.status === 'working'), voiceKey, voicePriors)
 let holdTimer: ReturnType<typeof setInterval> | null = null
 
 function setActivity(next: CallActivity) {
@@ -127,9 +133,13 @@ function schedule({ item, samples }: Piece) {
   const sameReply = item === lastItem
   lastItem = item
   if (nextTime < now) {
-    // Ran dry mid-reply: restart with a lead grown by how late it was, so a slow stream pauses rarely. A new reply
-    // starts at once: replyHold already waited for enough of it.
-    if (sameReply && nextTime > 0) lead = Math.min(MAX_LEAD_S, lead + (now - nextTime))
+    // Ran dry mid-reply: restart with a lead grown by how late it was, so a slow stream pauses rarely, and the
+    // session's next replies start with more in hand (the pause heard). A new reply starts at once: replyHold already
+    // waited for enough of it.
+    if (sameReply && nextTime > 0) {
+      hold.gap(Math.round((now - nextTime + lead) * 1_000))
+      lead = Math.min(MAX_LEAD_S, lead + (now - nextTime))
+    }
     nextTime = frame(now + (sameReply && nextTime > 0 ? lead : 0.01))
   }
   const buffer = playback.createBuffer(1, samples.length, RATE)
@@ -219,6 +229,7 @@ function onServerEvent(event: ServerEvent) {
   if (event.type === 'session.created') {
     // A new session numbers its items from 1 again: what was kept per item belongs to the old one.
     silence()
+    hold.reset(true) // and starts at the usual margin
     cut.clear()
     doneMs.clear()
     lastDelta = null
@@ -248,9 +259,6 @@ function onServerEvent(event: ServerEvent) {
       if (hold.holding) holdTick()
       break
     }
-    case 'localrouter.response.speech_first':
-      hold.speechFirst(event.item_id)
-      break
     case 'response.audio_transcript.delta':
       hold.written(event.item_id, event.delta.length)
       break
