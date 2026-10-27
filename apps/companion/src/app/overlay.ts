@@ -16,6 +16,8 @@ export interface Surface {
   showAt(x: number, y: number, mode: InputMode): void
   hide(): void
   close(): void
+  /** Builds and loads the window now (hidden), so the first ring of a task shows at once. */
+  warm?(): void
 }
 
 /** How long the marker stays after the last action before it fades, so a quiet moment does not leave it on screen. */
@@ -35,6 +37,14 @@ export class VirtualCursor {
         if (typeof t === 'object' && 'unref' in t) (t as { unref: () => void }).unref()
         return { cancel: () => clearTimeout(t) }
       })
+  }
+
+  /**
+   * A task started: the window is built and its page loaded before the first action (Windows run, 2026-10-27: no ring
+   * 167 ms after the first background act, while the window was still being built and loaded).
+   */
+  ready(): void {
+    this.surface.warm?.()
   }
 
   /** Show the marker at a point; it fades on its own after LINGER_MS unless another action moves it first. */

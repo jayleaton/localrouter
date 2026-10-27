@@ -288,6 +288,7 @@ function cursor(): VirtualCursor {
   // The page loads after the window is built: the first ring of a task waits for it instead of being dropped (Windows
   // run, 2026-10-26: no ring 241 ms after a background click).
   let loaded = false
+  let shownOnce = false
   let pending: string | null = null
   const build = (): BrowserWindow => {
     loaded = false
@@ -314,10 +315,15 @@ function cursor(): VirtualCursor {
     void win.webContents.executeJavaScript(js).catch(() => undefined)
   }
   const surface: Surface = {
+    warm: () => {
+      if (!win || win.isDestroyed()) win = build()
+    },
     showAt: (x, y, mode) => {
       if (!win || win.isDestroyed()) win = build()
       const b = win.getBounds()
       win.showInactive()
+      if (!shownOnce) log.info('overlay.shown', { at: { x, y }, mode, bounds: b, loaded, visible: win.isVisible() })
+      shownOnce = true
       run(`window.lrCursor(${x - b.x}, ${y - b.y}, ${JSON.stringify(mode)})`)
     },
     hide: () => {
@@ -400,6 +406,7 @@ async function startLocalExecutor(): Promise<void> {
       const at = process.platform === 'darwin' ? e.at : screen.screenToDipPoint(e.at)
       cursor().show({ x: at.x, y: at.y, mode: e.mode })
     }
+    if (e.type === 'task' && e.task.status === 'running') cursor().ready()
     if (e.type === 'task' && e.task.status !== 'running') cursor().end()
     if (e.type === 'task' || e.type === 'approval' || e.type === 'approval.end') refreshTray()
     if (e.type === 'task' && e.task.status !== 'running' && /Accessibility|Screen Recording/i.test(e.task.reason)) void checkStale()

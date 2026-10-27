@@ -3,7 +3,7 @@ import type { Logger } from '../log.ts'
 import { choiceProbability } from './decisions.ts'
 import type { Answers, Decider, Question } from './decisions.ts'
 import { needsPointer } from './types.ts'
-import type { ActResult, BrowserTab, BrowserTabs, Observation, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
+import type { ActResult, BrowserTab, BrowserTabs, Observation, Point, PointerWatch, ScreenAction, ScreenBackend, ScreenControl, TabGroup } from './types.ts'
 
 /**
  * Computer use: the helper moves the real cursor, clicks, scrolls, and types on this computer (macOS, Linux or Windows) toward a goal.
@@ -40,6 +40,8 @@ export type AuthorizeAction =
   /** `field`: the text box typed into before this Enter. */
   | { kind: 'press'; key: 'enter' | 'escape' | 'tab' | 'space'; field?: { role: ScreenControl['role']; label: string } }
   | { kind: 'scroll'; direction: 'up' | 'down' | 'top' | 'bottom' }
+  /** `to`: the control it is dropped on, or the stroke drawn inside the one it starts on. */
+  | { kind: 'drag'; ref: string; role: ScreenControl['role']; label: string; to: string }
   | { kind: 'surface'; what: 'tab' | 'app'; name: string }
   /**
    * The real pointer and keyboard for one step that cannot be done in the background (`step`: the action, `why`: the
@@ -310,7 +312,9 @@ export class ComputerUse {
       throw new Halt('stuck', `The box did not allow the next step: ${messageOf(error)}`)
     } finally {
       run.waited += this.now() - asked
-      run.watch?.left(null)
+      // Waiting for the box used no pointer: the person's moves meanwhile and after are their own.
+      if (run.watch?.released) run.watch.released()
+      else run.watch?.left(null)
     }
     if (run.signal.aborted) throw new Halt('stopped', stopReason(run.signal))
     if (!grant.ok) throw new Halt('blocked', grant.denied || 'The box did not allow that.')
@@ -381,7 +385,9 @@ export class ComputerUse {
       if (allowPointer) run.watch?.left(null)
       throw error
     }
-    if (allowPointer) run.watch?.left(result.pointer)
+    // Only a step done with the real pointer makes the person's moves just after it a takeover.
+    if (allowPointer && result.mode !== 'pointer' && run.watch?.released) run.watch.released()
+    else if (allowPointer) run.watch?.left(result.pointer)
     return result
   }
 
@@ -407,6 +413,12 @@ export class ComputerUse {
         return action.key === 'enter' && run.typedInto ? { kind: 'press', key: action.key, field: { role: run.typedInto.role, label: run.typedInto.label } } : { kind: 'press', key: action.key }
       case 'scroll':
         return { kind: 'scroll', direction: action.direction }
+      case 'drag': {
+        const control = this.control(screen, action.ref)
+        const end = action.path[action.path.length - 1]
+        const onto = screen.controls.find((c) => c.ref !== action.ref && c.bounds && end && inside(c.bounds, end))
+        return { kind: 'drag', ref: action.ref, role: control.role, label: control.label, to: onto ? `${onto.role} “${onto.label}”` : 'a stroke inside it' }
+      }
     }
   }
 
@@ -519,6 +531,10 @@ export class ComputerUse {
     const typed = run.typedInto !== null
     const textboxes = controls.map((control, index) => ({ control, index })).filter(({ control }) => control.role === 'textbox')
     const canType = Boolean(task.text) && !typed && textboxes.length > 0
+    // Anything with a box on screen can start or end a drag (a canvas, a file, a slider); offered with a canvas on screen.
+    const draggable = controls.map((control, index) => ({ control, index })).filter(({ control }) => control.bounds && control.bounds.w > 0 && control.bounds.h > 0)
+    const canvas = draggable.some(({ control }) => /canvas/i.test(control.label))
+    if (!canvas) draggable.length = 0
     const state = {
       goal: task.goal,
       ...(task.text ? { textToType: clip(task.text, 400), alreadyTyped: typed } : {}),
@@ -544,12 +560,19 @@ export class ComputerUse {
           ...(avoid.has('scroll:down') ? {} : { scroll_down: 'Scroll down to see more of this page or list.' }),
           ...(avoid.has('scroll:up') ? {} : { scroll_up: 'Scroll up to see earlier content.' }),
           ...(canType ? { type_text: 'Type the prepared text (`textToType`) into a text box.' } : {}),
+          ...(draggable.length ? { drag: 'Drag with the mouse: draw a line on a canvas, or drag one thing onto another.' } : {}),
           ...(typed && !avoid.has('press:enter') ? { press_enter: 'Press Enter, for example to send what was just typed or to run a search.' } : {}),
           ...(avoid.has('press:space') ? {} : { press_space: 'Press Space, which plays or pauses the video or audio on this page.' }),
           ...(navigationUnmet(task.goal, screen) ? {} : { done: 'The goal is already done on this screen.' }),
           stuck: 'None of these moves toward the goal.',
         },
       },
+      ...(draggable.length
+        ? {
+            drag_from: { type: 'choice', instructions: `If dragging now, where does the drag start (the canvas to draw on, or the thing to move)? ${STATE_NOTE}`, criteria: { ...Object.fromEntries(draggable.map(({ control, index }) => [`c${index}`, describeControl(control)])), none: 'None of these.' } },
+            drag_to: { type: 'choice', instructions: `If dragging now, where does it go: a stroke inside where it starts, or onto another control? ${STATE_NOTE}`, criteria: { ...Object.fromEntries(Object.entries(STROKES).map(([key, s]) => [key, `Draw ${s.says}`])), ...Object.fromEntries(draggable.map(({ control, index }) => [`c${index}`, `Onto the ${describeControl(control)}`])), none: 'None of these.' } },
+          }
+        : {}),
       ...(canType ? { type_into: { type: 'choice', instructions: `If typing now, which text box should the prepared text go into? ${STATE_NOTE}`, criteria: { ...Object.fromEntries(textboxes.map(({ control, index }) => [`c${index}`, describeControl(control)])), none: 'None of these.' } } } : {}),
     }
     const answers = await this.ask(state, questions)
@@ -557,6 +580,16 @@ export class ComputerUse {
     if (!next || next === 'stuck') return { stop: 'stuck', reason: `It could not tell what to do next on ${screen.app}.` }
     if (next === 'done' && !navigationUnmet(task.goal, screen)) return { stop: 'done', reason: '' }
     if (next === 'scroll_down' || next === 'scroll_up') return { action: { kind: 'scroll', direction: next === 'scroll_down' ? 'down' : 'up' }, step: `scrolled ${next === 'scroll_down' ? 'down' : 'up'}` }
+    if (next === 'drag') {
+      const from = this.confident(answers, 'drag_from')
+      const to = this.confident(answers, 'drag_to')
+      const start = from && /^c\d+$/.test(from) ? controls[Number(from.slice(1))] : undefined
+      const end = to && to in STROKES ? (to as keyof typeof STROKES) : to && /^c\d+$/.test(to) ? controls[Number(to.slice(1))] : undefined
+      const path = start && end ? dragPath(start, end) : null
+      if (!start || !end || !path) return { stop: 'stuck', reason: 'It could not tell where to drag.' }
+      const what = typeof end === 'string' ? `drew ${STROKES[end].says} on the ${describeControl(start)}` : `dragged the ${describeControl(start)} onto the ${describeControl(end)}`
+      return { action: { kind: 'drag', ref: start.ref, path }, step: what }
+    }
     if (next === 'press_space') return { action: { kind: 'press', key: 'space' }, step: 'pressed Space' }
     if (next === 'press_enter') return { action: { kind: 'press', key: 'enter' }, step: 'pressed Enter' }
     if (next === 'type_text' && task.text) {
@@ -645,7 +678,31 @@ function actionKey(action: ScreenAction): string {
       return `press:${action.key}`
     case 'scroll':
       return `scroll:${action.direction}`
+    case 'drag':
+      return `drag:${action.ref}:${action.path.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(';')}`
   }
+}
+
+const inside = (r: { x: number; y: number; w: number; h: number }, p: { x: number; y: number }) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h
+
+/** Strokes drawn inside one control (a canvas), as fractions of its box: start, middle, end. */
+export const STROKES = {
+  stroke_across: { says: 'a straight line across its middle, left to right', points: [[0.25, 0.5], [0.5, 0.5], [0.75, 0.5]] },
+  stroke_down: { says: 'a straight line down its middle, top to bottom', points: [[0.5, 0.25], [0.5, 0.5], [0.5, 0.75]] },
+  stroke_diagonal: { says: 'a diagonal line, top left to bottom right', points: [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]] },
+} as const
+
+/**
+ * The drag the decider chose, in screen coordinates: a stroke inside `from`, or from its middle to `onto`'s middle.
+ * Null when a box needed is unknown (a control read without bounds).
+ */
+export function dragPath(from: ScreenControl, to: ScreenControl | keyof typeof STROKES): Point[] | null {
+  const b = from.bounds
+  if (!b) return null
+  if (typeof to === 'string') return STROKES[to].points.map(([fx, fy]) => ({ x: Math.round(b.x + b.w * fx), y: Math.round(b.y + b.h * fy) }))
+  if (!to.bounds) return null
+  const mid = (r: { x: number; y: number; w: number; h: number }) => ({ x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2) })
+  return [mid(b), mid(to.bounds)]
 }
 
 /** A host as people write it and browsers show it: no scheme, no "www.", no path, lower case. */

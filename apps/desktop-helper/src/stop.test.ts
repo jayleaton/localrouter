@@ -106,6 +106,25 @@ describe('LocalStop', () => {
     expect(aborted).toEqual([STOPPED_IN_CORNER])
   })
 
+  it('Windows run 2026-10-27: after a background step (or the wait for the box) the person’s mouse is theirs; only the corner stops it', async () => {
+    const { watch, aborted, move } = watched()
+    // The box answers (moving … released), then the background click (moving … released): no pointer was used.
+    watch.moving()
+    watch.released?.()
+    watch.moving()
+    watch.released?.()
+    move({ x: 100, y: 100 })
+    await watch.check()
+    move({ x: 900, y: 700 })
+    await watch.check()
+    move({ x: 300, y: 500 })
+    await watch.check()
+    expect(aborted).toEqual([])
+    move({ x: 0, y: 0 })
+    await watch.check()
+    expect(aborted).toEqual([STOPPED_IN_CORNER])
+  })
+
   it('takes the next reading as the expected place after a movement to somewhere unknown', async () => {
     const { watch, aborted, move } = watched()
     watch.left(null)

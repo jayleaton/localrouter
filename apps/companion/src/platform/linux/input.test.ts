@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK, MULTILINE, chooseInjector, chunks, keysym } from './input.ts'
+import { CHUNK, MULTILINE, chooseInjector, chunks, dragSteps, keysym } from './input.ts'
 import type { TokenStore } from './input.ts'
 import { fakeRunner, fakeSession, tool } from './testing.ts'
 
@@ -27,6 +27,18 @@ describe('injector choice', () => {
       'xdotool type --clearmodifiers --delay 12 -- -rf hello',
       'xdotool mousemove --sync 5 6 click --repeat 5 --delay 20 4',
     ])
+  })
+
+  it('drags with xdotool: press, small moves, release; a driver without drag says so (Windows run, 2026-10-27: Paint)', async () => {
+    const { runner, lines } = fakeRunner()
+    const input = chooseInjector(fakeSession({ server: 'x11', tools: ['xdotool'] }), runner)
+    await input.drag([{ x: 100, y: 200 }, { x: 180, y: 200 }])
+    const line = lines()[0]
+    expect(line.startsWith('xdotool mousemove --sync 100 200 mousedown 1 mousemove --sync 110 200 sleep 0.015')).toBe(true)
+    expect(line.endsWith('mousemove --sync 180 200 sleep 0.015 mouseup 1')).toBe(true)
+    expect(dragSteps([{ x: 0, y: 0 }, { x: 8, y: 16 }])).toHaveLength(9)
+    const hypr = chooseInjector(fakeSession({ server: 'wayland', compositor: 'hyprland', ydotoold: true, tools: ['hyprctl', 'ydotool', 'wtype'] }), fakeRunner().runner)
+    await expect(hypr.drag([{ x: 1, y: 1 }, { x: 2, y: 2 }])).rejects.toThrow(/Dragging is not supported with hyprctl/)
   })
 
   it('on Hyprland places the pointer with hyprctl and clicks with ydotool, and types with wtype', async () => {

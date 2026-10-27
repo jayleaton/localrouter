@@ -451,6 +451,25 @@ function run(argv) {
     if ($.AXUIElementSetAttributeValue(box, $('AXValue'), $(payload.text)) !== 0) throw new Error('LOCALROUTER_NEEDS_POINTER:this field does not accept text without the keyboard:');
     return JSON.stringify({ mode: 'background' });
   }
+  if (op === 'drag') {
+    // The real pointer (allowed for this step): press at the first point, move through the rest in small steps (apps
+    // draw from the dragged events between), release at the last.
+    var path = (payload.path || []).map(function (p) { return [Number(p.x), Number(p.y)]; });
+    if (path.length < 2 || !path.every(onScreen)) throw new Error('LOCALROUTER_OFFSCREEN');
+    mouse($.kCGEventMouseMoved, path[0], dryrun);
+    if (!dryrun) delay(0.06);
+    mouse($.kCGEventLeftMouseDown, path[0], dryrun);
+    for (var s = 1; s < path.length; s++) {
+      for (var t = 1; t <= 8; t++) {
+        var a = path[s - 1], b = path[s];
+        mouse($.kCGEventLeftMouseDragged, [a[0] + (b[0] - a[0]) * t / 8, a[1] + (b[1] - a[1]) * t / 8], dryrun);
+        if (!dryrun) delay(0.015);
+      }
+    }
+    var last = path[path.length - 1];
+    mouse($.kCGEventLeftMouseUp, last, dryrun);
+    return JSON.stringify({ mode: 'pointer', pointer: { x: last[0], y: last[1] }, at: { x: path[0][0], y: path[0][1] } });
+  }
   if (op === 'keys') {
     if (/[\\r\\n]/.test(payload.text)) throw new Error('LOCALROUTER_NEWLINE');
     // System Events' keystroke only where macOS already allows it (checked without asking, payload.events); else to the
@@ -778,6 +797,10 @@ export class DesktopBackend implements ScreenBackend {
     const signal = options.signal
     if (signal?.aborted) throw stopped(signal)
     if (action.kind === 'type') return this.type(action.ref, action.text, options)
+    if (action.kind === 'drag') {
+      if (!options.allowPointer) throw new NeedsPointer('dragging needs the real mouse: nothing drags through accessibility')
+      return resultOf(await this.call(ACT_SCRIPT, ['drag', JSON.stringify({ path: action.path })], signal))
+    }
     const payload = { ...actionPayload(action), ...(options.allowPointer ? { allow: true } : {}) }
     return resultOf(await this.call(ACT_SCRIPT, [action.kind, JSON.stringify(payload)], signal))
   }

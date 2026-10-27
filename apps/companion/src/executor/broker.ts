@@ -881,6 +881,8 @@ export function flatten(a: AuthorizeAction): policy.Action {
       return { kind: 'press', key: a.key, ...(a.field ? { field_role: a.field.role, field_label: a.field.label } : {}) }
     case 'scroll':
       return { kind: 'scroll', direction: a.direction }
+    case 'drag':
+      return { kind: 'drag', ref: a.ref, role: a.role, label: a.label, why: `to ${a.to}` }
     case 'surface':
       return { kind: 'surface', what: a.what, name: a.name }
     case 'pointer':

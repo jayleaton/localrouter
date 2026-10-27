@@ -158,6 +158,14 @@ class PointerTaskWatch implements TaskWatch {
     else if (point) this.expected = this.last = { x: point.x, y: point.y }
   }
 
+  released(): void {
+    this.holding = false
+    this.helperMoving = false
+    this.generation += 1
+    this.beyond = 0
+    this.expected = this.last = null
+  }
+
   end(): void {
     if (this.ended) return
     this.ended = true

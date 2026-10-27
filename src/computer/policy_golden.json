@@ -61,7 +61,7 @@
     { "action": { "kind": "surface", "what": "tab", "name": "Inbox" }, "verdict": "auto" },
     { "action": { "kind": "surface", "what": "app", "name": "" }, "verdict": "refused" },
     { "action": { "kind": "surface", "what": "window", "name": "Safari" }, "verdict": "refused" },
-    { "action": { "kind": "drag" }, "verdict": "refused" },
+    { "action": { "kind": "drag" }, "verdict": "tap" },
     { "action": { "kind": "shell", "text": "rm -rf ~" }, "verdict": "refused" }
   ],
   "after_judge": [
