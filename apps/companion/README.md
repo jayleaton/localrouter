@@ -42,7 +42,8 @@ LOCALROUTER_TOKEN=… node src/harness/cli.ts turns --url https://<box>:10443 --
    `xattr -dr com.apple.quarantine /Applications/LocalRouter.app`. If macOS still says it is damaged, System Settings
    › Privacy & Security › **Open Anyway**.
 3. On the Spark, make a pairing code (ten minutes, single use):
-   `deploy/jarvis/pair.sh add "JJ's MacBook" --scopes inference,media,read`
+   `deploy/jarvis/pair.sh add "JJ's MacBook"` (no `--scopes`: every feature, voice cloning and computer control
+   included; add `--scopes LIST` to narrow it)
 4. LocalRouter's first window, **Connect**, walks four steps:
    1. **Spark address**: the `https://<spark>.<tailnet>.ts.net:10443` one `tailscale serve` gives the box (the Mac must
       be on the tailnet). If Tailscale runs on the Mac, the app asks each online peer's MagicDNS name for

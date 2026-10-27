@@ -99,6 +99,10 @@ describe('the connection step', () => {
   it('names the missing scope when the box offers a feature this token may not use', () => {
     const rows = capabilitiesOf(caps, ['inference'])
     expect(rows.find((r) => r.id === 'images')).toMatchObject({ ok: false, detail: 'needs the media scope' })
+    // A device paired without --scopes (all, the default) may use every service, whatever the box lists beside it.
+    for (const scopes of [['all'], ['all', 'inference', 'media']]) {
+      expect(capabilitiesOf(caps, scopes).filter((r) => r.detail.startsWith('needs the'))).toEqual([])
+    }
     // A device paired before scopes (voice, mcp) may use every service.
     expect(capabilitiesOf(caps, ['voice', 'mcp']).find((r) => r.id === 'images')?.ok).toBe(true)
     // With pairing off on the box, scopes do not limit anything.

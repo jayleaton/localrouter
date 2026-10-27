@@ -118,7 +118,8 @@ test "pairing required: /mcp and /v1/realtime need a paired token; codes trade o
     try testing.expect(p.required);
     try testing.expectEqual(std.http.Status.ok, (try callBearer(&d, a, .POST, "/mcp", list_tools, p.token)).status);
     const me = try callBearer(&d, a, .GET, "/v1/pair", null, p.token);
-    try testing.expect(has(me.body, try std.fmt.allocPrint(a, "\"paired\":true,\"device\":{{\"id\":\"{s}\",\"name\":\"kitchen tablet\",\"scopes\":[\"voice\",\"mcp\"]}}", .{p.device.id})));
+    // `pair add` with no --scopes: all, listed with every scope it holds today
+    try testing.expect(has(me.body, try std.fmt.allocPrint(a, "\"paired\":true,\"device\":{{\"id\":\"{s}\",\"name\":\"kitchen tablet\",\"scopes\":[\"all\",\"inference\",\"media\",\"decisions\",\"read\",\"manage\",\"desktop_helper\",\"computer\",\"approve\"]}}", .{p.device.id})));
     const again = try redeem(&d, a, code, "");
     try testing.expectEqual(std.http.Status.unauthorized, again.status);
     try testing.expect(has(again.body, "wrong, expired"));
@@ -193,7 +194,8 @@ test "computer control needs paired devices even with pairing off: scopes gate e
     defer d.stop();
     const helper = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "mac", "--scopes", "desktop_helper" }), "\n");
     const phone = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone", "--scopes", "voice,mcp,computer,approve" }), "\n");
-    const agent = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "agent" }), "\n"); // voice and mcp only
+    const agent = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "agent", "--scopes", "voice,mcp" }), "\n"); // no computer scope
+    const companion = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "companion" }), "\n"); // no --scopes: all
     const listed = try pairCli(&d, a, &.{"list"});
     try testing.expect(has(listed, "desktop_helper") and has(listed, "voice,mcp,computer,approve"));
 
@@ -207,6 +209,8 @@ test "computer control needs paired devices even with pairing off: scopes gate e
     // No helper yet: the tool says so.
     const none = try mcpAs(&d, a, phone, "computer_control", "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}");
     try testing.expect(none.is_error and has(none.text, "no computer is connected"));
+    const all_none = try mcpAs(&d, a, companion, "computer_control", "{\"control\":{\"kind\":\"open_app\",\"app\":\"Safari\"}}");
+    try testing.expect(all_none.is_error and has(all_none.text, "no computer is connected"));
 
     // The phone's token cannot open the helper's socket; the helper's can.
     var bad: voice.Ws = undefined;
@@ -258,7 +262,7 @@ test "computer control needs paired devices even with pairing off: scopes gate e
     try testing.expect(has(log.body, "\"event\":\"helper.connected\"") and has(log.body, "\"event\":\"approval.answer\"") and has(log.body, "\"status\":\"blocked\""));
 }
 
-test "pairing required and scopes: a desktop helper's token reaches neither /mcp nor /v1/realtime; an unscoped device keeps both" {
+test "pairing required and scopes: a desktop helper's token reaches neither /mcp nor /v1/realtime; a legacy device keeps both" {
     const io = testing.io;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -266,7 +270,7 @@ test "pairing required and scopes: a desktop helper's token reaches neither /mcp
     var d = try Daemon.start(testing.allocator, io, "scopes", "{" ++ harness.reserve ++ ", \"pairing\": {\"required\": true}, " ++ quiet_voice ++ "}");
     defer d.stop();
     const helper = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "mac", "--scopes", "desktop_helper" }), "\n");
-    const old = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone" }), "\n");
+    const old = std.mem.trim(u8, try pairCli(&d, a, &.{ "token", "phone", "--scopes", "voice,mcp" }), "\n");
     const no_mcp = try callBearer(&d, a, .POST, "/mcp", list_tools, helper);
     try testing.expectEqual(std.http.Status.forbidden, no_mcp.status);
     try testing.expect(has(no_mcp.body, "does not have the inference, media, decisions, read or manage scope"));
@@ -307,14 +311,20 @@ test "service scopes: a wrong or missing scope is refused on every route class; 
             return std.mem.trim(u8, out, " \r\n");
         }
     }.of;
-    const legacy = try tok(&d, a, "phone", null); // paired before scopes: voice and mcp
+    const legacy = try tok(&d, a, "phone", "voice,mcp"); // the legacy profile: every service scope
+    const everything = try tok(&d, a, "companion", null); // no --scopes: all
     const coder = try tok(&d, a, "opencode", "inference,media,read");
     const other = try tok(&d, a, "deepseek", "media");
     const reader = try tok(&d, a, "dashboard", "read");
     const judge = try tok(&d, a, "router", "decisions");
     const helper = try tok(&d, a, "mac", "desktop_helper");
     const operator = try tok(&d, a, "ops", "read,manage");
-    try testing.expect(has(try pairCli(&d, a, &.{"list"}), "voice,mcp (legacy)"));
+    const list = try pairCli(&d, a, &.{"list"});
+    try testing.expect(has(list, "voice,mcp") and has(list, "companion") and has(list, "  all\n"));
+    // A device paired without --scopes reaches every route class, manage and computer control's included.
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/models", null, everything));
+    try testing.expectEqual(std.http.Status.ok, try statusAs(&d, a, .GET, "/v1/computer/status", null, everything));
+    try testing.expect(std.mem.indexOf(u8, try toolNames(&d, a, everything), "load_model") != null);
 
     // Every route class: no token is 401, a token without the scope 403, the scope (or the legacy profile) gets through.
     const image = "{\"model\":\"tp\",\"prompt\":\"bars\",\"size\":\"256x256\",\"response_format\":\"url\"}";

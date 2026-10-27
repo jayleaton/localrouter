@@ -168,6 +168,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .pair = "/v1/pair",
             .scopes = pair.scope_names,
             .service_scopes = pair.service_scopes,
+            .default_scopes = pair.default_scopes, // a device paired without a list: `all`, every scope now and later
             .legacy_scopes = [_][]const u8{ "voice", "mcp" }, // either (or none listed) grants every service scope
             .harness_scopes = [_][]const u8{ "inference", "media", "read" }, // what a harness is usually issued
             .guarded = try guards(a),

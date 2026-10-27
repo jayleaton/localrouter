@@ -109,17 +109,27 @@ pub fn callerOf(app: *App, a: std.mem.Allocator, t: []const u8) ?Caller {
 }
 
 /// GET /v1/pair: {"required", "paired", "device": {"id", "name", "scopes"} or null}, for whatever token is presented
-/// (`scopes` as the device holds them; a device paired before scopes holds `voice` and `mcp`).
+/// (`scopes` as the device holds them, `all` spelled out as `all` and every scope it holds today, so a client that checks
+/// for a scope by name finds it; a device paired before scopes holds `voice` and `mcp`).
 pub fn status(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
     const Dev = struct { id: []const u8, name: []const u8, scopes: []const []const u8 };
     const d = device(app, req, a);
-    const legacy = [_][]const u8{ "voice", "mcp" };
     const text = try std.json.Stringify.valueAlloc(a, .{
         .required = app.cfg.pairing.required,
         .paired = d != null,
-        .device = if (d) |x| @as(?Dev, .{ .id = x.id, .name = x.name, .scopes = if (x.scopes.len > 0) x.scopes else &legacy }) else null,
+        .device = if (d) |x| @as(?Dev, .{ .id = x.id, .name = x.name, .scopes = listed(x) }) else null,
     }, .{});
     try h.json(req, .ok, text);
+}
+
+const legacy_listed = [_][]const u8{ "voice", "mcp" };
+const all_listed = [_][]const u8{store.all} ++ store.all_scopes;
+
+/// A device's scopes as `GET /v1/pair` lists them.
+pub fn listed(d: store.Device) []const []const u8 {
+    if (d.scopes.len == 0) return &legacy_listed;
+    for (d.scopes) |s| if (std.mem.eql(u8, s, store.all)) return &all_listed;
+    return d.scopes;
 }
 
 /// POST /v1/pair {"code": "XXXX-XXXX", "name": "optional"}: a new device and its token. A wrong code counts toward

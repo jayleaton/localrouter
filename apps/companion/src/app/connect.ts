@@ -119,6 +119,7 @@ export function connectView(i: ConnectInput): ConnectView {
 // ------------------------------------------------------------------ what the connection offers
 
 const SCOPES: Record<string, string> = {
+  all: 'everything, including features added later',
   inference: 'chat and voice calls',
   media: 'pictures, video, speech and transcription',
   decisions: 'typed decisions',
@@ -135,9 +136,9 @@ export function scopeLabel(scope: string): string {
   return SCOPES[scope] ?? scope
 }
 
-/** Whether a token with `scopes` may use a service scope: `voice` or `mcp` (or none listed) grants every one. */
+/** Whether a token with `scopes` may use a service scope: `all` (the default), `voice` or `mcp` (or none listed) grants every one. */
 function allows(scopes: string[], scope: string): boolean {
-  return scopes.length === 0 || scopes.includes('voice') || scopes.includes('mcp') || scopes.includes(scope)
+  return scopes.length === 0 || scopes.includes('all') || scopes.includes('voice') || scopes.includes('mcp') || scopes.includes(scope)
 }
 
 /**

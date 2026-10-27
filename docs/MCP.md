@@ -32,7 +32,8 @@ localrouter pair revoke ID|NAME --config FILE      # refused from the next reque
 
 ### Scopes
 
-Issue a harness the least it needs (`--scopes LIST` on `token` or `add`; `GET /v1/pair` shows a token's own):
+A device paired without `--scopes` gets `all`: every scope below, and any added later. Issue a harness the least it
+needs instead (`--scopes LIST` on `token` or `add`; `pair scopes` changes it later; `GET /v1/pair` shows a token's own):
 
 | Scope | HTTP | MCP tools | Voice session (`/v1/realtime`) |
 | --- | --- | --- | --- |

@@ -5,6 +5,7 @@
 //!                                                     minutes, once); with --url (the address the phone reaches) its link
 //!   localrouter pair token NAME [--scopes LIST] [--config FILE] [--data DIR]    a device made at once: its token, printed
 //!                                                     once (a harness: --scopes inference,media,read)
+//! With no --scopes a device gets `all`: every scope, including later ones.
 //!   localrouter pair scopes ID|NAME LIST [--config FILE] [--data DIR]           replaces what a device may do
 //!   localrouter pair list [--config FILE] [--data DIR]                          the devices (never their tokens)
 //!   localrouter pair revoke ID|NAME [--config FILE] [--data DIR]                removes them; the next request is refused
@@ -46,7 +47,7 @@ pub fn run(io: Io, a: std.mem.Allocator, args: []const []const u8) !u8 {
         if (o.arg2 != null) return usageError();
         const name = std.mem.trim(u8, o.arg orelse return usageError(), " \t");
         if (name.len == 0 or name.len > store.max_name_len) return fail("NAME must be 1 to {d} bytes", .{store.max_name_len});
-        const scopes: []const []const u8 = if (o.scopes) |text| (try store.parseScopes(a, text)) orelse return fail(scopes_help, .{}) else &.{};
+        const scopes: []const []const u8 = if (o.scopes) |text| (try store.parseScopes(a, text)) orelse return fail(scopes_help, .{}) else &store.default_scopes;
         if (eql(verb, "token")) {
             if (o.url != null) return usageError();
             const m = s.mintScoped(io, a, name, scopes, at) catch |err| return fail("{s}/devices.json: {s}", .{ s.dir, @errorName(err) });
@@ -124,18 +125,19 @@ pub const usage_text =
     \\       localrouter pair scopes ID|NAME LIST [--config FILE] [--data DIR]                    what a paired device may do
     \\       localrouter pair list [--config FILE] [--data DIR]
     \\       localrouter pair revoke ID|NAME [--config FILE] [--data DIR]
-    \\LIST: comma-separated. Service scopes, least privilege for a harness:
+    \\LIST: comma-separated. None given is all: every scope, including any added later (narrow it here or with `scopes`).
+    \\Service scopes, least privilege for a harness:
     \\  inference   chat completions and /v1/realtime        media    image, video, speech and transcription
     \\  decisions   typed decisions (/v1/systemone)          read     models, voices and residency
     \\  manage      load, unload, reserve and release models
     \\Computer control: desktop_helper, computer, approve. Legacy: voice (/v1/realtime) and mcp (/mcp), each with every
-    \\service scope; none given is voice,mcp, as every device paired before scopes. A device sees only its own jobs.
+    \\service scope (a device paired before scopes holds these two). A device sees only its own jobs.
     \\  A coding harness: --scopes inference,media,read. A desktop helper: --scopes desktop_helper.
     \\  A phone that talks, drives and approves computer tasks: voice,mcp,computer,approve.
     \\
 ;
 
-const scopes_help = "scopes are a comma-separated list of inference, media, decisions, read, manage, desktop_helper, computer, approve (or the legacy voice, mcp)";
+const scopes_help = "scopes are a comma-separated list of all, inference, media, decisions, read, manage, desktop_helper, computer, approve (or the legacy voice, mcp)";
 
 fn usageError() u8 {
     std.debug.print(usage_text, .{});
