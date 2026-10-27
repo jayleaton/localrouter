@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Voice: speech first. While a reply is written, the daemon pauses its own chat model's server (SIGSTOP, lossless:
+  its decode resumes where it stopped) whenever the reply's speech is under 2 s ahead of real time and a written
+  sentence waits, until it is 3.5 s ahead (`voice.speech_first`, on by default; a lease each piece of speech renews, so
+  a stalled speaker never leaves it paused). Beside a decoding chat model Drama 3 came at 0.55x real time on DGX-02,
+  alone at 1.4x. A long reply still starts at about 2 s, while it is written, and its pauses fell from 13 to 26 a reply
+  (1.9 to 3.6 s in all) to 0 to 7 (at most 1 s). The session announces it (`localrouter.response.speech_first`), and the
+  `/voice` page, the companion and the mobile app then start a reply still being written once the audio in hand
+  covers the text written so far at the measured rate.
+
 - Voice: a reply speaks while it is written again. `voice.speak_written` is off by default (each sentence is spoken as
   soon as it is complete), and the `/voice` page, the companion and the mobile app hold a reply whose text is still
   being written at most 1 s, not until its text is complete. Held for its whole text, a long reply's voice began after

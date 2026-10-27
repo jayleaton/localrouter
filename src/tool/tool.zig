@@ -82,6 +82,8 @@ pub const Tool = struct {
         // Whether it runs on this machine now (its memory and the host's GPU lock are this scheduler's); null: always.
         // A remote tool (`node.zig`) runs on another node, which admits it there.
         local: ?*const fn (ptr: *anyopaque) bool = null,
+        // The pid of the model's own server process while it is loaded (`openai_server`), for sched/yielder.zig; 0: none.
+        server_pid: ?*const fn (ptr: *anyopaque) std.posix.pid_t = null,
     };
 
     /// The tool's configuration (id, kind, timeouts).
@@ -119,6 +121,11 @@ pub const Tool = struct {
     }
     pub fn failure(t: Tool) Failure {
         return t.vtable.failure(t.ptr);
+    }
+    /// The model's own server process while loaded (a proxied chat server), which may be paused; 0: none.
+    pub fn serverPid(t: Tool) std.posix.pid_t {
+        const f = t.vtable.server_pid orelse return 0;
+        return f(t.ptr);
     }
     /// Whether it runs here now, on this machine's memory and GPU (false: another node runs it).
     pub fn local(t: Tool) bool {

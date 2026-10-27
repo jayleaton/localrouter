@@ -80,7 +80,18 @@ pub const Backend = struct {
         computer: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, name: []const u8, arguments: []const u8, utterance: []const u8, speaker: Speaker, stop: *Stop) Managed = null,
         shadow: ?*const fn (ptr: *anyopaque, turn: Shadow) void = null, // must not block: called under the session's lock
         client_tools: ?*const fn (ptr: *anyopaque, why: *Why) bool = null, // may the session own its tools (null: yes)
+        yield_chat: ?*const fn (ptr: *anyopaque, model: []const u8, op: Yield, holder: usize) bool = null, // speech first
     };
+
+    /// Speech first (sched/yielder.zig): `check` whether chat model `model` ("": the default) can be paused for speech,
+    /// `hold` it paused for one more lease (`holder`: the response), `release` it.
+    pub const Yield = enum { check, hold, release };
+
+    /// False when the chat model cannot be paused (another server, another node, not loaded): speech shares the GPU.
+    pub fn yieldChat(b: Backend, model: []const u8, op: Yield, holder: usize) bool {
+        const f = b.vtable.yield_chat orelse return false;
+        return f(b.ptr, model, op, holder);
+    }
 
     /// Whether the session's caller may take client tool execution (the `inference` scope); false with `why` set.
     pub fn clientTools(b: Backend, why: *Why) bool {

@@ -90,9 +90,13 @@ pub const Voice = struct {
     // thread: the speech model's first job after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm)
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
     // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
+    speech_first: bool = true, // while a reply is written, this daemon's own chat model is paused (SIGSTOP, lossless) whenever
+    // its speech is under 2 s ahead of real time, until 3.5 s ahead (sched/yielder.zig): speech beside a decoding chat
+    // model came at 0.55x real time on DGX-02, alone at 1.4x, so a long reply streams from its first sentence
     speak_written: bool = false, // true: a reply's speech starts once its spoken text is complete, not sentence by
     // sentence while the chat model still writes (with the GPU to itself the chat writes it in half the time, then speech
-    // plays without a gap, but nothing is heard until the whole text is written: rejected as "not streaming at all")
+    // plays without a gap, but nothing is heard until the whole text is written: rejected as "not streaming at all");
+    // speech first takes precedence
     max_history_chars: u32 = 24000, // older turns are dropped past this
     tools: bool = true, // offer generate_image and generate_video to the chat model
     manage_models: bool = false, // offer list_models, reserve_for, unload_model and load_model to the chat model, with the

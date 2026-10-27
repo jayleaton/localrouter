@@ -6,6 +6,10 @@
  * - the text is complete (`localrouter.response.text_done`, with its length) and enough is in hand to play all of
  *   it at the rate it comes in (at least START_MS; GEN_START_MS while a picture or video is being made);
  * - or, while the text is still being written, speech keeps up anyway (KEEP_UP over RATE_MS), then START_MS;
+ * - or, while the text is still being written by a reply that puts its speech first
+ *   (`localrouter.response.speech_first`: the server pauses the chat model while speech is less than about 2 s ahead),
+ *   enough is in hand to play the text written so far at the rate it comes in: its audio not yet received, from
+ *   MS_PER_CHAR, x (1 - rate) x MARGIN;
  * - or all of the reply's speech is in (`localrouter.response.speech_done`);
  * - and never more than HOLD_CAP_MS after the first piece, or WRITING_CAP_MS while the text is still being written:
  *   a reply speaks while it is written, at the cost of a pause where speech falls behind.
@@ -30,6 +34,10 @@ export class ReplyHold<T> {
   private started = new Set<string>()
   private textDone = new Map<string, number>()
   private speechDone = new Set<string>()
+  /** Replies whose speech the server puts first (their start need not wait for the text to be complete). */
+  private speechFirsts = new Set<string>()
+  /** Characters of each reply's spoken text written so far. */
+  private writtenChars = new Map<string, number>()
   /** The server's measure of how fast speech comes with the GPU to itself (text_done's speech_rate). */
   private freeRate = new Map<string, number>()
   /** How fast the last fully received reply's speech came. */
@@ -45,6 +53,8 @@ export class ReplyHold<T> {
     this.started.clear()
     this.textDone.clear()
     this.speechDone.clear()
+    this.speechFirsts.clear()
+    this.writtenChars.clear()
     this.freeRate.clear()
     this.got.clear()
   }
@@ -65,6 +75,16 @@ export class ReplyHold<T> {
     held.haveMs += ms
     this.held.set(item, held)
     return this.check(item, now)
+  }
+
+  /** `localrouter.response.speech_first`, before the reply's first audio. */
+  speechFirst(item: string) {
+    this.speechFirsts.add(item)
+  }
+
+  /** `chars` more of the reply's spoken text were written (`response.audio_transcript.delta`); only raises the need. */
+  written(item: string, chars: number) {
+    this.writtenChars.set(item, (this.writtenChars.get(item) ?? 0) + chars)
   }
 
   text(item: string, chars: number, speechRate: number | null, toolCalls: boolean, now: number) {
@@ -99,7 +119,13 @@ export class ReplyHold<T> {
 
   private need(item: string, rate: number) {
     const chars = this.textDone.get(item)
-    if (chars === undefined) return rate >= KEEP_UP ? this.startMs() : Infinity
+    if (chars === undefined) {
+      if (rate >= KEEP_UP) return this.startMs()
+      if (!this.speechFirsts.has(item)) return Infinity
+      // The text written so far, less the audio of it already in (held or played).
+      const pending = Math.max(0, (this.writtenChars.get(item) ?? 0) * MS_PER_CHAR - (this.got.get(item)?.ms ?? 0))
+      return Math.max(this.startMs(), pending * (1 - Math.min(rate, 1)) * MARGIN)
+    }
     return Math.max(this.startMs(), chars * MS_PER_CHAR * (1 - Math.min(rate, 1)) * MARGIN)
   }
 

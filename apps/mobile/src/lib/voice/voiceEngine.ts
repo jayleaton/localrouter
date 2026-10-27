@@ -247,6 +247,12 @@ function onServerEvent(event: ServerEvent) {
       if (hold.holding) holdTick()
       break
     }
+    case 'localrouter.response.speech_first':
+      hold.speechFirst(event.item_id)
+      break
+    case 'response.audio_transcript.delta':
+      hold.written(event.item_id, event.delta.length)
+      break
     case 'localrouter.response.text_done':
       release(hold.text(event.item_id, event.chars, event.speech_rate, event.tool_calls, now))
       break

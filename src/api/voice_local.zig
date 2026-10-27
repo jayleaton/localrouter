@@ -101,7 +101,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat };
 
 /// Client tool execution makes the session a harness's inference service: its device needs the inference scope.
 fn clientTools(ptr: *anyopaque, why: *Why) bool {
@@ -149,6 +149,26 @@ fn waitVoice(app: *App, stop: *Stop) backend.Error!void {
         if (std.Io.Clock.awake.now(app.io).nanoseconds >= limit.nanoseconds) return;
         std.Io.sleep(app.io, .fromMilliseconds(250), .awake) catch return error.Cancelled;
     }
+}
+
+/// How long one hold keeps the chat server paused unless renewed (each piece of speech renews it): a speaker that stalls
+/// lets the chat model run again within this.
+const yield_lease_ns: i96 = 600 * std.time.ns_per_ms;
+
+/// Speech first: the session's chat model is paused only when it is this daemon's own server (chat_url unset).
+fn yieldChat(ptr: *anyopaque, model: []const u8, op: backend.Backend.Yield, holder: usize) bool {
+    const app = self(ptr).app;
+    const sched = app.scheduler;
+    if (op == .release) {
+        sched.chat_yield.release(app.io, holder);
+        return true;
+    }
+    if (app.cfg.voice.chat_url.len > 0) return false;
+    var ref: routes.Refusal = .{};
+    const i = routes.resolve(app, if (model.len > 0) model else null, .chat_completion, &ref) orelse return false;
+    const pid = sched.slots[i].tool.serverPid();
+    if (pid <= 0) return false;
+    return op == .check or sched.chat_yield.hold(app.io, pid, holder, yield_lease_ns);
 }
 
 fn paused(ptr: *anyopaque) bool {
