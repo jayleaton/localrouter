@@ -352,7 +352,7 @@ def turn(sess, name, samples, results, checks, timeout=120, need_audio=True):
 LONG_ASK = "Tell me a short story about a lighthouse keeper, in about six sentences."
 # The /voice page's start hold (src/voice/voice.html: holdNeed, rateOf), replayed on a reply's recorded events, as a
 # fresh page has it (no voice priors learned, no pause yet in the session).
-START_MS, HOLD_CAP_MS, MS_PER_CHAR, MARGIN_MS = 200, 30000, 65, 300
+START_MS, HOLD_CAP_MS, MS_PER_CHAR, MARGIN_MS, OBSERVE_MS = 200, 30000, 65, 300, 1600
 RATE_WINDOW_MS, EWMA_ALPHA, RATE_HEADROOM, PRIOR_RATE = 150, 0.7, 0.5, 1.0
 
 
@@ -383,6 +383,9 @@ def page_start(span, rid, step=0.025):
         if any(e["type"] == "localrouter.response.speech_done" for e in seen) or (t - t0) * 1000 >= HOLD_CAP_MS:
             return t
         done = next((e for e in seen if e["type"] == "localrouter.response.text_done"), None)
+        if done is None and (t - t0) * 1000 < OBSERVE_MS:  # still watching its rate
+            t += step
+            continue
         free = (done.get("speech_rate") or None) if done and not done.get("tool_calls") else None
         chars = (done.get("chars") or 0) if done else sum(len(e.get("delta", "")) for e in seen if e["type"] == "response.audio_transcript.delta")
         rest = max(0.0, chars * MS_PER_CHAR - have)
