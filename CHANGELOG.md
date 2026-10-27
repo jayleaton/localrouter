@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Voice: a long reply streams again. Its speech starts once its text is written (`voice.speak_written`, on by
+  default), not sentence by sentence beside the chat model: the two share the GPU, so on DGX-02 a six-sentence story
+  took 10 to 12 s to write beside speech at 0.55x real time, and the `/voice` page and the companion held its start
+  until then (or a player starting at once ran dry 4 s in). Written first, the chat has the GPU to itself (6 to 7 s)
+  and speech then comes at 1.4x, so the reply plays from its first audio to its end without a gap, 3 to 5 s sooner.
+  Short replies start as before. `voice_e2e.py` (and `--smoke`) checks a long reply streams (`--skip-long` to skip).
+
 - Speech to text runs in a set language by default: `stt.language` (`en`) when a caller names none, for voice calls,
   `/v1/audio/transcriptions` and MCP `transcribe_audio`; `auto` (from the caller or the config) detects it. A voice
   session no longer carries the language its last turn was detected in: Whisper's detection on a 1 to 2 s turn is

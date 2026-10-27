@@ -416,12 +416,30 @@ test "pauses under the wait never add up: one turn, nothing transcribed or asked
     try testing.expectEqual(heard_before + 1, rig.fake.hears); // the last pause's early transcript was the turn's: no second decode
 }
 
+test "a long reply is spoken once its text is complete (voice.speak_written); sentence by sentence while written without" {
+    for ([_]bool{ true, false }) |written| {
+        var rig: Rig = undefined;
+        try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0, .speak_written = written });
+        defer rig.stop();
+        rig.heard("tell me something slow"); // 20 sentences, written over about 1.2 s
+        try rig.audio(600, true);
+        try rig.audio(700, false);
+        _ = try rig.rec.wait("response.done", 0);
+        const text_done = try rig.rec.wait("localrouter.response.text_done", 0);
+        const first_audio = try rig.rec.wait("response.audio.delta", 0);
+        // Written first, the chat model has the GPU to itself, and so does speech after it: no audio while it writes.
+        try testing.expectEqual(written, first_audio > text_done);
+        try testing.expect(rig.fake.spoke.items.len >= 2); // still in sentences, the first on its own
+        try testing.expectEqualStrings("This is one more sentence.", rig.fake.spoke.items[0]);
+    }
+}
+
 test "barge-in: speech over the reply cancels the chat stream and the speech, and keeps only what was spoken" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var rig: Rig = undefined;
-    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0 });
+    try rig.start(.{ .prime_chat = false, .partial_interval_ms = 0, .speak_written = false }); // speech while it is written
     defer rig.stop();
     rig.heard("tell me something slow");
     try rig.audio(600, true);
