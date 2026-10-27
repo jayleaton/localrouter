@@ -6,6 +6,10 @@
   the GPU once instead of holding a host and a device copy: 53.4 GiB at the peak instead of over 65 GiB (it was stopped
   at 5 GiB free beside the warm Jarvis set on DGX-02), and the pack is byte-identical to the pins
   (`tools/twin/packs/built/minimax-h3.json`, 6/6 files).
+- `tools/twin/packs/built/qwen-image-2.1-turbo.json` pins the image packs as `prepare.sh` builds them since the edit pack
+  (#78): `edit.json` and the te/ and vae/ packs with the vision tower and VAE encoder. The 2026-10-21 pins predate it,
+  so the profile's `image/packs` check failed on every fresh build (4 of 10 files). The new pins come from DGX-02
+  (2026-10-27), whose te/ and vae/ rebuilt without the edit step match the old pins byte for byte.
 - The GPU Docker preflight (`tools/spark/install.sh`, `tools/package/install.sh`, the `jarvis-gb10` profile's `docker`
   prerequisite) also accepts Docker reaching the GPU through CDI (an `nvidia.com/gpu=all` spec from `nvidia-ctk`, no
   `nvidia` runtime registered), as on DGX-02: `--gpus all` works there, and the check refused it.
