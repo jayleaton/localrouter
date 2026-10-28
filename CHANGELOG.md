@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- A model of an existing kind is a drop-in: config only, no model names outside its adapter
+  ([MODEL-DROPIN.md](docs/dev/MODEL-DROPIN.md)). `voice.speech_models` defaults to empty, so the `text_to_speech`
+  default speaks calls (it was Drama 3 then Kitten, named in code; Jarvis lists its chain). Voice cloning takes the
+  model's `clone_codebooks` and `clone_rate` (they were Fish Audio's 10 rows at 44.1 kHz; Jarvis sets 10). The model
+  management prompt names this box's models and what each needs, from the config, instead of a fixed roster. A
+  transcription model may declare `languages`: listed, a language outside them refused, and `/voice` offers only
+  those. The MCP `synthesize_speech` `instructions` description no longer names Drama 3; `tools/list` and
+  `/v1/models` are otherwise unchanged. `tests/dropin.zig` swaps a second model in for every kind. The companion's
+  language picker offers the box's transcription languages (Whisper's list offline). MCP `decide` with no `model` no
+  longer fails with "state is required" after the decision ran (a put on a shallow copy of the request).
+
 - The image edit pack's `te/manifest.json` (and `edit.json`, which hashes it) is the same on every box: its vision config
   is the checkpoint's architecture fields only, not transformers' `to_dict()`, which carried the installed version
   (5.20.2 on the reporter's Spark, 5.21.0 on DGX-02: the only difference, with byte-identical weights), so a fresh

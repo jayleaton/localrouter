@@ -4,7 +4,11 @@
  * was chosen and never breaks on what was not.
  */
 
-/** Whisper large-v3's languages, code to name: the same list as the `/voice` page's `LANGUAGES` (src/voice/voice.html). */
+/**
+ * Language names, code to name: the same list as the `/voice` page's `LANGUAGES` (src/voice/voice.html). The choices
+ * are the box's transcription model's own `languages` (`heardLanguages`) when it lists them; these (Whisper large-v3's)
+ * otherwise, and while the box has not been read.
+ */
 export const LANGUAGES: Readonly<Record<string, string>> = {
   af: 'Afrikaans', sq: 'Albanian', am: 'Amharic', ar: 'Arabic', hy: 'Armenian', as: 'Assamese', az: 'Azerbaijani',
   ba: 'Bashkir', eu: 'Basque', be: 'Belarusian', bn: 'Bengali', bs: 'Bosnian', br: 'Breton', bg: 'Bulgarian',
@@ -25,15 +29,33 @@ export const LANGUAGES: Readonly<Record<string, string>> = {
 
 export const DEFAULT_LANGUAGE = 'en'
 
-/** A Whisper code or "auto" (detect it on each turn); anything else is English. */
-export function sttLanguage(v: unknown): string {
-  return v === 'auto' || (typeof v === 'string' && Object.hasOwn(LANGUAGES, v)) ? v : DEFAULT_LANGUAGE
+/** The languages the box hears: null for none listed (any of `LANGUAGES`). */
+export type Heard = readonly string[] | null
+
+/**
+ * The transcription model's declared `languages` from `/v1/models`' `data` (the one whose default_for lists
+ * speech_to_text, else the first transcription model), or null when it lists none.
+ */
+export function heardLanguages(models: unknown): Heard {
+  if (!Array.isArray(models)) return null
+  const stt = models.filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && (m as { kind?: unknown }).kind === 'transcription')
+  const m = stt.find((x) => Array.isArray(x.default_for) && x.default_for.includes('speech_to_text')) ?? stt[0]
+  const list = m?.languages
+  return Array.isArray(list) ? list.filter((c): c is string => typeof c === 'string' && c.length > 0) : null
 }
 
-/** The picker's choices: English, Auto-detect, then the others by name. */
-export function languageChoices(): Array<{ code: string; name: string }> {
-  const rest = Object.entries(LANGUAGES).filter(([c]) => c !== 'en').sort((a, b) => a[1].localeCompare(b[1], 'en'))
-  return [{ code: 'en', name: 'English' }, { code: 'auto', name: 'Auto-detect' }, ...rest.map(([code, name]) => ({ code, name }))]
+/** A code the box hears, or "auto" (detect it on each turn); anything else is English, or "auto" if it hears none. */
+export function sttLanguage(v: unknown, heard: Heard = null): string {
+  if (v === 'auto' || (typeof v === 'string' && (heard ? heard.includes(v) : Object.hasOwn(LANGUAGES, v)))) return v as string
+  return !heard || heard.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : 'auto'
+}
+
+/** The picker's choices: English (when heard), Auto-detect, then the others by name. */
+export function languageChoices(heard: Heard = null): Array<{ code: string; name: string }> {
+  const all = heard ? heard.map((c): [string, string] => [c, LANGUAGES[c] ?? c]) : Object.entries(LANGUAGES)
+  const rest = all.filter(([c]) => c !== 'en').sort((a, b) => a[1].localeCompare(b[1], 'en'))
+  const en = !heard || heard.includes('en') ? [{ code: 'en', name: 'English' }] : []
+  return [...en, { code: 'auto', name: 'Auto-detect' }, ...rest.map(([code, name]) => ({ code, name }))]
 }
 
 /** settings.json's text (null: no file yet) over the defaults. */

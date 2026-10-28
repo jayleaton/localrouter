@@ -1,7 +1,7 @@
 //! Computer control over HTTP (docs/dev/COMPUTER.md): `GET /v1/desktop`, the WebSocket a paired desktop helper dials
 //! out to, and `/v1/computer/...` for the web UI: status, approvals (list, approve, deny), stop and the audit log. Every
 //! route needs a paired device's token with the route's scope (`computer/gate.zig`); the decisions come from the chat
-//! model through `decide.Qwen` until the open Jev service replaces it.
+//! model through `decide.ChatDecider` until the open Jev service replaces it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,7 +23,7 @@ const Hub = hub_mod.Hub;
 pub const Service = struct {
     log: audit.Log,
     hub: Hub,
-    qwen: decide.Qwen,
+    chat: decide.ChatDecider,
     gate: gate.Gate = .{},
     app: *App,
     mutex: Io.Mutex = .init,
@@ -33,12 +33,12 @@ pub const Service = struct {
     /// Sets up in place (the hub points at the log, the provider at the service).
     pub fn init(s: *Service, app: *App, data_dir: []const u8, a: std.mem.Allocator) !void {
         const cc = app.cfg.computer;
-        s.* = .{ .log = .{ .io = app.io, .path = try std.fs.path.join(a, &.{ data_dir, "computer", "audit.jsonl" }) }, .hub = undefined, .qwen = .{ .ctx = undefined, .complete = complete, .extra = app.cfg.voice.chat_extra }, .app = app };
+        s.* = .{ .log = .{ .io = app.io, .path = try std.fs.path.join(a, &.{ data_dir, "computer", "audit.jsonl" }) }, .hub = undefined, .chat = .{ .ctx = undefined, .complete = complete, .extra = app.cfg.voice.chat_extra }, .app = app };
         s.hub = Hub.init(app.gpa, app.io, &s.log);
         s.hub.limits = .{ .max_steps = @min(cc.max_steps, 15), .timeout_ms = @as(i64, @min(cc.timeout_s, 90)) * 1000, .approval_timeout_ms = @as(i64, cc.approval_timeout_s) * 1000 };
         s.hub.approvals.ttl_ms = s.hub.limits.approval_timeout_ms;
-        s.qwen.ctx = s;
-        s.hub.provider = s.qwen.provider();
+        s.chat.ctx = s;
+        s.hub.provider = s.chat.provider();
         s.gate = gate.Paired(App, pairedDevice).gate(app); // always: computer control never runs without a paired device
     }
 
@@ -85,7 +85,7 @@ fn pairedDevice(app: *App, tok: []const u8, buf: []u8) ?gate.Found {
     return .{ .device = .{ .id = buf[0..id_len], .name = buf[id_len..][0..name_len] }, .desktop_helper = d.allows("desktop_helper"), .computer = d.allows("computer"), .approve = d.allows("approve") };
 }
 
-/// The Qwen provider's chat call: one completion on the configured decision model (or the chat default).
+/// The chat decision provider's call: one completion on the configured decision model (or the chat default).
 fn complete(ctx: *anyopaque, a: std.mem.Allocator, body: Value, why: *decide.Why) ?[]const u8 {
     const s: *Service = @ptrCast(@alignCast(ctx));
     const app = s.app;

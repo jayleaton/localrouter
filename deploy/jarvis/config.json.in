@@ -39,7 +39,7 @@
    "options": {"variant": "@DRAMA_VARIANT@", "voices": ["Mae", "Arlo", "Ezra", "Nora", "Theo", "Wren"], "default_voice": "Mae",
                "voices_dir": "@DRAMA_ROOT@/voices", "min_speed": 1, "max_speed": 1,
                "max_input_chars": 4096, "stream": true, "references": true, "instructions": "[{s}] ", "port": @DRAMA_PORT@,
-               "max_frames": 1024, "long_form": false, "verify": "size", "clone_working_bytes": 2147483648}},
+               "max_frames": 1024, "long_form": false, "verify": "size", "clone_working_bytes": 2147483648, "clone_codebooks": 10}},
   {"id": "whisper-large-v3-turbo", "kind": "transcription", "name": "Whisper large-v3-turbo",
    "cmd": ["@J@/venvs/whisper/bin/python", "@SRC@/tools/speech/whisper/worker.py"], "weights": "@WHISPER@",
    "resident_bytes": 4026531840, "working_bytes": 536870912, "keep_loaded": true, "priority": 90, "idle_ttl_s": 3600,

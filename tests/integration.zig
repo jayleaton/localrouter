@@ -3,7 +3,8 @@
 //! `harness.zig` starts the daemon; `router.zig` has the tests of priorities, image inputs and the stdio bridge;
 //! `speech.zig` those of text to speech and speech to text; `chat.zig` those of the chat kind (tests/fixtures/chat_server.py); `responses.zig` the Responses API over it; `jarvis.zig` chat and voice warm together;
 //! `drama3.zig` those of the Drama 3 adapter; `voice.zig` the voice loop over a WebSocket; `pairing.zig` device pairing; `contract.zig` the harness contract
-//! (`/v1/capabilities`, and our clients' recorded requests replayed).
+//! (`/v1/capabilities`, and our clients' recorded requests replayed); `dropin.zig` that every kind's model is swapped by
+//! config alone (the same MCP tools, endpoints and voice loop on another model set, capabilities honoured).
 
 const std = @import("std");
 const Io = std.Io;
@@ -35,6 +36,7 @@ test {
     _ = @import("contract.zig");
     _ = @import("nodes.zig");
     _ = @import("ranks.zig");
+    _ = @import("dropin.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;

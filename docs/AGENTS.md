@@ -68,7 +68,8 @@ multi-node LocalRouter each model also names the `node` that runs it; the API is
 voice from recordings: [Voices](#voices-cloning)). Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
 `max_input_chars`, `stream` (whether `stream: true` works), `references` (whether voice references do) and
 `instructions` (whether `instructions` do);
-transcription models `max_audio_s`. `default_for` lists the capabilities the model serves
+transcription models `max_audio_s`, and `languages` when the model hears only some (a `language` outside them is
+refused). `default_for` lists the capabilities the model serves
 when a request names no model (the operator's `defaults` in the config, else the first model that has the capability).
 Name a model with `model` to choose one yourself, per request. A request that needs a capability the model lacks is
 refused with a 400 naming the model and the capability; a model of the other kind is a 400 and an unknown one a 404,

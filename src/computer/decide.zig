@@ -1,6 +1,6 @@
 //! Decisions for computer use (docs/dev/COMPUTER.md): typed questions over closed candidate sets, answered by a
 //! `Provider`. The shape is TypeSafe System One's (Choice and Noul questions with probabilities), which the SideBud
-//! controller was written against, so the open Jev decision service can replace the Qwen provider without touching the
+//! controller was written against, so the open Jev decision service can replace the chat model provider without touching the
 //! helper or the policy. Answers outside the offered candidates are dropped, never acted on.
 
 const std = @import("std");
@@ -138,22 +138,22 @@ pub fn answersValue(a: std.mem.Allocator, answers: []const Answer) !Value {
     return .{ .object = o };
 }
 
-// ---------------------------------------------------------------- Qwen: the chat model as a decision provider
+// ---------------------------------------------------------------- the chat model as a decision provider
 
 /// Answers questions with the chat model: one completion whose JSON schema makes every Choice an enum of its offered
-/// keys, with a stated confidence (`high` 0.9, `medium` 0.6, `low` 0.3; Qwen has no calibrated scores).
-pub const Qwen = struct {
+/// keys, with a stated confidence (`high` 0.9, `medium` 0.6, `low` 0.3; a chat model has no calibrated scores).
+pub const ChatDecider = struct {
     ctx: *anyopaque,
     /// Sends one chat request (an OpenAI body) and returns the assistant message's content, or null with `why` set.
     complete: *const fn (ctx: *anyopaque, a: std.mem.Allocator, body: Value, why: *Why) ?[]const u8,
     extra: ?Value = null, // members added to the request (the voice config's chat_extra: thinking off)
 
-    pub fn provider(q: *Qwen) Provider {
-        return .{ .ptr = q, .name = "qwen", .askFn = askFn };
+    pub fn provider(q: *ChatDecider) Provider {
+        return .{ .ptr = q, .name = "chat", .askFn = askFn };
     }
 
     fn askFn(ptr: *anyopaque, a: std.mem.Allocator, state: []const u8, questions: []const Question, why: *Why) Error![]Answer {
-        const q: *Qwen = @ptrCast(@alignCast(ptr));
+        const q: *ChatDecider = @ptrCast(@alignCast(ptr));
         const body = try request(a, state, questions, q.extra);
         const content = q.complete(q.ctx, a, body, why) orelse return error.Failed;
         return parseReply(a, content, questions) orelse {

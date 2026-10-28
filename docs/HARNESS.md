@@ -114,7 +114,7 @@ With pairing off every route answers whoever reaches the daemon. Either way keep
 `GET /v1/models` is OpenAI's list with LocalRouter's fields: `kind` (`chat`, `image`, `video`, `speech`,
 `transcription`, `decision`), `capabilities`, `default_for`, `running`, `resident_bytes`, `qualified` (false: refused
 with a 503 until the operator qualifies it on this GPU), and, for speech models, `voices`, `default_voice`, `presets`,
-`speed`, `max_input_chars`, `stream`, `references`, `instructions`; for transcription, `max_audio_s`. `license`, when the config or
+`speed`, `max_input_chars`, `stream`, `references`, `instructions`; for transcription, `max_audio_s` and `languages`. `license`, when the config or
 the engine states one, is the weights' licence (`name`, `url`, `use`, `commercial`, `excluded_regions`, `notice`);
 LocalRouter informs and does not enforce it ([AGENTS.md](AGENTS.md#licences)). Model ids are stable for a
 deployment; a request without `model` goes to the model whose `default_for` lists the capability it needs.

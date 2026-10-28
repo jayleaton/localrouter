@@ -25,6 +25,7 @@ const request = @import("../tool/request.zig");
 const engine = @import("../engine/engine.zig");
 const audio = @import("../media/audio.zig");
 const voiceprep = @import("../media/voiceprep.zig");
+const resample = @import("../voice/resample.zig");
 const store = @import("../voices.zig");
 const jobs = @import("../sched/jobs.zig");
 const sched = @import("../sched/scheduler.zig");
@@ -204,7 +205,9 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
         if (textProblem(t.*)) |p| return h.fail(req, a, 400, "invalid_request_error", try std.fmt.allocPrint(a, "the transcript of reference {d} {s}", .{ n, p }));
     }
 
-    // the encode: a voice_clone job on the model, its clips deleted with its directory once the codes are read
+    // the encode: a voice_clone job on the model, its clips deleted with its directory once the codes are read; the
+    // clips go at the model's `clone_rate` (the rate they are prepared at, 44.1 kHz, unless its options say another)
+    const clone_rate: u32 = @intCast(std.math.clamp(engine.optionInt(cfg, "clone_rate", voiceprep.rate), 8_000, 192_000));
     const Manifest = struct { name: []const u8, references: []const struct { audio: []const u8, text: []const u8 } };
     const entries = try a.alloc(@typeInfo(@FieldType(Manifest, "references")).pointer.child, refs.len);
     const files = try a.alloc(inputs.File, refs.len + 1);
@@ -213,6 +216,9 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
         e.* = .{ .audio = file_name, .text = t };
         f.* = .{ .name = file_name, .data = wv };
     }
+    if (clone_rate != voiceprep.rate) for (files[0..refs.len], refs) |*f, r| {
+        f.data = try audio.wav(a, clone_rate, 1, std.mem.sliceAsBytes(try resample.resample(a, r.samples, voiceprep.rate, clone_rate)));
+    };
     var rnd: [4]u8 = undefined;
     app.io.random(&rnd);
     const id = if (b.name.len > 0) b.name else try std.fmt.allocPrint(a, "{s}{x:0>8}", .{ store.draft_prefix, std.mem.readInt(u32, &rnd, .little) });
@@ -221,7 +227,7 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     defer scrub(app, j);
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
-    const codes = readCodes(app, a, j, refs.len) orelse return h.fail(req, a, 500, "server_error", "the model wrote no valid voice.json");
+    const codes = readCodes(app, a, j, refs.len, engine.optionInt(cfg, "clone_codebooks", 0)) orelse return h.fail(req, a, 500, "server_error", "the model wrote no valid voice.json");
 
     const now = sched.nowUnix(app.io);
     const stored = try a.alloc(store.Reference, refs.len);
@@ -358,18 +364,46 @@ fn scrub(app: *App, j: *jobs.Job) void {
     Io.Dir.cwd().deleteTree(app.io, j.dir) catch |err| std.log.warn("voices: could not delete {s}: {s}", .{ j.dir, @errorName(err) });
 }
 
-/// The encode's `voice.json`, checked: one reference per clip sent, each a 10-row grid of `frames` integers.
-fn readCodes(app: *App, a: std.mem.Allocator, j: *jobs.Job, want: usize) ?request.ClonedCodes {
+/// The encode's `voice.json`, checked: one reference per clip sent, each a grid of `frames` integers with the model's
+/// `codebooks` rows (its `clone_codebooks` option; 0: any number, the same for every reference).
+fn readCodes(app: *App, a: std.mem.Allocator, j: *jobs.Job, want: usize, codebooks: u64) ?request.ClonedCodes {
     const path = std.fs.path.join(a, &.{ j.dir, "voice.json" }) catch return null;
     const text = Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(64 << 20)) catch return null;
     const c = std.json.parseFromSliceLeaky(request.ClonedCodes, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return null;
-    if (c.references.len != want) return null;
+    return if (validCodes(c, want, codebooks)) c else null;
+}
+
+fn validCodes(c: request.ClonedCodes, want: usize, codebooks: u64) bool {
+    if (c.references.len != want) return false;
+    var rows: u64 = codebooks;
     for (c.references) |r| {
-        if (r.vq_codes != .array or r.vq_codes.array.items.len != 10 or r.frames == 0) return null;
+        if (r.vq_codes != .array or r.vq_codes.array.items.len == 0 or r.frames == 0) return false;
+        if (rows == 0) rows = r.vq_codes.array.items.len;
+        if (r.vq_codes.array.items.len != rows) return false;
         for (r.vq_codes.array.items) |row| {
-            if (row != .array or row.array.items.len != r.frames) return null;
-            for (row.array.items) |x| if (x != .integer) return null;
+            if (row != .array or row.array.items.len != r.frames) return false;
+            for (row.array.items) |x| if (x != .integer) return false;
         }
     }
-    return c;
+    return true;
+}
+
+test "an encode's codes: the model's codebook count when it declares one, else any count the references share" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parse = struct {
+        fn f(al: std.mem.Allocator, text: []const u8) !request.ClonedCodes {
+            return std.json.parseFromSliceLeaky(request.ClonedCodes, al, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        }
+    }.f;
+    const two = try parse(a, "{\"references\":[{\"text\":\"a\",\"frames\":2,\"vq_codes\":[[1,2],[3,4]]},{\"text\":\"b\",\"frames\":1,\"vq_codes\":[[5],[6]]}]}");
+    try std.testing.expect(validCodes(two, 2, 0));
+    try std.testing.expect(validCodes(two, 2, 2));
+    try std.testing.expect(!validCodes(two, 2, 10)); // a model that declares 10 codebooks
+    try std.testing.expect(!validCodes(two, 1, 0)); // one reference per clip sent
+    const mixed = try parse(a, "{\"references\":[{\"text\":\"a\",\"frames\":1,\"vq_codes\":[[1],[2]]},{\"text\":\"b\",\"frames\":1,\"vq_codes\":[[5]]}]}");
+    try std.testing.expect(!validCodes(mixed, 2, 0));
+    const ragged = try parse(a, "{\"references\":[{\"text\":\"a\",\"frames\":2,\"vq_codes\":[[1,2],[3]]}]}");
+    try std.testing.expect(!validCodes(ragged, 1, 0));
 }

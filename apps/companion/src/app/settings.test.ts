@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { languageChoices, LANGUAGES, parseSettings, settingsText, sttLanguage } from './settings.ts'
+import { heardLanguages, languageChoices, LANGUAGES, parseSettings, settingsText, sttLanguage } from './settings.ts'
 
 const dflt = { base: '', name: 'Mac', shared: [] as string[], legacy: false, language: 'en' }
 
@@ -62,6 +62,24 @@ describe('settings.json and the language a call hears', () => {
     expect(c.length).toBe(Object.keys(LANGUAGES).length + 1)
     const names = c.slice(2).map((l) => l.name)
     expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, 'en')))
+  })
+
+  it('the box’s declared languages narrow the choices; without them (or offline) the built-in list', () => {
+    const models = [
+      { id: 'other', kind: 'transcription', default_for: [], languages: ['fr'] },
+      { id: 'ears', kind: 'transcription', default_for: ['speech_to_text'], languages: ['de', 'en', 'xx'] },
+      { id: 'voice', kind: 'speech' },
+    ]
+    const heard = heardLanguages(models)
+    expect(heard).toEqual(['de', 'en', 'xx'])
+    expect(languageChoices(heard)).toEqual([{ code: 'en', name: 'English' }, { code: 'auto', name: 'Auto-detect' }, { code: 'de', name: 'German' }, { code: 'xx', name: 'xx' }])
+    expect(sttLanguage('de', heard)).toBe('de')
+    expect(sttLanguage('ja', heard)).toBe('en')
+    expect(sttLanguage('ja', ['de'])).toBe('auto')
+    expect(languageChoices(['de'])[0]).toEqual({ code: 'auto', name: 'Auto-detect' })
+    expect(heardLanguages([{ id: 'ears', kind: 'transcription' }])).toBeNull()
+    expect(heardLanguages('nope')).toBeNull()
+    expect(languageChoices(null)).toEqual(languageChoices())
   })
 
   it('the app’s list is the voice page’s list', () => {

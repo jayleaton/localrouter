@@ -82,7 +82,14 @@ pub const Backend = struct {
         client_tools: ?*const fn (ptr: *anyopaque, why: *Why) bool = null, // may the session own its tools (null: yes)
         yield_chat: ?*const fn (ptr: *anyopaque, model: []const u8, op: Yield, holder: usize) bool = null, // speech first
         assistant_name: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: the default
+        model_skill: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: no models line
     };
+
+    /// The model management procedure (`skill.zig`) with this machine's models in it, in `a`.
+    pub fn modelSkill(b: Backend, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+        const f = b.vtable.model_skill orelse return @import("skill.zig").render(a, 0, &.{});
+        return f(b.ptr, a);
+    }
 
     /// What the assistant is called now (`assistant.zig`), in `a`: read each turn, so a rename counts from the next one.
     pub fn assistantName(b: Backend, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {

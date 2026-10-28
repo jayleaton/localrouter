@@ -18,7 +18,7 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
-import { DEFAULT_LANGUAGE, languageChoices, parseSettings, settingsText, sttLanguage } from './settings.ts'
+import { DEFAULT_LANGUAGE, heardLanguages, languageChoices, parseSettings, settingsText, sttLanguage, type Heard } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import { assistantNameProblem, assistantOf, DEFAULT_ASSISTANT, tidyAssistantName, voiceHint } from '../harness/assistant.ts'
 import type { Assistant } from '../harness/assistant.ts'
@@ -288,6 +288,8 @@ const WINDOW_ICON = process.platform === 'linux' ? { icon: join(__dirname, 'icon
 let runtime: Runtime | null = null
 let legacy: LegacyBridge | null = null
 let settings: Settings
+/** The languages the Spark's transcription model hears (`/v1/models`); null: it lists none, or not read yet. */
+let heard: Heard = null
 let mainWindow: BrowserWindow | null = null
 let setupWindow: BrowserWindow | null = null
 let virtualCursor: VirtualCursor | null = null
@@ -613,7 +615,7 @@ function registerIpc() {
   // The language a call hears: the page's picker reads and writes this computer's setting (Settings shows it too).
   host('host:language', () => settings.language)
   host('host:setLanguage', (v) => {
-    settings = { ...settings, language: sttLanguage(v) }
+    settings = { ...settings, language: sttLanguage(v, heard) }
     saveSettings(settings)
     return settings.language
   })
@@ -804,7 +806,7 @@ function registerIpc() {
   })
   // "Ask before each action" (off by default): a card per consequential step instead of the standing grant.
   setup('setup:language', (v) => {
-    settings = { ...settings, language: sttLanguage(v) }
+    settings = { ...settings, language: sttLanguage(v, heard) }
     saveSettings(settings)
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('host:language', settings.language)
     return state()
@@ -1010,11 +1012,28 @@ function useAssistant(a: Assistant | null) {
 /** Reads the name on the Spark; a box that does not answer keeps the name last read. */
 async function readAssistant(spark = runtime ? new Spark(settings.base, loadSecrets().token, timed(CHECK_S)) : null) {
   if (!spark) return
+  void readLanguages(spark)
   try {
     useAssistant(await spark.assistant())
   } catch (error) {
     log.warn('assistant.read_failed', { error: error instanceof Error ? error.message : String(error) })
   }
+}
+
+/** Reads them with the name; a language the model does not hear becomes English (or Auto-detect) for every call. */
+async function readLanguages(spark: Spark) {
+  try {
+    heard = heardLanguages(await spark.models())
+  } catch (error) {
+    log.warn('languages.read_failed', { error: error instanceof Error ? error.message : String(error) })
+    return
+  }
+  const language = sttLanguage(settings.language, heard)
+  if (language === settings.language) return
+  settings = { ...settings, language }
+  saveSettings(settings)
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('host:language', settings.language)
+  log.info('languages.narrowed', { language, heard })
 }
 
 /** Why the Spark did not rename the assistant, for the person. */
@@ -1085,7 +1104,7 @@ async function state() {
     control_granted: standing.granted(),
     ask_each: settings.askEachAction === true,
     language: settings.language,
-    languages: languageChoices(),
+    languages: languageChoices(heard),
     granted_since: standing.since,
     machine: machineKind(),
     permissions: permissionState,
