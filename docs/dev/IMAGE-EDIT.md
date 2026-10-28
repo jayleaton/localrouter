@@ -138,7 +138,9 @@ Status is at the end of this file.
 ## 6. Pack layout and capability
 
 - `te/weights.safetensors` + `vis.*` (bf16; names in `pack_edit.py`); `te/manifest.json` gains
-  `"vision": {...config, "template_edit": ...}`.
+  `"vision": {...config, "template_edit": ...}`; `config` holds only the checkpoint's architecture fields
+  (`pack_edit.VISION_CONFIG`), not transformers' whole `to_dict()`, whose version string made the manifest differ by
+  box (#84). `tools/spark/prepare.sh` rewrites an older pack's manifest and `edit.json` this way (`pack_edit.normalise`).
 - `vae/weights.safetensors` + `vae.encoder.*`, `vae.quant_conv.*` (all 128 moment channels; the twin selects the first 64 outputs),
   `vae.enc_latents_*`; `vae/manifest.json` gains an `encoder` member with its own convs / norms / downs maps; top-level decoder maps stay separate.
 - `<weights>/edit.json`: `{"format": "stk-edit/1", "refs_max": 5, "manifest_sha256": {"te": ..., "vae": ...}}`, written by the pack step only when both parts
