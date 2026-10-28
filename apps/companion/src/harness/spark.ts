@@ -121,6 +121,12 @@ export class Spark {
     return this.json('/v1/pair')
   }
 
+  /** `/v1/models`' list (each model's id, kind, default_for and declared limits). */
+  async models(): Promise<unknown[]> {
+    const j = await this.json<{ data?: unknown }>('/v1/models')
+    return Array.isArray(j.data) ? j.data : []
+  }
+
   /** The assistant's name on the box; null on a box from before the setting (404, 405, or 403 for the route). */
   async assistant(): Promise<Assistant | null> {
     const r = await this.request('/v1/assistant')
