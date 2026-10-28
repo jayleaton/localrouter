@@ -15,6 +15,14 @@ from .edit import TEMPLATE
 from .pack import _save
 from .files import readable
 
+# The vision tower's architecture as the checkpoint's config.json gives it, in this order: the fields the engine reads
+# (src/engines/qwen_image/vision.zig) and the shapes they set. Not the whole `to_dict()`: that also carries the
+# installed transformers' version and its defaults, so te/manifest.json (and edit.json, which hashes it) differed
+# between boxes with byte-identical weights (#84: transformers 5.20.2 against 5.21.0).
+VISION_CONFIG = ("depth", "hidden_size", "hidden_act", "intermediate_size", "num_heads", "in_channels", "patch_size",
+                 "spatial_merge_size", "temporal_patch_size", "out_hidden_size", "num_position_embeddings",
+                 "deepstack_visual_indexes")
+
 
 def base(path: Path, model: str):
     man = json.loads((path / "manifest.json").read_text())
@@ -43,7 +51,7 @@ def write_vision(pipe, root: Path):
             # Conv3d [D,3,2,16,16] on one patch is the twin's GEMM [D,1536]. No rank-5 pack tensor.
             value = value.reshape(value.shape[0], -1)
         tensors[key] = value.contiguous()
-    cfg = visual.config.to_dict()
+    cfg = {k: visual.config.to_dict()[k] for k in VISION_CONFIG}
     if cfg["hidden_size"] // cfg["num_heads"] != 72 or cfg["spatial_merge_size"] != 2:
         raise ValueError("vision pack requires 72-wide heads and merge size 2")
     man["vision"] = {"config": cfg, "template_edit": TEMPLATE, "heads_padded": 128,
@@ -112,10 +120,36 @@ def write(pipe, out: str | Path):
     marker = root / "edit.json"
     marker.unlink(missing_ok=True)
     counts = {"te": write_vision(pipe, root), "vae": write_encoder(pipe, root)}
-    hashes = {name: hashlib.sha256((root / name / "manifest.json").read_bytes()).hexdigest() for name in counts}
+    return {"pack": str(root), "precision": "edit", "tensors": counts, **mark(root)}
+
+
+def mark(root: Path) -> dict:
+    """edit.json for the te/ and vae/ manifests now in ROOT."""
+    hashes = {name: hashlib.sha256((root / name / "manifest.json").read_bytes()).hexdigest() for name in ("te", "vae")}
     result = {"format": "stk-edit/1", "refs_max": 5, "manifest_sha256": hashes}
     temp = root / "edit.json.tmp"
     temp.write_text(json.dumps(result, indent=1))
-    temp.replace(marker)
+    temp.replace(root / "edit.json")
     readable(root)
-    return {"pack": str(root), "precision": "edit", "tensors": counts, **result}
+    return result
+
+
+def normalise(out: str | Path) -> bool:
+    """An edit pack written before VISION_CONFIG (#84): te/manifest.json rewritten with only those fields, as `write`
+    now writes it (the rest of the file is kept byte for byte: json round-trips it), then edit.json for it. Metadata
+    only; the weights are not touched. True when it rewrote anything."""
+    root = Path(out)
+    te, marker = root / "te" / "manifest.json", root / "edit.json"
+    if not marker.exists():
+        return False
+    man = json.loads(te.read_text())
+    cfg = man["vision"]["config"]
+    if list(cfg) == list(VISION_CONFIG):
+        return False
+    man["vision"]["config"] = {k: cfg[k] for k in VISION_CONFIG}
+    marker.unlink()   # no marker naming a manifest that is being replaced: edits stay off until both are written
+    temp = te.with_name("manifest.json.tmp")
+    temp.write_text(json.dumps(man, indent=1))
+    temp.replace(te)
+    mark(root)
+    return True

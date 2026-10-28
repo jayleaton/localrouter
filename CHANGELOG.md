@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The image edit pack's `te/manifest.json` (and `edit.json`, which hashes it) is the same on every box: its vision config
+  is the checkpoint's architecture fields only, not transformers' `to_dict()`, which carried the installed version
+  (5.20.2 on the reporter's Spark, 5.21.0 on DGX-02: the only difference, with byte-identical weights), so a fresh
+  `bootstrap.sh` failed `image/packs` on those two files (#84). `prepare.sh` rewrites an existing pack's metadata in
+  place (no re-pack), the pins are updated, and the twin venv pins `transformers==5.21.0`.
 - Voice: a long reply is watched for 1.6 s before it starts. In the first second its speech often comes at real time
   and slows once the chat model writes its next sentences, so the start the rate allowed then still paused in 16 of
   84 long replies measured live on DGX-02; with the wait, 3 (each 0.07 to 0.4 s, 35 s or more in). Long replies start

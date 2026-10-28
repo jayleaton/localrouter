@@ -1,10 +1,10 @@
 {
   "repo_id": "Qwen/Qwen-Image-2.1-Turbo",
   "revision": "d65dbc9a7e8f6b5479e33dee6030eaab2a906509",
-  "note": "what tools/spark/prepare.sh builds into weights/qwen-image-2.1 for the qwen-image-2.1-turbo tool (IMAGE_MODELS=qwen-image-2.1-turbo, PRECISIONS=fp8s): the Turbo DiT pack and the shared text-encoder and VAE packs, from the pinned sources (packs/sources/); built on DGX-01 (GB10) 2026-10-21; te/, vae/ and edit.json since the edit pack (prepare.sh's `pack edit`, PR #78: the vision tower into te/, the VAE encoder into vae/), pinned from the DGX-02 build of 2026-10-27, whose te/ and vae/ without the edit step matched the 2026-10-21 pins byte for byte. The per-GPU Triton cubins (turbo-fp8s/triton/) are compiled on the box and not listed. Checked by tools/package/verify_assets.py",
+  "note": "what tools/spark/prepare.sh builds into weights/qwen-image-2.1 for the qwen-image-2.1-turbo tool (IMAGE_MODELS=qwen-image-2.1-turbo, PRECISIONS=fp8s): the Turbo DiT pack and the shared text-encoder and VAE packs, from the pinned sources (packs/sources/); built on DGX-01 (GB10) 2026-10-21; te/, vae/ and edit.json since the edit pack (prepare.sh's `pack edit`, PR #78: the vision tower into te/, the VAE encoder into vae/), pinned from the DGX-02 build of 2026-10-27, whose te/ and vae/ without the edit step matched the 2026-10-21 pins byte for byte. te/manifest.json carries the vision tower's checkpoint fields only (not the installed transformers' version, which made it and edit.json differ by box, #84). The per-GPU Triton cubins (turbo-fp8s/triton/) are compiled on the box and not listed. Checked by tools/package/verify_assets.py",
   "selected_files": [
-    {"path": "edit.json", "size_bytes": 221, "sha256": "d426ea093e524b5e90337c74d2b66a0db865f49c658dbf7cfed30cbe3ae20530"},
-    {"path": "te/manifest.json", "size_bytes": 131480, "sha256": "de7a0a752d7ac0fd83dd9d158994e0658bdcf24992788415369c4763c250a95a"},
+    {"path": "edit.json", "size_bytes": 221, "sha256": "64638c30c878558e960c98d8a2de4c195dfb77628d589a2418c8605773f9683f"},
+    {"path": "te/manifest.json", "size_bytes": 130922, "sha256": "91fd46ff3a3054fa5d08e50d0395b17c4ca74967edc7f6f88290708cb6576cfa"},
     {"path": "te/tokenizer.json", "size_bytes": 11422650, "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"},
     {"path": "te/tokenizer/chat_template.jinja", "size_bytes": 5292, "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4"},
     {"path": "te/tokenizer/tokenizer.json", "size_bytes": 11422650, "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"},

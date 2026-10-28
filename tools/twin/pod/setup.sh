@@ -6,9 +6,10 @@ mkdir -p $STK/src $STK/models
 if [[ ! -f $STK/venv/bin/activate ]]; then
     python -m venv --system-site-packages $STK/venv
     source $STK/venv/bin/activate
-    # the image's torch is a pre-release pip would replace: pin it, triton and numpy to what is installed
+    # the image's torch is a pre-release pip would replace: pin it, triton and numpy to what is installed. transformers
+    # exactly: the packs are built through it (the image pins were made with 5.21.0, #84)
     pip freeze --all | grep -iE '^(torch|triton|numpy)==' > $STK/venv/constraints.txt
-    pip install -q -c $STK/venv/constraints.txt "diffusers==0.41.0" "transformers>=4.57" accelerate
+    pip install -q -c $STK/venv/constraints.txt "diffusers==0.41.0" "transformers==5.21.0" accelerate
 fi
 [[ -d $STK/src/TensorFold ]] || git clone -q --depth 1 --branch $TENSORFOLD_TAG https://github.com/ashhart/TensorFold $STK/src/TensorFold
 pip install -q --no-deps -e $STK/src/TensorFold

@@ -103,6 +103,9 @@ if packs; then
 [[ -f $W/vae/manifest.json ]] || { step "pack vae"; $T pack --model $MODEL --precision vae --out $W/vae; }
 # image edit: the vision tower into te/, the VAE encoder into vae/, then edit.json (the tool lists image_edit only with it)
 [[ -f $W/edit.json ]] || { step "pack edit"; $T pack --model $MODEL --precision edit --out $W; }
+# an edit pack from before #84: its te/manifest.json carried the installed transformers' version (so its pin differed by
+# box); rewritten with the checkpoint's vision fields only, and edit.json with it (metadata, no re-pack)
+python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.pack_edit import normalise; normalise('$W') and print('[prepare] edit pack metadata normalised (#84)')"
 python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.files import readable; readable('$W')"
 fi
 step "image done$(packs || echo ' (DOWNLOAD_ONLY: the checkpoints only)'): $(du -sh $W | cut -f1) in $W"
