@@ -3,8 +3,8 @@
 //! speech and transcription in A, the `cmd` worker tests/fixtures/speech_worker.py in B; chat and decision are
 //! `openai_server` on their fixtures in both). Only the config changes: the MCP tool list and /v1/capabilities' MCP
 //! tools stay the same, /v1/models lists what is configured, every endpoint and MCP tool works with and without a model
-//! named, a capability a model lacks is refused naming it and what it can do, `defaults` alone moves a request, and the
-//! voice loop runs on either set.
+//! named, a capability a model lacks is refused naming it and what it can do, `defaults` alone moves a request, the
+//! voice loop runs on either set and speaks with the configured default, and declared languages are listed and enforced.
 
 const std = @import("std");
 const Io = std.Io;
@@ -388,4 +388,49 @@ test "drop-in: the voice loop on either set: its speech and transcription models
         const done = try w.until(a, "response.done", &seen);
         try testing.expectEqualStrings("completed", done.object.get("response").?.object.get("status").?.string);
     }
+}
+
+/// /v1/assistant's `voice.model`: the speech model a call speaks with when it names none.
+fn callSpeech(d: *Daemon, a: std.mem.Allocator) ![]const u8 {
+    const T = struct { voice: ?struct { model: []const u8 } = null };
+    const v = try std.json.parseFromSliceLeaky(T, a, (try d.call(a, .GET, "/v1/assistant", null)).body, .{ .ignore_unknown_fields = true });
+    return v.voice.?.model;
+}
+
+test "drop-in: the voice loop speaks with the text_to_speech default unless voice.speech_models names a chain" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A model the old built-in chain named first, configured beside the new default: the default speaks.
+    const tools = [_][]const u8{ "{\"id\": \"kitten-tts-2\", \"kind\": \"speech\", \"engine\": \"testpattern\"}", try worker(a, "tts-new", "speech", "") };
+    const defaults = "{\"text_to_speech\": \"tts-new\"}";
+    for ([_]struct { top: []const u8, want: []const u8 }{
+        .{ .top = "", .want = "tts-new" },
+        .{ .top = ", \"voice\": {\"speech_models\": [\"kitten-tts-2\", \"tts-new\"]}", .want = "kitten-tts-2" },
+    }) |c| {
+        var d = try Daemon.start(testing.allocator, testing.io, "dropin-speech", try config(a, &tools, defaults, c.top));
+        defer d.stop();
+        try testing.expectEqualStrings(c.want, try callSpeech(&d, a));
+    }
+}
+
+test "drop-in: a transcription model's declared languages are listed, and a language outside them is refused before it loads" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = [_][]const u8{"{\"id\": \"ears\", \"kind\": \"transcription\", \"engine\": \"testpattern\", \"options\": {\"languages\": [\"en\", \"de\"]}}"};
+    var d = try Daemon.start(testing.allocator, testing.io, "dropin-languages", try config(a, &tools, "{}", ""));
+    defer d.stop();
+    const M = struct { data: []const struct { id: []const u8, languages: ?[]const []const u8 = null } };
+    const models = try std.json.parseFromSliceLeaky(M, a, (try d.call(a, .GET, "/v1/models", null)).body, .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("en,de", try std.mem.join(a, ",", models.data[0].languages.?));
+    const listed = (try harness.mcpText(a, try mcpCall(&d, a, "list_models", "{}"))).object.get("models").?.array.items[0];
+    try testing.expectEqual(@as(usize, 2), listed.object.get("languages").?.array.items.len);
+
+    const clip = try b64(a, try wav(a));
+    const refusal = "model 'ears' does not hear language 'ja'; its languages: en, de";
+    try expectStatus(try d.call(a, .POST, "/v1/audio/transcriptions", try std.fmt.allocPrint(a, "{{\"file\":\"{s}\",\"language\":\"ja\"}}", .{clip})), .bad_request, &.{refusal});
+    try expectToolError(try mcpCall(&d, a, "transcribe_audio", try std.fmt.allocPrint(a, "{{\"audio\":\"data:audio/wav;base64,{s}\",\"language\":\"ja\"}}", .{clip})), &.{refusal});
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "ears")); // refused before anything loaded
+    try expectStatus(try d.call(a, .POST, "/v1/audio/transcriptions", try std.fmt.allocPrint(a, "{{\"file\":\"{s}\",\"language\":\"de\"}}", .{clip})), .ok, &.{", language de"});
 }
