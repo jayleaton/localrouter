@@ -76,7 +76,8 @@ pub const Voice = struct {
     temperature: ?f32 = null, // a session's chat temperature until it sets its own (session.update); null: the chat server's
     // (Qwen with thinking off wants 0.7: at its server's 1.0 a spoken picture request went without the tool call 1 in 4)
     speech_model: []const u8 = "", // "": the first of speech_models that is configured and qualified
-    speech_models: []const []const u8 = &.{ "fishaudio/drama-3", "kitten-tts-2" }, // in order; one that fails to serve falls through to the next; none: the text_to_speech default
+    speech_models: []const []const u8 = &.{}, // in order; one that fails to serve falls through to the next; none (the
+    // default): the text_to_speech default alone, so a model is swapped in `defaults` without naming it here too
     transcription_model: []const u8 = "", // "": the speech_to_text default
     voice: []const u8 = "", // "": the speech model's default voice
     // `{name}` is the assistant's name (`assistant.name`, or the one set over /v1/assistant); instructions that do not

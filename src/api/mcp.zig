@@ -301,7 +301,7 @@ fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wai
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -899,7 +899,7 @@ const tool_list = [_]Tool{
     \\"voice":{"type":"string","description":"A voice id from the model's voices in list_models; omit for its default."},
     \\"speed":{"type":"number","minimum":0.25,"maximum":4,"default":1,"description":"Within the model's own speed range (list_models speed); a model without a speed control takes only 1."},
     \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
-    \\"instructions":{"type":"string","maxLength":500,"description":"How to say it (delivery, emotion, pace), for a model whose list_models entry says instructions: true; others refuse it. Drama 3 hears it as a bracketed direction before the text: [whispering, nervous]."},
+    \\"instructions":{"type":"string","maxLength":500,"description":"How to say it (delivery, emotion, pace), for a model whose list_models entry says instructions: true; others refuse it. The model's own template puts it into the text, such as a bracketed direction before it: [whispering, nervous]."},
     \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
     \\"seed":{"type":"integer","minimum":0},
     \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},

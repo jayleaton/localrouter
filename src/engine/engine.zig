@@ -132,9 +132,21 @@ pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
 /// takes anything else that is valid.
 pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     if (req.* == .speech and !checkSpeech(cfg, req.speech, why)) return false;
+    if (req.* == .transcription and !checkTranscription(cfg, req.transcription, why)) return false;
     const e = find(cfg.engine) orelse return true;
     const f = e.check orelse return true;
     return f(cfg, req, why);
+}
+
+/// A transcription tool's own limits, from its options: `languages` (the ISO-639-1 codes it hears; absent: any), so a
+/// language it does not know is refused before it loads, not heard as another. An empty language (detect it) is taken.
+pub fn checkTranscription(cfg: *const ToolConfig, v: request.Transcription, why: *std.Io.Writer) bool {
+    if (v.language.len == 0) return true;
+    const list = optionList(cfg, "languages") orelse return true;
+    if (listed(list, v.language)) return true;
+    why.print("model '{s}' does not hear language '{s}'; its languages: ", .{ cfg.id, v.language }) catch {};
+    printList(list, why);
+    return false;
 }
 
 /// A speech tool's own limits, from its options, checked before it loads (so nothing is resampled or ignored quietly):
@@ -194,6 +206,7 @@ pub const AudioInfo = struct {
     references: ?bool = null,
     instructions: ?bool = null,
     max_audio_s: ?u64 = null,
+    languages: ?[]const std.json.Value = null,
 };
 
 pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
@@ -208,7 +221,7 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .references = optionBool(cfg, "references", false),
             .instructions = optionString(cfg, "instructions", "").len > 0,
         },
-        .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60) },
+        .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60), .languages = optionList(cfg, "languages") },
         else => .{},
     };
 }
@@ -429,6 +442,24 @@ test "a speech tool's voices are checked before it loads; cmd tools get their ki
     const bad = try config.parse(arena.allocator(), "{\"tools\": [{\"id\": \"t\", \"kind\": \"speech\", \"cmd\": [\"x\"], \"options\": {\"voices\": [\"a\"], \"default_voice\": \"b\"}}]}");
     try std.testing.expect(!checkDefaults(&bad, &why));
     try std.testing.expectEqualStrings("tool 't': default_voice 'b' is not one of its voices", why.buffered());
+}
+
+test "a transcription model's declared languages: listed, and a language outside them refused before it loads" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "ears", "kind": "transcription", "cmd": ["x"], "options": {"languages": ["en", "de"]}},
+        \\           {"id": "any", "kind": "transcription", "cmd": ["x"]}]}
+    );
+    const ears = c.tool("ears").?;
+    try std.testing.expectEqual(@as(usize, 2), audioInfo(ears).languages.?.len);
+    try std.testing.expect(audioInfo(c.tool("any").?).languages == null);
+    var buf: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    for ([_][]const u8{ "", "en", "de" }) |l| try std.testing.expect(check(ears, &.{ .transcription = .{ .audio = "a.wav", .language = l } }, &why));
+    try std.testing.expect(check(c.tool("any").?, &.{ .transcription = .{ .audio = "a.wav", .language = "ja" } }, &why));
+    try std.testing.expect(!check(ears, &.{ .transcription = .{ .audio = "a.wav", .language = "ja" } }, &why));
+    try std.testing.expectEqualStrings("model 'ears' does not hear language 'ja'; its languages: en, de", why.buffered());
 }
 
 /// A boolean option from the tool's `options` object, else `default`.

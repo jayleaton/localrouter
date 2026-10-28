@@ -54,11 +54,16 @@ TTS model), `partial_interval_ms`, `localrouter.tool_execution` ([Client tool ex
 that can do it, as the HTTP API's refusals do. Defaults come from the daemon config:
 
 ```json
-{"voice": {"remote": null, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "",
+{"voice": {"remote": null, "chat_url": "", "chat_api_key": "", "chat_model": "", "speech_model": "", "speech_models": [],
            "transcription_model": "", "voice": "", "instructions": "You are {name}, a helpful voice assistant...",
            "partial_interval_ms": 0, "prime_chat": true, "warm_speech": true, "greedy_transcripts": true, "speak_written": false, "max_history_chars": 24000, "tools": true, "tool_wait_s": 1800,
            "temperature": null}}
 ```
+
+`speech_model` and `transcription_model` empty: the config's `text_to_speech` and `speech_to_text` defaults, so
+swapping a voice model is one `defaults` entry. `speech_models` is an optional fallback chain for speech (in order, each
+configured and qualified one tried; one that fails before any audio was sent falls through to the next); empty, the
+`text_to_speech` default speaks alone.
 
 `{name}` in `instructions` (the daemon's or a session's) is the assistant's name, `assistant.name` or the one a client
 set over `/v1/assistant` ([AGENTS.md](../AGENTS.md#the-assistants-name)), read each turn; instructions that do not

@@ -740,8 +740,9 @@ const SUGGEST = [
 
 // ---------------------------------------------------------------- storage, settings, debug log
 
-// What speech to text hears on a call: Whisper large-v3's languages, code to name ("auto": detect it on each turn).
-// The LocalRouter app keeps the same list (apps/companion/src/app/language.ts).
+// What speech to text hears on a call, code to name ("auto": detect it on each turn): these names, narrowed to the
+// transcription model's own `languages` when /v1/models lists them (`heardLanguages`). The LocalRouter app keeps the
+// same list (apps/companion/src/app/settings.ts).
 const LANGUAGES = {
   af: 'Afrikaans', sq: 'Albanian', am: 'Amharic', ar: 'Arabic', hy: 'Armenian', as: 'Assamese', az: 'Azerbaijani',
   ba: 'Bashkir', eu: 'Basque', be: 'Belarusian', bn: 'Bengali', bs: 'Bosnian', br: 'Breton', bg: 'Bulgarian',
@@ -759,7 +760,19 @@ const LANGUAGES = {
   tr: 'Turkish', tk: 'Turkmen', uk: 'Ukrainian', ur: 'Urdu', uz: 'Uzbek', vi: 'Vietnamese', cy: 'Welsh',
   yi: 'Yiddish', yo: 'Yoruba',
 };
-const sttLanguage = v => (v === 'auto' || Object.hasOwn(LANGUAGES, v) ? v : 'en');
+// The transcription model's languages (the speech_to_text default, else the first), or null: it lists none (any).
+const heardLanguages = () => {
+  let all = [];
+  try { all = models; } catch { /* before the models are declared */ }
+  const t = all.filter(m => m.kind === 'transcription');
+  const m = t.find(x => (x.default_for || []).includes('speech_to_text')) || t[0];
+  return m && Array.isArray(m.languages) ? m.languages : null;
+};
+const sttLanguage = v => {
+  const heard = heardLanguages();
+  if (v === 'auto' || (heard ? heard.includes(v) : Object.hasOwn(LANGUAGES, v))) return v;
+  return !heard || heard.includes('en') ? 'en' : 'auto';
+};
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem('jarvis.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -1538,6 +1551,7 @@ async function loadModels() {
     models = (await r.json()).data || [];
   } catch (e) { note(`Could not reach the models: ${e.message}`, true); return; }
   cleanVoiceSettings();
+  if (heardLanguages()) { setLanguage(S.language, 'models'); fillLanguages(); }
   const chats = models.filter(m => m.kind === 'chat');
   fillSelect($('chatmodel'), [['', chats[0] ? `${short(chats[0])} (default)` : 'default'], ...chats.slice(1).map(m => [m.id, short(m)])], S.chatModel);
   renderVoiceName();
@@ -2002,7 +2016,7 @@ async function renderVoiceName() {
   if (!m) return;
   const vs = await loadVoices(id);
   const v = vs.list.find(x => x.id === (voiceOf(id) || vs.def));
-  const lang = S.language === 'en' ? '' : ` · ${S.language === 'auto' ? 'Auto-detect' : LANGUAGES[S.language]}`;
+  const lang = S.language === 'en' ? '' : ` · ${S.language === 'auto' ? 'Auto-detect' : LANGUAGES[S.language] || S.language}`;
   $('vmVoiceName').textContent = `${short(m).replace(/^Fish Audio /, '')} · ${v ? v.name : 'default'}${lang}`;
 }
 async function renderVoices() {
@@ -3549,9 +3563,15 @@ function setLanguage(v, from) {
   renderVoiceName();
   dbg('settings.language', { language: v, from });
 }
-$('lang').replaceChildren(...[['en', 'English'], ['auto', 'Auto-detect'],
-  ...Object.entries(LANGUAGES).filter(([c]) => c !== 'en').sort((a, b) => a[1].localeCompare(b[1], 'en'))]
-  .map(([value, text]) => Object.assign(document.createElement('option'), { value, textContent: text })));
+function fillLanguages() {
+  const heard = heardLanguages();
+  const names = heard ? heard.map(c => [c, LANGUAGES[c] || c]) : Object.entries(LANGUAGES);
+  $('lang').replaceChildren(...[...(!heard || heard.includes('en') ? [['en', 'English']] : []), ['auto', 'Auto-detect'],
+    ...names.filter(([c]) => c !== 'en').sort((a, b) => a[1].localeCompare(b[1], 'en'))]
+    .map(([value, text]) => Object.assign(document.createElement('option'), { value, textContent: text })));
+  $('lang').value = S.language;
+}
+fillLanguages();
 $('lang').addEventListener('change', () => setLanguage($('lang').value, 'page'));
 if (HOST && HOST.language) {
   HOST.language().then(v => setLanguage(v, 'host'), e => dbg('host.language', { error: e.message }));

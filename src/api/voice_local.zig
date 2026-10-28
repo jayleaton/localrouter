@@ -14,6 +14,8 @@ const jobs = @import("../sched/jobs.zig");
 const engine = @import("../engine/engine.zig");
 const audio = @import("../media/audio.zig");
 const backend = @import("../voice/backend.zig");
+const skill = @import("../voice/skill.zig");
+const memory = @import("../sched/memory.zig");
 const chat = @import("../voice/chat.zig");
 const resample = @import("../voice/resample.zig");
 const Stop = @import("../voice/stop.zig").Stop;
@@ -101,11 +103,30 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName, .model_skill = modelSkillOf };
 
 fn assistantName(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     const app = self(ptr).app;
     return app.assistant.name(app.io, a);
+}
+
+fn modelSkillOf(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    return modelSkill(self(ptr).app, a);
+}
+
+/// The model management procedure (`voice/skill.zig`) for this machine: each configured model's role, id and the
+/// memory it needs loaded (as list_models prices it), within the budget they share (`budget_bytes`, else the machine's
+/// memory less `reserve_bytes`); `you` is the voice's chat model when it runs here.
+pub fn modelSkill(app: *App, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+    var ref: routes.Refusal = .{};
+    const you: ?usize = if (app.cfg.voice.chat_url.len > 0) null else routes.resolve(app, named(app.cfg.voice.chat_model, ""), .chat_completion, &ref);
+    const members = try a.alloc(skill.Member, app.scheduler.slots.len);
+    for (app.scheduler.slots, members, 0..) |*slot, *m, i| {
+        const c = slot.tool.config();
+        m.* = .{ .kind = c.kind, .id = c.id, .bytes = app.scheduler.defaultNeeds(i).total(), .you = if (you) |y| y == i else false };
+    }
+    const budget = if (app.cfg.budget_bytes > 0) app.cfg.budget_bytes else (memory.total() orelse 0) -| app.cfg.reserve_bytes;
+    return skill.render(a, budget, members);
 }
 
 /// Client tool execution makes the session a harness's inference service: its device needs the inference scope.

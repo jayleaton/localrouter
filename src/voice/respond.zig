@@ -745,9 +745,7 @@ const builtin_tools =
     \\  "image": {"type": "string", "description": "the URL of another picture from an earlier result; omit for the last picture"}}, "required": ["prompt"]}}}]
 ;
 
-/// The model management procedure (`voice.manage_models`): appended to the instructions, with its tools offered.
-pub const model_skill = @import("skill.zig").model_skill;
-
+/// The model management tools (`voice.manage_models`), offered with the procedure (`skill.zig`) in the instructions.
 const manage_tools =
     \\[{"type": "function", "function": {"name": "list_models", "description": "This machine's models: state (ready, unloaded), needs_bytes, displaced (unloaded to make room, coming back), and memory.mem_available_bytes.", "parameters": {"type": "object", "properties": {}}}},
     \\ {"type": "function", "function": {"name": "reserve_for", "description": "Make room for a model before its job: dry_run true says what it would unload; false unloads that (never you), loads the model and holds it for its job. What it unloads comes back by itself after the job.", "parameters": {"type": "object", "properties": {"model": {"type": "string"}, "seconds": {"type": "integer"}, "dry_run": {"type": "boolean"}}, "required": ["model"]}}},
@@ -771,7 +769,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     var msgs: std.ArrayList(chat.Message) = .empty;
     const base = try @import("../assistant.zig").systemPrompt(a, ask.instructions orelse st.instructions, try s.backend.assistantName(a));
     const manage = s.voice.tools and s.voice.manage_models and st.tool_execution == .server;
-    const instructions = if (manage) try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ base, model_skill }) else base;
+    const instructions = if (manage) try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ base, try s.backend.modelSkill(a) }) else base;
     if (instructions.len > 0) try msgs.append(a, .{ .role = "system", .content = try a.dupe(u8, instructions) });
     try history(s, a, &msgs);
     trim(&msgs, s.voice.max_history_chars, if (instructions.len > 0) 1 else 0);

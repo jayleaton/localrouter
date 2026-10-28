@@ -1,7 +1,7 @@
 import type { Answers, Decider, Question } from '../../../desktop-helper/src/computer/decisions.ts'
 
 /**
- * The executor's decisions, asked of the chat model on the Spark as the box's `decide.Qwen` asks it (one completion,
+ * The executor's decisions, asked of the chat model on the Spark as the box's `decide.ChatDecider` asks it (one completion,
  * a strict JSON schema whose enums are the offered keys, a stated confidence: high 0.9, medium 0.6, low 0.3). The
  * answers are advice: each is checked against what was offered, and nothing here grants an action. `complete` sends an
  * OpenAI Chat Completions body and returns the assistant's content (the harness's Spark client supplies it).

@@ -140,7 +140,7 @@ It sends its API key field as the bearer token, so a device token allowed to app
 ## Replacing the decision provider
 
 `src/computer/decide.zig` defines `Provider.ask(state, questions) -> answers`, the System One shape: Choice questions
-over closed candidate sets and Noul (yes/no) questions, each answer with a probability. `decide.Qwen` implements it with
+over closed candidate sets and Noul (yes/no) questions, each answer with a probability. `decide.ChatDecider` implements it with
 the chat model. A Jev provider implements the same function against the open decision service (its `/v1/systemone`)
 and is set as `hub.provider` in `api/desktop.zig`; `Provider.ask` re-validates every answer against the offered keys
 whichever provider answers, and the policy, approvals and budgets do not change.

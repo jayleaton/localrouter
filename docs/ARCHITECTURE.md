@@ -147,8 +147,10 @@ the model: input decoding, response encodings, and the limits checked before a t
 - A cloned voice (`src/voices.zig`) is spoken with its own references: the daemon writes them to `voice.json` and
   sends `"voice_references": "voice.json"` beside the voice's name; the tool speaks them after any `references` and
   with nothing else (no voice of its own). A tool with `voice_clone` also encodes a voice: `"clone": "clone.json"`
-  (`{name, references: [{audio, text}]}`, prepared 44.1 kHz clips and their words, `input` empty) -> `voice.json`
-  (`{references: [{text, vq_codes, frames}]}`). The scheduler books such a job at the tool's `clone_working_bytes`
+  (`{name, references: [{audio, text}]}`, prepared clips and their words, `input` empty) -> `voice.json`
+  (`{references: [{text, vq_codes, frames}]}`). The clips are 44.1 kHz unless the tool's `clone_rate` says another
+  rate; `clone_codebooks` is the number of `vq_codes` rows the daemon expects (absent: any, the same for every
+  reference). The scheduler books such a job at the tool's `clone_working_bytes`
   (the encoder's measured peak; 8 GiB when the config gives none) beside the loaded model.
 - `speech.wav` is the only text to speech output. `/v1/audio/speech` returns it as `wav` or raw `pcm` (with
   `x-sample-rate`, `x-channels` and `x-sample-format: s16le` headers), or encodes `flac`, `mp3`, `opus` or `aac`.
@@ -161,7 +163,8 @@ the model: input decoding, response encodings, and the limits checked before a t
   model without a speed control), `max_input_chars` (at most 4096), `instructions` (a template with one `{s}`, such
   as Drama 3's `"[{s}] "`: the daemon writes a request's `instructions` into `input` with it, after leading white
   space and `<|...|>` tags, and checks `max_input_chars` on the result; absent: `instructions` are refused) and, for
-  transcription, `max_audio_s`. `/v1/models` and `list_models` show them.
+  transcription, `max_audio_s` and `languages` (the ISO-639-1 codes it hears; absent: any; a request's `language`
+  outside them is refused). `/v1/models` and `list_models` show them.
 - A reply may say why the audio ended and where long-form segments start: `{"ok":true,"files":["speech.wav"],
   "finish_reason":"length","segments":"2;220500"}`. `/v1/audio/speech` sends them as `x-finish-reason` and
   `x-long-form-segments` (printable ASCII only; anything else is dropped).
