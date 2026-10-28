@@ -42,9 +42,11 @@ fn pick(app: *App, model: ?[]const u8, why: *Refusal) ?usize {
     return routes.resolve(app, null, .typed_decision, why);
 }
 
-/// Queues `body` (a parsed System One request) for the decision model it names, on behalf of `owner`.
+/// Queues `body` (a parsed System One request) for the decision model it names, on behalf of `owner`. The model is
+/// written into a copy: a put on a shallow copy of the caller's map could move its entries out from under the caller,
+/// which reads the questions again afterwards (MCP `decide`).
 fn start(app: *App, a: std.mem.Allocator, body: Value, owner: []const u8, why: *Refusal) ?*jobs.Job {
-    var obj = body.object;
+    var obj = body.object.clone(a) catch return refuse(why, 500, "server_error", "out of memory");
     const model: ?[]const u8 = if (obj.get("model")) |m| (if (m == .string) m.string else null) else null;
     const tool = pick(app, model, why) orelse return null;
     obj.put(a, "model", .{ .string = app.scheduler.slots[tool].tool.config().id }) catch return refuse(why, 500, "server_error", "out of memory");

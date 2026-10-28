@@ -533,7 +533,8 @@ fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, ou
         for (try engine.capabilityList(a, c), 0..) |x, k| w.writer.print("{s}{s}", .{ if (k > 0) ", " else "", @tagName(x) }) catch return error.OutOfMemory;
         w.writer.writeByte(')') catch return error.OutOfMemory;
     }
-    return fail(a, out, "no model on this machine can do {s}: its models are {s}; an image model edits once its edit pack is installed (docs/dev/IMAGE-EDIT.md)", .{ @tagName(cap), if (w.written().len > 0) w.written() else "none" });
+    const hint = if (cap == .image_edit) "; an image model edits once its edit pack is installed (docs/dev/IMAGE-EDIT.md)" else "";
+    return fail(a, out, "no model on this machine can do {s}: its models are {s}{s}", .{ @tagName(cap), if (w.written().len > 0) w.written() else "none", hint });
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
