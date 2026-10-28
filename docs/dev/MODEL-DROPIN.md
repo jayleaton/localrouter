@@ -89,16 +89,17 @@ Model names that remain in `src/` belong to adapters (`src/engines/qwen_image*`,
 | 1 | high | Voice cloning tied to Fish's codec: exactly 10 `vq_codes` rows, 44.1 kHz clips. Any other `voice_clone` model failed every clone with "the model wrote no valid voice.json" | `clone_codebooks` (absent: any count, the same for every reference) and `clone_rate` (absent: 44.1 kHz; clips are resampled only when they differ). The Jarvis template sets `clone_codebooks: 10`, so Drama 3 keeps the strict check |
 | 2 | high | The voice loop's speech fallback chain named two models in code. Swapping the `text_to_speech` default left Kitten speaking calls on any box that still had Kitten configured | `voice.speech_models` defaults to empty: the `text_to_speech` default speaks alone. A box that wants a chain lists it (Jarvis and the live box already do) |
 | 3 | medium | The model-management prompt (`voice/model_skill.md`) gave the chat model a fixed roster: "Drama 3, the voice (21 GiB); Whisper, the ears (4 GiB) … 120 GiB". After a swap it planned memory with wrong names and sizes | a `{models}` line rendered from config at each request (`skill.render`): each model's role, id and needed memory (as `list_models` prices it), within `budget_bytes`, else the machine's memory less `reserve_bytes`. Served the same way at `/v1/skills/model-manager` |
-| 4 | medium | No way to declare a transcription model's languages: a model that hears only some got any code, and the UIs offered Whisper's list | `languages` option: listed in `/v1/models` and `list_models`, a `language` outside it is refused before load, and `/voice` narrows its picker |
+| 4 | medium | No way to declare a transcription model's languages: a model that hears only some got any code, and the UIs offered Whisper's list | `languages` option: listed in `/v1/models` and `list_models`, a `language` outside it is refused before load, and `/voice` and the companion read it from `/v1/models` (Whisper's list stays as their offline fallback; the mobile app sends no language, so the box's default applies) |
 | 5 | low | The MCP `synthesize_speech.instructions` description named Drama 3 | model-neutral wording (the only `tools/list` text change) |
 | 6 | low | `computer/decide.zig`'s provider was `Qwen` (named after a model, though it used the configured one) | `ChatDecider`, audit-log provider `"chat"` |
+| 7 | low | MCP's no-capable-model refusal pointed at the image edit pack for every capability (`image_to_video`, `typed_decision`, ...) | the hint only for `image_edit` |
+
+The conformance suite also found a latent bug. MCP `decide` with no `model` could fail with "state is required" after
+the decision had already run. `api/decide.zig` wrote the model into a shallow copy of the caller's map, and the put
+could move the entries out from under the caller. The model now goes into a clone.
 
 Left as they are, with the reason:
 
-- **The companion's language list** (`apps/companion/src/app/settings.ts`) is still Whisper's. The setting is chosen
-  before a call, on the Mac, where the box's model list isn't loaded. The daemon now refuses a language the model
-  doesn't declare, so a mismatch fails with a clear message rather than a wrong transcript. Narrowing it from
-  `/v1/models` is a companion follow-up.
 - **Prose hints** in MCP schemas ("about 1 megapixel is best", `fps` 24) are API-level guidance. Each model's real
   limits are refused by its engine's `check` and listed by its options.
 - **`budget.default_off`** (`chat_template_kwargs.enable_thinking`) is a default for the common open-model servers;

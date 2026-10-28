@@ -9,7 +9,9 @@
   management prompt names this box's models and what each needs, from the config, instead of a fixed roster. A
   transcription model may declare `languages`: listed, a language outside them refused, and `/voice` offers only
   those. The MCP `synthesize_speech` `instructions` description no longer names Drama 3; `tools/list` and
-  `/v1/models` are otherwise unchanged. `tests/dropin.zig` swaps a second model in for every kind.
+  `/v1/models` are otherwise unchanged. `tests/dropin.zig` swaps a second model in for every kind. The companion's
+  language picker offers the box's transcription languages (Whisper's list offline). MCP `decide` with no `model` no
+  longer fails with "state is required" after the decision ran (a put on a shallow copy of the request).
 
 - The image edit pack's `te/manifest.json` (and `edit.json`, which hashes it) is the same on every box: its vision config
   is the checkpoint's architecture fields only, not transformers' `to_dict()`, which carried the installed version
