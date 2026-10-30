@@ -452,8 +452,16 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
     uses it (else the last reply's rate) in place of the rate measured so far, when it is 1.05x or better; so a written
     reply starts with 200 ms in hand, on a session's first turn as on later ones. Before this, a reply still being written when its first audio came was held
     on its rate so far once `text_done` came (0.88 to 0.92x on DGX-01): 0.75 to 6 s.
-  - **The first session after a start warms speech** (`voice.warm_speech`, on by default): on its own thread, it speaks
-    one word ("Hello.") when it connects, the audio discarded. The speech model's first job after a load took 0.84 s to
+  - **A call is ready when it connects** (`voice.warm_speech`, on by default). A kept speech model speaks one word
+    ("Hello.", the audio discarded) in the voice a call uses on it (`voice.voice`, else its `default_voice`) each time
+    it loads, at start and when it comes back after making room. The scheduler records the voice each speech model's
+    loaded instance last spoke (`Scheduler.speechWarm`: one voice, since the Mac's Drama 3 server keeps one voice's
+    reference prefix and rebuilds it on a switch, 4 to 6 s to first audio on the M5 Ultra; a load, a clone or a
+    request's own references leave none). A session checks its voice against that at connect, after a voice change and
+    after `localrouter.voice.resumed`, speaks the word on its own thread when it is not warm, and sends
+    `localrouter.session.ready` once that and the chat prime are done (`docs/HARNESS.md`); `/voice` shows "Getting
+    ready" until then. A `session.update` primes the chat server again, so the prefix the first turn finds is the one
+    it sends. The speech model's first job after a load took 0.84 s to
     its first audio on DGX-01 (0.1 s warm), and a 2 s sentence 4.7 s in all; the engine speaks one request at a time, so
     a reply waits behind it, hence one word. Its rate is not kept (a first job's: 1.03x beside the chat prime, 1.45x
     warm; a second, warm sentence collided with the first turn). The first reply after a start measures the rate.
