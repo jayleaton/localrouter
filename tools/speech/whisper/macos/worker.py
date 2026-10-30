@@ -7,8 +7,8 @@ redirected to stderr), logs go to stderr.
   {"op":"generate","id","dir","request":{"transcription":{...}}}
                      -> {"progress":{...}}* then {"ok":true,"files":["transcript.json"],"seed","ms"} or {"ok":false,...}
   {"op":"exit"} or EOF                            -> release and exit 0
-SIGUSR1 during a generate ends it with {"ok":false,"type":"cancelled"} and the model stays loaded (the daemon's soft
-cancel, src/tool/process.zig); at any other time it is ignored. SIGKILL (the daemon's abort) is always safe.
+SIGUSR1 during a generate (from the command's arrival to its reply) ends it with {"ok":false,"type":"cancelled"} and
+the model stays loaded (the daemon's soft cancel, src/tool/process.zig); with no generate in hand it is ignored. SIGKILL (the daemon's abort) is always safe.
 The tool's config arrives as JSON in LOCALROUTER_TOOL: `weights` is the MLX model directory (config.json and
 weights.safetensors, fetch_model.py), `options` holds dtype (auto|float16|float32; auto is float16), threads (torch CPU
 threads for the gate), max_new_tokens, and the voice activity gate: vad ("silero", the default, or "off") and
@@ -77,6 +77,16 @@ def watch_parent():
 _pending = bytearray()
 
 
+def generate_waiting():
+    """A generate command the daemon has sent and this worker has not started: buffered, or unread on stdin."""
+    if b'"generate"' in _pending:
+        return True
+    try:
+        return bool(select.select([0], [], [], 0)[0])
+    except (OSError, ValueError):
+        return False
+
+
 def read_line():
     """The next stdin line, or None on EOF or when the daemon is gone (checked at least once a second)."""
     while True:
@@ -125,9 +135,10 @@ class Worker:
         self.model = self.vad = self.dtype = None
         self.weights = ""
         self.mode = None  # the gate of the loaded state: "silero" or "off"; None while not loaded
-        self.decoding = False  # a decode runs: SIGUSR1 cancels it
+        self.generating = False  # from a generate command until its reply is out: a SIGUSR1 then is for this job
+        self.decoding = False  # a decode runs: SIGUSR1 cancels it at once
         self.sending = False  # ...but not halfway through a protocol line: then it is held until the line is out
-        self.cancel_held = False
+        self.cancel_held = False  # a SIGUSR1 for this job that came before its decode (or mid-line): honoured next
 
     def ready(self):
         """Loaded, with the gate the options select: the only state generate runs in."""
@@ -173,6 +184,7 @@ class Worker:
 
     def generate(self, cmd):
         t = time.monotonic()
+        self.generating = True
         req = (cmd.get("request") or {}).get("transcription")
         if not isinstance(req, dict):
             raise mlx_core.InvalidRequest("this tool serves transcription requests only")
@@ -197,9 +209,10 @@ class Worker:
             if self.cancel_held:
                 raise Cancelled()
 
-        self.cancel_held = False
         self.decoding = True
         try:
+            if self.cancel_held:  # cancelled while the audio was read or the model loaded
+                raise Cancelled()
             result = mlx_core.transcribe(self.model, self.weights, self.dtype, samples, opts, progress=progress,
                                          debug=bool(cmd.get("debug")), vad=self.vad if self.mode == "silero" else None)
         finally:
@@ -251,12 +264,13 @@ def main():
     w = Worker(cfg)
 
     def on_cancel(signum, frame):
-        if not w.decoding:
-            return
-        if w.sending:
-            w.cancel_held = True
-        else:
+        # The daemon signals only a job it has sent: one being decoded is cancelled at once; one whose generate is
+        # still being read, checked or loaded for, or is waiting on stdin, at the start of its decode. A signal with
+        # no generate in hand (it raced a reply already sent) is ignored, so it can never cancel the next job.
+        if w.decoding and not w.sending:
             raise Cancelled()
+        if w.decoding or w.generating or generate_waiting():
+            w.cancel_held = True
     signal.signal(signal.SIGUSR1, on_cancel)
 
     while True:
@@ -288,6 +302,8 @@ def main():
         except Exception as e:  # keep serving: one failed job is not a dead worker
             log(f"{op} failed: {type(e).__name__}: {e}")
             send({"ok": False, "error": f"{op} failed: {type(e).__name__}: {e}", "type": "server_error"})
+        finally:
+            w.generating = w.cancel_held = False  # the reply is out: a later signal is not for this job
     w.release()
     return 0
 

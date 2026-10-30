@@ -16,7 +16,8 @@ group). Real weights: run it under the machine's model lock. The fixtures direct
              a fixed language, a prompt, greedy decode, a seeded temperature reproduces; progress lines in order
   memory     after each generate the footprint is back near the loaded one (the decode's buffers are returned)
   cancel     SIGUSR1 mid-decode replies "cancelled" within a second and the model stays loaded (the next generate
-             runs without a reload); SIGUSR1 when idle is ignored; SIGKILL of the process group mid-decode leaves no
+             runs without a reload); SIGUSR1 sent as the generate is written cancels that job; SIGUSR1 when idle is
+             ignored (the next job runs); SIGKILL of the process group mid-decode leaves no
              process; a worker started without its daemon (LOCALROUTER_PARENT) exits at once, and one whose daemon
              goes away mid-decode ends within two seconds (macOS has no parent-death signal)
   vad off    with debug: whisper_debug.json is valid JSON and its model_transcript equals transcript.json
@@ -282,6 +283,17 @@ def main():
     check("cancel: SIGUSR1 mid-decode replies cancelled within a second, nothing written",
           r.get("type") == "cancelled" and took < 1.0 and not os.path.exists(os.path.join(d, "transcript.json")),
           reply=r, seconds=round(took, 3), footprint=st["footprint"])
+    # the daemon's cancel can race the start of the job: SIGUSR1 right after the generate command is written, before
+    # the worker has read it or begun to decode, must still cancel that job (not be lost, nor cancel a later one)
+    d = job(long_wav)
+    w.send({"op": "generate", "id": "tr_early", "dir": d, "request": {"transcription": {"audio": "audio.wav"}}})
+    t = time.monotonic()
+    os.kill(w.p.pid, signal.SIGUSR1)
+    r = w.reply()
+    took = time.monotonic() - t
+    check("cancel: SIGUSR1 as the generate arrives cancels that job, before its decode",
+          r.get("type") == "cancelled" and took < 1.0 and not os.path.exists(os.path.join(d, "transcript.json")),
+          reply=r, seconds=round(took, 3))
     os.kill(w.p.pid, signal.SIGUSR1)
     time.sleep(0.2)
     t = time.monotonic()
