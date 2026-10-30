@@ -82,6 +82,9 @@ def fake_main(argv):
                 return self.reply(400, {"error": {"message": "'mode' must be \"edit\" or \"variation\""}})
             if p == "oom":
                 return self.reply(400, {"error": {"message": "this edit's working set (references + target) needs more GPU memory than is free"}})
+            if b.get("stream") is not True:  # MLX-Serve answers one JSON body: no progress, no prompt cancel
+                record({"unstreamed": p})
+                return self.reply(500, {"error": {"message": "the fake streams only"}})
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -231,7 +234,7 @@ class Sizes(unittest.TestCase):
 
 class Lifecycle(unittest.TestCase):
     def setUp(self):
-        self.env = Env()
+        self.env = Env({"warmup": True})
         self.w = Proc(self.env)
 
     def tearDown(self):
@@ -249,10 +252,12 @@ class Lifecycle(unittest.TestCase):
         self.assertIn("--skip-mem-preflight", argv)
         self.assertIn("--no-w8a8", argv)
 
+        warm = self.env.requests()
+        self.assertEqual([(q["prompt"], q["size"]) for q in warm], [("warm up", "256x256")])
         r, progress = self.w.gen(self.env, {"prompt": "a fox", "width": 1024, "height": 768, "n": 2, "seed": 7})
         self.assertEqual((r["ok"], r["files"], r["seed"]), (True, ["0.png", "1.png"], 7))
         self.assertEqual(progress[:2], [{"phase": "denoise", "step": 1, "of": 8}, {"phase": "denoise", "step": 2, "of": 8}])
-        reqs = self.env.requests()
+        reqs = self.env.requests()[1:]
         self.assertEqual([q["seed"] for q in reqs], [7, 8])
         self.assertEqual({(q["size"], q["steps"], q["transparent"], q["stream"]) for q in reqs}, {("1024x768", 8, True, True)})
         self.assertEqual(reqs[0]["keys"][-1], "prompt")  # MLX-Serve takes each field's first match: the prompt goes last
@@ -273,7 +278,7 @@ class Lifecycle(unittest.TestCase):
         self.w.reply()
         r, _ = self.w.gen(self.env, {"prompt": "x", "width": 512, "height": 512, "steps": 8, "seed": (1 << 64) - 1, "n": 2})
         self.assertTrue(r["ok"], r)
-        self.assertEqual([q["seed"] for q in self.env.requests()], [(1 << 64) - 1, 0])  # wraps as the Spark engine's u64
+        self.assertEqual([q["seed"] for q in self.env.requests()[1:]], [(1 << 64) - 1, 0])  # wraps as the Spark engine's u64
 
 
 class Refusals(unittest.TestCase):

@@ -305,7 +305,7 @@ class Worker:
             raise Refused(f"size {width}x{height}: an edit's sides must be multiples of 32 on this model (MLX-Serve)")
         keep = Keep(job, mask, inputs[0][1], width, height) if mask is not None else None
 
-        body = {"size": f"{width}x{height}", "steps": o.steps, "stream": True}
+        body = {"size": f"{width}x{height}", "steps": o.steps}
         if o.alpha:
             body["transparent"] = True
         if inputs:
@@ -357,7 +357,9 @@ class Worker:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=None)
         self.conn = conn
         try:
-            conn.request("POST", "/v1/images/generations", body=json.dumps(body), headers={"Content-Type": "application/json"})
+            # streamed: progress events, and a cancel MLX-Serve sees at its next step
+            conn.request("POST", "/v1/images/generations", body=json.dumps({"stream": True, **body}),
+                         headers={"Content-Type": "application/json"})
             r = conn.getresponse()
             if r.status != 200:
                 msg = server_message(r.read())
@@ -368,6 +370,8 @@ class Worker:
                 if r.status == 503:
                     raise Unavailable(msg)
                 raise RuntimeError(f"mlx-serve answered {r.status}: {msg}")
+            if not r.getheader("Content-Type", "").startswith("text/event-stream"):
+                return base64.b64decode(json.loads(r.read())["data"][0]["b64_json"])
             for raw in r:
                 line = raw.strip()
                 if not line.startswith(b"data:"):
