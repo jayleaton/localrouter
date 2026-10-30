@@ -306,9 +306,15 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
   answers in 1.9 s; through `/v1/chat/completions` 188 of 188 checks, the same replies as the baseline; decode 198 /
   153 / 127 / 105 tok/s (code; 2.5k / 9.5k / 31.2k prompts), TTFT 2.02 / 7.72 / 27.3 s, cached next turns 0.065 s
   (2.1k) and 0.105 s (9.7k); peak `phys_footprint` 26.0 GiB. The daemon adds nothing measurable. After SIGTERM the
-  model server was gone, but the daemon itself did not exit within 15 s and was killed: on macOS, `shutdown()` of the
-  listening socket does not wake a blocked `accept()` (reproduced with no tools configured; one connection to the
-  port after the signal lets it exit 0 in 0.5 s). That fix belongs to the daemon (MAC-PORT.md), not to chat.
+  model server was gone, but that run's daemon did not exit within 15 s and was killed: on macOS, `shutdown()` of the
+  listening socket does not wake a blocked `accept()`. The daemon now connects to itself on macOS instead
+  (`feat/mac-foundation` 64bcb59, checked by `tests/orphans.zig`); the chat daemon run has not been repeated with it.
+- **A smaller prompt cache.** `setup-macos.sh ROOT --prompt-cache-gib 1` writes the same tool with `--prompt-cache-gib
+  1` and `resident_bytes` **27 GiB** (28,991,029,248), for a Mac that keeps chat, Drama 3 and Whisper warm together
+  while image and decisions load on demand. 27 GiB is an **estimate**, not a measurement: the 4 GiB configuration
+  peaked at 25.6 GiB with at most 4 GiB of cache. A 30k-token conversation needs about 2 GiB of cache (above), so 1
+  GiB keeps short and mid-length conversations warm but not a long one, whose next turn may be prefilled again. The
+  default stays 4 GiB / 30 GiB until `bench_macos.py serve` measures the 1 GiB footprint and cached-turn latency.
 
 ## Licences
 
