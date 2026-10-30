@@ -64,7 +64,7 @@ unchanged; the Mac has its own beside them.
 | `setup-macos.sh ROOT [--hf DIR]` | `--version`, `capabilities --json` (must list only the `metal` backend and every serve flag of the config), `models` and `info` offline, `lib/libtfgrammar.dylib`; writes and prints `ROOT/config.json` |
 | `config.macos.example.json` | the Mac tool config: no `qualification` marker (that gate is the GB10's), `resident_bytes` 30 GiB from this Mac's measurement (docs/dev/CHAT.md) |
 | `baseline-macos.json` | the Mac reference baseline: this Mac's greedy replies to prompts.json on 1.1.4, which every `bench_macos.py` run on 1.1.4 must equal (Metal is not CUDA arithmetic; see docs/dev/CHAT.md) |
-| `bench_macos.py serve\|port` | the Mac measurement and qualification: load time, footprint (rusage lifetime maximum and `footprint`), prompts.json's checks, speed with and without the drafter, cached follow-ups; `port` runs the same suite through the LocalRouter daemon |
+| `bench_macos.py serve\|daemon\|port` | the Mac measurement and qualification: load time, footprint (rusage lifetime maximum and `footprint`), prompts.json's checks against `baseline-macos.json`, speed with and without the drafter, cached follow-ups; `daemon` runs the same suite through `localrouter serve` (plus MCP `load_model` and `chat`), `port` against any running endpoint |
 
 The `.sha256.sig` is pinned by hash only: no key that verifies it is published at the pinned commit (see the notes in
 `pins-macos.json`). The archive's sha256 and its `SHA256SUMS` are the trust inputs, as on Linux.
@@ -77,6 +77,7 @@ python3 -I tools/chat/qwen38-27b/bench_macos.py serve --config ~/.local/share/lo
   --out /tmp/qwen-mac-drafter
 python3 -I tools/chat/qwen38-27b/bench_macos.py serve --config ~/.local/share/localrouter/chat/config.json \
   --out /tmp/qwen-mac-plain --no-drafter
-# through the daemon, once it serves the tool on PORT
-python3 -I tools/chat/qwen38-27b/bench_macos.py port --port PORT --model qwen3.8-27b --out /tmp/qwen-mac-daemon
+# through LocalRouter (stop any running daemon that holds the tool first)
+python3 -I tools/chat/qwen38-27b/bench_macos.py daemon --bin zig-out/bin/localrouter \
+  --config ~/.local/share/localrouter/chat/config.json --out /tmp/qwen-mac-daemon
 ```
