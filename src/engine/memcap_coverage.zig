@@ -38,7 +38,11 @@ test "coverage: nothing in LocalRouter opens a driver or allocates GPU memory ex
     var hits: std.ArrayList(u8) = .empty;
     defer hits.deinit(gpa);
     // run from the build root (zig build test): a missing tree fails the test rather than passing it
-    const n_src = try scanTree(io, gpa, "src", &.{ "engines/qwen_image/memcap.zig", "engine/memcap_coverage.zig" }, &guarded, &hits);
+    // Not compiled into this binary: the Kandinsky-6 video VAE qualification harness (built alone by its own
+    // build.zig) and the DiT weights module (its own test module; the engine does not import it yet). Its raw calls
+    // go through the driver table its caller passes, so wiring it in takes a driver from memcap.open.
+    const outside = [_][]const u8{ "engines/kandinsky6/video_vae/qual.zig", "engines/kandinsky6/dit_weights.zig" };
+    const n_src = try scanTree(io, gpa, "src", &([_][]const u8{ "engines/qwen_image/memcap.zig", "engine/memcap_coverage.zig" } ++ outside), &guarded, &hits);
     const n_k = try scanTree(io, gpa, "kernels", &.{}, &guarded, &hits);
     if (hits.items.len > 0) std.debug.print("unguarded allocation paths:\n{s}", .{hits.items});
     try std.testing.expect(n_src > 50 and n_k > 0);

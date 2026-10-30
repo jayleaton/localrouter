@@ -433,8 +433,14 @@ fn runCase(a: std.mem.Allocator, io: Io, gpu: ?*Gpu, simr: *launch.Sim, l: launc
         const plan = try tiles.decodePlan(@intCast(z.shape[0]), @intCast(z.shape[1]), @intCast(z.shape[2]), policy);
         const g = plan.grid;
         const t = plan.tiling;
-        try info.print("\"latent_dtype\": \"{s}\", \"policy\": \"{s}\", \"plan\": {{\"tile_size\": [1, {d}, {d}, {d}], \"tile_stride\": [{d}, {d}, {d}], \"temporal_tiles\": {d}, \"spatial_tiles\": {d}, \"tiled\": {}}}", .{ @tagName(dtype), @tagName(policy), t.ft, t.ht, t.wt, t.fs, t.hs, t.ws, plan.tileCount(), g.count(), g.tiled() });
-        const rgb_bytes: u64 = @as(u64, plan.sampleFramesTotal()) * g.sample_h * g.sample_w * 3;
+        const free_bytes: ?u64 = switch (policy) {
+            .unbounded => null,
+            .free_bytes => |n| n,
+        };
+        const nom = plan.nominal();
+        const emi = plan.emitted();
+        try info.print("\"latent_dtype\": \"{s}\", \"policy\": \"{s}\", \"free_bytes\": {?d}, \"plan\": {{\"tile_size\": [1, {d}, {d}, {d}], \"tile_stride\": [{d}, {d}, {d}], \"temporal_tiles\": {d}, \"spatial_tiles\": {d}, \"grid\": [{d}, {d}], \"passes\": {d}, \"tiled\": {}, \"nominal\": [{d}, {d}, {d}], \"emitted\": [{d}, {d}, {d}]}}", .{ @tagName(dtype), @tagName(policy), free_bytes, t.ft, t.ht, t.wt, t.fs, t.hs, t.ws, plan.tileCount(), g.count(), g.rows, g.cols, plan.passes(), g.tiled(), nom.frames, nom.height, nom.width, emi.frames, emi.height, emi.width });
+        const rgb_bytes: u64 = emi.rgbBytes();
         const lat_at: u64 = 0;
         const rgb_at = std.mem.alignForward(u64, z.bytes.len, 256);
         const scratch_at = std.mem.alignForward(u64, rgb_at + rgb_bytes, 256);
@@ -444,11 +450,14 @@ fn runCase(a: std.mem.Allocator, io: Io, gpu: ?*Gpu, simr: *launch.Sim, l: launc
         simr.region(buf.base, buf.len, "case");
         rec.begin(case, &.{ &buf, wbuf });
         try buf.upload(lat_at, z.bytes);
-        try decode.decode(l, dec, plan, .{ .latent = buf.base + lat_at, .latent_dtype = dtype, .rgb = buf.base + rgb_at, .scratch = buf.base + scratch_at, .scratch_bytes = scratch });
+        // the decode is the production decode: the qualified policies (the encoder keeps the component's own orders)
+        var dl = l;
+        launch.qualified.apply(&dl);
+        try decode.decode(dl, dec, plan, .{ .latent = buf.base + lat_at, .latent_dtype = dtype, .rgb = buf.base + rgb_at, .scratch = buf.base + scratch_at, .scratch_bytes = scratch });
         if (gpu) |gg| try gg.stream.synchronize();
         const rgb = try a.alloc(u8, rgb_bytes);
         try buf.download(rgb_at, rgb);
-        try rec.put("decode.rgb", "u8", &.{ plan.sampleFramesTotal(), g.sample_h, g.sample_w, 3 }, rgb);
+        try rec.put("decode.rgb", "u8", &.{ emi.frames, emi.height, emi.width, 3 }, rgb);
         return buf.len;
     }
     const img = try loadInput(a, io, inputs, index, try std.fmt.allocPrint(a, "{s}.image", .{case}));

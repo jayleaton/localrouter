@@ -1,0 +1,3 @@
+# Vendored third-party sources stay byte-identical to upstream (pinned by each vendor/SHA256SUMS):
+# exempt them from whitespace checks.
+kernels/cuda/kandinsky6/*/vendor/** -whitespace

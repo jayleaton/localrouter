@@ -21,6 +21,37 @@
 
 #include "frag.cuh"
 
+// The pinned upstream masked BF16 SDPA selects this 64x128 efficient-attention specialization.
+// Existing header provenance/licenses: ../text/vendor/README.md. No Torch runtime/library calls.
+#include <cuda/std/bit>
+#include <ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h>
+using K6MaskedAttention = PyTorchMemEffAttention::AttentionKernel<
+    cutlass::bfloat16_t, cutlass::arch::Sm80, true, 64, 128, 128, true, true>;
+static_assert(K6MaskedAttention::kNumThreads == 256);
+static_assert(sizeof(K6MaskedAttention::SharedStorage) == 52224);
+struct K6MaskedZeroParams {
+    alignas(K6MaskedAttention::Params) unsigned char bytes[sizeof(K6MaskedAttention::Params)];
+};
+extern "C" __global__ void k6_attention_padding_bias(const uint8_t* mask, uint16_t* bias, int keys) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < keys) bias[i] = mask[i] ? 0 : 0xff80;
+}
+extern "C" __global__ void __launch_bounds__(K6MaskedAttention::kNumThreads, K6MaskedAttention::kMinBlocksPerSm)
+k6_attention_sdpa(const cutlass::bfloat16_t* q, const cutlass::bfloat16_t* k,
+                  const cutlass::bfloat16_t* v, cutlass::bfloat16_t* out,
+                  const cutlass::bfloat16_t* bias, int queries, int keys,
+                  long long ldq, long long ldk, long long ldv, long long ldo, float scale) {
+    K6MaskedAttention::Params p = cuda::std::bit_cast<K6MaskedAttention::Params>(K6MaskedZeroParams{});
+    p.query_ptr = q; p.key_ptr = k; p.value_ptr = v; p.output_ptr = out; p.attn_bias_ptr = bias;
+    p.scale = scale; p.head_dim = p.head_dim_value = 128;
+    p.num_queries = queries; p.num_keys = p.num_keys_absolute = keys;
+    p.q_strideM = ldq; p.k_strideM = ldk; p.v_strideM = ldv; p.o_strideM = ldo;
+    p.q_strideH = p.k_strideH = p.v_strideH = 128;
+    p.q_strideB = queries * ldq; p.k_strideB = keys * ldk; p.v_strideB = keys * ldv;
+    p.bias_strideM = 0; p.num_batches = 1; p.num_heads = gridDim.y; p.q_heads_per_kv = 1;
+    if (p.advance_to_block()) K6MaskedAttention::attention_kernel(p);
+}
+
 namespace k6_attn {
 
 using k6_frag::commit;

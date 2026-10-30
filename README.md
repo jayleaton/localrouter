@@ -176,7 +176,7 @@ The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an age
 | `tools[].qualification` | none | a file the model's qualify script writes on this machine. Until it exists and says `"qualified": true` the model is listed (`"qualified": false` in `/v1/models`) and refused with a 503 saying it is not GPU-qualified on this host |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
 | `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq`, `qwen_inv_freq` and `audio` are required; the exact `audio` values are in `kernels/cuda/kandinsky6/audio/QUALIFICATION.md`), `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
 | `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; `max_pixels`, the largest width x height, which sizes the image engines' scratch (about 4.6 KiB a pixel on GB10 FP8); default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
@@ -221,6 +221,8 @@ LocalRouter stands on the work of these projects and teams:
 - **OpenAI**: [Whisper](https://github.com/openai/whisper) large-v3-turbo, for speech to text.
 - [**Silero VAD**](https://github.com/snakers4/silero-vad): voice activity detection.
 - **MiniMax**: MiniMax H3, video with audio.
+- **Kandinsky Lab**: Kandinsky-6 Pro distilled, video with coupled audio (built in; it refuses to load until its GPU
+  qualification passes).
 - **NVIDIA**: the DGX Spark (GB10) and the NGC PyTorch container the packs are built in. The INT8 attention kernels
   are SageAttention's, as shipped in NVIDIA's comfy-kitchen.
 
@@ -236,6 +238,7 @@ using a model (a summary, not legal advice; the licence text is what binds):
 | Kitten TTS 2 (optional speech tool) | [Stellon Labs Community License](https://huggingface.co/KittenML/kitten-tts-2/blob/f2eee74f4467855ad58fe16f1fb7b7df473263fd/LICENSE.md) | research, non-commercial; commercial after registering with Stellon Labs, until USD 1,000,000 annual revenue or total funding | outputs may not train another model. "Powered by Stellon Labs" ([details](docs/dev/KITTEN-TTS2.md#licences)) |
 | Qwen-Image 2.1 and 2.1 Turbo (images) | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
 | MiniMax H3 (video) | [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) | outside the excluded territories, under its Acceptable Use Policy; commercial included, over USD 20 million yearly revenue with MiniMax's written authorization | the model and its outputs are not licensed in the US, EU, UK or South Korea. Content published to the public must be disclosed as machine-generated; a commercial product shows "MiniMax H3" in its interface |
+| Kandinsky-6 Pro distilled (video; not yet available) | [MIT](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers) | any, commercial included | |
 
 `GET /v1/models` lists each model's licence as `license` (from the tool's config, else its engine's), and
 `GET /v1/capabilities` lists them all. LocalRouter informs; it does not enforce any of these terms, and installing

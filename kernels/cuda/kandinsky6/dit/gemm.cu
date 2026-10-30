@@ -35,6 +35,37 @@
 #include <stdint.h>
 
 #include "frag.cuh"
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/epilogue/thread/linear_combination.h>
+
+// VisualEmbeddings: the captured aligned-2 BF16 K32/three-stage reduction,
+// replayed exactly over all 50,220 rows before integration. The caller owns
+// the CUDA context, stream, buffers and dynamic shared memory.
+using VisualBF = cutlass::bfloat16_t;
+using VisualGemm = cutlass::gemm::device::Gemm<
+    VisualBF, cutlass::layout::RowMajor, VisualBF, cutlass::layout::ColumnMajor,
+    VisualBF, cutlass::layout::RowMajor, float, cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80, cutlass::gemm::GemmShape<256, 128, 32>,
+    cutlass::gemm::GemmShape<64, 64, 32>, cutlass::gemm::GemmShape<16, 8, 16>,
+    cutlass::epilogue::thread::LinearCombination<VisualBF, 2, float, float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, 3, 2, 2>;
+using VisualKernel = VisualGemm::GemmKernel;
+static_assert(VisualKernel::kThreadCount == 256);
+static_assert(sizeof(VisualKernel::SharedStorage) == 73728);
+extern "C" __global__ void __launch_bounds__(VisualKernel::kThreadCount)
+k6_visual_gemm_bf16(const VisualBF* x, const VisualBF* w, const VisualBF* bias,
+                    VisualBF* out, int m, int n, int k,
+                    long long lda, long long ldb, long long ldc) {
+    extern __shared__ char shared[];
+    VisualKernel::Params p({m, n, k}, {(m + 255) / 256, (n + 127) / 128, 1},
+        {const_cast<VisualBF*>(x), lda}, {const_cast<VisualBF*>(w), ldb},
+        {const_cast<VisualBF*>(bias), 0}, {out, ldc}, {1.0f, 1.0f});
+    p.gather_A_indices = nullptr;
+    p.gather_B_indices = nullptr;
+    p.scatter_D_indices = nullptr;
+    VisualKernel kernel;
+    kernel(p, *reinterpret_cast<VisualKernel::SharedStorage*>(shared));
+}
 
 namespace k6_gemm {
 
@@ -188,6 +219,40 @@ extern "C" __global__ void __launch_bounds__(256) k6_gemv_f32(const void* __rest
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, n = blockIdx.x * 8 + warp;
     if (n >= N) return;
     const __nv_bfloat16* w = W + (long long)n * K;
+    // SM121's FP32 modulation GEMV accumulates each 512-element tile in 16 lanes,
+    // adds tile partials, then reduces lanes serially. The captured 24576x1024
+    // first text modulation matches this order in FP32 and after the BF16 cast.
+    // Keep the FP32-input time MLP path separate; whole DiT qualification is pending.
+    if (in_bf16 && silu) {
+        __shared__ float partial[8][16];
+        for (int m = 0; m < M; ++m) {
+            if (lane < 16) {
+                float total = 0.0f;
+                for (int base = 0; base < K; base += 512) {
+                    float acc = 0.0f;
+                    for (int k = base + lane; k < K && k < base + 512; k += 16) {
+                        const float a = k6_gemm::silu(__bfloat162float(
+                            static_cast<const __nv_bfloat16*>(A)[(long long)m * lda + k]));
+                        acc = __fmaf_rn(a, __bfloat162float(w[k]), acc);
+                    }
+                    total = __fadd_rn(total, acc);
+                }
+                partial[warp][lane] = total;
+            }
+            __syncwarp();
+            if (lane == 0) {
+                float v = partial[warp][0];
+                for (int j = 1; j < 16; ++j) v = __fadd_rn(v, partial[warp][j]);
+                if (bias) v = __fadd_rn(v, __bfloat162float(bias[n]));
+                if (out_bf16)
+                    static_cast<__nv_bfloat16*>(C)[(long long)m * ldc + n] = __float2bfloat16_rn(v);
+                else
+                    static_cast<float*>(C)[(long long)m * ldc + n] = v;
+            }
+            __syncwarp();
+        }
+        return;
+    }
     for (int m = 0; m < M; ++m) {
         float acc = 0.0f;
         for (int k = lane; k < K; k += 32) {

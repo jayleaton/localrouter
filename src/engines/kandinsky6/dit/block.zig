@@ -30,6 +30,8 @@ pub const Error = launch.Error || error{ UnsupportedShape, MissingWeight, NoSpac
 pub const Hook = struct {
     ctx: *anyopaque,
     op: *const fn (ctx: *anyopaque, name: []const u8, out: View) anyerror!void,
+    trace_attention: bool = false,
+    trace_visual_attention: bool = false,
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -106,6 +108,7 @@ pub fn bindWeights(c: Config, lookup: anytype, text_blocks: []TextBlock, blocks:
                 .b = if (bias) try t(l, fmt ++ ".bias", args, 1, out) else null,
             };
         }
+
         fn attn(l: anytype, comptime fmt: []const u8, args: anytype, q: u64, kv: u64) Error!Attn {
             return .{
                 .q = try lin(l, fmt ++ ".to_query", args, q, q, true),
@@ -219,6 +222,8 @@ pub const Plan = struct {
     t_h: u64, // [1, T] f32
     t_emb: u64, // [1, T] bf16
     pooled: u64, // [1, T] bf16
+    flash_lse: u64, // [32, 50220] fp32, reused by Flash LSE and AV split-KV accumulation
+    attention_bias: u64, // [L] bf16 broadcast key-padding bias, reused on the caller's stream
     head: u64, // [max(N, A), max(640, 400)] bf16
     total: u64,
 
@@ -266,6 +271,8 @@ pub const Plan = struct {
         p.t_h = put(&at, T * 4);
         p.t_emb = put(&at, T * 2);
         p.pooled = put(&at, T * 2);
+        p.flash_lse = put(&at, 32 * 50220 * 4);
+        p.attention_bias = put(&at, L * 2);
         p.head = put(&at, @max(N, A) * @max(4 * c.out_visual_dim, c.out_audio_dim) * 2);
         p.total = at;
         return p;
@@ -345,7 +352,15 @@ pub const Dit = struct {
 
     /// One attention module: q from `xq`, k / v from `xkv` (the same view for self-attention), per-head RMSNorm, the
     /// optional ropes, streaming attention, out_layer into b.o. b.q / b.a are [Rq, dq]; b.k / b.v at least [Rkv, dq].
-    fn attn(x: *const Dit, m: Attn, xq: View, xkv: View, rope_q: ?View, rope_k: ?View, mask: attention.Mask, b: Bufs) Error!void {
+    fn attentionTrace(x: *const Dit, comptime name: []const u8, prefix: []const u8, value: View) Error!void {
+        try x.emit("{s}" ++ name, .{prefix}, value);
+    }
+
+    fn attn(x: *const Dit, m: Attn, xq: View, xkv: View, rope_q: ?View, rope_k: ?View, mask: attention.Mask, b: Bufs, trace: ?[]const u8) Error!void {
+        if (trace) |prefix| {
+            try x.attentionTrace("input", prefix, xq);
+            if (std.mem.eql(u8, prefix, "va_attention_trace.") or std.mem.eql(u8, prefix, "av_attention_trace.")) try x.attentionTrace("input_kv", prefix, xkv);
+        }
         const dq = m.q.w.rows;
         const q = b.q.columns(0, dq).slice(0, xq.rows);
         const k = View.of(b.k.ptr, .bf16, xkv.rows, dq);
@@ -354,9 +369,19 @@ pub const Dit = struct {
         try x.linear(m.q, xq, q);
         try x.linear(m.k, xkv, k);
         try x.linear(m.v, xkv, v);
+        if (trace) |prefix| {
+            try x.attentionTrace("q", prefix, q);
+            try x.attentionTrace("k", prefix, k);
+            try x.attentionTrace("v", prefix, v);
+        }
         try x.k.qkNormRope(x.s, q, m.qn, rope_q, m.heads);
         try x.k.qkNormRope(x.s, k, m.kn, rope_k, m.heads);
-        try x.k.attend(x.s, .{ .q = q, .k = k, .v = v, .out = a, .heads = m.heads, .mask = mask });
+        if (trace) |prefix| {
+            try x.attentionTrace("q_rotary", prefix, q);
+            try x.attentionTrace("k_rotary", prefix, k);
+        }
+        try x.k.attend(x.s, .{ .q = q, .k = k, .v = v, .out = a, .heads = m.heads, .mask = mask }, x.buf(x.p.attention_bias, 1, x.p.sh.text, .bf16), x.buf(x.p.flash_lse, 32, 50220, .f32));
+        if (trace) |prefix| try x.attentionTrace("sdpa", prefix, a);
         try x.linear(m.o, a, b.o.columns(0, dq).slice(0, xq.rows));
     }
 
@@ -392,7 +417,7 @@ pub const Dit = struct {
         try x.modulation(b.mod, tm, mod);
         try x.emit(prefix ++ "_text_transformer_blocks.{d}.text_modulation", .{i}, mod);
         try x.k.normMod(x.s, te, mod.columns(Mod.enc(md, 0, 1), md), mod.columns(Mod.enc(md, 0, 0), md), bufs.n);
-        try x.attn(b.attn, bufs.n, bufs.n, rope, rope, mask, bufs);
+        try x.attn(b.attn, bufs.n, bufs.n, rope, rope, mask, bufs, if (x.hook) |h| (if (h.trace_attention) (if (b.attn.heads == 16) "audio_attention_trace." else "video_attention_trace.") else null) else null);
         try x.emit(prefix ++ "_text_transformer_blocks.{d}.attn", .{i}, bufs.o);
         try x.k.gateSum(x.s, te, bufs.o, mod.columns(Mod.enc(md, 0, 2), md));
         try x.k.normMod(x.s, te, mod.columns(Mod.enc(md, 1, 1), md), mod.columns(Mod.enc(md, 1, 0), md), bufs.n);
@@ -440,25 +465,25 @@ pub const Dit = struct {
         try x.modulation(b.video.mod, io.tm_v, vm);
         try x.emit(p ++ "video_dec_block.visual_modulation", .{i}, vm);
         try x.k.normMod(x.s, io.vis, vm.columns(Mod.dec(D, 0, 1), D), vm.columns(Mod.dec(D, 0, 0), D), vb.n);
-        try x.attn(b.video.sa, vb.n, vb.n, io.vis_rope, io.vis_rope, .none, vb);
+        try x.attn(b.video.sa, vb.n, vb.n, io.vis_rope, io.vis_rope, .none, vb, if (x.hook) |h| (if (h.trace_visual_attention and i == 0) "video_attention_trace." else null) else null);
         try x.emit(p ++ "video_dec_block.self_attention", .{i}, vb.o);
         try x.k.gateSum(x.s, io.vis, vb.o, vm.columns(Mod.dec(D, 0, 2), D));
         try x.emit(p ++ "video_dec_block.self_attention_residual", .{i}, io.vis);
         try x.k.normMod(x.s, io.vis, vm.columns(Mod.dec(D, 1, 1), D), vm.columns(Mod.dec(D, 1, 0), D), vpre);
         try x.emit(p ++ "video_dec_block.pre_ca", .{i}, vpre);
-        try x.attn(b.video.ca, vpre, io.text_v, null, null, io.mask, .{ .n = vb.n, .q = vb.q, .k = vb.k, .v = vb.v, .a = vb.a, .o = vct });
+        try x.attn(b.video.ca, vpre, io.text_v, null, null, io.mask, .{ .n = vb.n, .q = vb.q, .k = vb.k, .v = vb.v, .a = vb.a, .o = vct }, null);
         try x.emit(p ++ "video_dec_block.cross_attention", .{i}, vct);
 
         // ---- audio backbone: self-attention, text cross-attention added at once
         try x.modulation(b.audio.mod, io.tm_a, am);
         try x.emit(p ++ "audio_dec_block.visual_modulation", .{i}, am);
         try x.k.normMod(x.s, io.aud, am.columns(Mod.dec(Da, 0, 1), Da), am.columns(Mod.dec(Da, 0, 0), Da), ab.n);
-        try x.attn(b.audio.sa, ab.n, ab.n, io.aud_rope, io.aud_rope, .none, ab);
+        try x.attn(b.audio.sa, ab.n, ab.n, io.aud_rope, io.aud_rope, .none, ab, if (x.hook) |h| (if (h.trace_visual_attention and i == 0) "audio_attention_trace." else null) else null);
         try x.emit(p ++ "audio_dec_block.self_attention", .{i}, ab.o);
         try x.k.gateSum(x.s, io.aud, ab.o, am.columns(Mod.dec(Da, 0, 2), Da));
         try x.k.normMod(x.s, io.aud, am.columns(Mod.dec(Da, 1, 1), Da), am.columns(Mod.dec(Da, 1, 0), Da), apre);
         try x.emit(p ++ "audio_dec_block.pre_ca", .{i}, apre);
-        try x.attn(b.audio.ca, apre, io.text_a, null, null, io.mask, ab);
+        try x.attn(b.audio.ca, apre, io.text_a, null, null, io.mask, ab, null);
         try x.emit(p ++ "audio_dec_block.cross_attention", .{i}, ab.o);
         try x.k.gateSum(x.s, io.aud, ab.o, am.columns(Mod.dec(Da, 1, 2), Da));
 
@@ -478,11 +503,11 @@ pub const Dit = struct {
         try x.k.normMod(x.s, io.vis, vam.columns(va_scale[0], va_scale[1]), vam.columns(va_shift[0], va_shift[1]), vb.n);
         try x.k.normMod(x.s, io.aud, avm.columns(av_scale[0], av_scale[1]), avm.columns(av_shift[0], av_shift[1]), ab.n);
         // V <- A: queries vis_for_va (visual rope), keys / values aud_pre_ca (audio rope); 32 heads of the video width
-        try x.attn(b.va, vb.n, apre, io.vis_rope, io.aud_rope, .none, vb);
+        try x.attn(b.va, vb.n, apre, io.vis_rope, io.aud_rope, .none, vb, if (x.hook) |h| (if (h.trace_visual_attention and i == 0) "va_attention_trace." else null) else null);
         try x.emit(p ++ "va_cross_attention", .{i}, vb.o);
         // A <- V: queries aud_for_av (audio rope), keys / values vis_pre_ca (visual rope); 16 heads of the audio width.
         // Its key / value projections [N, Da] use the video stream's k / v buffers.
-        try x.attn(b.av, ab.n, vpre, io.aud_rope, io.vis_rope, .none, .{ .n = ab.n, .q = ab.q, .k = vb.k, .v = vb.v, .a = ab.a, .o = ab.o });
+        try x.attn(b.av, ab.n, vpre, io.aud_rope, io.vis_rope, .none, .{ .n = ab.n, .q = ab.q, .k = vb.k, .v = vb.v, .a = ab.a, .o = ab.o }, if (x.hook) |h| (if (h.trace_visual_attention and i == 0) "av_attention_trace." else null) else null);
         try x.emit(p ++ "av_cross_attention", .{i}, ab.o);
         try x.k.gateSum(x.s, io.vis, vb.o, avm.columns(av_gate[0], av_gate[1]));
         try x.k.gateSum(x.s, io.aud, ab.o, vam.columns(va_gate[0], va_gate[1]));
@@ -564,7 +589,7 @@ pub const Dit = struct {
         const aud = x.buf(x.p.aud, A, Da, .bf16);
         const prow = x.buf(x.p.rows_in, N, c.patchIn(), .bf16);
         try x.k.patchify(x.s, in.x_video, prow, sh, c.visualIn());
-        try x.linear(x.w.visual_in, prow, vis);
+        try x.k.visualGemm(x.s, prow, x.w.visual_in.w, x.w.visual_in.b orelse return error.Invalid, vis);
         try x.emit("visual_embeddings", .{}, vis);
         const ain = x.buf(x.p.audio_in, A, c.in_audio_dim, .bf16);
         const audio_in = switch (in.x_audio.dtype) {
@@ -601,12 +626,20 @@ pub const Dit = struct {
         try x.k.unpatchify(x.s, head_v, out.video, sh, c.out_visual_dim, c.n_grid);
         // OutLayerAudio: modulation, norm_mod, the second (non-affine) LayerNorm on bf16, out_layer, grid split
         const am = x.buf(x.p.mod2, 1, 2 * Da, .bf16);
+        try x.emit("audio_out_layer.time", .{}, tm_a);
         try x.modulation(x.w.audio_out_mod, tm_a, am);
+        try x.emit("audio_out_layer.modulation", .{}, am);
         const an = x.buf(x.p.a[0], A, Da, .bf16);
         try x.k.normMod(x.s, aud, am.columns(Mod.out(Da, 1), Da), am.columns(Mod.out(Da, 0), Da), an);
+        try x.emit("audio_out_layer.norm_mod", .{}, an);
         try x.k.layerNorm(x.s, an, null, null, an);
+        try x.emit("audio_out_layer.norm", .{}, an);
         const head_a = x.buf(x.p.head, A, c.out_audio_dim, .bf16);
-        try x.linear(x.w.audio_out, an, head_a);
+        if (A == 218 and Da == 2048 and c.out_audio_dim == 400) {
+            try x.k.audioHead(x.s, an, x.w.audio_out.w, x.w.audio_out.b orelse return error.Invalid, head_a, x.base + x.p.flash_lse);
+        } else {
+            try x.linear(x.w.audio_out, an, head_a);
+        }
         try x.emit("audio_out_layer", .{}, head_a);
         try x.k.gridMajor(x.s, head_a, out.audio, c.n_grid);
         try x.emit("video_velocity_grid", .{}, out.video);

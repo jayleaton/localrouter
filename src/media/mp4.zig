@@ -13,6 +13,9 @@ pub const Options = struct {
     fps: u32,
     wav: ?[]const u8 = null, // audio track, muxed as AAC
     crf: u8 = 18,
+    /// End the file with the shorter stream (ffmpeg `-shortest`). False keeps every audio sample, as a model whose
+    /// native mux writes its whole waveform past the last frame does.
+    shortest: bool = true,
     marker: ?marker.Marker = null, // the machine-generated label
 };
 
@@ -50,7 +53,10 @@ pub const Writer = struct {
         try argv.appendSlice(gpa, &.{ "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", size, "-r", fps, "-i", "pipe:0" });
         if (o.wav) |w| try argv.appendSlice(gpa, &.{ "-i", w });
         try argv.appendSlice(gpa, &.{ "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-movflags", "+faststart" });
-        if (o.wav != null) try argv.appendSlice(gpa, &.{ "-c:a", "aac", "-b:a", "192k", "-shortest" });
+        if (o.wav != null) {
+            try argv.appendSlice(gpa, &.{ "-c:a", "aac", "-b:a", "192k" });
+            if (o.shortest) try argv.append(gpa, "-shortest");
+        }
         var label: Label = .{};
         if (o.marker) |m| try argv.appendSlice(gpa, &label.args(m));
         try argv.append(gpa, path);

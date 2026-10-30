@@ -355,13 +355,14 @@ def visual_embeddings_site(c: B.Config, sh: B.Shape, wb: int) -> Site:
         def twin():
             out = torch.empty(Nt, D, dtype=BF, device=DEV)
             ctx.k.patchify(x.reshape(-1, C), prow, sh, C)
-            ctx.k.gemm(prow, ve.in_layer.weight, ve.in_layer.bias.view(1, -1), out, K.EPI_BIAS, c.patch_k_first())
+            ctx.k.visual_gemm(prow, ve.in_layer.weight, ve.in_layer.bias.view(1, -1), out)
             return out
 
         return Case({"x_video": x, "weight": ve.in_layer.weight, "bias": ve.in_layer.bias},
                     lambda: ve(x).reshape(Nt, D), twin,
                     {"patchify": "k6_patchify f32",
-                     **gemm_math(prow, ve.in_layer.weight, Nt, D, "bias", k_first=c.patch_k_first())},
+                     "kernel": "k6_visual_gemm_bf16", "epilogue": "bias", "m": Nt, "n": D, "k": c.patch_in(),
+                     "math": "the reference's aligned-2, K32, three-stage BF16 reduction"},
                     f"VisualEmbeddings({C}, {D}, (1, 2, 2)) on {list(x_shape)} fp32")
 
     return Site("linear/visual_embeddings", "linear",
@@ -909,7 +910,7 @@ def embeddings_unit(c: B.Config, sh: B.Shape, wb: int, plan: int) -> Site:
             vis, aud = d.buf(d.p.vis, Nt, D), d.buf(d.p.aud, A, Da)
             prow = d.buf(d.p.rows_in, Nt, c.patch_in())
             ctx.k.patchify(inp.x_video, prow, sh, c.visual_in())
-            d.linear(w.visual_in, prow, vis)
+            ctx.k.visual_gemm(prow, w.visual_in.w, w.visual_in.b, vis)
             d.emit("visual_embeddings", vis)
             audio_in = d.buf(d.p.audio_in, A, c.in_audio_dim)
             ctx.k.cast_bf16(inp.x_audio, audio_in)

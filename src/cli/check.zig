@@ -1,4 +1,5 @@
 //! `localrouter check gpu`: opens the CUDA driver through TensorFold's runtime and reports devices and memory.
+//! `localrouter check k6-components ...` / `k6-e2e ...`: the Kandinsky-6 bit gates' native captures (cli/k6.zig).
 //! `localrouter check health [URL]`: exit 0 when the daemon answers /health (the container's health check).
 //! `localrouter check selftest`: starts a private daemon on a free port with the test-pattern tools, makes one image and
 //! one video through the HTTP API, checks the files, and stops it. Needs no GPU; ffmpeg must be on PATH.
@@ -26,6 +27,8 @@ pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-e2e")) return @import("qwen_e2e.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-te")) return @import("qwen_te.zig").run(io, gpa, args[1..]);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-replay")) return @import("qwen_replay.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-components")) return @import("k6.zig").run(io, gpa, args[1..], false);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-e2e")) return @import("k6.zig").run(io, gpa, args[1..], true);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "health")) return health(io, gpa, if (args.len > 1) args[1] else "http://127.0.0.1:8190");
     std.debug.print("usage: localrouter check gpu|selftest|health [URL]\n", .{});
     return 2;
@@ -138,4 +141,8 @@ test "h3 bench: its argument and shape tests run with the unit tests" {
 
 test "h3 step bench: its argument tests and the step code's type check run with the unit tests" {
     _ = @import("h3_stepbench.zig");
+}
+
+test "k6 gates: their argument tests run with the unit tests" {
+    _ = @import("k6.zig");
 }

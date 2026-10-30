@@ -122,3 +122,8 @@ chain per stage, free-running and teacher-forced, with the final PCM.
 `make_kit.sh FATBIN DESTDIR` copies these six files and the fatbin (as `audio.fatbin`) into a read-only directory with
 `SHA256SUMS`, then writes a reproducible `k6a-kit-<fatbin sha12>-<harness sha12>.tar.gz` and its `.sha256`. It refuses
 to overwrite an existing kit.
+
+## Route A: withdrawn
+
+There is no vendor job: route A was removed once the native kernels reproduced every audio operator
+(`../QUALIFICATION.md`).

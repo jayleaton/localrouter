@@ -95,8 +95,8 @@ bounds anything here (`nvidia-smi` reports GB10 memory as `[N/A]`). The jobs app
       `cuLaunchKernel` and the like), loads the fatbins into torch's primary context and launches them on torch
       tensors;
     - the fatbins: device code only;
-    - PR #5's Zig engine: none. It uses only `Driver`, `Module`, `Function`, `Stream` and `launch` from TensorFold's
-      `cuda` module and borrows every buffer from the pipeline. TensorFold v1.0.7's own call sites (`memory.zig` 61
+    - PR #5's Zig engine (`src/engines/kandinsky6/dit/`): none. It uses only `Driver`, `Module`, `Function`,
+      `Stream` and `launch` from TensorFold's `cuda` module and borrows every buffer from the pipeline. TensorFold v1.0.7's own call sites (`memory.zig` 61
       and 175, `carveout.zig` 128 and 130) sit behind `DeviceBuffer`, `HostBuffer` and `Carveout`, which the engine
       never uses.
   - step budget = CUDA processes x (Torch + 8) + host processes x 8 + 8.

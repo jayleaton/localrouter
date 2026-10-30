@@ -37,10 +37,17 @@ weight norm, so no fold runs.
 If BigVGAN or alias-free-torch source is ever copied rather than reimplemented, the copy must carry the BigVGAN
 `LICENSE` and `incl_licenses/LICENSE_1..8` closure. The release inventory decides which notices ship.
 
-## Qualification state (gpu-qualification-pending)
+## Qualification state
 
-No kernel here is qualified. The required gate is zero unequal values against the native pinned Python twin on SM121,
-checked per operator, per chain, on the full mel and on raw PCM. CPU diagnostics do not count toward it.
+The audio chain is qualified on SM121 (GB10). With the policies listed in `QUALIFICATION.md`, the full untraced run is
+bit-equal to the pinned reference for latent, mel, wave and raw PCM, and so is every decoder and vocoder hook.
+`QUALIFICATION.md` records the evidence, hashes, hardware, precision, seed and commands. Admission (`admission.zig`)
+still lists the audio contracts as pending; that is a separate decision.
+
+The notes below are how individual operators were narrowed before that gate. Where they disagree with
+`QUALIFICATION.md`, the record is current. The FFT-engine and SDPA-GEMM records came from an earlier probe environment;
+under the reference's pinned precision settings the originals ran the CUTLASS / xmma / legacy kernels that the record
+lists, and the native paths reproduce those.
 
 Native bits reproduced offline (diagnostic only; the kernels below are not yet run on SM121):
 
@@ -75,6 +82,13 @@ Recorded, not reproduced (gates stay open):
   stays a comparison candidate until it runs there. Strict FLASH is not accepted.
 
 Not on the native path, refused: the vocoder weight-norm fold.
+
+## Route A: withdrawn
+
+The scoped vendor exception (cuDNN for the recorded FFT convolutions, cuBLASLt for the SDPA's GEMMs) is withdrawn: the
+native kernels reproduce every audio operator (`QUALIFICATION.md`). Its operators (`conv1d_vendor_fft`,
+`sdpa_gemm_vendor`), plans (`native_plans.zig`), admission (`route_a.zig`), cuDNN graph (`cudnn.zig`) and the central
+lock's candidate rows were removed; no audio code opens a vendor library.
 
 Open choices that the native fixtures must settle: the per-term rounding of each reduction (`Acc`) and how each scalar
 division executes (`Div`). Neither has a default.

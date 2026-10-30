@@ -24,6 +24,8 @@ What is wrapped, and how (every wrapper records and then returns the native valu
     vae.config.scaling_factor` as prepare_latents.py:236-237. encode.latent_native: the function's return value.
   * the tiling: an instance attribute `vae.get_dec_optimal_tiling` records mem_get_info and the plan it returns; a
     counter on vae.decoder gives the number of decoder passes (temporal x spatial tiles).
+  * tile assembly: instance attributes `vae.blend_v`, `vae.blend_h`, `vae.blend_t` and `vae.tiled_decode` record the
+    value each returns, first call only (the blended tile; a temporal tile's assembled `.sample`), as [T][H][W][C].
 Each case also runs once more without hooks under torch.profiler (s_dec, f_dec, s_enc only) for its kernel-name list.
 
 `--device cpu --dtype float32` is a plumbing test of the hooks and the record format, NOT an oracle: the fp16
@@ -346,7 +348,21 @@ def run_decode(case, vae, mods, inp, index, dev, rec=None, tiling=None):
         tiling["chosen"] = {"mem_get_info": free, "shape": list(shape), "tile_size": list(r[0]),
                             "tile_stride": list(r[1])}
         return r
-    with patched(vae, "decode", decode_w), patched(vae, "get_dec_optimal_tiling", choose_w):
+    firsts = set()
+
+    def first(name, fn, pick=lambda r: r):
+        def w(*a, **k):
+            r = fn(*a, **k)
+            if name not in firsts:
+                firsts.add(name)
+                rec.put(name, pick(r), "ncthw")
+            return r
+        return w
+    sample = lambda r: r.sample if hasattr(r, "sample") else r[0]  # noqa: E731 (DecoderOutput or a tuple)
+    with (patched(vae, "decode", decode_w), patched(vae, "get_dec_optimal_tiling", choose_w),
+          patched(vae, "blend_v", first("blend_v", vae.blend_v)), patched(vae, "blend_h", first("blend_h", vae.blend_h)),
+          patched(vae, "blend_t", first("blend_t", vae.blend_t)),
+          patched(vae, "tiled_decode", first("tiled_decode", vae.tiled_decode, sample))):
         rgb = postprocess_video.postprocess_video(bundle, vae, bs=1)
     rec.put("decode.rgb", rgb, "ncthw")
     return rgb

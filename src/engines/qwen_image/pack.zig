@@ -37,7 +37,7 @@ pub const DType = enum {
 
 pub const Tensor = struct {
     dtype: DType,
-    shape: [5]usize = .{ 1, 1, 1, 1, 1 },
+    shape: [6]usize = .{ 1, 1, 1, 1, 1, 1 },
     rank: u8,
     begin: usize, // within the data region
     end: usize,
@@ -198,7 +198,7 @@ pub const Pack = struct {
             const shape = o.get("shape").?.array.items;
             const offs = o.get("data_offsets").?.array.items;
             if (offs.len != 2) return error.BadPack;
-            if (shape.len > 5) continue;
+            if (shape.len > 6) continue; // no engine reads a tensor of higher rank; asking for one is MissingTensor
             var t: Tensor = .{ .dtype = dt, .rank = @intCast(shape.len), .begin = @intCast(offs[0].integer), .end = @intCast(offs[1].integer) };
             var n: usize = dt.size();
             for (shape, 0..) |s, i| {

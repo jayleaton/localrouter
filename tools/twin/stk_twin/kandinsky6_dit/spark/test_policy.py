@@ -559,7 +559,8 @@ class RawAllocationLedger(unittest.TestCase):
         return {
             "twin python processes": [p for p in PKG.rglob("*.py") if not p.name.startswith("test_")],
             "fatbins (device code)": [p for p in k6.rglob("*") if p.suffix in (".cu", ".cuh", ".zig")],
-            "PR5 Zig engine": list((REPO / "src" / "engines" / "kandinsky6").rglob("*.zig")),
+            # the DiT component only: the rest of src/engines/kandinsky6 (pipeline, VAE, audio) is not in this job
+            "PR5 Zig engine": list((REPO / "src" / "engines" / "kandinsky6" / "dit").rglob("*.zig")),
         }
 
     def test_every_binary_matches_ledger(self):

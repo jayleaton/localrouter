@@ -20,10 +20,12 @@ that leaves a JSON receipt. The daemon holds no GPU memory while idle. The model
 
 ## Kandinsky-6 Pro distilled
 
-`profiles/kandinsky6-pro-distill.json`: engine `kandinsky6`, model `kandinsky6-pro-distill`. It makes 864x480 5 s
+`profiles/kandinsky6-pro-distill.json`: engine `kandinsky6`, model `kandinsky6-pro-distill`. It makes 832x480 5 s
 video at 24 fps (121 frames) with jointly generated mono 44.1 kHz audio, from the unmodified Hugging Face snapshot of
-`kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers` at revision `1018d5828716e8bea3de99609f45c924de9c5564`. Any other
-size, length, frame rate, step count or guidance is refused, as are `audio: false`, a negative prompt and a first frame.
+`kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers` at revision `1018d5828716e8bea3de99609f45c924de9c5564`. A request
+that names no size gets 832x480 (the smoke request leaves it out). Any other size or orientation (the 864x480
+generation size included), length, frame rate, step count or guidance is refused, as are `audio: false`, a negative
+prompt and a first frame.
 
 The image build runs in a builder of its own whose container is capped (`LR_BUILDER_MEMORY`, default 7g with no swap;
 `LR_BUILDER_CPUS`, default 0-3). A build that needs more fails with an out-of-memory error instead of pushing the build
@@ -50,7 +52,7 @@ TOOL_OPTIONS='{"fp32_linear": "<mode>", "clip_linear": "<mode>", "qwen_rope_freq
     --weights <snapshot dir> --image localrouter-<commit>-arm64.tar.zst \
     [--manifest tools/kandinsky6/staging/assets.json] --smoke
 LR_HOME=~/.localrouter tools/package/localrouterctl start
-LR_HOME=~/.localrouter tools/package/localrouterctl generate kandinsky6-pro-distill "a prompt" -o out.mp4 --size 864x480 --seconds 5
+LR_HOME=~/.localrouter tools/package/localrouterctl generate kandinsky6-pro-distill "a prompt" -o out.mp4 --size 832x480 --seconds 5
 LR_HOME=~/.localrouter tools/package/localrouterctl stop
 ```
 

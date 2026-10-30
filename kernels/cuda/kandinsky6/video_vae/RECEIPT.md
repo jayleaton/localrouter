@@ -112,21 +112,24 @@ Native reference: AutoencoderKLHunyuanVideo loaded with `torch_dtype=float16`: f
 row below is the arithmetic of this implementation. The "Native" column records what the pinned source fixes and what
 it leaves to the backend; it is not evidence of native bits.
 
-Qualification status: unqualified. Every row whose Native entry says the order or backend differs or is undeclared
-(convolution, linear, GroupNorm statistics, attention, decode input division) stays unqualified until SM121 fixtures
-of the native pipeline, captured with its own settings, match these kernels byte for byte. Record with each fixture:
+Qualification status: the decoder is qualified on SM121 for the qualified plan (QUALIFICATION.md, "SM121 qualification
+record": the whole decode bit-equal to the reference, every policy exact on every fixture of its op; the production
+path's own gate, with no VAE options, passed: `K6_VAE_PROD_EXACT`, and the full pipeline `K6_FULL_E2E_EXACT`). The decode runs
+`launch.zig` `qualified` unconditionally; the "component's own" orders below remain for the encoder (unqualified) and as
+the fixtures' baselines. Any other plan, the encoder and I2V stay unqualified until fixtures of the native pipeline,
+captured with its own settings, match these kernels byte for byte. Record with each fixture:
 operand dtypes and shapes, the effective precision and cuDNN / SDPA settings, environment overrides, the torch / CUDA /
 cuDNN / cuBLAS versions, and the reference outputs. A mismatch is fixed in these kernels, never by changing the oracle,
 a threshold or the reduction order to suit them.
 
 | Operation | Implementation | Native |
 |---|---|---|
-| Convolution | fp32 accumulation over k16 chunks ascending (`mma.sync` m16n8k16), then `half(half(acc) + bias)` | cuDNN fp16 conv, then `output.add_(bias)`; the two roundings here are an implementation choice, and cuDNN's accumulation and order on SM121 are undeclared until fixtures |
-| Linear (attention q, k, v, out) | `half(acc + bias)` | cuBLASLt bias epilogue; summation order differs |
+| Convolution | fp32 accumulation over k16 chunks ascending (`mma.sync` m16n8k16), then `half(half(acc) + bias)`; the K sequence is tap-major, or under a conv rule (the decode's `qualified.conv`, per exact shape) channel tiles of T outer and taps inner (`ctile`, CUTLASS's optimized fprop iterator order), optionally alternating channel tiles (`split` 2, cudnn's xmma fprop with grid z = 2) or k16 chunks (`split_by` chunk: two interleaved mma chains) between two fp32 accumulators joined before the epilogue (the `_k2` kernels), or with `kslot` quad32 the two chunks of each 32-channel block taking alternate 4-channel quads (the decoder conv_out's cudnn `indexed_wo_smem` kernel, measured by `vae_conv_oracle`), the order the convolution fixture selects among candidates (tile sizes, k8/k16 MMAs, split-K) against torch's cudnn bits | cuDNN fp16 conv, then `output.add_(bias)`; the two roundings here are an implementation choice, and cuDNN's accumulation and order on SM121 are undeclared until fixtures |
+| Linear (attention q, k, v, out) | `half(acc + bias)`; in the decode (`qualified.attn_qkv_bias`, separate) q, k and v take `half(half(acc) + bias)`; k16 chunks ascending | to_out: cuBLASLt with the bias epilogue (one rounding). q, k, v: the input is non-contiguous (`group_norm(h.transpose(1, 2)).transpose(1, 2)`), so `at::linear` runs `matmul` then `add_(bias)` (torch 2.14.1 `Linear.cpp`; the reference cuBLASLt log shows `cublasLtHSHMatmul` without an epilogue for them). The attention fixture (`vae_attn_isolate`, conv-fixture format) checks the order and both bias modes against torch |
 | Residual add | `half(h + res)` in the epilogue | separate fp16 add: same |
-| GroupNorm(32, eps 1e-6) | two-pass fp32 (sum, then centred squares with fmaf) in fixed blocks of 2,048 positions and a fixed tree; mean and variance divided in fp64; `rstd = rsqrtf(var + eps)`; `y = half(fmaf(x, rstd*gamma, fmaf(-rstd*gamma, mean, beta)))` | torch Welford in fp32: statistics may differ in the last bits |
+| GroupNorm(32, eps 1e-6) | two-pass fp32 (sum, then centred squares with fmaf) in fixed blocks of 2,048 positions and a fixed tree; mean and variance divided in fp64; `rstd = rsqrtf(var + eps)`; `y = half(fmaf(x, rstd*gamma, fmaf(-rstd*gamma, mean, beta)))` | torch 2.14.1 (`group_norm_kernel.cu` RowwiseMomentsCUDAKernel<c10::Half, float>, source-read): one 512-thread block a group, Welford over the group's NCTHW elements at stride 512, warp-shuffle then block combine, `var = m2 / n`, `rstd = rsqrtf(var + float(half(eps)))` (eps cast to the input dtype first); apply as here; SiLU a separate fp16 op. `k6v_gn_welford` transcribes it and is the decode's (`qualified.gn`, V 7); V pins nvcc's fmaf contractions, V1 / V3 / V5 / V7 all exact on every GroupNorm fixture. First divergence of the 832-wide replay (trace v1): `decoder.mid_block.resnets.0.nonlinearity.0`, 879 of 2,375,680 values, inputs bit-equal |
 | SiLU | `half(s / (1 + expf(-s)))` on the fp16 norm output | torch silu: same expression |
-| Attention (1 head, dim 512, frame-causal mask) | `S = fp32 q.k`, `x = S * 512^-0.5`, fp32 max / `expf` / fixed-tree sum, `P = half(e / l)`, `O = half(fp32 P.V)` (row blocks of 1,024) | diffusers `Attention` (`hunyuan_vae.py:238`, `upcast_softmax=True`) through SDPA; the backend actually selected for fp16 + float mask + head dim 512 on SM121 is undeclared and must be captured with the fixture (the math backend scales q and k by sqrt(scale) in fp16 first) |
+| Attention (1 head, dim 512, frame-causal mask) | `S = fp32 q.k`, `x = S * 512^-0.5`, fp32 max / `expf` / fixed-tree sum, `P = half(e / l)`, `O = half(fp32 P.V)` (row blocks of 1,024); in the decode (`qualified.attn_sdpa`, variant 524) the reference's mem-efficient kernel replayed (`ops.cu` k6v_sdpa_memeff: 32-query x 128-key blocks, exp2-domain online softmax, unnormalised `half(p)`, an fp32 output accumulator rescaled per key block; the variant selects the contractions, exp2 / reciprocal forms and the GEMMs' instruction shape, m16n8k8 as in the source or m16n8k16) | diffusers `Attention` (`hunyuan_vae.py:238`, `upcast_softmax=True`) through SDPA; on SM121 the call runs torch's mem-efficient kernel (fmha_cutlassF_f16_aligned_32x128_gmem_sm80; flash and cuDNN have no kernel for it), captured by the attention isolate and forced-backend checks |
 | Nearest upsample, replicate pad | index arithmetic only | exact |
 | Decode input | fp32 `z`: `half(z * inv)`; bf16 `z`: `half(float(bf16(float(z) * inv)))`; `inv = float(1.0 / 0.476986)` = `0x40062d04` | torch 2.14.1 `div_true_kernel_cuda` (`BinaryDivTrueKernel.cu:35-52`, file sha256 `db073437…`): a CPU scalar divisor becomes `a * inv_b` in opmath float with `inv_b = float(1.0 / double(b))`, the quotient in the input dtype. The double and the float reciprocal are the same bits for this factor; over every finite fp32 input, `half(x * inv)` differs from `half(x / float(0.476986))` (true fp32 division) for 35,718 inputs, so the reciprocal form is the one to match. Source-derived; bits still to be confirmed by the SM121 fixture (f_dec, n_dec) |
 | Decode output | `uint8(trunc(half(half(clamp(x,-1,1) + 1) * 127.5)))` | same ops |
@@ -148,8 +151,11 @@ frames (17 decoded frames), stride 2, first tile keeps 9 frames, middle tiles 8,
 121 frames emitted once each. Frames above 2^31 tile-elements (e.g. 1280 x 720) tile spatially regardless of memory.
 There is no temporal feature cache in this VAE: tiles are independent decoder passes (their GroupNorm statistics are
 per tile) meeting through in-place linear blends, which `decode.zig` replays in the reference's order (later blends read
-earlier, already-blended tiles). Plans the reference would leave short (uncovered output) or fail (zero stride) are
-refused. I2V encode (`opt_tiling=False`) is always a direct pass; tiled encodes are outside this contract.
+earlier, already-blended tiles). Where the reference's full-tile ranges stop before the latent's edge, its output is
+the kept boxes concatenated (cropped to 8 lh x 8 lw), narrower or shorter than nominal: the plan carries that emitted
+extent apart from the nominal one and the decode writes it, with no edge tile, shift or padding (the reference run with
+2,301,403,136 free bytes: a 2 x 4 grid, 112 passes, 832 x 480 of the nominal 864). Plans the reference would fail
+(zero stride, empty range) are refused. I2V encode (`opt_tiling=False`) is always a direct pass; tiled encodes are outside this contract.
 
 ## H3 / Qwen primitive audit
 

@@ -4,12 +4,16 @@
 //!
 //!   latent  bf16 [frames][lh][lw][16], the packed THWC layout the DiT produces: all 31 frames for T2V and for I2V under
 //!           the default pretrain scheme (and explicit i2v); no frame is appended or dropped
-//!   rgb     uint8 [(frames - 1) * 4 + 1][8 lh][8 lw][3], frame-major interleaved RGB (rawvideo rgb24 per frame); the
-//!           reference's (bs, 3, T, H, W) uint8 tensor permuted to (T, H, W, 3), same values
+//!   rgb     uint8 [(frames - 1) * 4 + 1][H][W][3], frame-major interleaved RGB (rawvideo rgb24 per frame); the
+//!           reference's (bs, 3, T, H, W) uint8 tensor permuted to (T, H, W, 3), same values. H x W is the plan's emitted
+//!           extent (`DecodePlan.emitted`): 8 lh x 8 lw, or less when the plan's full tiles stop before the edge
 //!
 //! Per temporal tile (5 latent frames -> 17 frames at the native size): post_quant_conv, decoder (conv_in, mid block,
 //! four up blocks, norm/SiLU, conv_out) into an fp16 tile, the reference's in-place blends, then the kept frames are
 //! converted to uint8 directly into the caller's output. Tile outputs that later blends read stay in scratch.
+//! `Launcher.mark` names (QUALIFICATION.md): the decoder's module checkpoints in decodeTile, then `blend_v` / `blend_h`
+//! (a spatial tile after that blend), `tiled_decode` (a temporal tile's assembled frames) and `blend_t` (a temporal
+//! tile after its drop and blend), each the value the reference's method of that name returns.
 
 const std = @import("std");
 const launch = @import("launch.zig");
@@ -67,14 +71,14 @@ pub const Layout = struct {
     work: launch.Work,
     tile_out: u64, // spatial tiles of one temporal tile ([rows * cols] x [F][8 tlh][8 tlw][3]), when tiled
     tile_elems: u64,
-    frames_buf: [2]u64, // the current and previous temporal tile, [F][H][W][3]
+    frames_buf: [2]u64, // the current and previous temporal tile, [F][H][W][3] at the emitted extent
 
     pub fn init(arena: *launch.Arena, plan: tiles.DecodePlan) launch.Error!Layout {
         const g = plan.grid;
         const ft = tiles.sampleFrames(plan.tile_lat_frames);
         const act = maxActivation(plan.tile_lat_frames, g.tile_lh, g.tile_lw);
-        const sh: u64 = g.sample_h;
-        const sw: u64 = g.sample_w;
+        const sh: u64 = g.emitted_h;
+        const sw: u64 = g.emitted_w;
         const tile_elems: u64 = @as(u64, ft) * g.tile_lh * tiles.spatial_ratio * g.tile_lw * tiles.spatial_ratio * 3;
         var l: Layout = undefined;
         l.latent16 = try arena.take(@as(u64, plan.latent_frames) * plan.lh * plan.lw * tiles.latent_channels * 2);
@@ -93,6 +97,15 @@ pub fn scratchBytes(plan: tiles.DecodePlan) u64 {
     var arena: launch.Arena = .{ .base = 0, .cap = 0, .measure = true };
     _ = Layout.init(&arena, plan) catch unreachable;
     return arena.peak;
+}
+
+/// Where in its scratch `decode` leaves the fp16 decoder input (the latent divided by the scaling factor and cast,
+/// [frames][lh][lw][16], upstream's `vae.decode` input): no later launch of the decode writes it, so it holds after the
+/// decode until the scratch is reused.
+pub fn decoderInputOffset(plan: tiles.DecodePlan) u64 {
+    var arena: launch.Arena = .{ .base = 0, .cap = 0, .measure = true };
+    const l = Layout.init(&arena, plan) catch unreachable;
+    return l.latent16;
 }
 
 pub const LatentDtype = launch.LatentDtype;
@@ -153,8 +166,8 @@ pub fn decode(l: launch.Launcher, w: *const Decoder, plan: tiles.DecodePlan, io:
     try l.run(.{ .call = .{ .latent_in = .{ .z = io.latent, .y = lay.latent16, .count = @intCast(lat_n), .inv_sf = invScale(), .z_f32 = @intFromBool(io.latent_dtype == .f32) } }, .grid = .{ @intCast((lat_n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
     const z_all = View.dense(lay.latent16, plan.latent_frames, plan.lh, plan.lw, tiles.latent_channels);
     try l.mark("decode.input", .{}, z_all, false);
-    const sh = g.sample_h;
-    const sw = g.sample_w;
+    const sh = g.emitted_h;
+    const sw = g.emitted_w;
     const frame_elems: u64 = @as(u64, sh) * sw * 3;
     var prev: ?struct { ptr: u64, frames: u32 } = null;
     var slot: usize = 0;
@@ -166,12 +179,14 @@ pub fn decode(l: launch.Launcher, w: *const Decoder, plan: tiles.DecodePlan, io:
             try decodeTile(l, w, lay, zt, buf);
         } else {
             try spatial(l, w, lay, plan, zt, tt.frames, buf);
+            try l.mark("tiled_decode", .{}, View.dense(buf, tt.frames, sh, sw, 3), false);
         }
         const cur_ptr = buf + tt.drop * frame_elems * 2;
         const cur_frames = tt.frames - tt.drop;
         if (tt.blend > 0) {
             const p = prev.?;
             try l.run(blendLaunch(.{ .a = p.ptr, .b = cur_ptr, .fa = @intCast(p.frames), .ha = @intCast(sh), .wa = @intCast(sw), .fb = @intCast(cur_frames), .hb = @intCast(sh), .wb = @intCast(sw), .ch = 3, .axis = 0, .extent = @intCast(tt.blend) }));
+            try l.mark("blend_t", .{}, View.dense(cur_ptr, cur_frames, sh, sw, 3), false);
         }
         if (tt.keep > 0) {
             const n = @as(u64, tt.keep) * frame_elems;
@@ -182,7 +197,8 @@ pub fn decode(l: launch.Launcher, w: *const Decoder, plan: tiles.DecodePlan, io:
     }
 }
 
-fn blendLaunch(a: launch.BlendArgs) launch.Launch {
+/// One k6v_blend launch over `a`'s blend box (the extent along its axis, the full other two).
+pub fn blendLaunch(a: launch.BlendArgs) launch.Launch {
     const d0: u64 = @intCast(if (a.axis == 0) a.extent else a.fb);
     const d1: u64 = @intCast(if (a.axis == 1) a.extent else a.hb);
     const d2: u64 = @intCast(if (a.axis == 2) a.extent else a.wb);
@@ -191,7 +207,7 @@ fn blendLaunch(a: launch.BlendArgs) launch.Launch {
 }
 
 /// tiled_decode of one temporal tile: every spatial tile decoded, then blend_v / blend_h in place in the reference's
-/// (row, column) order, then each tile's kept box placed into `out` ([frames][sample_h][sample_w][3]) and cropped.
+/// (row, column) order, then each tile's kept box placed into `out` ([frames][emitted_h][emitted_w][3]) and cropped.
 fn spatial(l: launch.Launcher, w: *const Decoder, lay: Layout, plan: tiles.DecodePlan, zt: View, frames: u32, out: u64) !void {
     const g = plan.grid;
     const th = g.tile_lh * tiles.spatial_ratio;
@@ -204,16 +220,22 @@ fn spatial(l: launch.Launcher, w: *const Decoder, lay: Layout, plan: tiles.Decod
     const f: i32 = @intCast(frames);
     for (0..g.rows) |i| for (0..g.cols) |j| {
         const b = lay.tile_out + (i * g.cols + j) * tile_bytes;
-        if (i > 0) try l.run(blendLaunch(.{ .a = lay.tile_out + ((i - 1) * g.cols + j) * tile_bytes, .b = b, .fa = f, .ha = @intCast(th), .wa = @intCast(tw), .fb = f, .hb = @intCast(th), .wb = @intCast(tw), .ch = 3, .axis = 1, .extent = @intCast(g.blend_h) }));
-        if (j > 0) try l.run(blendLaunch(.{ .a = lay.tile_out + (i * g.cols + j - 1) * tile_bytes, .b = b, .fa = f, .ha = @intCast(th), .wa = @intCast(tw), .fb = f, .hb = @intCast(th), .wb = @intCast(tw), .ch = 3, .axis = 2, .extent = @intCast(g.blend_w) }));
+        if (i > 0) {
+            try l.run(blendLaunch(.{ .a = lay.tile_out + ((i - 1) * g.cols + j) * tile_bytes, .b = b, .fa = f, .ha = @intCast(th), .wa = @intCast(tw), .fb = f, .hb = @intCast(th), .wb = @intCast(tw), .ch = 3, .axis = 1, .extent = @intCast(g.blend_h) }));
+            try l.mark("blend_v", .{}, View.dense(b, frames, th, tw, 3), false);
+        }
+        if (j > 0) {
+            try l.run(blendLaunch(.{ .a = lay.tile_out + (i * g.cols + j - 1) * tile_bytes, .b = b, .fa = f, .ha = @intCast(th), .wa = @intCast(tw), .fb = f, .hb = @intCast(th), .wb = @intCast(tw), .ch = 3, .axis = 2, .extent = @intCast(g.blend_w) }));
+            try l.mark("blend_h", .{}, View.dense(b, frames, th, tw, 3), false);
+        }
     };
     for (0..g.rows) |i| for (0..g.cols) |j| {
         const t = g.tile(@intCast(i), @intCast(j));
-        if (t.out_y >= g.sample_h or t.out_x >= g.sample_w) continue;
-        const h = @min(t.keep_h, g.sample_h - t.out_y);
-        const wd = @min(t.keep_w, g.sample_w - t.out_x);
+        if (t.out_y >= g.emitted_h or t.out_x >= g.emitted_w) continue;
+        const h = @min(t.keep_h, g.emitted_h - t.out_y);
+        const wd = @min(t.keep_w, g.emitted_w - t.out_x);
         const n: u64 = @as(u64, frames) * h * wd * 3;
-        try l.run(.{ .call = .{ .copy = .{ .src = lay.tile_out + (i * g.cols + j) * tile_bytes, .dst = out, .sf = f, .sh = @intCast(th), .sw = @intCast(tw), .df = f, .dh = @intCast(g.sample_h), .dw = @intCast(g.sample_w), .f = f, .h = @intCast(h), .w = @intCast(wd), .ch = 3, .sf0 = 0, .sh0 = 0, .sw0 = 0, .df0 = 0, .dh0 = @intCast(t.out_y), .dw0 = @intCast(t.out_x) } }, .grid = .{ @intCast((n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
+        try l.run(.{ .call = .{ .copy = .{ .src = lay.tile_out + (i * g.cols + j) * tile_bytes, .dst = out, .sf = f, .sh = @intCast(th), .sw = @intCast(tw), .df = f, .dh = @intCast(g.emitted_h), .dw = @intCast(g.emitted_w), .f = f, .h = @intCast(h), .w = @intCast(wd), .ch = 3, .sf0 = 0, .sh0 = 0, .sw0 = 0, .df0 = 0, .dh0 = @intCast(t.out_y), .dw0 = @intCast(t.out_x) } }, .grid = .{ @intCast((n + 255) / 256), 1, 1 }, .block = .{ 256, 1, 1 } });
     };
 }
 
@@ -269,6 +291,11 @@ test "decoder activation bound: 17 x 480 x 864 x 256 at the native tile, the scr
 
 /// Runs `decode` in the simulator: bounds and race checks on every launch, the data-movement kernels executed on the host.
 fn simDecode(plan: tiles.DecodePlan, execute: bool, latent: []const u16, rgb: []u8) !launch.Sim {
+    return simDecodeWith(plan, execute, latent, rgb, false);
+}
+
+/// `simDecode`, with the production policies (`launch.qualified`) when `qualified`.
+fn simDecodeWith(plan: tiles.DecodePlan, execute: bool, latent: []const u16, rgb: []u8, qualified: bool) !launch.Sim {
     var sim: launch.Sim = .{ .execute = execute };
     const wb = bindForTest(0x1000_0000_0000);
     sim.region(0x1000_0000_0000, wb.bytes, "weights");
@@ -284,10 +311,12 @@ fn simDecode(plan: tiles.DecodePlan, execute: bool, latent: []const u16, rgb: []
     const lat_addr: u64 = if (execute) @intFromPtr(latent.ptr) else 0x3000_0000_0000;
     const rgb_addr: u64 = if (execute) @intFromPtr(rgb.ptr) else 0x4000_0000_0000;
     const lat_bytes = @as(u64, plan.latent_frames) * plan.lh * plan.lw * 16 * 2;
-    const rgb_bytes = @as(u64, plan.sampleFramesTotal()) * plan.grid.sample_h * plan.grid.sample_w * 3;
+    const rgb_bytes = plan.emitted().rgbBytes();
     sim.region(lat_addr, lat_bytes, "latent");
     sim.region(rgb_addr, rgb_bytes, "rgb");
-    try decode(sim.launcher(), &wb.dec, plan, .{ .latent = lat_addr, .latent_dtype = .bf16, .rgb = rgb_addr, .scratch = sbase, .scratch_bytes = sbytes });
+    var l = sim.launcher();
+    if (qualified) launch.qualified.apply(&l);
+    try decode(l, &wb.dec, plan, .{ .latent = lat_addr, .latent_dtype = .bf16, .rgb = rgb_addr, .scratch = sbase, .scratch_bytes = sbytes });
     return sim;
 }
 
@@ -300,12 +329,32 @@ test "native 5 s decode: every launch in bounds and race free, 14 decoder passes
     try testing.expectEqual(@as(u64, 14), sim.counts[@backingInt(launch.Kernel.rgb_out)]);
 }
 
-/// The reference's tile loops, transcribed (in place, in its order) over recorded decoder outputs, to uint8.
+test "the production decode: the qualified policies on the qualified plan, every launch in bounds and race free" {
+    const plan = try tiles.decodePlan(31, 60, 108, .{ .free_bytes = launch.qualified.free_bytes });
+    try testing.expectEqual(@as(u32, 832), plan.emitted().width);
+    const sim = try simDecodeWith(plan, false, &.{}, &.{}, true);
+    const k = struct {
+        fn n(s_: launch.Sim, kernel: launch.Kernel) u64 {
+            return s_.counts[@backingInt(kernel)];
+        }
+    }.n;
+    try testing.expectEqual(@as(u64, 112), k(sim, .sdpa_memeff)); // one attention a pass: torch's mem-efficient kernel
+    try testing.expectEqual(@as(u64, 0), k(sim, .softmax_rows));
+    try testing.expect(k(sim, .gn_welford) > 0); // torch's Welford statistics, never the two-pass ones
+    try testing.expectEqual(@as(u64, 0), k(sim, .gn_partial));
+    try testing.expect(k(sim, .conv_wide_k2) > 0); // the split-K rules matched
+    const plain = try simDecode(plan, false, &.{}, &.{});
+    try testing.expectEqual(@as(u64, 0), k(plain, .sdpa_memeff));
+    // a small untiled plan (288 tokens, fewer than the 512 channels): the accumulator still fits the scores buffer
+    const small = try simDecodeWith(try tiles.decodePlan(3, 8, 12, .unbounded), false, &.{}, &.{}, true);
+    try testing.expect(k(small, .sdpa_memeff) > 0);
+}
+
+/// The reference's tile loops, transcribed (in place, in its order) over recorded decoder outputs, to uint8. It derives
+/// its own output extents (the concatenations, cropped to the nominal size) rather than reading the grid's.
 const Reference = struct {
-    fn temporal(gpa: std.mem.Allocator, plan: tiles.DecodePlan, outs: []const []f16) ![]u8 {
-        const sh = plan.grid.sample_h;
-        const sw = plan.grid.sample_w;
-        const fe = @as(usize, sh) * sw * 3;
+    /// _temporal_tiled_decode over per-tile frames of `fe` elements each, cropped to the clip's frame count.
+    fn temporal(gpa: std.mem.Allocator, plan: tiles.DecodePlan, outs: []const []f16, fe: usize) ![]u8 {
         const total = plan.sampleFramesTotal();
         var result: std.ArrayList(f16) = .empty;
         defer result.deinit(gpa);
@@ -329,13 +378,17 @@ const Reference = struct {
                 try result.appendSlice(gpa, tile[0 .. @min(plan.tiling.fs + 1, len) * fe]);
             }
         }
-        const out = try gpa.alloc(u8, total * fe);
+        const frames = @min(total, result.items.len / fe);
+        const out = try gpa.alloc(u8, frames * fe);
         for (out, 0..) |*u, i| u.* = launch.Sim.rgbOut(result.items[i]);
         return out;
     }
 
-    /// tiled_decode over recorded tiles [rows][cols] of [F][th][tw][3]: returns [F][sh][sw][3].
-    fn spatial(gpa: std.mem.Allocator, g: tiles.SpatialGrid, frames: usize, tl: []const []f16) ![]f16 {
+    const Frames = struct { data: []f16, h: usize, w: usize };
+
+    /// tiled_decode over recorded tiles [rows][cols] of [F][th][tw][3]: the kept boxes concatenated
+    /// (torch.cat(result_row, -1), then torch.cat(result_rows, 3)), cropped to [:8 lh, :8 lw].
+    fn spatial(gpa: std.mem.Allocator, g: tiles.SpatialGrid, lh: u32, lw: u32, frames: usize, tl: []const []f16) !Frames {
         const th: usize = g.tile_lh * 8;
         const tw: usize = g.tile_lw * 8;
         for (0..g.rows) |i| for (0..g.cols) |j| {
@@ -359,24 +412,34 @@ const Reference = struct {
                 };
             }
         };
-        // concatenate kept boxes, crop to the sample size
-        const out = try gpa.alloc(f16, frames * g.sample_h * g.sample_w * 3);
+        const hl = struct {
+            fn lim(k: usize, n: usize, stride: usize, tile: usize) usize {
+                return if (k == n - 1) tile else @min(stride, tile);
+            }
+        }.lim;
+        var cat_h: usize = 0;
+        for (0..g.rows) |i| cat_h += hl(i, g.rows, g.keep_h, th);
+        var cat_w: usize = 0;
+        for (0..g.cols) |j| cat_w += hl(j, g.cols, g.keep_w, tw);
+        const sh = @min(cat_h, @as(usize, lh) * 8);
+        const sw = @min(cat_w, @as(usize, lw) * 8);
+        const out = try gpa.alloc(f16, frames * sh * sw * 3);
         var oy: usize = 0;
         for (0..g.rows) |i| {
-            const hl: usize = if (i == g.rows - 1) th else g.keep_h;
+            const h = hl(i, g.rows, g.keep_h, th);
             var ox: usize = 0;
             for (0..g.cols) |j| {
-                const wl: usize = if (j == g.cols - 1) tw else g.keep_w;
+                const w = hl(j, g.cols, g.keep_w, tw);
                 const t = tl[i * g.cols + j];
-                for (0..frames) |f| for (0..hl) |y| for (0..wl) |x| for (0..3) |c| {
-                    if (oy + y >= g.sample_h or ox + x >= g.sample_w) continue;
-                    out[((f * g.sample_h + oy + y) * g.sample_w + ox + x) * 3 + c] = t[((f * th + y) * tw + x) * 3 + c];
+                for (0..frames) |f| for (0..h) |y| for (0..w) |x| for (0..3) |c| {
+                    if (oy + y >= sh or ox + x >= sw) continue;
+                    out[((f * sh + oy + y) * sw + ox + x) * 3 + c] = t[((f * th + y) * tw + x) * 3 + c];
                 };
-                ox += wl;
+                ox += w;
             }
-            oy += hl;
+            oy += h;
         }
-        return out;
+        return .{ .data = out, .h = sh, .w = sw };
     }
 };
 
@@ -404,12 +467,11 @@ fn checkAgainstReference(plan: tiles.DecodePlan) !void {
     const latent = try gpa.alloc(u16, @as(usize, plan.latent_frames) * plan.lh * plan.lw * 16);
     defer gpa.free(latent);
     @memset(latent, 0x3f80); // bf16 1.0
-    const fe = @as(usize, plan.grid.sample_h) * plan.grid.sample_w * 3;
-    const rgb = try gpa.alloc(u8, plan.sampleFramesTotal() * fe);
+    const rgb = try gpa.alloc(u8, plan.emitted().rgbBytes());
     defer gpa.free(rgb);
     @memset(rgb, 0xaa);
     const sim = try simDecode(plan, true, latent, rgb);
-    try testing.expectEqual(@as(u32, @intCast(plan.tileCount() * plan.grid.count())), sim.conv_out_calls);
+    try testing.expectEqual(plan.passes(), sim.conv_out_calls);
 
     const recorded = try recordTiles(gpa, plan);
     defer {
@@ -422,13 +484,21 @@ fn checkAgainstReference(plan: tiles.DecodePlan) !void {
         if (g.tiled()) for (per_t) |p| gpa.free(p);
         gpa.free(per_t);
     }
+    // the direct decoder's frames are the whole tile: 8 lh x 8 lw
+    var fh: usize = @as(usize, plan.lh) * 8;
+    var fw: usize = @as(usize, plan.lw) * 8;
     for (0..plan.tileCount()) |k| {
         if (g.tiled()) {
             const tt = plan.temporal(@intCast(k));
-            per_t[k] = try Reference.spatial(gpa, g, tt.frames, recorded[k * g.count() ..][0..g.count()]);
+            const r = try Reference.spatial(gpa, g, plan.lh, plan.lw, tt.frames, recorded[k * g.count() ..][0..g.count()]);
+            per_t[k] = r.data;
+            fh = r.h;
+            fw = r.w;
         } else per_t[k] = recorded[k];
     }
-    const want = try Reference.temporal(gpa, plan, per_t);
+    try testing.expectEqual(@as(usize, g.emitted_h), fh);
+    try testing.expectEqual(@as(usize, g.emitted_w), fw);
+    const want = try Reference.temporal(gpa, plan, per_t, fh * fw * 3);
     defer gpa.free(want);
     try testing.expectEqualSlices(u8, want, rgb);
 }
@@ -451,4 +521,39 @@ test "spatial tiles with overlapping in-place blends (2 x 3 grid, blend 32 > str
 
 test "short clip decodes directly in one pass" {
     try checkAgainstReference(try tiles.decodePlan(3, 2, 3, .unbounded));
+}
+
+test "short width (2 x 3 grid, the last column stops at latent 19 of 20): 152 of 160 columns, equal to the reference" {
+    // The reference policy's shape in small: full rows, blend 32 below the 40-pixel stride, the last full column tile
+    // ending one latent short of the edge.
+    const plan = try tiles.decodePlan(7, 14, 20, .{ .free_bytes = 124_780_544 });
+    try testing.expectEqual(tiles.Tiling{ .ft = 17, .ht = 72, .wt = 72, .fs = 8, .hs = 40, .ws = 40 }, plan.tiling);
+    try testing.expectEqual(@as(u32, 2), plan.grid.rows);
+    try testing.expectEqual(@as(u32, 3), plan.grid.cols);
+    try testing.expectEqual(tiles.Geometry{ .frames = 25, .height = 112, .width = 152 }, plan.emitted());
+    try testing.expectEqual(@as(u32, 160), plan.nominal().width);
+    try checkAgainstReference(plan);
+}
+
+test "short in both axes with blends wider than the stride (3 x 3 grid): corner tiles mutate in the reference's order" {
+    // Tiles 48, stride 16, blend 32: every tile is blended vertically with the tile above, then horizontally with its
+    // left neighbour, each neighbour as it stands after its own blends (the reference mutates in place, row-major); a
+    // corner region takes both, so any other order changes the bytes. 80 x 80 of the nominal 88 x 88.
+    const plan = try tiles.decodePlan(7, 11, 11, .{ .free_bytes = 31_195_136 });
+    try testing.expectEqual(tiles.Tiling{ .ft = 17, .ht = 48, .wt = 48, .fs = 8, .hs = 16, .ws = 16 }, plan.tiling);
+    try testing.expectEqual(@as(u32, 3), plan.grid.rows);
+    try testing.expectEqual(@as(u32, 3), plan.grid.cols);
+    try testing.expectEqual(@as(u32, 32), plan.grid.blend_h);
+    try testing.expectEqual(tiles.Geometry{ .frames = 25, .height = 80, .width = 80 }, plan.emitted());
+    try checkAgainstReference(plan);
+}
+
+test "reference policy at the native size: 112 passes, every launch in bounds of the 832-wide output, race free" {
+    const plan = try tiles.decodePlan(31, 60, 108, .{ .free_bytes = 2_301_403_136 });
+    try testing.expectEqual(@as(u64, 144_967_680), plan.emitted().rgbBytes());
+    const sim = try simDecode(plan, false, &.{}, &.{});
+    try testing.expectEqual(@as(u64, 112), sim.counts[@backingInt(launch.Kernel.transpose)]); // one attention a pass
+    // per temporal tile 4 vertical + 6 horizontal spatial blends, then 13 temporal blends
+    try testing.expectEqual(@as(u64, 14 * 10 + 13), sim.counts[@backingInt(launch.Kernel.blend)]);
+    try testing.expectEqual(@as(u64, 14), sim.counts[@backingInt(launch.Kernel.rgb_out)]);
 }

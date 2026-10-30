@@ -679,6 +679,8 @@ pub fn decoderParams() ParamCounts {
 /// the scalars. Working (per request): six [B, Cmax*T] activation slots (block input, normalized input, two branch
 /// buffers, shortcut, output) at the largest C*T of the graph, plus the middle attention's qkv [B,6144,T], q/k/v
 /// [B,T,2048] each, the output [B,T,2048] and one [B,T,T] score matrix.
+pub const first_res_tf32_floats: u64 = 2 * 2048 * 218 + 2048 * 2048 * 3;
+
 pub const Memory = struct { resident_bytes: u64, working_bytes: u64 };
 
 pub const Decoder = struct {
@@ -732,7 +734,7 @@ pub const Decoder = struct {
         const attn = 6144 * t + 3 * 2048 * t + 2048 * t + t * t;
         return .{
             .resident_bytes = (p.conv_weights + conv_out_gain_copy + p.scalars) * 4,
-            .working_bytes = (6 * d.maxCt() + attn) * @as(u64, d.batch) * 4,
+            .working_bytes = ((6 * d.maxCt() + attn) * @as(u64, d.batch) + d.tf32ScratchFloats()) * 4,
         };
     }
 
@@ -740,7 +742,11 @@ pub const Decoder = struct {
     /// contiguous scratch allocation). `act` are the five activation slots (block input / output, normalized input, two
     /// branch buffers, shortcut); `aux` holds the unscaled latent until conv_in, then the per-normalization norms; the
     /// rest is the middle attention's packed qkv, q / k / v, output and score matrix.
-    pub const Scratch = struct { slot: u64, act: [5]u64, aux: u64, qkv: u64, q: u64, k: u64, v: u64, out: u64, scores: u64, floats: u64 };
+    pub const Scratch = struct { slot: u64, act: [5]u64, aux: u64, qkv: u64, q: u64, k: u64, v: u64, out: u64, scores: u64, conv_tf32: u64, floats: u64 };
+
+    fn tf32ScratchFloats(d: Decoder) u64 {
+        return if (d.batch == 1 and d.frames == 218) first_res_tf32_floats else 0;
+    }
 
     pub fn scratch(d: Decoder) Scratch {
         const b: u64 = d.batch;
@@ -756,7 +762,8 @@ pub const Decoder = struct {
             @field(r, e[0]) = o;
             o += e[1];
         }
-        r.floats = o;
+        r.conv_tf32 = o;
+        r.floats = o + d.tf32ScratchFloats();
         return r;
     }
 
@@ -1091,7 +1098,7 @@ test "decoder graph resolves the receipt shapes" {
     const m = d.memory();
     try testing.expectEqual((want + 512 * 128 * 3 + 257) * 4, m.resident_bytes);
     // largest C*T: 2048 x 218 = 446464 (= 1024 x 436 after the upsample)
-    try testing.expectEqual((6 * 446464 + (6144 + 6144 + 2048) * 218 + 218 * 218) * 4, m.working_bytes);
+    try testing.expectEqual((6 * 446464 + (6144 + 6144 + 2048) * 218 + 218 * 218 + first_res_tf32_floats) * 4, m.working_bytes);
 }
 
 test "the full decoder: diagnostic admitted for comparison, production refused before allocation" {
@@ -1526,7 +1533,7 @@ test "decoder scratch partitions exactly its working memory" {
         const t: u64 = bt[1];
         const b: u64 = bt[0];
         try testing.expectEqual(s.qkv, 6 * s.slot);
-        try testing.expectEqual(s.scores + t * t * b, s.floats);
+        try testing.expectEqual(s.scores + t * t * b + d.tf32ScratchFloats(), s.floats);
         for (s.act, 0..) |a, i| try testing.expectEqual(i * s.slot, a);
         // the aux slot holds the latent [B, 40, T] and the largest norms [B, 3T]
         try testing.expect(s.slot >= 40 * t * b and s.slot >= 3 * t * b);
