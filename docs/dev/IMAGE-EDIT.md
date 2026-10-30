@@ -291,6 +291,14 @@ which also has the vision tower), mflux `5171ae15` `QwenImage21Edit`, the same p
 | edit, 5 inputs | 25.59 / 24.44 | 36.46 / 39.11 |
 | peak memory (MLX) | 16.8 to 17.3 GB | 29.1 to 34.0 GB |
 
+**Through the daemon** (the same Mac, LocalRouter built with `zig build -Doptimize=ReleaseSafe`, the tool of
+`config.example.json`; seconds are the HTTP round trip): `/v1/images/generations` 1024x1024 10.8 s for the first
+request (loading the tool included), `n` 2 16.8 s; `/v1/images/edits` with 1, 2 and 5 inputs 11.3, 14.0 and 24.0 s, a
+mask 11.2 s; MCP `generate_image` 8.6 s, `edit_image` with 1 and 2 images 11.3 and 14.5 s. Refused with a 400 and
+the reason: six inputs (the API), steps 25, 1600x1024, and an edit at 1008x1008 (the worker). Outputs carry the
+machine-generated label and the `prompt` / `seed` chunks; the scheduler measured 16,089 MiB resident. A SIGKILLed
+daemon leaves no worker or MLX-Serve behind (`localrouter guard`).
+
 Both produce correct edits with all five inputs. MLX-Serve is as fast for text to image, two to four times faster for
 edits, and needs half the memory; it is also a server that cancels at the next step, where mflux is a library a worker
 would have to host itself.
