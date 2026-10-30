@@ -157,6 +157,11 @@ macOS returns ENOTCONN for that call and `accept` stays blocked, so there the da
 once (`serve.zig` `watchStop`). It then exits 0 and its workers follow. `tests/orphans.zig` covers both this and
 SIGKILL.
 
+**Reading test output.** `zig build test-integration` may end with `failed command: ./.zig-cache/o/.../test ...` and
+still pass. Zig 0.17's build runner prints that line, left over from the run, whenever a passing test step's child
+processes wrote to the inherited stderr (the daemons' `info:` logs do). It is the same on Linux. The exit status and
+`Build Summary` (`N/N tests passed`) are what count.
+
 **Cancel reaches the worker.** A `cmd` worker that takes soft cancel gets SIGUSR1. The daemon used to send it at
 once, so a cancel that came between "job running" and the `generate` line reaching the worker was lost (the worker
 was not busy yet and ignored it). Now the job carries its cancel flag: a cancel before the write ends the job without
