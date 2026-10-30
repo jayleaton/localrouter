@@ -20,6 +20,10 @@ pub const PcmSink = struct {
 pub const Hear = struct { model: []const u8 = "", language: []const u8 = "", prompt: []const u8 = "", worker_ms: ?*u64 = null, detected: ?*[]const u8 = null, greedy: bool = false };
 pub const Say = struct { model: []const u8 = "", voice: []const u8 = "" };
 
+/// What a warm-up speaks (the audio is dropped): one short word, since the engine speaks one request at a time and a
+/// reply waits behind it.
+pub const warm_sentence = "Hello.";
+
 pub const JobKind = enum { image, video };
 
 /// A tool call's job: what the model asked for. An input image (an image's: an edit; a video's: its first frame) is
@@ -83,7 +87,15 @@ pub const Backend = struct {
         yield_chat: ?*const fn (ptr: *anyopaque, model: []const u8, op: Yield, holder: usize) bool = null, // speech first
         assistant_name: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: the default
         model_skill: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: no models line
+        speech_warm: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, o: Say) bool = null, // null: never known warm
     };
+
+    /// Whether `o`'s voice is warm in its speech model's loaded instance: its first sentence starts at the warm speed.
+    /// False when the backend cannot tell (the session then warms it).
+    pub fn speechWarm(b: Backend, a: std.mem.Allocator, o: Say) bool {
+        const f = b.vtable.speech_warm orelse return false;
+        return f(b.ptr, a, o);
+    }
 
     /// The model management procedure (`skill.zig`) with this machine's models in it, in `a`.
     pub fn modelSkill(b: Backend, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {

@@ -103,7 +103,7 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName, .model_skill = modelSkillOf };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName, .model_skill = modelSkillOf, .speech_warm = speechWarm };
 
 fn assistantName(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     const app = self(ptr).app;
@@ -308,6 +308,45 @@ fn speak(ptr: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say
         return;
     }
     return failed(why, "no speech model");
+}
+
+/// Whether the voice a session's sentence would be spoken in (as `speak` picks it from `o`) is the one warm in its speech
+/// model's loaded instance (`Scheduler.speechWarm`): its first sentence then starts at the warm speed.
+fn speechWarm(ptr: *anyopaque, a: std.mem.Allocator, o: backend.Say) bool {
+    const app = self(ptr).app;
+    const wanted = if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+    const first = (speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model, wanted) catch return false)[0];
+    const voice = voiceFor(app, first, wanted);
+    var ref: routes.Refusal = .{};
+    const i = routes.resolveSpeech(app, first, voice, &ref) orelse return false;
+    const c = app.scheduler.slots[i].tool.config();
+    return app.scheduler.speechWarm(i, if (voice.len > 0) voice else engine.optionString(c, "default_voice", ""));
+}
+
+/// The scheduler's hook after a kept speech tool loads, at start and each time it comes back (`sched.Loaded`): one word
+/// in the voice a call speaks in on it (`voice.voice` on the voice loop's model, else the tool's default voice), the
+/// audio dropped, so a call that connects later finds the first job after the load paid: about 7 s to first audio with
+/// the voice's references on the Mac's Drama 3 (0.5 s warm), 0.84 s on DGX-01 (0.1 s warm). It only queues the job.
+pub fn warmLoaded(ctx: *anyopaque, tool: usize) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    if (!app.cfg.voice.warm_speech) return;
+    var arena: std.heap.ArenaAllocator = .init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = app.scheduler.slots[tool].tool.config();
+    if (!engine.supports(c, .text_to_speech)) return;
+    var voice = engine.optionString(c, "default_voice", "");
+    if (defaultVoice(app, a) catch null) |d| if (std.mem.eql(u8, d.model, c.id)) {
+        voice = d.voice;
+    };
+    if (app.scheduler.speechWarm(tool, voice)) return;
+    var ref: routes.Refusal = .{};
+    const j = speech.startSpeech(app, a, .{ .model = c.id, .input = backend.warm_sentence, .voice = voice, .stream = engine.optionBool(c, "stream", false) }, "", &ref) orelse {
+        std.log.warn("voice: {s} not warmed after its load: {s}", .{ c.id, ref.message });
+        return;
+    };
+    forget(app, j);
+    std.log.info("voice: warming {s} in voice '{s}' after its load ({s})", .{ c.id, voice, j.id });
 }
 
 /// `wanted` when `model` has that voice (or lists none, or is the text_to_speech default, which picks its own), else ""

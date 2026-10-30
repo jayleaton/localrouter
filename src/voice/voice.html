@@ -3330,6 +3330,16 @@ function handle(ev) {
     case 'localrouter.voice.resumed':
       if (V.paused) note('Voice is back.');
       V.paused = false;
+      V.warming = true; // a new instance of the speech model: the session warms its voice and says when it is ready
+      renderVoice();
+      break;
+    case 'session.created':
+      V.warming = true;
+      renderVoice();
+      break;
+    case 'localrouter.session.ready':
+      V.warming = false;
+      dbg('voice.ready', { speech: ev.speech, chat: ev.chat, ms: ev.ms });
       renderVoice();
       break;
     case 'response.output_item.done':
@@ -3418,6 +3428,7 @@ function voiceState() {
   if (V.userSpeaking) return 'hearing';
   if (V.live.length) return 'speaking';
   if (V.thinking || V.resp) return 'thinking';
+  if (V.warming && !V.muted) return 'warming';
   if (S.mode === 'ptt') return 'ptt';
   return V.muted ? 'muted' : 'listening';
 }
@@ -3427,6 +3438,7 @@ const STATE_TEXT = {
   thinking: ['Thinking…', 'Tap the orb to stop'], speaking: ['Speaking', 'Tap the orb or just talk to interrupt'],
   muted: ['Muted', 'Tap Unmute to talk'], ptt: ['Ready', 'Hold the button while you talk'], talking: ['Listening…', 'Release to send'],
   paused: ['Voice paused, making video…', 'The voice models make room for a job and come back by themselves'],
+  warming: ['Getting ready…', 'Warming up the voice; the first reply waits for it'],
 };
 function renderVoice() {
   const s = voiceState();

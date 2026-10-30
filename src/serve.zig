@@ -137,6 +137,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     defer scheduler.deinit();
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
+    scheduler.loaded = .{ .ctx = &app, .f = @import("api/voice_local.zig").warmLoaded }; // a kept speech model's voice warms as it loads
     defer app.voice.deinit(gpa);
     try app.cloned.init(io, gpa, try std.fs.path.join(arena, &.{ cfg.data_dir, "voices" })); // cloned voices (voices.zig)
     defer app.cloned.deinit();

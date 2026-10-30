@@ -122,8 +122,14 @@ pub const Session = struct {
     stt_worker_ms: u64 = 0, // the transcription as the worker timed it
     last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
     primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
-    warmer: ?std.Thread = null, // the speech warm-up (respond.warmSpeech), joined at the end
+    warmer: ?std.Thread = null, // the speech warm-up (respond.warmUp), joined before the next and at the end
     priming: bool = false,
+    prime_again: bool = false, // the session changed while a prime ran: one more after it
+    warming: bool = false,
+    warm_again: bool = false, // the voice changed while a warm-up ran: one more after it
+    getting_ready: bool = false, // a readiness check is open: `localrouter.session.ready` follows (respond.getReady)
+    ready_from_ns: i96 = 0,
+    speech_ready: respond.SpeechReady = .off,
     speech_end_ns: i96 = 0, // the last spoken turn's quiet began (awake clock), for its response's timing
     // The turn so far, transcribed once the speaker has been quiet for voice.early_stt_ms: while they stay quiet it is the
     // whole turn, so when the wait ends the transcript is ready and only the answer is left. It is only the turn's words:
@@ -149,9 +155,9 @@ pub const Session = struct {
         s.emit.send(tmp.allocator(), "session.created", .{ .session = try s.shown(tmp.allocator()) });
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
         s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
         respond.prime(s); // the system prompt and tools, before the first turn needs them
-        s.mutex.unlock(io);
-        if (s.voice.warm_speech and s.settings.audio and respond.speechCold()) s.warmer = std.Thread.spawn(.{}, respond.warmSpeech, .{s}) catch null;
+        respond.getReady(s); // and the voice: `localrouter.session.ready` once both are done
         return s;
     }
 
@@ -256,12 +262,17 @@ pub const Session = struct {
             return s.emit.fail(a, "invalid_request_error", "invalid_session", why.message, eid);
         }
         const vad_changed = !std.meta.eql(st.vad, s.settings.vad);
+        const voice_changed = !eql(st.voice, s.settings.voice) or !eql(st.speech_model, s.settings.speech_model) or (st.audio and !s.settings.audio);
         var old = s.settings_arena;
         s.settings = st;
         s.settings_arena = next;
         old.deinit();
         if (vad_changed and s.turn == null) s.resetDetector();
         s.emit.send(a, "session.updated", .{ .session = try s.shown(a) });
+        // A client sets its instructions, tools and voice after connecting: the prime and the warm-up follow them, and a
+        // new voice or speech model is checked again (another `localrouter.session.ready`).
+        if (s.resp == null) respond.prime(s);
+        if (voice_changed) respond.getReady(s);
     }
 
     /// The session object a client sees: its instructions as the chat model reads them, the assistant's name filled in.
