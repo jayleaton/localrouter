@@ -1,0 +1,16 @@
+[project]
+name = "localrouter-speech-whisper-macos"
+version = "0.1.0"
+description = "Whisper large-v3-turbo speech-to-text worker for LocalRouter's cmd adapter on Apple Silicon (MLX)"
+requires-python = "==3.12.*"
+dependencies = [
+    "mlx==0.32.4",
+    "mlx-whisper==0.4.3",
+    "torch==2.13.0",  # the Silero VAD gate only (TorchScript on the CPU), the same release as the Spark worker
+    "numpy==2.5.4",
+]
+
+[tool.uv]
+package = false
+# macOS on Apple Silicon only; the Linux (Spark / x86_64) worker has its own project and lock one directory up.
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]

@@ -14,6 +14,8 @@ import argparse
 import base64
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -23,11 +25,18 @@ import uuid
 
 
 def mem_available():
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    return 0
+    """MemAvailable on Linux; on macOS (no /proc) vm_stat's free, inactive, speculative and purgeable pages, the
+    memory the VM can hand out without paging (file cache counted as free, as MemAvailable does)."""
+    if os.path.exists("/proc/meminfo"):
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        return 0
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    page = int(re.search(r"page size of (\d+) bytes", out).group(1))
+    pages = {k.strip(): int(v.strip().rstrip(".")) for k, v in (l.split(":", 1) for l in out.splitlines()[1:] if ":" in l)}
+    return page * sum(pages.get(k, 0) for k in ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"))
 
 
 class Daemon:
@@ -246,26 +255,34 @@ def main():
         status, _, body = d.transcribe(data, "l.wav", [("model", a.model), ("language", "klingon")])
         rep.check("bad language refused", status == 400, status=status)
 
-    # Cancel: a long transcription over MCP, cancelled while running; the worker is killed and memory comes back.
+    # Cancel: a long transcription over MCP, cancelled while running. A worker without soft cancel is killed and its
+    # memory comes back; one that offers it ("cancel": "signal", the macOS worker) ends the job and stays loaded.
     longest = max(((n, r) for n, r in refs.items() if not r.get("malformed") and (r.get("duration_s") or 0) > 0),
                   key=lambda x: x[1]["duration_s"], default=None)
     if longest and not a.skip_cancel:
         data = open(path_of(*longest), "rb").read()
         res = d.mcp("transcribe_audio", {"audio": base64.b64encode(data).decode(), "model": a.model, "wait_s": 0})
         job = json.loads(next(c["text"] for c in res["content"] if c["type"] == "text"))
-        time.sleep(3)
+        # cancel as soon as it runs: a fast box finishes the longest fixture in under two seconds
+        deadline = time.monotonic() + 60
+        while job.get("status") in ("queued", None) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            job = json.loads(d.mcp("get_job", {"id": job["id"], "wait_s": 0})["content"][0]["text"])
+        time.sleep(0.3)
         busy_mem = mem_available()
         t0 = time.monotonic()
         res = d.mcp("cancel_job", {"id": job["id"]})
+        cancel_s = round(time.monotonic() - t0, 3)  # the cancel call alone (it returns when the job has ended)
         cancelled = json.loads(res["content"][0]["text"])
         time.sleep(2)
         after = mem_available()
         tool = d.tool(a.model)
-        rep.check("cancel kills the running transcription", cancelled["status"] == "cancelled" and tool["state"] == "unloaded",
-                  status=cancelled["status"], state=tool["state"], cancel_s=round(time.monotonic() - t0, 3),
+        rep.check("cancel ends the running transcription", cancelled["status"] == "cancelled"
+                  and tool["state"] in ("unloaded", "ready"),
+                  status=cancelled["status"], state=tool["state"], cancel_s=cancel_s,
                   mem_busy=busy_mem, mem_after=after, reclaimed_bytes=after - busy_mem, idle_before_load=mem_idle)
         status, _, body = d.transcribe(open(path_of(en, refs[en]), "rb").read(), "again.wav", [("model", a.model), ("seed", "0")]) if en else (200, {}, b"")
-        rep.check("next request reloads after cancel", status == 200, status=status)
+        rep.check("next request served after cancel", status == 200, status=status)
 
     # Unload: release returns the memory.
     before = mem_available()
