@@ -23,8 +23,7 @@ jobs:
         run: |
           for f in tools/install/*.sh deploy/jarvis/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
           for f in deploy/profiles/*.json tools/twin/packs/sources/*.json tools/twin/packs/built/*.json; do jq empty "$f"; done
-          # a profile still being written (status "skeleton", no models yet) has no plan to run
-          for p in deploy/profiles/*.json; do [ "$(jq -r .status "$p")" = skeleton ] && continue; tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
+          for p in deploy/profiles/*.json; do tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
       - run: zig build
       - run: zig build test
         timeout-minutes: 20

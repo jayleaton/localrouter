@@ -134,8 +134,37 @@ ceiling reads 79,626 MiB.
 - The yielder's child and stopped-state probes use libproc instead of `/proc`.
 - The tests' process probes are in `tests/proc.zig` (libproc and `KERN_PROCARGS2` on macOS).
 
-**CI.** No macOS job was added, because macOS runners are billed. The PR proposes one. The CI plan check skips a
-profile whose `status` is `skeleton` until its models are filled in.
+**Stopping.** On SIGTERM or SIGINT, Linux wakes the blocked `accept` with `shutdown()` on the listening socket.
+macOS returns ENOTCONN for that call and `accept` stays blocked, so there the daemon connects to its own address
+once (`serve.zig` `watchStop`). It then exits 0 and its workers follow. `tests/orphans.zig` covers both this and
+SIGKILL.
+
+**Installer** (`tools/install`). It runs on macOS's bash 3.2 and BSD tools, and on a Spark it runs exactly the
+commands it ran before. `lib.sh` holds the portable helpers:
+
+| Helper | Linux | macOS fallback |
+| --- | --- | --- |
+| `readlines` | `mapfile` | read loop |
+| `abspath` | `realpath -m` | by hand |
+| `sha256` | `sha256sum` | `shasum -a 256` |
+| `hw_mem`, `hw_avail` | `/proc/meminfo` | `sysctl` and `vm_stat` (the daemon's formula) |
+| `hw_disk_free` | `df -B1` | `df -k` |
+| `hw_os` | `/etc/os-release` | `sw_vers` |
+| `hw_gpu` | `nvidia-smi` | the SoC name |
+
+Other differences:
+
+- On bash older than 4.4, nounset is relaxed, because `"${empty[@]}"` trips it there.
+- `--peer-store` needs bash 4.
+- Hard-link reuse (`cp -l`) falls back to downloading, because BSD `cp` has no `-l`.
+- A `skeleton` profile with no models plans its host steps alone.
+- A profile without `deploy` ends after its steps. The Mac service, launchd rather than systemd, is not written
+  yet, and `doctor.sh`'s service checks are still the systemd ones.
+
+`bootstrap.sh --profile mac-apple-silicon --dry-run` runs on this Mac, and CI dry-runs every profile as before. On
+Linux, the `jarvis-gb10` plan is byte-identical before and after this change.
+
+**CI.** No macOS job was added, because macOS runners are billed. The PR proposes one.
 
 The Mac deploy profile is `deploy/profiles/mac-apple-silicon.json`. It lists the host prerequisites (Zig 0.17.0, the
 Xcode Metal toolchain, python3) and an empty `models` list, which each model's port fills in.

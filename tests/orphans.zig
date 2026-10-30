@@ -55,3 +55,43 @@ fn waitReady(d: *harness.Daemon, a: std.mem.Allocator, id: []const u8) !void {
     }
     return error.NotReady;
 }
+
+test "orphans: SIGTERM stops the daemon (exit 0 within 5 s) and its workers with it" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg = try std.fmt.allocPrint(a, "{{" ++ harness.reserve ++ ", \"tools\": [" ++
+        "{{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"keep_loaded\": true}}," ++
+        "{{\"id\": \"py\", \"kind\": \"speech\", \"cmd\": [\"python3\", \"{s}\"], \"keep_loaded\": true, \"resident_bytes\": 8388608}}]}}", .{opts.speech_worker});
+    var d = try harness.Daemon.start(testing.allocator, io, "sigterm", cfg);
+    defer { // not `stop`: the daemon is reaped here
+        d.client.deinit();
+        std.Io.Dir.cwd().deleteTree(io, d.dir) catch {};
+        testing.allocator.free(d.dir);
+    }
+    for ([_][]const u8{ "tp", "py" }) |id| try waitReady(&d, a, id);
+    const pid = d.child.id.?;
+    const below = try proc.children(a, io, pid);
+    try testing.expect(below.len >= 2);
+
+    _ = std.posix.system.kill(pid, std.posix.SIG.TERM);
+    var status: c_int = 0;
+    const exited = for (0..50) |_| { // 5 s
+        if (std.c.waitpid(pid, &status, std.c.W.NOHANG) == pid) break true;
+        harness.sleepMs(io, 100);
+    } else false;
+    if (!exited) {
+        _ = std.posix.system.kill(pid, std.posix.SIG.KILL);
+        _ = std.c.waitpid(pid, &status, 0);
+    }
+    try testing.expect(exited);
+    try testing.expect(std.c.W.IFEXITED(@bitCast(status)) and std.c.W.EXITSTATUS(@bitCast(status)) == 0);
+    for (0..50) |_| { // the workers follow within 5 s
+        if (for (below) |w| {
+            if (std.posix.system.kill(w, @fromBackingInt(@intCast(0))) == 0) break false;
+        } else true) break;
+        harness.sleepMs(io, 100);
+    }
+    for (below) |w| try testing.expect(std.posix.system.kill(w, @fromBackingInt(@intCast(0))) != 0);
+}

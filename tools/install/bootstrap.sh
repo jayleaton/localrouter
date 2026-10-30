@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --profile) profile=${2:?}; shift 2 ;;
     --models) list=${2:?}; shift 2 ;;
-    --prefix) PREFIX=$(realpath -m "${2:?}"); shift 2 ;;
+    --prefix) PREFIX=$(abspath "${2:?}"); shift 2 ;;
     --port) PORT=${2:?}; port_set=1; shift 2 ;;
     --https-port) HTTPS_PORT=${2:?}; shift 2 ;;
     --unit) UNIT=${2:?}; shift 2 ;;
@@ -49,7 +49,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$profile" ] || die "--profile is required (have: $(profiles))"
-for t in jq curl sha256sum awk; do command -v $t > /dev/null || die "needs $t first: sudo apt-get install -y jq curl coreutils gawk"; done
+if [ $darwin = 1 ]; then
+  for t in jq curl shasum awk; do command -v $t > /dev/null || die "needs $t first: brew install jq (curl, shasum and awk come with macOS)"; done
+else
+  for t in jq curl sha256sum awk; do command -v $t > /dev/null || die "needs $t first: sudo apt-get install -y jq curl coreutils gawk"; done
+fi
 p=$(profile_file "$profile") || exit 1
 topo_note="" listen=127.0.0.1 fbk=" "
 if [ -n "$topology$node" ]; then # one node of several: the profile's models it runs
@@ -59,8 +63,8 @@ if [ -n "$topology$node" ]; then # one node of several: the profile's models it 
   extra=$(for t in $(topo_local "$topology" "$node"); do jq -e --arg t "$t" 'any(.models[]; .id == $t)' "$p" > /dev/null || echo "$t"; done | paste -sd ' ')
   topo_note="node $node of $topology ($(topo_role "$topology" "$node"))${extra:+; it also runs $extra, which $profile does not install: set those up by hand first (deploy/jarvis/README.md)}"
 fi
-mapfile -t keys < <(selected "$p" "$list")
-[ ${#keys[@]} -gt 0 ] || die "no models selected"
+readlines keys < <(selected "$p" "$list")
+[ ${#keys[@]} -gt 0 ] || [ "$(jq -r .status "$p")" = skeleton ] || die "no models selected"   # a skeleton: the host's steps alone
 step_env "$p"
 # the install to reuse model files from: --models-dir, else the default prefix when this one is elsewhere
 [ -z "$STORE" ] && [ "$PREFIX" != "$HOME/jarvis" ] && [ -d "$HOME/jarvis" ] && STORE=$HOME/jarvis
@@ -99,7 +103,9 @@ for spec in "${peers[@]}"; do
 done
 # what to copy from a peer: a model with a weights step (reused) still to do, the paths not in the store, from the
 # first peer that has them (rsync then sends only what differs, so a copy that broke off resumes)
-declare -A copy_list=() copy_from=()
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then declare -A copy_list=() copy_from=(); else
+  [ ${#pnode[@]} = 0 ] || die "--peer-store needs bash 4 or newer (macOS: brew install bash, then run this with it)"
+fi
 fetching() {
   local s
   for s in "${todo[@]}"; do [ "$(jq -r '.model + " " + (.reused // false | tostring)' <<< "$s")" = "$1 true" ] && ! is_done "$s" && return 0; done
@@ -129,7 +135,7 @@ while read -r q; do
 done < <(prereqs "$p" "${keys[@]}")
 
 # ---- 2. the plan: each step, done or to do; what the rest needs
-mapfile -t todo < <(steps "$p" "${keys[@]}")
+readlines todo < <(steps "$p" "${keys[@]}")
 need_dl=0 need_disk=0 warm=0 peak=0 accepts=() saved=0 reuse_lines=() reusing=" "
 for k in "${keys[@]}"; do   # what the store already has: linked, not downloaded
   while read -r r; do
@@ -183,7 +189,11 @@ for s in "${todo[@]}"; do
   printf '  %-5s %-16s %s%s\n' "$st" "$(step_id "$s")" "$(jq -r .title <<< "$s")" \
     "$(jq -r 'if .gpu then " [GPU, \(.min_free_gib) GiB free]" else "" end' <<< "$s")"
 done
-printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on $listen:$PORT), then start.sh until the warm models are ready"
+if jq -e .deploy "$p" > /dev/null; then
+  printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on $listen:$PORT), then start.sh until the warm models are ready"
+else
+  printf '  %-5s %-16s %s\n' none deploy "this profile has no deploy yet: the run ends after its steps"
+fi
 echo "needs: download $(gib $need_dl) GiB, disk $(gib $need_disk) GiB + $(gib $margin) margin (free: $(gib "$free") GiB)$([ $saved -gt 0 ] && echo "; $(gib $saved) GiB reused from $STORE instead of downloaded")$([ $copied -gt 0 ] && echo "; $(gib $copied) GiB copied from peers instead of downloaded")"
 echo "memory: $(gib $warm) GiB for the warm models$([ $peak -gt 0 ] && echo ", plus up to $(gib $peak) GiB for an on-demand one (it unloads the image model to fit)") of $(gib "$(hw_mem)") GiB"
 gpu_need=0   # the most free memory a GPU step still to do needs
@@ -224,8 +234,8 @@ for s in "${todo[@]}"; do
   k=$(jq -r .model <<< "$s")
   if [ "$k" != "${reused:-}" ]; then   # a model's first step: link what the store has, copy what a peer has (its licence accepted)
     reused=$k
-    mapfile -t rs < <(reusable "$k")
-    read -ra cs <<< "${copy_list[$k]:-}"
+    readlines rs < <(reusable "$k")
+    cs=(); [ ${#pnode[@]} = 0 ] || read -ra cs <<< "${copy_list[$k]:-}"
     if [ $((${#rs[@]} + ${#cs[@]})) -gt 0 ] && { [ $accept = 1 ] || [ "$(model "$p" "$k" | jq '(.accept // []) | length')" = 0 ]; }; then
       for r in "${rs[@]}"; do echo "reuse $k: $STORE/$r"; $STEPS reuse "$STORE/$r" "$PREFIX/$r" >> "$LOGS/$k-reuse.log" 2>&1; done
       for r in "${cs[@]}"; do
@@ -267,6 +277,8 @@ for s in "${todo[@]}"; do
   echo "ok    $id in $(($(date +%s) - t)) s"
 done
 if [ $nogpu = 1 ]; then echo "== --no-gpu: the GPU steps are left; when the GPU is free run: ${again// --no-gpu/}"; exit 0; fi
+
+jq -e .deploy "$p" > /dev/null || { echo "== the steps are done; $profile has no deploy yet (its manifest names none)"; exit 0; }
 
 # ---- 4. deploy: the service on the selected models (install.sh waits for open voice sessions before a restart)
 echo "run   deploy (log: $LOGS/deploy.log)"

@@ -211,11 +211,18 @@ fn installSignals() void {
     posix.sigaction(posix.SIG.TERM, &act, null);
 }
 
-/// Once a signal set the flag: ends the voice sessions' reads, then wakes the accept loop (shutdown closes the socket).
+/// Once a signal set the flag: ends the voice sessions' reads, then wakes the accept loop. On Linux shutdown closes the
+/// socket under `accept`; on macOS it fails (ENOTCONN on a listening socket) and `accept` stays blocked, so there the
+/// daemon connects to itself once (its own bound address: the kernel answers at once): `accept` returns, and the loop
+/// sees the flag.
 fn watchStop(io: Io, server: *Io.net.Server, app: *routes.App) void {
     while (!stop_flag.load(.acquire)) Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
     app.voice.closeAll(io);
     if (app.computer) |c| c.closeAll();
+    if (@import("builtin").os.tag != .linux) {
+        if (app.self_addr.connect(io, .{ .mode = .stream })) |s| s.close(io) else |err| std.log.warn("waking the accept loop: {s}", .{@errorName(err)});
+        return;
+    }
     _ = posix.system.shutdown(server.socket.handle, posix.SHUT.RDWR);
 }
 

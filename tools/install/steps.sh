@@ -14,8 +14,9 @@
 #                                 with this box's paths, for its qualify.sh
 set -euo pipefail
 : "${J:?J (the prefix) is not set}" "${REPO:?REPO is not set}" "${PROFILE_FILE:?PROFILE_FILE is not set}"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"   # sha256, abspath, hw_avail: the GNU/Linux commands, or macOS's
 die() { echo "steps.sh: $*" >&2; exit 1; }
-sum_of() { cat "$@" | sha256sum | cut -c1-64; }
+sum_of() { cat "$@" | sha256 | cut -c1-64; }
 
 tool() {
   local t url sha top name f
@@ -25,9 +26,9 @@ tool() {
   name=$(basename "$url")
   mkdir -p "$J/dl" "$J/opt" "$J/bin"
   f=$J/dl/$name
-  if [ ! -f "$f" ] || [ "$(sha256sum "$f" | cut -c1-64)" != "$sha" ]; then
+  if [ ! -f "$f" ] || [ "$(sha256 "$f" | cut -c1-64)" != "$sha" ]; then
     curl -fL --retry 5 -C - -o "$f.part" "$url" || curl -fL --retry 5 -o "$f.part" "$url"
-    [ "$(sha256sum "$f.part" | cut -c1-64)" = "$sha" ] || { rm -f "$f.part"; die "$name: sha256 differs from the pin $sha (removed; run again)"; }
+    [ "$(sha256 "$f.part" | cut -c1-64)" = "$sha" ] || { rm -f "$f.part"; die "$name: sha256 differs from the pin $sha (removed; run again)"; }
     mv "$f.part" "$f"
   fi
   top=$(tar -tf "$f" | awk -F/ 'NR == 1 {print $1}')   # the archive's one top directory (awk reads it all: no SIGPIPE)
@@ -47,7 +48,7 @@ file() {
   local url=$1 sha=$2 dest=$3
   mkdir -p "$(dirname "$dest")"
   curl -fL --retry 5 -o "$dest.part" "$url"
-  [ "$(sha256sum "$dest.part" | cut -c1-64)" = "$sha" ] || { rm -f "$dest.part"; die "$(basename "$dest"): sha256 differs from the pin $sha"; }
+  [ "$(sha256 "$dest.part" | cut -c1-64)" = "$sha" ] || { rm -f "$dest.part"; die "$(basename "$dest"): sha256 differs from the pin $sha"; }
   mv "$dest.part" "$dest"
 }
 
@@ -56,13 +57,13 @@ stamped() { local n=$1; shift; [ -f "$J/install/state/$n" ] && [ "$(cat "$J/inst
 
 # qualified MARKER PINS [VARIANT_PINS]: the marker says qualified for these pins (and a variant's, pins-VARIANT.json)
 qualified() {
-  [ -f "$1" ] && jq -e --arg p "$(sha256sum "$2" | cut -c1-64)" '.qualified == true and .pins_sha256 == $p' "$1" > /dev/null || return 1
-  [ -z "${3:-}" ] || jq -e --arg v "$(sha256sum "$3" | cut -c1-64)" '.variant_pins_sha256 == $v' "$1" > /dev/null
+  [ -f "$1" ] && jq -e --arg p "$(sha256 "$2" | cut -c1-64)" '.qualified == true and .pins_sha256 == $p' "$1" > /dev/null || return 1
+  [ -z "${3:-}" ] || jq -e --arg v "$(sha256 "$3" | cut -c1-64)" '.variant_pins_sha256 == $v' "$1" > /dev/null
 }
 
 free() {
   local have
-  have=$(awk '/^MemAvailable:/{printf "%d", $2 / 1048576}' /proc/meminfo)
+  have=$(($(hw_avail) / 1073741824))
   [ "$have" -ge "$1" ] && return 0
   echo "steps.sh: this step needs $1 GiB free, MemAvailable is $have GiB. Stop what uses the GPU first (a running" >&2
   echo "  LocalRouter: systemctl --user stop ${UNIT:-localrouter-jarvis}; others: nvidia-smi --query-compute-apps=pid,name --format=csv)" >&2
@@ -76,7 +77,7 @@ free() {
 # them against its pins either way.
 reuse() {
   local src dst base
-  src=$(realpath "$1") dst=$(realpath -m "$2")
+  src=$(realpath "$1") dst=$(abspath "$2")
   mkdir -p "$dst"
   cp -a -l -n "$src/." "$dst/" 2> /dev/null && return 0
   base=$src; while [ "$base" != / ] && [[ $dst != "$base"/* ]]; do base=$(dirname "$base"); done   # the deepest directory holding both

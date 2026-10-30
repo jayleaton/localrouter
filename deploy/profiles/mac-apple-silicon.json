@@ -5,7 +5,7 @@
  "tested_on": "",
  "hardware": {
   "arch": "arm64",
-  "gpu": "Apple Silicon (Metal)",
+  "gpu": "Apple M",
   "unified_memory": true,
   "min_memory_gib": 64,
   "os": "macos 27"

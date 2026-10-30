@@ -66,7 +66,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     it_mod.addOptions("build_options", it_opts);
-    const it_test = b.addTest(.{ .root_module = it_mod });
+    const it_filters = b.option([]const []const u8, "test-filter", "Run only the integration tests whose names contain this (repeatable)") orelse &.{};
+    const it_test = b.addTest(.{ .root_module = it_mod, .filters = it_filters });
     const integration = b.addRunArtifact(it_test);
     integration.has_side_effects = true;
     // The same tests as a program, run outside the build runner so each test's name and output appear as it runs.
