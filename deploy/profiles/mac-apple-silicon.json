@@ -178,7 +178,7 @@
   {
    "id": "qwen-image-2.1-turbo",
    "key": "image",
-   "title": "Qwen-Image 2.1 Turbo text to image and edits of up to five images (MLX-Serve 8-bit, 8 steps; a cmd worker)",
+   "title": "Qwen-Image 2.1 Turbo text to image and edits of up to five images (MLX-Serve 8-bit, 8 steps; a cmd worker, loaded on demand)",
    "licence": {
     "name": "Qwen Research License: non-commercial research or evaluation only",
     "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE"
@@ -186,12 +186,12 @@
    "accept": [
     "the Qwen-Image 2.1 Turbo licence (link below)"
    ],
-   "pins": "tools/image/qwen-mlx/pins-macos.json, tools/image/qwen-mlx/requirements-macos.txt",
+   "pins": "tools/image/qwen-mlx/pins-macos.json (8-bit, installed), tools/image/qwen-mlx/pins-macos-q4.json (4-bit alternative), tools/image/qwen-mlx/requirements-macos.txt",
    "memory_bytes": 17179869184,
    "working_bytes": 2147483648,
    "download_bytes": 17810000000,
    "disk_bytes": 18500000000,
-   "warm": true,
+   "warm": false,
    "tool": "tools/image/qwen-mlx/config.example.json: cmd $IMAGE_ROOT/venv/bin/python -I $REPO/tools/image/qwen-mlx/qwen_mlx_worker.py, weights $IMAGE_ROOT/qwen-image-2.1-turbo-mlx-q8",
    "skip": "leave image out of --models; picture requests then fail with 'no image model'",
    "steps": [

@@ -439,6 +439,20 @@ class LoadFailures(unittest.TestCase):
         r = self.load(Env({"verify": "size"}))
         self.assertIn("missing or not the pinned size", r["error"])
 
+    def test_each_pack_is_checked_against_its_own_pins(self):
+        env = Env({"verify": "size", "pack": "q4"})
+        os.makedirs(os.path.join(env.weights, "text_encoder"))
+        with open(os.path.join(env.weights, "text_encoder", "model.safetensors"), "wb") as f:
+            f.truncate(17)  # not the 4-bit text encoder's pinned size
+        r = self.load(env)
+        self.assertFalse(r["ok"])
+        self.assertIn("not the pinned size", r["error"])
+        self.assertEqual(qw.PACKS["q4"], os.path.join(HERE, "pins-macos-q4.json"))
+
+    def test_an_unknown_pack_is_a_bad_config(self):
+        r = self.load(Env({"pack": "q2"}))
+        self.assertIn("bad tool config: pack must be one of ['q4', 'q8']", r["error"])
+
     def test_a_bad_config_answers_every_load(self):
         env = Env()
         env.tool["weights"] = ""
