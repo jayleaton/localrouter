@@ -9,6 +9,7 @@ export VMODELS_VOL=$STK/models/minimax-h3           # the volume's copy
 export WITH_COMFY=${WITH_COMFY:-0}
 if [[ $WITH_COMFY == 1 ]]; then export COMFY=$STK/src/ComfyUI; else unset COMFY; fi   # v0.37.0
 export TFVIDEO_REV=711d942                          # jayleaton/minimax-h3-tensorfold-rtx
+export H3_REV=${H3_REV:-e5eb578a89295337b8ff433a035929ce0279e0b6}   # Comfy-Org/MiniMax-H3 (files: packs/sources/)
 export KITCHEN_VERSION=0.2.35                       # comfy-kitchen, ComfyUI 0.37.0's pin
 export PYTHONPATH=$TWIN${COMFY:+:$COMFY}:$STK/src/minimax-h3-tensorfold-rtx${PYTHONPATH:+:$PYTHONPATH}
 if [[ -f $VVENV/bin/activate ]]; then source $VVENV/bin/activate; fi

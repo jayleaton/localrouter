@@ -55,16 +55,24 @@ pub const Layout = struct {
     w: u32,
     a: u32,
     s: u32,
+    cond: u32 = 0,
 
     pub fn init(l: u32, t: u32, h: u32, w: u32, a: u32) Layout {
         return .{ .l = l, .t = t, .h = h, .w = w, .a = a, .s = l + 2 * a + t * (h / 2) * (w / 2) };
     }
 
+    pub fn withFirstFrame(x: Layout) Layout {
+        var y = x;
+        y.cond = (x.h / 2) * (x.w / 2);
+        y.s += y.cond;
+        return y;
+    }
+
     pub fn audioRows(x: Layout) [2]u32 {
-        return .{ x.l, x.l + 2 * x.a };
+        return .{ x.l + x.cond, x.l + x.cond + 2 * x.a };
     }
     pub fn videoRows(x: Layout) [2]u32 {
-        return .{ x.l + 2 * x.a, x.s };
+        return .{ x.l + x.cond + 2 * x.a, x.s };
     }
 
     fn axis(dim: u32, area: f64, i: u32) f64 {
@@ -85,6 +93,12 @@ pub const Layout = struct {
             r += 1;
         }
         const cursor: f64 = @floatFromInt(x.l);
+        if (x.cond > 0) {
+            for (0..x.h / 2) |hh| for (0..x.w / 2) |ww| {
+                out[r] = .{ cursor, axis(x.h, area, @intCast(hh)), axis(x.w, area, @intCast(ww)) };
+                r += 1;
+            };
+        }
         for (0..2) |ch| for (0..x.a) |i| {
             out[r] = .{ cursor + @as(f64, @floatFromInt(i)), 0, if (ch == 0) w_lo else w_hi };
             r += 1;
@@ -120,21 +134,38 @@ pub const Layout = struct {
     }
 
     /// The unique timesteps (ascending) and each token's modulation row t_row * 3 + tag (video 0, text 1, audio 2);
-    /// returns how many unique values and the final layer's rows for video and audio.
-    pub fn modRows(x: Layout, sc: Scalars, unique: *[2]f32, idx: []i32) struct { m: u32, row_v: u32, row_a: u32 } {
-        var m: u32 = 1;
-        unique[0] = @min(sc.t_v, sc.t_a);
-        if (sc.t_v != sc.t_a) {
-            unique[1] = @max(sc.t_v, sc.t_a);
-            m = 2;
+    /// returns how many unique values, the final layer's rows for video and audio, and the image condition's row.
+    pub fn modRows(x: Layout, sc: Scalars, tags: []const u8, unique: *[3]f32, idx: []i32) struct { m: u32, row_v: u32, row_a: u32, row_c: u32 } {
+        const tc = @max(sc.t_v, 0.999);
+        unique.* = .{ sc.t_v, sc.t_a, tc };
+        const n: usize = if (x.cond > 0) 3 else 2;
+        std.mem.sort(f32, unique[0..n], {}, std.sort.asc(f32));
+        var m: u32 = 0;
+        for (0..n) |i| {
+            const v = unique[i];
+            if (m == 0 or v != unique[m - 1]) {
+                unique[m] = v;
+                m += 1;
+            }
         }
-        const row_v: u32 = if (sc.t_v == unique[0]) 0 else 1;
-        const row_a: u32 = if (sc.t_a == unique[0]) 0 else 1;
+        var row_v: u32 = 0;
+        var row_a: u32 = 0;
+        var row_c: u32 = 0;
+        for (unique[0..m], 0..) |v, i| {
+            if (v == sc.t_v) row_v = @intCast(i);
+            if (v == sc.t_a) row_a = @intCast(i);
+            if (v == tc) row_c = @intCast(i);
+        }
         const a = x.audioRows();
         @memset(idx[0..x.l], @intCast(row_v * 3 + 1));
+        if (tags.len != 0) {
+            std.debug.assert(tags.len == x.l);
+            for (tags, idx[0..x.l]) |tag, *v| v.* = @intCast(row_v * 3 + tag);
+        }
+        @memset(idx[x.l..a[0]], @intCast(row_c * 3));
         @memset(idx[a[0]..a[1]], @intCast(row_a * 3 + 2));
         @memset(idx[a[1]..x.s], @intCast(row_v * 3 + 0));
-        return .{ .m = m, .row_v = row_v, .row_a = row_a };
+        return .{ .m = m, .row_v = row_v, .row_a = row_a, .row_c = row_c };
     }
 };
 
@@ -164,4 +195,21 @@ test "step 0: sigma 1 gives one timestep and a unit carry" {
 test "layout rows: 768x448, 56 frames" {
     const x = Layout.init(69, 17, 28, 48, 93);
     try std.testing.expectEqual(@as(u32, 69 + 186 + 17 * 14 * 24), x.s);
+}
+
+test "first frame: packed positions and three modulation timesteps" {
+    const x = Layout.init(4, 2, 4, 6, 3).withFirstFrame();
+    var pos: [28][3]f64 = undefined;
+    try std.testing.expectEqual(@as(u32, 28), x.s);
+    x.positions(&pos);
+    try std.testing.expectEqualSlices(f64, &pos[4], &pos[16]); // condition and target frame zero share their positions
+    try std.testing.expectEqual(@as(f64, 4), pos[10][0]); // audio starts at text length, not after cond rows
+    var idx: [28]i32 = undefined;
+    var unique: [3]f32 = undefined;
+    const mr = x.modRows(stepScalars(0.5), &.{ 1, 0, 0, 1 }, &unique, &idx);
+    try std.testing.expectEqual(@as(u32, 3), mr.m);
+    try std.testing.expectEqual(@as(f32, 0.999), unique[2]);
+    try std.testing.expectEqual(@as(i32, 6), idx[4]);
+    try std.testing.expectEqual(idx[1] + 1, idx[0]);
+    try std.testing.expectEqual(@as(i32, @intCast(mr.row_a * 3 + 2)), idx[10]);
 }

@@ -5,11 +5,24 @@
 //!
 //!   list_models      the tools, their kind, capabilities, priority and whether they are loaded
 //!   generate_image   waits for the image(s); returns them inline (PNG) and as URLs on this server; `images` makes it an edit
+//!   edit_image       the same for an edit: `image` (or `images`) changed as the prompt says, optionally within a `mask`
 //!   generate_video   queues a clip and waits up to `wait_s` (default 600): the MP4's URL when done, else the job id;
 //!                    `image` makes it image to video
+//!   transcribe_audio waits up to `wait_s` for the transcript of an audio file (base64, data URL or URL): its text and
+//!                    JSON (language, segments, words), else the job id; get_job returns the transcript once done
+//!   synthesize_speech waits for spoken text; returns the audio inline (WAV) and as a URL
+//!   chat             a chat completion from the chat model (whole): the reply's text, then the completion as JSON
+//!   decide           typed decisions (choice, noul, score) about a state from the decision model: checked probabilities
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
+//!   computer_control a fixed control on a paired computer (open/quit an app, volume, media, dark mode, lock)
+//!   computer_use     a bounded task on a paired computer's screen; consequential steps wait for the user's tap
+//!   computer_status  a computer task's state, or the paired computers; computer_stop stops a task
+//!   (the computer tools need a paired device token with the `computer` scope: docs/dev/COMPUTER.md)
+//! With `pairing.required`, /mcp takes a paired device whose scopes include a service scope (or the legacy `mcp`);
+//! each tool needs its own (`toolNeed`: read, media, inference, decisions or manage), tools/list shows only those, and
+//! get_job and cancel_job see only the device's own jobs.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,18 +33,33 @@ const jobs = @import("../sched/jobs.zig");
 const sched = @import("../sched/scheduler.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
+const speech = @import("speech.zig");
+const chat = @import("chat.zig");
+const budget = @import("budget.zig");
+const decision = @import("decide.zig");
+const systemone = @import("../tool/systemone.zig");
+const audio = @import("../media/audio.zig");
+const config = @import("../config.zig");
+const sched_memory = @import("../sched/memory.zig");
+const gate = @import("../computer/gate.zig");
+const hub_mod = @import("../computer/hub.zig");
+const pair = @import("pair.zig");
+const Need = @import("../pair.zig").Need;
 
 const App = routes.App;
 const Value = std.json.Value;
 
-const versions = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
+pub const versions = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
 const max_wait_s = 3000; // a tool call longer than this returns the job id; get_job picks it up
 
-pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8) !void {
+pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, who: pair.Caller) !void {
     if (req.head.method != .POST) {
         try req.respond("", .{ .status = .method_not_allowed, .extra_headers = &.{.{ .name = "allow", .value = "POST" }} });
         return;
     }
+    caller_token = try a.dupe(u8, gate.token(req)); // the headers are gone once the body is read
+    caller = who;
+    caller_scheme = h.scheme(req);
     const text = h.body(req, a) catch return rpcError(req, a, .null, -32600, "body too large");
     const msg = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return rpcError(req, a, .null, -32700, "parse error");
     if (msg != .object) return rpcError(req, a, .null, -32600, "one JSON-RPC message a request (no batches)");
@@ -43,7 +71,7 @@ pub fn handle(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8
     const params: Value = msg.object.get("params") orelse .{ .object = .empty };
     if (eql(method, "initialize")) return initialize(req, a, id, params);
     if (eql(method, "ping")) return reply(req, a, id, .{});
-    if (eql(method, "tools/list")) return reply(req, a, id, .{ .tools = tool_list });
+    if (eql(method, "tools/list")) return reply(req, a, id, .{ .tools = try listed(a) });
     if (eql(method, "tools/call")) return call(app, req, a, host, id, params);
     return rpcError(req, a, id, -32601, "method not found");
 }
@@ -58,15 +86,16 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
     try reply(req, a, id, .{
         .protocolVersion = version,
         .capabilities = .{ .tools = .{ .listChanged = false } },
-        .serverInfo = .{ .name = "localrouter", .version = "0.1.0" },
+        .serverInfo = .{ .name = "localrouter", .version = @import("capabilities.zig").server_version },
         .instructions = instructions,
     });
 }
 
 const instructions =
-    \\Generative models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
+    \\Chat, generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
     \\then answers in seconds; it unloads by itself when idle. Send one request at a time. Images come back inline and as
-    \\URLs; videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job).
+    \\URLs (edit_image changes a picture); videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
+    \\JSON; speech as WAV inline and a URL; chat replies as text (chat keeps its model loaded, so it answers at once).
 ;
 
 // ---------------------------------------------------------------- tools/call
@@ -85,25 +114,83 @@ fn call(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, id: 
     const name = str(params.object.get("name")) orelse return rpcError(req, a, id, -32602, "no tool name");
     const args: Value = params.object.get("arguments") orelse .{ .object = .empty };
     var out: std.ArrayList(Content) = .empty;
-    const result: ToolError!bool = if (eql(name, "list_models"))
-        listModels(app, a, &out)
-    else if (eql(name, "generate_image"))
-        generateImage(app, a, host, args, &out)
-    else if (eql(name, "generate_video"))
-        generateVideo(app, a, host, args, &out)
-    else if (eql(name, "get_job"))
-        getJob(app, a, host, args, &out)
-    else if (eql(name, "cancel_job"))
-        cancelJob(app, a, host, args, &out)
-    else if (eql(name, "release_models"))
-        release(app, a, &out)
-    else
-        return rpcError(req, a, id, -32602, "unknown tool");
+    const result = invoke(app, a, host, name, args, &out) orelse
+        return rpcError(req, a, id, -32602, try std.fmt.allocPrint(a, "unknown tool '{s}'; tools/list names them: {s}", .{ name, tool_names }));
     const ok = result catch |err| switch (err) {
         error.ToolFailed, error.BadArguments => false, // the reason is already in `out`
         error.OutOfMemory => return error.OutOfMemory,
     };
     try reply(req, a, id, .{ .content = out.items, .isError = !ok });
+}
+
+/// The text a tool call returns (its text contents, one a line) and whether it failed; for callers outside MCP (the
+/// voice session's model tools), as `who` (its scopes apply as over /mcp), with output URLs in `scheme`. Null for an
+/// unknown tool.
+pub fn callText(app: *App, a: std.mem.Allocator, host: []const u8, scheme: []const u8, who: pair.Caller, name: []const u8, args: Value) ?struct { ok: bool, text: []const u8 } {
+    var out: std.ArrayList(Content) = .empty;
+    caller_token = ""; // an in-process caller has no device: the computer tools refuse it
+    caller = who;
+    caller_scheme = scheme;
+    const result = invoke(app, a, host, name, args, &out) orelse return null;
+    const ok = if (result) |x| x else |_| false;
+    var w: Io.Writer.Allocating = .init(a);
+    for (out.items) |c| if (c.text) |t| {
+        if (w.written().len > 0) w.writer.writeByte('\n') catch {};
+        w.writer.writeAll(t) catch {};
+    };
+    return .{ .ok = ok, .text = w.written() };
+}
+
+/// Runs tool `name` into `out`; null when there is no such tool.
+fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, args: Value, out: *std.ArrayList(Content)) ?ToolError!bool {
+    calling = name;
+    if (toolNeed(name)) |n| {
+        if (!caller.may(n)) {
+            const refused: ToolError!bool = fail(a, out, "this device's token does not have the {s} scope that {s} needs: on the box, `localrouter pair scopes NAME ...` adds it", .{ n.scopes(), name });
+            return refused;
+        }
+    }
+    const r: ToolError!bool = if (eql(name, "list_models"))
+        listModels(app, a, out)
+    else if (eql(name, "load_model"))
+        loadModel(app, a, args, out)
+    else if (eql(name, "unload_model"))
+        unloadModel(app, a, args, out)
+    else if (eql(name, "reserve_for"))
+        reserveFor(app, a, args, out)
+    else if (eql(name, "list_voices"))
+        listVoices(app, a, out)
+    else if (eql(name, "generate_image"))
+        generateImage(app, a, host, args, out)
+    else if (eql(name, "edit_image"))
+        editImage(app, a, host, args, out)
+    else if (eql(name, "generate_video"))
+        generateVideo(app, a, host, args, out)
+    else if (eql(name, "transcribe_audio"))
+        transcribeAudio(app, a, host, args, out)
+    else if (eql(name, "synthesize_speech"))
+        synthesizeSpeech(app, a, host, args, out)
+    else if (eql(name, "chat"))
+        chatTool(app, a, args, out)
+    else if (eql(name, "decide"))
+        decideTool(app, a, args, out)
+    else if (eql(name, "get_job"))
+        getJob(app, a, host, args, out)
+    else if (eql(name, "cancel_job"))
+        cancelJob(app, a, host, args, out)
+    else if (eql(name, "release_models"))
+        release(app, a, out)
+    else if (eql(name, "computer_control"))
+        computerControl(app, a, args, out)
+    else if (eql(name, "computer_use"))
+        computerUse(app, a, args, out)
+    else if (eql(name, "computer_status"))
+        computerStatus(app, a, args, out)
+    else if (eql(name, "computer_stop"))
+        computerStop(app, a, args, out)
+    else
+        return null;
+    return r;
 }
 
 const ToolError = error{ ToolFailed, BadArguments, OutOfMemory };
@@ -113,37 +200,318 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
     return error.ToolFailed;
 }
 
+/// The tool being called on this connection's thread, for argument errors that name it.
+threadlocal var calling: []const u8 = "";
+/// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
+threadlocal var caller_token: []const u8 = "";
+/// The scheme the caller reached the daemon with (`h.scheme`), for the output URLs it gets back.
+threadlocal var caller_scheme: []const u8 = "http";
+
+/// Who is calling (`pair.Caller`): the scopes each tool needs, the owner its jobs get, the jobs it may see.
+threadlocal var caller: pair.Caller = .{};
+
+/// The scope tool `name` needs; null for the tools that check for themselves (get_job and cancel_job: the job must be
+/// the caller's own; the computer tools: computer control's scopes, always) and for an unknown name.
+fn toolNeed(name: []const u8) ?Need {
+    const needs = [_]struct { []const u8, Need }{
+        .{ "list_models", .read },       .{ "list_voices", .read },
+        .{ "generate_image", .media },   .{ "generate_video", .media },
+        .{ "transcribe_audio", .media }, .{ "synthesize_speech", .media },
+        .{ "chat", .inference },         .{ "decide", .decisions },
+        .{ "load_model", .manage },      .{ "unload_model", .manage },
+        .{ "reserve_for", .manage },     .{ "release_models", .manage },
+        .{ "edit_image", .media },
+    };
+    for (needs) |x| if (eql(x[0], name)) return x[1];
+    return null;
+}
+
+/// tools/list for the caller: the tools its scopes let it call (every tool with pairing off).
+fn listed(a: std.mem.Allocator) ![]const Tool {
+    var list: std.ArrayList(Tool) = .empty;
+    for (tool_list) |t| if (if (toolNeed(t.name)) |n| caller.may(n) else true) try list.append(a, t);
+    return list.items;
+}
+
 fn parseArgs(comptime T: type, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!T {
     return std.json.parseFromValueLeaky(T, a, args, .{ .ignore_unknown_fields = true }) catch |err| {
-        try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "invalid arguments: {s}", .{@errorName(err)}) });
+        const ename = @errorName(err);
+        const why = if (eql(ename, "MissingField")) "a required argument is missing" else if (eql(ename, "OutOfMemory")) return error.OutOfMemory else "an argument has the wrong type or is out of range";
+        try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "invalid arguments for {s}: {s}; its inputSchema in tools/list names the arguments, their types and which are required", .{ calling, why }) });
         return error.BadArguments;
     };
 }
 
+// ---------------------------------------------------------------- computer tools (docs/dev/COMPUTER.md)
+
+/// The computer service and the calling device, when its token has the `computer` scope; else a tool error.
+fn computerCaller(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!struct { hub: *hub_mod.Hub, who: hub_mod.Requester } {
+    const s = app.computer orelse return fail(a, out, "computer control is switched off in this daemon's config (computer.enabled)", .{});
+    return switch (s.gate.check(caller_token, .computer)) {
+        .ok => |d| .{ .hub = &s.hub, .who = .{ .source = "mcp", .device = try a.dupe(u8, d.name) } },
+        .off => |m| fail(a, out, "{s}", .{m}),
+        .denied => |m| fail(a, out, "{s}", .{m}),
+    };
+}
+
+fn computerControl(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { control: Value, computer: []const u8 = "" }, a, args, out);
+    const r = c.hub.control(a, c.who, b.computer, b.control);
+    if (!r.ok) return fail(a, out, "{s}", .{r.text});
+    try out.append(a, .{ .type = "text", .text = r.text });
+    return true;
+}
+
+fn computerUse(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { goal: []const u8, text: ?[]const u8 = null, computer: []const u8 = "", wait_s: u32 = 120 }, a, args, out);
+    const r = c.hub.startUse(a, c.who, b.computer, b.goal, b.text, null);
+    if (!r.ok) return fail(a, out, "{s}", .{r.text});
+    return taskOutcome(c.hub, a, r.task_id, @min(b.wait_s, 600), out);
+}
+
+fn computerStatus(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { task_id: []const u8 = "", wait_s: u32 = 0 }, a, args, out);
+    if (b.task_id.len > 0) return taskOutcome(c.hub, a, b.task_id, @min(b.wait_s, 600), out);
+    const st = c.hub.status(a) catch return error.OutOfMemory;
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .computers = st.computers, .tasks = st.tasks }, .{ .emit_null_optional_fields = false }) });
+    return true;
+}
+
+fn computerStop(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const c = try computerCaller(app, a, out);
+    const b = try parseArgs(struct { task_id: []const u8 = "" }, a, args, out);
+    const n = c.hub.stop(a, b.task_id, try std.fmt.allocPrint(a, "mcp: {s}", .{c.who.device}));
+    try out.append(a, .{ .type = "text", .text = try std.fmt.allocPrint(a, "{{\"stopped\": {d}}}", .{n}) });
+    return true;
+}
+
+/// A task's state as JSON after waiting up to `wait_s` for it to end; a failed or refused outcome is a tool error.
+fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wait_s: u32, out: *std.ArrayList(Content)) ToolError!bool {
+    const v = hub.wait(a, task_id, @as(i64, wait_s) * 1000) orelse return fail(a, out, "no such computer task: {s}", .{task_id});
+    const text = try std.json.Stringify.valueAlloc(a, v, .{ .emit_null_optional_fields = false });
+    if (eql(v.status, "running") or eql(v.status, "done")) {
+        try out.append(a, .{ .type = "text", .text = text });
+        return true;
+    }
+    try out.append(a, .{ .type = "text", .text = text });
+    return error.ToolFailed;
+}
+
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, running: bool, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .running = st == .ready or st == .busy, .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded, .license = engine.license(c), .min_thinking_tokens = if (c.kind == .chat) c.min_thinking_tokens else null };
+        var info = engine.audioInfo(c);
+        if (c.kind == .speech) info.voices = try routes.speechVoices(app, a, c);
+        inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
+        var buf: [512]u8 = undefined;
+        if (c.qualification.len > 0 and slot.tool.local()) e.qualified = engine.unqualified(app.io, a, c, &buf) == null;
     }
-    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine }, .{}) });
+    const memory = .{ .mem_available_bytes = sched_memory.available() orelse 0, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_paused = app.scheduler.voicePaused() };
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .models = list, .machine = app.cfg.machine, .memory = memory }, .{ .emit_null_optional_fields = false }) });
     return true;
 }
 
-fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "1024x1024", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, images: []const []const u8 = &.{} };
+/// Every speech model's voices, its default voice, whether it is loaded now and whether it may serve (qualified).
+fn listVoices(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
+    const Entry = struct { model: []const u8, name: []const u8, voices: []const Value, default_voice: ?[]const u8 = null, state: []const u8, default: bool, qualified: ?bool = null };
+    var list: std.ArrayList(Entry) = .empty;
+    for (app.scheduler.slots, 0..) |slot, i| {
+        const c = slot.tool.config();
+        if (c.kind != .speech) continue;
+        const info = engine.audioInfo(c);
+        var buf: [512]u8 = undefined;
+        const defaults = try routes.defaultFor(app, a, i);
+        const voices = (try routes.speechVoices(app, a, c)) orelse &.{}; // its own voices and those cloned for it
+        try list.append(a, .{ .model = c.id, .name = if (c.name.len > 0) c.name else c.id, .voices = voices, .default_voice = info.default_voice, .state = @tagName(slot.tool.state()), .default = std.mem.indexOfScalar(engine.Capability, defaults, .text_to_speech) != null, .qualified = if (c.qualification.len > 0 and slot.tool.local()) engine.unqualified(app.io, a, c, &buf) == null else null });
+    }
+    if (list.items.len == 0) return fail(a, out, "no speech model is configured on this machine", .{});
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, .{ .speech_models = list.items }, .{ .emit_null_optional_fields = false }) });
+    return true;
+}
+
+// ---------------------------------------------------------------- model management (load_model, unload_model, reserve_for)
+
+/// A control running on its own thread, so a tool call returns after `wait_s` even when a load takes longer; whichever
+/// of the waiter and the thread finishes last frees it.
+const Pending = struct {
+    c: sched.Control,
+    gone: std.atomic.Value(bool) = .init(false),
+    gpa: std.mem.Allocator,
+    s: *sched.Scheduler,
+
+    fn run(p: *Pending) void {
+        p.s.control(&p.c) catch {
+            p.c.failed = true;
+            p.c.message = "the scheduler is shutting down or its queue is full";
+            p.c.done.set(p.s.io);
+        };
+        if (p.gone.swap(true, .acq_rel)) p.gpa.destroy(p);
+    }
+
+    const Result = struct { finished: bool, failed: bool, message: []const u8, plan: sched.Plan };
+
+    /// Starts `c`; waits up to `wait_s`. The copy of the result is in `a`; finished false when it is still running.
+    fn start(app: *App, a: std.mem.Allocator, c: sched.Control, wait_s: u32) !Result {
+        const p = try app.gpa.create(Pending);
+        p.* = .{ .c = c, .gpa = app.gpa, .s = app.scheduler };
+        const t = std.Thread.spawn(.{}, run, .{p}) catch |err| {
+            app.gpa.destroy(p);
+            return err;
+        };
+        t.detach();
+        const deadline = std.Io.Clock.awake.now(app.io).addDuration(.fromSeconds(@min(wait_s, max_wait_s)));
+        while (!p.c.done.isSet() and std.Io.Clock.awake.now(app.io).nanoseconds < deadline.nanoseconds)
+            std.Io.sleep(app.io, .fromMilliseconds(100), .awake) catch break;
+        const ended = p.c.done.isSet();
+        const r: Result = .{ .finished = ended, .failed = ended and p.c.failed, .message = try a.dupe(u8, if (ended) p.c.message else ""), .plan = p.c.plan };
+        if (p.gone.swap(true, .acq_rel)) app.gpa.destroy(p);
+        return r;
+    }
+};
+
+/// The model `name` names: its id, or a kind ("video") when the machine has one model of that kind.
+fn modelIndex(app: *App, a: std.mem.Allocator, name: []const u8, out: *std.ArrayList(Content)) ToolError!usize {
+    if (routes.toolIndex(app, name)) |i| return i;
+    var found: ?usize = null;
+    for (app.scheduler.slots, 0..) |slot, i| {
+        if (!eql(@tagName(slot.tool.config().kind), name)) continue;
+        if (found != null) return fail(a, out, "more than one {s} model on this machine; name it by its id from list_models", .{name});
+        found = i;
+    }
+    return found orelse fail(a, out, "no model '{s}' on this machine; list_models names them", .{name});
+}
+
+fn loadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(struct { model: []const u8, wait_s: u32 = 300 }, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    if (app.scheduler.slots[i].tool.state() == .ready) return done(a, out, .{ .model = b.model, .state = "ready", .message = "already loaded" });
+    const plan = app.scheduler.plan(i, null);
+    if (!plan.fits) return fail(a, out, "{s} does not fit without unloading the chat model: it needs {d} MiB, {d} MiB is free beyond the reserve", .{ b.model, plan.needed >> 20, plan.available >> 20 });
+    std.log.info("load_model {s}: on request", .{b.model});
+    const r = Pending.start(app, a, .{ .op = .load, .tool = i }, b.wait_s) catch return fail(a, out, "could not start the load", .{});
+    if (r.failed) return fail(a, out, "{s} did not load: {s}", .{ b.model, r.message });
+    const st = @tagName(app.scheduler.slots[i].tool.state());
+    return done(a, out, .{ .model = b.model, .state = st, .message = if (r.finished) "loaded" else "still loading: call list_models or load_model again later" });
+}
+
+fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(struct { model: []const u8, hold_s: u32 = 120 }, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    if (app.scheduler.slots[i].tool.state() == .unloaded) return done(a, out, .{ .model = b.model, .state = "unloaded", .message = "it was not loaded" });
+    if (app.scheduler.displaceNow(i, @min(b.hold_s, 3600))) |why| return fail(a, out, "{s} was not unloaded: {s}", .{ b.model, why });
+    return done(a, out, .{ .model = b.model, .state = "unloaded", .comes_back_in_s = @min(b.hold_s, 3600), .message = "unloaded; it loads again by itself after hold_s, or call load_model to bring it back sooner" });
+}
+
+fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
     const b = try parseArgs(Args, a, args, out);
-    const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
-    const files = try inputFiles(app, a, host, "ref", b.images, out);
+    const i = try modelIndex(app, a, b.model, out);
+    const cfg = app.scheduler.slots[i].tool.config();
+    var r: request.Request = switch (cfg.kind) {
+        .image => .{ .image = .{ .prompt = "" } },
+        .video => .{ .video = .{ .prompt = "", .seconds = if (b.seconds > 0) b.seconds else 5 } },
+        .speech => .{ .speech = .{ .input = "" } },
+        .transcription => .{ .transcription = .{ .audio = "" } },
+        .chat => .{ .chat = .{ .body = "" } },
+        .decision => .{ .decision = .{ .body = "" } },
+    };
+    if (b.size.len > 0) {
+        const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+        switch (r) {
+            .image => |*v| {
+                v.width = wh[0];
+                v.height = wh[1];
+            },
+            .video => |*v| {
+                v.width = wh[0];
+                v.height = wh[1];
+            },
+            else => {},
+        }
+    }
+    engine.fill(cfg, &r);
+    const plan = if (b.dry_run) app.scheduler.plan(i, r) else blk: {
+        std.log.info("reserve_for {s}: on request (hold {d} s)", .{ b.model, b.hold_s });
+        const res = Pending.start(app, a, .{ .op = .reserve, .tool = i, .request = r, .hold_s = @min(b.hold_s, 3600) }, b.wait_s) catch return fail(a, out, "could not start the reservation", .{});
+        if (res.failed) return fail(a, out, "no room for {s}: {s}. Free memory now: {d} MiB beyond the reserve; it needs {d} MiB", .{ b.model, res.message, res.plan.available >> 20, res.plan.needed >> 20 });
+        if (!res.finished) return done(a, out, .{ .model = b.model, .state = "reserving", .message = "still unloading and loading: call list_models later" });
+        break :blk res.plan;
+    };
+    const names = try a.alloc([]const u8, plan.count);
+    var voice = false;
+    var ms: u64 = 0;
+    for (names, plan.list()) |*n, v| {
+        const c = app.scheduler.slots[v].tool.config();
+        n.* = c.id;
+        voice = voice or c.kind == .speech or c.kind == .transcription;
+        ms +|= app.scheduler.slots[v].resident;
+    }
+    if (b.dry_run and !plan.fits) return fail(a, out, "{s} does not fit even after unloading every idle model but the chat model: it needs {d} MiB, {d} MiB is free beyond the reserve", .{ b.model, plan.needed >> 20, plan.available >> 20 });
+    return done(a, out, .{
+        .model = b.model,
+        .dry_run = b.dry_run,
+        .needed_bytes = plan.needed,
+        .available_bytes = plan.available,
+        .fits_now = plan.count == 0,
+        .unloads = names,
+        .unloads_bytes = ms,
+        .pauses_voice = voice,
+        .message = if (b.dry_run)
+            (if (plan.count == 0) "it fits now: nothing needs unloading" else "these would be unloaded; they come back by themselves after the job. Tell the user what pauses before you reserve")
+        else if (plan.count == 0) "it fits; loaded and held for its job" else "unloaded these, loaded and held the model; run its job now: they come back by themselves when it is done",
+    });
+}
+
+/// A tool's JSON result as its one text content.
+fn done(a: std.mem.Allocator, out: *std.ArrayList(Content), value: anytype) ToolError!bool {
+    try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, value, .{}) });
+    return true;
+}
+
+/// generate_image's and edit_image's arguments: `image` or `images` (and `mask`) make it an edit.
+const ImageArgs = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, image: ?[]const u8 = null, images: []const []const u8 = &.{}, mask: ?[]const u8 = null, wait_s: u32 = 600 };
+
+fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(ImageArgs, a, args, out);
+    if (b.image != null or b.mask != null) return fail(a, out, "generate_image takes input images as images (a list) and no mask: for one image or a mask, call edit_image", .{});
+    return drawImage(app, a, host, b, out);
+}
+
+fn editImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(ImageArgs, a, args, out);
+    if (b.image == null and b.images.len == 0) return fail(a, out, "edit_image needs the picture to edit: image (base64, a data URL or an http(s) URL, this server's own /v1/files URLs too) or images (1 to 5)", .{});
+    return drawImage(app, a, host, b, out);
+}
+
+/// generate_image and edit_image: the job, waited for up to `wait_s`; the PNGs inline (unless `inline_images` is false)
+/// and the summary with their URLs, or the job id. An edit without a size keeps the input's shape (the model picks).
+fn drawImage(app: *App, a: std.mem.Allocator, host: []const u8, b: ImageArgs, out: *std.ArrayList(Content)) ToolError!bool {
+    if (b.image != null and b.images.len > 0) return fail(a, out, "send image or images, not both", .{});
+    const one = [1][]const u8{b.image orelse ""};
+    const specs: []const []const u8 = if (b.image != null) &one else b.images;
+    const edit = specs.len > 0;
+    if (b.mask != null and !edit) return fail(a, out, "a mask goes with the image it masks: send image too", .{});
+    if (edit) try requireCapability(app, a, .image_edit, out);
+    const auto = b.size.len == 0 or eql(b.size, "auto");
+    const wh: [2]u32 = if (auto and edit) .{ 0, 0 } else request.parseSize(if (auto) "1024x1024" else b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+    const refs_files = try inputFiles(app, a, host, "ref", specs, out);
+    const mask_files = try inputFiles(app, a, host, "mask", if (b.mask) |m| &.{m} else &.{}, out);
+    const files = try std.mem.concat(a, inputs.File, &.{ refs_files, mask_files });
     var why: routes.Refusal = .{};
-    const tool = routes.resolve(app, b.model, if (files.len > 0) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
-    const refs = try a.alloc([]const u8, files.len);
-    for (refs, files) |*d, f| d.* = f.name;
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs } };
+    const tool = routes.resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const refs = try a.alloc([]const u8, refs_files.len);
+    for (refs, refs_files) |*d, f| d.* = f.name;
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
-    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    try waitFor(app, j, b.wait_s);
+    if (!finished(app, j)) return report(app, a, host, j, out); // still loading or drawing: the job id, for get_job
     if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
     if (b.inline_images) for (j.files) |f| {
         const png = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(h.max_body)) catch
@@ -155,23 +523,167 @@ fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     return true;
 }
 
+/// A tool error when no model on this machine lists `cap` (after `engine.resolve`), naming each model and what it can do.
+fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, out: *std.ArrayList(Content)) ToolError!void {
+    for (app.scheduler.slots) |slot| if (engine.supports(slot.tool.config(), cap)) return;
+    var w: Io.Writer.Allocating = .init(a);
+    for (app.scheduler.slots, 0..) |slot, i| {
+        const c = slot.tool.config();
+        w.writer.print("{s}{s} (", .{ if (i > 0) "; " else "", c.id }) catch return error.OutOfMemory;
+        for (try engine.capabilityList(a, c), 0..) |x, k| w.writer.print("{s}{s}", .{ if (k > 0) ", " else "", @tagName(x) }) catch return error.OutOfMemory;
+        w.writer.writeByte(')') catch return error.OutOfMemory;
+    }
+    const hint = if (cap == .image_edit) "; an image model edits once its edit pack is installed (docs/dev/IMAGE-EDIT.md)" else "";
+    return fail(a, out, "no model on this machine can do {s}: its models are {s}{s}", .{ @tagName(cap), if (w.written().len > 0) w.written() else "none", hint });
+}
+
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: ?[]const u8 = null, seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
+    const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
     var why: routes.Refusal = .{};
     const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
-    // absent: the model's default size, else 768x448
-    const wh = request.resolveSize(b.size, engine.defaultSize(app.scheduler.slots[tool].tool.config()), .{ 768, 448 }) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
 }
 
+fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { audio: ?[]const u8 = null, path: ?[]const u8 = null, model: ?[]const u8 = null, language: []const u8 = "", prompt: []const u8 = "", temperature: f32 = 0, timestamps: request.Timestamps = .none, seed: ?u64 = null, wait_s: u32 = 600 };
+    const b = try parseArgs(Args, a, args, out);
+    var msg: []const u8 = "";
+    const upload = if (b.path) |p| blk: {
+        if (b.audio != null) return fail(a, out, "send audio or path, not both", .{});
+        break :blk try localFile(app, a, p, out);
+    } else inputs.resolve(app.io, app.gpa, a, b.audio orelse return fail(a, out, "audio (base64, a data URL or an http(s) URL) or path (a file on this machine) is required", .{}), app.policy(host), &msg) catch return fail(a, out, "{s}", .{msg});
+    if (upload.len > inputs.max_bytes) return fail(a, out, "the audio file is larger than 32 MB", .{});
+    var why: routes.Refusal = .{};
+    const j = speech.startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = b.timestamps, .seed = b.seed }, upload, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
+    try waitFor(app, j, b.wait_s);
+    return report(app, a, host, j, out);
+}
+
+/// The bytes of a file on this machine, by absolute path, only inside a directory the operator listed in the config's
+/// `local_files` (with pairing off the API has no authentication, so nothing else on the disk is readable through it).
+fn localFile(app: *App, a: std.mem.Allocator, path: []const u8, out: *std.ArrayList(Content)) ToolError![]const u8 {
+    if (app.cfg.local_files.len == 0) return fail(a, out, "path is off on this server: the operator lists the directories it may read in the config's local_files; send the audio as base64 or an http(s) URL instead", .{});
+    if (!std.fs.path.isAbsolute(path)) return fail(a, out, "path must be absolute (it names a file on the machine that runs LocalRouter)", .{});
+    const real = Io.Dir.realPathFileAbsoluteAlloc(app.io, path, a) catch return fail(a, out, "no such file: {s}", .{path});
+    for (app.cfg.local_files) |root| {
+        const r = Io.Dir.realPathFileAbsoluteAlloc(app.io, root, a) catch continue;
+        if (!std.mem.startsWith(u8, real, r) or real.len <= r.len or real[r.len] != '/') continue;
+        return Io.Dir.cwd().readFileAlloc(app.io, real, a, .limited(inputs.max_bytes + 1)) catch |err| return switch (err) {
+            error.StreamTooLong => fail(a, out, "the audio file is larger than 32 MB", .{}),
+            else => fail(a, out, "could not read {s}: {s}", .{ path, @errorName(err) }),
+        };
+    }
+    return fail(a, out, "{s} is outside the directories this server may read (local_files: {s}{s})", .{ path, app.cfg.local_files[0], if (app.cfg.local_files.len > 1) ", ..." else "" });
+}
+
+fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { input: []const u8, model: ?[]const u8 = null, voice: []const u8 = "", speed: f32 = 1, preset: []const u8 = "", seed: ?u64 = null, instructions: []const u8 = "", format: []const u8 = "wav", inline_audio: bool = true, references: ?Value = null };
+    const b = try parseArgs(Args, a, args, out);
+    const format = std.meta.stringToEnum(audio.Format, b.format) orelse return fail(a, out, "format must be wav, pcm, flac, mp3, opus or aac", .{});
+    var why: routes.Refusal = .{};
+    const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
+    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (b.inline_audio) {
+        const bytes = speech.encodeSpeech(app, a, j, format, &why) orelse return fail(a, out, "{s}", .{why.message});
+        const enc = std.base64.standard.Encoder;
+        try out.append(a, .{ .type = "audio", .data = enc.encode(try a.alloc(u8, enc.calcSize(bytes.len)), bytes), .mimeType = format.contentType() });
+    }
+    try summary(app, a, host, j, out);
+    return true;
+}
+
+/// A whole chat completion. `prompt` becomes the last user message (after `messages`, after a `system` message);
+/// `reasoning` false switches the model's thinking off, true on (absent: the model's default). Returns the reply's
+/// text (its tool calls as JSON when it made some instead), then the whole completion.
+fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    if (args != .object) return fail(a, out, "arguments must be an object", .{});
+    const given = args.object;
+    var body: std.json.ObjectMap = .empty;
+    var messages = std.json.Array.init(a);
+    if (str(given.get("system"))) |s| try messages.append(try chatMessage(a, "system", s));
+    if (given.get("messages")) |m| {
+        if (m != .array) return fail(a, out, "messages must be an array of messages", .{});
+        try messages.appendSlice(m.array.items);
+    }
+    if (str(given.get("prompt"))) |s| try messages.append(try chatMessage(a, "user", s));
+    if (messages.items.len == 0 or (given.get("prompt") == null and given.get("messages") == null)) return fail(a, out, "prompt or messages is required", .{});
+    try body.put(a, "messages", .{ .array = messages });
+    for ([_][]const u8{ "model", "max_tokens", "temperature", "top_p", "stop", "seed", "tools", "tool_choice", "response_format" }) |k|
+        if (given.get(k)) |v| try body.put(a, k, v);
+    if (given.get("reasoning")) |r| if (r == .bool) {
+        var kwargs: std.json.ObjectMap = .empty;
+        try kwargs.put(a, "enable_thinking", .{ .bool = r.bool });
+        try body.put(a, "chat_template_kwargs", .{ .object = kwargs });
+        if (!r.bool) try body.put(a, "reasoning_effort", .{ .string = "none" });
+    };
+    var why: routes.Refusal = .{};
+    var plan: budget.Plan = .{};
+    const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why, &plan) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
+    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    const text = try budget.annotate(a, chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message }), plan);
+    const said = replyText(a, text) catch "";
+    const warned = if (said.len > 0) @as([]const budget.Warning, &.{}) else try budget.ofCompletion(a, text, plan);
+    // No text: the warning says why (its reasoning used max_tokens), rather than an empty reply.
+    try out.append(a, .{ .type = "text", .text = if (warned.len > 0) try std.fmt.allocPrint(a, "warning: {s}", .{warned[warned.len - 1].message}) else said });
+    try out.append(a, .{ .type = "text", .text = text });
+    return true;
+}
+
+/// Typed decisions about `state`: one line a question (the choice and its probability, the noul's probability, the
+/// score), then the model's checked reply as JSON. Nothing acts on them; the caller decides what to do.
+fn decideTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    if (args != .object) return fail(a, out, "decide takes state and questions", .{});
+    var body: std.json.ObjectMap = .empty;
+    for ([_][]const u8{ "model", "state", "questions" }) |k| if (args.object.get(k)) |v| try body.put(a, k, v);
+    var why: decision.Refusal = .{};
+    const r = decision.decide(app, a, .{ .object = body }, caller.owner(), &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
+    var bad: []const u8 = "";
+    const qs = systemone.parseQuestions(a, .{ .object = body }, &bad) catch return fail(a, out, "{s}", .{bad});
+    var w: Io.Writer.Allocating = .init(a);
+    for (qs, r.answers) |q, an| {
+        const line = switch (an) {
+            .choice => |c| w.writer.print("{s}: {s} ({d:.3})\n", .{ q.name, q.ask.choice[c.choice].id, c.probabilities[c.choice] }),
+            .noul => |p| w.writer.print("{s}: yes {d:.3}\n", .{ q.name, p }),
+            .score => |s| w.writer.print("{s}: score {d:.2} of {d} (confidence {d:.3})\n", .{ q.name, s.score, q.ask.score.len - 1, s.confidence }),
+        };
+        line catch return error.OutOfMemory;
+    }
+    w.writer.print("model {s}, {d} ms", .{ r.model, r.ms }) catch return error.OutOfMemory;
+    try out.append(a, .{ .type = "text", .text = w.written() });
+    try out.append(a, .{ .type = "text", .text = r.raw });
+    return true;
+}
+
+fn chatMessage(a: std.mem.Allocator, role: []const u8, content: []const u8) !Value {
+    var m: std.json.ObjectMap = .empty;
+    try m.put(a, "role", .{ .string = role });
+    try m.put(a, "content", .{ .string = content });
+    return .{ .object = m };
+}
+
+/// The first choice's text, or its tool calls as JSON when it has no text.
+fn replyText(a: std.mem.Allocator, completion: []const u8) ![]const u8 {
+    const v = try std.json.parseFromSliceLeaky(Value, a, completion, .{});
+    const choices = v.object.get("choices") orelse return "";
+    if (choices != .array or choices.array.items.len == 0) return "";
+    const msg = choices.array.items[0].object.get("message") orelse return "";
+    if (str(msg.object.get("content"))) |s| if (s.len > 0) return s;
+    if (msg.object.get("tool_calls")) |calls| return std.json.Stringify.valueAlloc(a, calls, .{});
+    return "";
+}
+
 fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(struct { id: []const u8, wait_s: u32 = 0 }, a, args, out);
     const j = app.table.get(app.io, b.id) orelse return fail(a, out, "no such job: {s}", .{b.id});
+    if (!caller.sees(j)) return fail(a, out, "no such job: {s}", .{b.id}); // another device's: as if absent
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
 }
@@ -179,6 +691,7 @@ fn getJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *
 fn cancelJob(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(struct { id: []const u8 }, a, args, out);
     const j = app.table.get(app.io, b.id) orelse return fail(a, out, "no such job: {s}", .{b.id});
+    if (!caller.sees(j)) return fail(a, out, "no such job: {s}", .{b.id}); // another device's: as if absent
     app.scheduler.cancel(j);
     try waitFor(app, j, 10);
     try summary(app, a, host, j, out);
@@ -195,7 +708,7 @@ fn release(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolEr
 
 fn start(app: *App, a: std.mem.Allocator, tool: usize, r: request.Request, files: []const inputs.File, out: *std.ArrayList(Content)) ToolError!*jobs.Job {
     var why: routes.Refusal = .{};
-    return routes.enqueue(app, tool, r, files, &why) orelse fail(a, out, "{s}", .{why.message});
+    return routes.enqueue(app, tool, r, files, caller.owner(), &why) orelse fail(a, out, "{s}", .{why.message});
 }
 
 /// The input images named by `specs` (base64, data URLs or http(s) URLs; at most 5), fetched and checked.
@@ -222,7 +735,14 @@ fn finished(app: *App, j: *jobs.Job) bool {
 }
 
 /// A finished job's summary (true), a failed one's reason (false), or a running one's progress (true: not an error).
+/// A completed transcription leads with its text, then the transcript as JSON.
 fn report(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out: *std.ArrayList(Content)) ToolError!bool {
+    if (j.kind() == .transcription and finished(app, j) and j.status == .completed) {
+        var why: routes.Refusal = .{};
+        const t = speech.readTranscript(app, a, j, &why) orelse return fail(a, out, "{s}", .{why.message});
+        try out.append(a, .{ .type = "text", .text = t.get("text").?.string });
+        try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, Value{ .object = t }, .{}) });
+    }
     try summary(app, a, host, j, out);
     return j.status != .failed;
 }
@@ -232,7 +752,7 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
     app.table.mutex.lockUncancelable(app.io);
     defer app.table.mutex.unlock(app.io);
     const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
-    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ host, j.id, j.files[i] });
+    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ caller_scheme, host, j.id, j.files[i] });
     const obj = .{
         .id = j.id,
         .model = app.scheduler.slots[j.tool].tool.config().id,
@@ -242,14 +762,15 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
         .seed = j.request.seed(),
         .ms = j.ms,
         .files = urls,
+        .finish_reason = if (j.finish_reason.len > 0) @as(?[]const u8, j.finish_reason) else null,
+        .segments = if (j.segments.len > 0) @as(?[]const u8, j.segments) else null,
         .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?[]const u8, try a.dupe(u8, j.error_message)) else null,
         .next = if (j.finished()) @as(?[]const u8, null) else "call get_job with this id (wait_s up to 3000) until status is completed",
     };
     try out.append(a, .{ .type = "text", .text = try std.json.Stringify.valueAlloc(a, obj, .{ .emit_null_optional_fields = false }) });
     for (urls, 0..) |u, i| {
         const f = j.files[i];
-        const mime = if (std.mem.endsWith(u8, f, ".png")) "image/png" else if (std.mem.endsWith(u8, f, ".mp4")) "video/mp4" else "application/octet-stream";
-        try out.append(a, .{ .type = "resource_link", .uri = u, .name = f, .mimeType = mime });
+        try out.append(a, .{ .type = "resource_link", .uri = u, .name = f, .mimeType = routes.contentType(f) });
     }
 }
 
@@ -287,26 +808,69 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image or video), capabilities (text_to_image, image_edit, text_to_video, image_to_video), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, and whether each is loaded now (fast) or will load on first use.", .inputSchema = .{ .text =
-    \\{"type":"object","properties":{}}
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat or decision), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision, voice_clone), voices (speech models; voices cloned for a model included), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{},"additionalProperties":false}
     } },
-    .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits for the result (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
+    .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices (its own and those cloned for it on this machine), default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{},"additionalProperties":false}
+    } },
+    .{ .name = "reserve_for", .title = "Make room for a model", .description = "Before a heavy job (a video), make room for its model: unloads idle models other than the chat model, lowest priority first (the image model, then voice models), loads the target and holds it for its next job. What it unloads comes back by itself when that job is done (or after hold_s). dry_run: true only says what it would unload, how much the model needs and how much is free, so you can tell the user first (for example that voice pauses). Voice sessions are told before a voice model goes, and wait for it instead of failing. The chat model is never unloaded.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"The model the job needs, from list_models (e.g. the video model)."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT of the job, to price it; omit for the model's default."},
+    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; default 5."},
+    \\"dry_run":{"type":"boolean","default":false,"description":"true: unload nothing, only report what would go."},
+    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":180,"description":"The unloaded models come back after this even if the job never runs."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300,"description":"How long to wait for the unloads and the load."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "unload_model", .title = "Unload a model", .description = "Unloads one model now to free its memory; it loads again by itself after hold_s (or call load_model). Prefer reserve_for before a heavy job: it unloads exactly what is needed and restores it when the job is done. A voice model's sessions are told first and wait for it. The chat model cannot be unloaded this way: it is the one answering.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"A model id from list_models."},
+    \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":120,"description":"It comes back by itself after this."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "load_model", .title = "Load a model", .description = "Loads a model now (unloading idle models of any priority if it needs the room, as a request would) and waits up to wait_s. Use it to bring back what you unloaded, or to warm a model before using it.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"A model id from list_models."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "generate_image", .title = "Generate image", .description = "Text to image, or an image edit when `images` is given. Waits up to wait_s (seconds when the model is loaded, plus its load time when not) and returns the PNG(s) inline and as URLs on this server; past wait_s it returns the job id for get_job. Reuse a returned seed to reproduce an image. Edits need a model whose capabilities (list_models) include image_edit.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"What to draw."},
     \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_image, or image_edit with images)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360).","default":"1024x1024"},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360). Omit for 1024x1024, or for an edit the input's own shape."},
     \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
     \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
     \\"negative_prompt":{"type":"string"},
     \\"images":{"type":"array","maxItems":5,"items":{"type":"string"},"description":"Input images (PNG, JPEG or WebP, up to 32 MB each) as base64 strings, data URLs or http(s) URLs. Given: the request is an edit of these images, guided by the prompt."},
-    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."}}}
+    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "edit_image", .title = "Edit image", .description = "Changes a picture as the prompt says (\"make it night\", \"put a red hat on the dog\"): image (or up to 5 images; the first is the one edited, the others guide it) and optionally a mask that limits where it changes. Waits up to wait_s and returns the PNG(s) inline and as URLs on this server, as generate_image does; past wait_s it returns the job id for get_job. Needs a model whose capabilities (list_models) include image_edit; without one it is refused.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["prompt"],"properties":{
+    \\"prompt":{"type":"string","description":"The edit: what to change, and what to keep."},
+    \\"image":{"type":"string","description":"The picture to edit (PNG, JPEG or WebP, up to 32 MB) as a base64 string, a data URL or an http(s) URL, this server's own /v1/files URLs (from generate_image or edit_image) too. Send this or images."},
+    \\"images":{"type":"array","minItems":1,"maxItems":5,"items":{"type":"string"},"description":"Input images in the same forms, for an edit that combines several: the first is edited (and is what a mask applies to). The model's own limit may be lower. Send this or image."},
+    \\"mask":{"type":"string","description":"In the same forms: a PNG of the first image's size whose alpha is 0 where the edit goes; wherever it is opaque the first image's pixels are kept."},
+    \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists image_edit."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT of the result, multiples of 16; omit for the input's own shape (the model picks the size)."},
+    \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
+    \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
+    \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
+    \\"negative_prompt":{"type":"string"},
+    \\"inline_images":{"type":"boolean","default":true,"description":"false: URLs only (smaller replies)."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "generate_video", .title = "Generate video", .description = "Text to video with audio (MP4), or image to video when `image` is given. Waits up to wait_s seconds; returns the MP4's URL when done, otherwise the job id for get_job.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omitted, the model's default size (else 768x448)."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omit it for the model's own size."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
     \\"fps":{"type":"integer","default":24},
     \\"seed":{"type":"integer","minimum":0},
@@ -314,15 +878,97 @@ const tool_list = [_]Tool{
     \\"audio":{"type":"boolean","default":true},
     \\"negative_prompt":{"type":"string"},
     \\"image":{"type":"string","description":"First frame (image to video): a base64 string, data URL or http(s) URL of a PNG, JPEG or WebP up to 32 MB. Needs a model whose capabilities (list_models) include image_to_video."},
-    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}}}
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "transcribe_audio", .title = "Transcribe audio", .description = "Speech to text in the spoken language (no translation). Waits up to wait_s for the transcript and returns its text, then JSON with language, duration and segments (and words when timestamps is word); a longer job returns its id for get_job. Audio up to 32 MB and 30 minutes: WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{
+    \\"audio":{"type":"string","description":"The audio file as a base64 string, a data URL or an http(s) URL (the daemon's own /v1/files URLs too). Send this or path."},
+    \\"path":{"type":"string","description":"An absolute path to an audio file on the machine that runs LocalRouter, inside a directory the operator listed in local_files (off by default). Send this or audio."},
+    \\"model":{"type":"string","description":"A transcription model id from list_models; default: the one whose default_for lists speech_to_text."},
+    \\"language":{"type":"string","description":"ISO-639-1 code of the spoken language (en, de, ja...); omit to detect it."},
+    \\"prompt":{"type":"string","description":"Text that guides spelling and style (names, terms, the previous passage)."},
+    \\"timestamps":{"type":"string","enum":["none","segment","word"],"default":"none"},
+    \\"temperature":{"type":"number","minimum":0,"maximum":1,"default":0},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (get_job returns the transcript; cancel_job stops it)."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "synthesize_speech", .title = "Synthesize speech", .description = "Text to speech. Waits for the audio and returns it inline (WAV unless format says otherwise) and as a URL on this server. Voices are listed per model in list_models.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["input"],"properties":{
+    \\"input":{"type":"string","description":"The text to speak, up to 4096 characters."},
+    \\"model":{"type":"string","description":"A speech model id from list_models; default: the one whose default_for lists text_to_speech."},
+    \\"voice":{"type":"string","description":"A voice id from the model's voices in list_models; omit for its default."},
+    \\"speed":{"type":"number","minimum":0.25,"maximum":4,"default":1,"description":"Within the model's own speed range (list_models speed); a model without a speed control takes only 1."},
+    \\"preset":{"type":"string","description":"A model-native style from the model's presets in list_models; omit for none."},
+    \\"instructions":{"type":"string","maxLength":500,"description":"How to say it (delivery, emotion, pace), for a model whose list_models entry says instructions: true; others refuse it. The model's own template puts it into the text, such as a bracketed direction before it: [whispering, nervous]."},
+    \\"format":{"type":"string","enum":["wav","pcm","flac","mp3","opus","aac"],"default":"wav"},
+    \\"seed":{"type":"integer","minimum":0},
+    \\"references":{"type":"array","items":{"type":"object","required":["text","vq_codes"],"properties":{"text":{"type":"string"},"vq_codes":{"type":"array","items":{"type":"array","items":{"type":"integer"}}}}},"description":"Voice references (a clip's transcript and codec codes) for a model whose list_models entry says references: true."},
+    \\"inline_audio":{"type":"boolean","default":true,"description":"false: the URL only (smaller replies)."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "chat", .title = "Chat", .description = "A chat completion from the local chat model (OpenAI Chat Completions semantics). Returns the reply's text (or its tool calls as JSON when it called a tool instead), then the whole completion as JSON (message, reasoning_content when the model thought, finish_reason, usage). The chat model stays loaded, so replies start at once.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{
+    \\"prompt":{"type":"string","description":"The user's message (appended after messages)."},
+    \\"messages":{"type":"array","items":{"type":"object"},"description":"OpenAI chat messages (role system, user, assistant or tool; content; tool_calls; tool_call_id), for a multi-turn conversation."},
+    \\"system":{"type":"string","description":"A system message, put first."},
+    \\"model":{"type":"string","description":"A chat model id from list_models; default: the one whose default_for lists chat_completion."},
+    \\"reasoning":{"type":"boolean","description":"false: answer without thinking (faster); true: think first. Omit for the model's default."},
+    \\"max_tokens":{"type":"integer","minimum":1},
+    \\"temperature":{"type":"number","minimum":0,"description":"0: greedy and deterministic."},
+    \\"top_p":{"type":"number"},
+    \\"stop":{"description":"A string or a list of strings that end the reply."},
+    \\"seed":{"type":"integer","minimum":0},
+    \\"tools":{"type":"array","items":{"type":"object"},"description":"OpenAI function tools the model may call."},
+    \\"tool_choice":{"description":"none, auto, required, or {\"type\":\"function\",\"function\":{\"name\":...}}."},
+    \\"response_format":{"type":"object","description":"{\"type\":\"json_object\"} or {\"type\":\"json_schema\",\"json_schema\":{...}} for structured output."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "decide", .title = "Decide", .description = "Typed decisions from the local decision model (the System One shape: choice, noul, score). Each question gets probabilities, checked before they are returned: a choice is always one of the offered options, a noul the probability that the statement is true, a score the expected level (0 = the first level). Use it to route or classify; it acts on nothing. Returns one line a question, then the model's reply as JSON.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["state","questions"],"properties":{
+    \\"state":{"description":"What every question refers to: text, an object or a list (a chat as {\"messages\":[...]} works)."},
+    \\"questions":{"type":"object","description":"name -> question, at most 64. {\"type\":\"choice\",\"instructions\":\"...\",\"criteria\":{\"option\":\"what it means\",...}} (2 to 255 options); {\"type\":\"noul\",\"instructions\":\"...\",\"criteria\":{\"true\":\"...\",\"false\":\"...\"}}; {\"type\":\"score\",\"instructions\":\"...\",\"criteria\":[\"lowest level\",...,\"highest\"]} (2 to 10 levels)."},
+    \\"model":{"type":"string","description":"A decision model id from list_models; default: the one whose default_for lists typed_decision."}},
+    \\"additionalProperties":false}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0}}}
+    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"A job id from generate_video, generate_image, transcribe_audio or a /v1 response."},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"How long to wait for it to finish."}},"additionalProperties":false}
     } },
-    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}
+    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job (an image, video or transcription by the id those tools or get_job returned). A cancelled job's model may be stopped, and loads again on its next use.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}},"additionalProperties":false}
     } },
     .{ .name = "release_models", .title = "Release models", .description = "Unloads every model now, returning its memory to the machine (they also unload by themselves when idle).", .inputSchema = .{ .text =
-    \\{"type":"object","properties":{}}
+    \\{"type":"object","properties":{},"additionalProperties":false}
     } },
+    .{ .name = "computer_control", .title = "Computer control", .description = "A fixed control on the user's paired computer (the LocalRouter desktop helper): open or quit an app, volume, media playback, dark mode, lock the screen. Needs a device token with the computer scope.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["control"],"properties":{"control":{"type":"object","description":"{\"kind\":\"open_app\",\"app\":\"Safari\"}, {\"kind\":\"quit_app\",\"app\":...}, {\"kind\":\"volume\",\"action\":\"up|down|mute|unmute|set\",\"level\":0-100,\"target\":\"system|Spotify|Music\"}, {\"kind\":\"media\",\"action\":\"play|pause|next|previous\",\"player\":\"Spotify|Music\"}, {\"kind\":\"dark_mode\",\"action\":\"on|off|toggle\"} or {\"kind\":\"lock_screen\"}."},
+    \\"computer":{"type":"string","description":"Which paired computer, by name; omit when only one is connected."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_use", .title = "Computer use", .description = "Do a small task on the user's paired computer's screen (a browser tab or an app window), one decided step at a time: at most 15 steps and 90 s of work. It runs in the background as a virtual mouse: it leaves the user's own mouse and keyboard alone, and they can keep working meanwhile. How each step is done is decided on the computer, never by you, so never decline it or ask the user how it should run. Steps are not approved one at a time: the user allowed computer control once; if a step still waits for them, the result says so. Returns the outcome (done, stuck, blocked, unavailable, stopped, failed) with the steps taken, or the task id while it still runs (computer_status). Needs a device token with the computer scope.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["goal"],"properties":{"goal":{"type":"string","description":"What to do on screen, in plain words: \"in Chrome, switch to the YouTube tab and pause the video\". Quote exact names."},
+    \\"text":{"type":"string","description":"Exact text to type, if the task types anything (a search, a message). Only this text is ever typed."},
+    \\"computer":{"type":"string","description":"Which paired computer, by name; omit when only one is connected."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":600,"default":120,"description":"How long to wait for the outcome; after it, the task id."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_status", .title = "Computer status", .description = "A computer task's state (status, steps, whether it waits for an approval) by task_id, or without one: the paired computers and recent tasks.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{"task_id":{"type":"string"},"wait_s":{"type":"integer","minimum":0,"maximum":600,"default":0,"description":"With task_id: wait this long for it to end."}},"additionalProperties":false}
+    } },
+    .{ .name = "computer_stop", .title = "Computer stop", .description = "Stops a computer task before its next step (every running one without task_id). A pending approval for it can no longer be granted.", .inputSchema = .{ .text =
+    \\{"type":"object","properties":{"task_id":{"type":"string"}},"additionalProperties":false}
+    } },
+};
+
+/// The tool names in tools/list order, for /v1/capabilities.
+pub const tool_name_list = blk: {
+    var names: [tool_list.len][]const u8 = undefined;
+    for (tool_list, 0..) |t, i| names[i] = t.name;
+    const out = names;
+    break :blk out;
+};
+
+/// "list_models, list_voices, ...": the tool names, for an unknown tool's error.
+const tool_names = blk: {
+    var s: []const u8 = "";
+    for (tool_list, 0..) |t, i| s = s ++ (if (i > 0) ", " else "") ++ t.name;
+    break :blk s;
 };

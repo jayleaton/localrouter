@@ -1,0 +1,196 @@
+name: Companion (Linux, Windows)
+on:
+  push:
+    # Branches only: a companion-v* tag builds through companion-release.yml.
+    branches: ['**']
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-desktop.yml
+  pull_request:
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-desktop.yml
+  workflow_dispatch:
+  # A release (companion-release.yml): the same checks and packages.
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux
+            artifact: LocalRouter-linux-x64
+            files: |
+              apps/companion/out/*.AppImage
+              apps/companion/out/*.deb
+          - os: windows-latest
+            target: win
+            artifact: LocalRouter-windows-x64
+            files: |
+              apps/companion/out/*.exe
+              apps/companion/out/*.zip
+              !apps/companion/out/*__uninstaller*
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - name: type-check, lint, tests (on Windows the win32 suites run the real UI Automation worker read-only)
+        run: |
+          npm run type-check
+          npm run lint
+          npm test
+      - name: build and package (esbuild, electron-builder)
+        run: npm run package:${{ matrix.target }}
+        env:
+          # No code signing for these builds yet; electron-builder must not look for an identity.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: smoke (the packaged app starts, its UI loads, the executor answers on the fake backend; the native platform reports what it detects; the MCP launcher lists its tools)
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "${{ matrix.target }}" = linux ]; then
+            bin=out/linux-unpacked/localrouter
+            launcher=out/linux-unpacked/resources/localrouter-executor-mcp
+            run() { timeout 90 xvfb-run -a "$bin" --no-sandbox "$@"; }
+            sudo apt-get install -y xvfb > /dev/null
+          else
+            bin=out/win-unpacked/LocalRouter.exe
+            launcher=out/win-unpacked/resources/localrouter-executor-mcp.cmd
+            run() { timeout 90 "$bin" "$@"; }
+          fi
+          run --version > "$RUNNER_TEMP/version.txt" 2> "$RUNNER_TEMP/version.err" || { cat "$RUNNER_TEMP/version.err"; exit 1; }
+          cat "$RUNNER_TEMP/version.txt"
+          grep -q "LocalRouter $version" "$RUNNER_TEMP/version.txt" || { echo "::error::--version did not print LocalRouter $version"; exit 1; }
+
+          set +e
+          run --smoke > "$RUNNER_TEMP/smoke.txt" 2> "$RUNNER_TEMP/smoke.err"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/smoke.txt"
+          echo "--- stderr"; tail -40 "$RUNNER_TEMP/smoke.err"
+          smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke.txt" | sed 's/^COMPANION_SMOKE //' | tr -d '\r' || true)
+          [ -n "$smoke" ] || { echo "::error::no COMPANION_SMOKE line (exit $code)"; exit 1; }
+          printf '%s\n' "$smoke" > "$RUNNER_TEMP/smoke.json"
+          [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] || { echo "::error::smoke not ok (exit $code): $smoke"; exit 1; }
+          [ "$code" -eq 0 ] || { echo "::error::smoke ok but exit $code"; exit 1; }
+          echo "native platform: $(jq -c '.native' <<< "$smoke")"
+
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | timeout 90 "$launcher" > "$RUNNER_TEMP/mcp.txt"
+          tools=$(tr -d '\r' < "$RUNNER_TEMP/mcp.txt" | jq -c 'select(.id == 2) | [.result.tools[].name]')
+          echo "tools: $tools"
+          [ "$(jq 'index("computer_use") != null and index("computer_observe") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list lacks computer_use or computer_observe"; exit 1; }
+      - name: package contents (deb metadata, its icons are the LocalRouter mark)
+        if: matrix.target == 'linux'
+        run: |
+          dpkg-deb -I out/*.deb
+          dpkg-deb -c out/*.deb | grep -E 'usr/share/icons/hicolor/.*/apps/localrouter\.png' || { echo "::error::no LocalRouter icon in the deb"; exit 1; }
+          command -v compare > /dev/null || { sudo apt-get update > /dev/null; sudo apt-get install -y imagemagick > /dev/null; }
+          mkdir -p "$RUNNER_TEMP/deb" && dpkg-deb -x out/*.deb "$RUNNER_TEMP/deb"
+          icon=$(ls -S "$RUNNER_TEMP"/deb/usr/share/icons/hicolor/*/apps/localrouter.png | head -1)
+          size=$(identify -format %w "$icon")
+          convert build/icon.png -resize "${size}x${size}" "$RUNNER_TEMP/want.png"
+          rmse=$({ compare -metric RMSE "$icon" "$RUNNER_TEMP/want.png" null: 2>&1 || true; } | sed -n 's/.*(\(.*\))/\1/p')
+          echo "deb icon $icon ($size px) against build/icon.png: RMSE $rmse"
+          awk -v r="$rmse" 'BEGIN { exit !(r != "" && r < 0.05) }' || { echo "::error::the deb's icon is not build/icon.png"; exit 1; }
+      - name: the exe's icon is build/icon.ico (not Electron's)
+        if: matrix.target == 'win'
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $exe = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path out/win-unpacked/LocalRouter.exe).Path).ToBitmap()
+          $ico = (New-Object System.Drawing.Icon((Resolve-Path build/icon.ico).Path, 32, 32)).ToBitmap()
+          $diff = 0
+          for ($x = 0; $x -lt 32; $x++) { for ($y = 0; $y -lt 32; $y++) {
+            $a = $exe.GetPixel($x, $y); $b = $ico.GetPixel($x, $y)
+            $diff += [math]::Abs($a.R - $b.R) + [math]::Abs($a.G - $b.G) + [math]::Abs($a.B - $b.B) + [math]::Abs($a.A - $b.A)
+          } }
+          $mean = $diff / (32 * 32 * 4)
+          "exe icon against build/icon.ico at 32 px: mean difference $mean (of 255)"
+          if ($mean -gt 8) { Write-Error "LocalRouter.exe does not carry build/icon.ico"; exit 1 }
+      - name: job summary
+        if: always()
+        run: |
+          {
+            echo "### LocalRouter for ${{ matrix.target == 'linux' && 'Linux (x64)' || 'Windows (x64)' }}"
+            echo
+            echo "| File | Size |"
+            echo "| --- | --- |"
+            for f in out/*.AppImage out/*.deb out/*.exe out/*.zip; do
+              [ -f "$f" ] && echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo "Smoke: \`$(cat "$RUNNER_TEMP/smoke.json" 2>/dev/null || echo 'not run')\`"
+            echo
+            echo "Unsigned build. See apps/companion/README.md › Install on Linux / Windows."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          retention-days: 14
+          if-no-files-found: error
+
+  linux-real:
+    # The real Linux backend on a real (virtual) session: Xvfb, openbox (window manager), the at-spi bus and a GTK
+    # window, all inside one D-Bus session of this job, so the test clicks and types into nothing but that window.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - name: install the session (Xvfb, openbox, at-spi, python3-gi, xdotool, ImageMagick)
+        run: |
+          sudo apt-get update > /dev/null
+          sudo apt-get install -y xvfb dbus-x11 at-spi2-core python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0 gir1.2-gdkpixbuf-2.0 \
+            xdotool wmctrl x11-utils x11-xserver-utils imagemagick openbox > /dev/null
+      - name: real backend (observe, click without the pointer, type and read back, switch a tab, pointer, display, screenshot)
+        run: |
+          cat > "$RUNNER_TEMP/session.sh" <<'SH'
+          set -eu
+          export DISPLAY=:99 XDG_SESSION_TYPE=x11 GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0
+          unset WAYLAND_DISPLAY
+          Xvfb :99 -screen 0 1280x800x24 -nolisten tcp & sleep 1
+          openbox & sleep 1
+          /usr/libexec/at-spi-bus-launcher --launch-immediately & sleep 1
+          python3 scripts/smoke/gtk-window.py &
+          # Ready means the window is mapped and its app is on the AT-SPI desktop: polled, not slept for (a fixed
+          # wait lost the race on a slow runner).
+          probe='import sys, gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi; d = Atspi.get_desktop(0); sys.exit(0 if any((d.get_child_at_index(i).get_name() or "") == "lr-smoke" for i in range(d.get_child_count())) else 1)'
+          for i in $(seq 60); do
+            if xdotool search --name 'LocalRouter smoke' > /dev/null 2>&1 && python3 -c "$probe"; then echo "session ready after $i polls"; break; fi
+            [ "$i" -lt 60 ] || { echo "the smoke window never reached AT-SPI"; exit 1; }
+            sleep 0.5
+          done
+          export LOCALROUTER_ATSPI_DEBUG="$RUNNER_TEMP/atspi.log"
+          LOCALROUTER_REAL_LINUX=1 npx vitest run src/platform/linux/real.test.ts
+          SH
+          status=0
+          dbus-run-session -- bash "$RUNNER_TEMP/session.sh" || status=$?
+          echo "--- AT-SPI calls that failed (LOCALROUTER_ATSPI_DEBUG)"; cat "$RUNNER_TEMP/atspi.log" 2>/dev/null || echo none
+          exit $status

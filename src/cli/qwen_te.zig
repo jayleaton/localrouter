@@ -32,7 +32,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         ids_equal = ids_equal and x == y.integer;
     };
 
-    var d = try cuda.Driver.open();
+    var d = try qi.memcap.open();
     defer d.close();
     var ctx = try cuda.Context.init(&d, 0);
     defer ctx.deinit();

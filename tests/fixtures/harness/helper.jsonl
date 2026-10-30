@@ -1,0 +1,24 @@
+{"conn":"1","dir":"c2s","method":"GET","path":"/v1/desktop","headers":{"upgrade":"websocket","authorization":"Bearer <redacted>","accept":"*/*","user-agent":"node"}}
+{"conn":"1","dir":"s2c","path":"/v1/desktop","status":101}
+{"conn":"1","dir":"c2s","ws":{"type":"hello","protocol":1,"helper":{"name":"h1 capture (fake Mac)","platform":"linux","version":"0.1.0"},"capabilities":{"controls":["open_app","quit_app","volume","media","dark_mode","lock_screen"],"computer_use":true},"access":{"accessibility":true,"screen_recording":true}}}
+{"conn":"1","dir":"s2c","ws":{"type":"welcome"}}
+{"conn":"2","dir":"c2s","method":"POST","path":"/mcp","headers":{"user-agent":"curl/8.5.0","accept":"*/*","content-type":"application/json","authorization":"Bearer <redacted>"},"body":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"computer_status","arguments":{}}}}
+{"conn":"2","dir":"s2c","path":"/mcp","status":200}
+{"conn":"3","dir":"c2s","method":"POST","path":"/mcp","headers":{"user-agent":"curl/8.5.0","accept":"*/*","content-type":"application/json","authorization":"Bearer <redacted>"},"body":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"computer_control","arguments":{"control":{"kind":"open_app","app":"Safari"}}}}}
+{"conn":"1","dir":"s2c","ws":{"type":"control"}}
+{"conn":"1","dir":"c2s","ws":{"type":"result","id":"b1","ok":true,"done":"Pretended to open Safari (fake Mac)."}}
+{"conn":"3","dir":"s2c","path":"/mcp","status":200}
+{"conn":"4","dir":"c2s","method":"POST","path":"/mcp","headers":{"user-agent":"curl/8.5.0","accept":"*/*","content-type":"application/json","authorization":"Bearer <redacted>"},"body":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"computer_use","arguments":{"goal":"Open Safari and search for the weather in Canberra","wait_s":120}}}}
+{"conn":"1","dir":"s2c","ws":{"type":"use.start"}}
+{"conn":"1","dir":"c2s","ws":{"type":"result","id":"b2","ok":true}}
+{"conn":"1","dir":"c2s","ws":{"type":"decide","id":"h1","task_id":"cu_d785a8fe5daf0353","state":{"goal":"Open Safari and search for the weather in Canberra"},"questions":{"surface":{"type":"choice","instructions":"Where does this happen? `goal` is what the user wants done on screen. It may come from speech recognition, which can mishear names.","criteria":{"browser":"In a website or web app, or a browser tab (including clicking a browser tab).","app":"In a native app window on this Mac (not a website).","current":"In whatever is on screen right now; no app or site is named."}},"app":{"type":"choice","instructions":"Which of the user's apps is it in? `goal` is what the user wants done on screen. It may come from speech recognition, which can mishear names.","criteria":{"a0":"Notes","none":"None of these apps."}}}}}
+{"conn":"1","dir":"s2c","ws":{"type":"result"}}
+{"conn":"1","dir":"c2s","ws":{"type":"progress","task_id":"cu_d785a8fe5daf0353","step":"worked in the app in front"}}
+{"conn":"1","dir":"c2s","ws":{"type":"decide","id":"h2","task_id":"cu_d785a8fe5daf0353","state":{"goal":"Open Safari and search for the weather in Canberra","screen":{"app":"Notes","title":"Notes","visibleText":"3 notes"},"stepsSoFar":["worked in the app in front"]},"questions":{"next":{"type":"choice","instructions":"What is the one next step toward the goal on this screen? Choose a control to click, or one of the other moves. `goal` is what the user wants done on screen. It may come from speech recognition, which can mishear names.","criteria":{"c0":"Click the textbox \u201cSearch\u201d","c1":"Click the button \u201cNew Note\u201d","c2":"Click the button \u201cDelete\u201d","c3":"Click the button \u201cSend\u201d","c4":"Click the row \u201cGroceries: milk, eggs, bread\u201d","c5":"Click the row \u201cTrip ideas\u201d","c6":"Click the row \u201cTeam meeting notes\u201d","scroll_down":"Scroll down to see more of this page or list.","scroll_up":"Scroll up to see earlier content.","press_space":"Press Space, which plays or pauses the video or audio on this page.","done":"The goal is already done on this screen.","stuck":"None of these moves toward the goal."}}}}}
+{"conn":"1","dir":"s2c","ws":{"type":"result"}}
+{"conn":"1","dir":"c2s","ws":{"type":"finished","task_id":"cu_d785a8fe5daf0353","outcome":{"status":"stuck","reason":"It could not tell what to do next on Notes.","steps":["worked in the app in front"],"surface":"Notes: Notes"}}}
+{"conn":"4","dir":"s2c","path":"/mcp","status":200}
+{"conn":"5","dir":"c2s","method":"POST","path":"/mcp","headers":{"user-agent":"curl/8.5.0","accept":"*/*","content-type":"application/json","authorization":"Bearer <redacted>"},"body":{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"computer_stop","arguments":{}}}}
+{"conn":"5","dir":"s2c","path":"/mcp","status":200}
+{"conn":"1","dir":"c2s","ws_close":null}
+{"conn":"1","dir":"s2c","ws_close":null}

@@ -1,9 +1,9 @@
 ---
 name: localrouter
-description: Generate images (and video with audio) with local models on your own GPU box through LocalRouter's MCP server, instead of a paid image or video API. Use when a task needs a new image, illustration, thumbnail, concept art, or a short video clip.
+description: Generate images (and video with audio), transcribe speech and synthesize speech with local models on your own GPU box through LocalRouter's MCP server, instead of a paid image, video or audio API. Use when a task needs a new image, illustration, thumbnail, concept art, a short video clip, a transcript of an audio file, or spoken audio.
 ---
 
-# LocalRouter: images and video from local models on your own GPU box
+# LocalRouter: images, video and speech from local models on your own GPU box
 
 The GPU box (a DGX Spark, first of all) runs `localrouter` (installed with `tools/spark/install.sh`). It is an MCP
 server at `http://<host>:8190/mcp` and an OpenAI-compatible API at `http://<host>:8190/v1`, reachable from the
@@ -20,7 +20,7 @@ stdio-only clients `npx -y mcp-remote http://<host>:8190/mcp --allow-http`.
 
 ## Use
 
-1. `list_models`: the ids, their kind (`image` / `video`), what each can do (`capabilities`), which one a request
+1. `list_models`: the ids, their kind (`image` / `video` / `speech` / `transcription`), what each can do (`capabilities`), which one a request
    without `model` gets (`default_for`) and whether each is loaded (`running`). Name `model` to pick one: where it is
    installed, `qwen-image-2.1-turbo` (8 steps, the faster) is usually the default and `qwen-image-2.1` (25 steps) the
    base model. Leave `steps` out: each model uses its own (Turbo takes only 8).
@@ -28,12 +28,22 @@ stdio-only clients `npx -y mcp-remote http://<host>:8190/mcp --allow-http`.
    seed. About 1 megapixel is best: `1024x1024`, `1360x768`, `768x1360`. A warm 1024x1024 image takes about 17 s
    (FP8, the default; the NVFP4 model, `qwen-image-2.1-nvfp4` where installed, takes about 13 s); the first call also
    loads the model (about 5 s).
-3. If `list_models` shows a video model: `generate_video` with `prompt` (and `size`, `seconds`, `seed`): waits up to `wait_s` (600) and returns the MP4's
-   URL, or a job id; then `get_job` with `wait_s` until `status` is `completed`.
-4. `release_models` when you are done with a long batch and the machine is shared; otherwise let them idle out.
+3. If a model's `capabilities` include `image_edit`: `edit_image` with `prompt` (the change: "make it night") and
+   `image` (base64, a data URL, or the URL `generate_image` returned); omit `size` to keep the input's shape. `mask`
+   (a PNG of the image's size, transparent where the edit goes) keeps the rest. Returns the PNG as `generate_image` does.
+4. If `list_models` shows a video model: `generate_video` with `prompt` (and `size`, `seconds`, `seed`): waits up to `wait_s` (600) and returns the MP4's
+   URL, or a job id; then `get_job` with `wait_s` until `status` is `completed`. With `image_to_video` in its
+   capabilities, `image` (a picture, as for `edit_image`) is the first frame.
+5. If it shows a transcription model: `transcribe_audio` with `audio` (base64, a data URL or a URL; up to 32 MB and
+   30 minutes; `language` if you know it, `timestamps` `segment` or `word`): the text, then JSON with segments. It
+   keeps the spoken language (no translation). Long files: `wait_s` returns a job id for `get_job` / `cancel_job`.
+6. If it shows a speech model: `synthesize_speech` with `input` (and a `voice` from its `voices`): WAV inline and a
+   URL. Use only the speeds and presets the model lists; others are refused.
+7. `release_models` when you are done with a long batch and the machine is shared; otherwise let them idle out.
 
 Without MCP, the same over HTTP: `POST /v1/images/generations` (OpenAI Images API, extensions `seed`, `steps`) and
-`POST /v1/videos` (OpenAI Videos API); see the repo's `docs/AGENTS.md`.
+`POST /v1/videos` (OpenAI Videos API), `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` (OpenAI Audio
+API); see the repo's `docs/AGENTS.md`.
 
 ## Be considerate
 

@@ -1,6 +1,11 @@
 //! The worker protocol: one JSON object a line each way over the worker's stdin and stdout. Files carry the bytes.
 //!   daemon -> worker  {"op":"load"} | {"op":"generate","id","dir","request"} | {"op":"exit"}
 //!   worker -> daemon  {"progress":{...}}* then {"ok":true,...} or {"ok":false,"error","type"}
+//! A speech reply may say why its audio ended (`finish_reason`) and where long-form segments start (`segments`); a
+//! refusal's `type` is invalid_request_error (400), service_unavailable (503: the model's own server is busy) or
+//! anything else (500).
+//! A worker whose load reply says `"cancel":"signal"` ends a generate early on SIGUSR1 with `{"ok":false,"type":"cancelled"}`
+//! and stays loaded; any other worker is cancelled by killing it.
 
 const std = @import("std");
 const posix = std.posix;
@@ -21,11 +26,15 @@ pub const Reply = struct {
     ok: ?bool = null,
     progress: ?Progress = null,
     resident: u64 = 0,
+    port: u16 = 0, // load: the loopback port of the worker's own HTTP server, which the daemon proxies chat requests to
     files: []const []const u8 = &.{},
     seed: u64 = 0,
     ms: u64 = 0,
+    finish_reason: []const u8 = "",
+    segments: []const u8 = "",
     @"error": []const u8 = "",
     type: []const u8 = "",
+    cancel: []const u8 = "", // in a load reply: "signal" when SIGUSR1 ends a generate early, the worker kept
 };
 
 pub const max_line = 1 << 20;

@@ -98,8 +98,16 @@ pub const Decoder = struct {
     conv_post: Conv = undefined,
     // scratch: x stage input, u upsampled, r the three AMP outputs, a / b work, up2 the Activation1d's 2T
     // intermediate, col im2col, ph one transpose phase, sc the std scale, wav the output
-    x: u64 = 0, u: u64 = 0, r: [3]u64 = .{ 0, 0, 0 }, a: u64 = 0, b: u64 = 0, up2: u64 = 0, col: u64 = 0, ph: u64 = 0,
-    sc: u64 = 0, wav: u64 = 0,
+    x: u64 = 0,
+    u: u64 = 0,
+    r: [3]u64 = .{ 0, 0, 0 },
+    a: u64 = 0,
+    b: u64 = 0,
+    up2: u64 = 0,
+    col: u64 = 0,
+    ph: u64 = 0,
+    sc: u64 = 0,
+    wav: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, g: *const launch.Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_a: u32) !Decoder {
         var t: Decoder = .{ .gpa = gpa, .d = d, .k = k, .g = g, .s = s, .store = .init(d, gpa), .max_a = max_a };
@@ -126,8 +134,8 @@ pub const Decoder = struct {
         const A: u64 = max_a;
         const act_n = stereo * hop * A * 8; // the widest activation: [2, 800 A, 8] (every stage from ups.1 on)
         inline for (.{
-            .{ "x", act_n * 4 },       .{ "u", act_n * 4 },      .{ "a", act_n * 4 },  .{ "b", act_n * 4 },
-            .{ "up2", act_n * 8 },     .{ "col", 140800 * A * 4 }, .{ "ph", act_n * 4 }, .{ "sc", 256 },
+            .{ "x", act_n * 4 },              .{ "u", act_n * 4 },        .{ "a", act_n * 4 },  .{ "b", act_n * 4 },
+            .{ "up2", act_n * 8 },            .{ "col", 140800 * A * 4 }, .{ "ph", act_n * 4 }, .{ "sc", 256 },
             .{ "wav", stereo * hop * A * 4 },
         }) |e| @field(t, e[0]) = try t.store.alloc(e[1]);
         for (&t.r) |*r| r.* = try t.store.alloc(act_n * 4);

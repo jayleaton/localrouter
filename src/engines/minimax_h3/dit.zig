@@ -43,7 +43,7 @@ const linear_names = [4][]const u8{ "qkv", "out", "fc1", "fc2" };
 
 /// A step's shape and buffers: what its launches' arguments depend on (the step graph's key, less the fuse flag).
 const Body = struct { video: u64, vel_v: u64, vel_a: u64, t: u32, h: u32, w: u32, a: u32, ly: lay.Layout, m: u32, row_v: u32, row_a: u32 };
-const StepGraph = struct { key: [12]u64, exec: ?cuda.graph.Exec }; // exec null: seen once (run eagerly), captured on the next use
+const StepGraph = struct { key: [14]u64, exec: ?cuda.graph.Exec }; // exec null: seen once (run eagerly), captured on the next use
 const max_graphs = 4;
 
 pub const Kernels = struct {
@@ -99,20 +99,20 @@ pub const Weights = struct {
         errdefer w.deinit();
         const st = &w.store;
         inline for (.{
-            .{ "cond_w", "condition_proj.weight" },                 .{ "cond_b", "condition_proj.bias" },
-            .{ "final_norm", "token_refiner.final_norm.weight" },   .{ "vp_w", "video_patch_proj.weight" },
-            .{ "vp_b", "video_patch_proj.bias" },                   .{ "ap_w", "audio_patch_proj.weight" },
-            .{ "ap_b", "audio_patch_proj.bias" },                   .{ "fl_ada_w", "final_layer.adaln_proj.linear.weight" },
-            .{ "fl_ada_b", "final_layer.adaln_proj.linear.bias" },  .{ "fl_norm", "final_layer.norm.weight" },
-            .{ "vo_w", "final_layer.video_out.weight" },            .{ "vo_b", "final_layer.video_out.bias" },
-            .{ "ao_w", "final_layer.audio_out.weight" },            .{ "ao_b", "final_layer.audio_out.bias" },
+            .{ "cond_w", "condition_proj.weight" },                .{ "cond_b", "condition_proj.bias" },
+            .{ "final_norm", "token_refiner.final_norm.weight" },  .{ "vp_w", "video_patch_proj.weight" },
+            .{ "vp_b", "video_patch_proj.bias" },                  .{ "ap_w", "audio_patch_proj.weight" },
+            .{ "ap_b", "audio_patch_proj.bias" },                  .{ "fl_ada_w", "final_layer.adaln_proj.linear.weight" },
+            .{ "fl_ada_b", "final_layer.adaln_proj.linear.bias" }, .{ "fl_norm", "final_layer.norm.weight" },
+            .{ "vo_w", "final_layer.video_out.weight" },           .{ "vo_b", "final_layer.video_out.bias" },
+            .{ "ao_w", "final_layer.audio_out.weight" },           .{ "ao_b", "final_layer.audio_out.bias" },
         }) |e| @field(w, e[0]) = try st.tensor(up, p, e[1]);
         var nb: [96]u8 = undefined;
         for (&w.refiner, 0..) |*r, i| {
             inline for (.{
-                .{ "norm1", "norm1.weight" },           .{ "qkv", "attn.qkv_proj.weight" }, .{ "q_norm", "attn.q_norm.weight" },
-                .{ "k_norm", "attn.k_norm.weight" },    .{ "out", "attn.out_proj.weight" }, .{ "norm2", "norm2.weight" },
-                .{ "fc1", "mlp.fc1.weight" },           .{ "fc2", "mlp.fc2.weight" },
+                .{ "norm1", "norm1.weight" },        .{ "qkv", "attn.qkv_proj.weight" }, .{ "q_norm", "attn.q_norm.weight" },
+                .{ "k_norm", "attn.k_norm.weight" }, .{ "out", "attn.out_proj.weight" }, .{ "norm2", "norm2.weight" },
+                .{ "fc1", "mlp.fc1.weight" },        .{ "fc2", "mlp.fc2.weight" },
             }) |e| @field(r, e[0]) = try st.tensor(up, p, try std.fmt.bufPrint(&nb, "token_refiner.blocks.{d}.{s}", .{ i, e[1] }));
         }
         for (&w.blocks, 0..) |*b, i| {
@@ -146,12 +146,39 @@ pub const Dit = struct {
     // the run's refined text [L, D] bf16
     context: u64 = 0,
     ctx_rows: u32 = 0,
+    cond_rows: u64 = 0,
+    cond_emb: u64 = 0,
+    cond_bufs: [2]?cuda.DeviceBuffer = .{ null, null },
+    cond_hw: ?[2]u32 = null,
+    text_tags: []u8 = &.{},
     // per step
-    h: u64 = 0, hn: u64 = 0, qkv: u64 = 0, heads_out: u64 = 0, att: u64 = 0, o: u64 = 0, gu: u64 = 0, act: u64 = 0,
-    q: u64 = 0, kk: u64 = 0, v: u64 = 0, qc: u64 = 0, qs: u64 = 0, ws: u64 = 0,
-    mod: u64 = 0, t_emb: u64 = 0, idx: u64 = 0, rope: u64 = 0, a_in: u64 = 0,
-    rows: u64 = 0, arows: u64 = 0, emb: u64 = 0, aemb: u64 = 0, fada: u64 = 0, vout: u64 = 0, aout: u64 = 0,
-    layout_key: ?[5]u32 = null,
+    h: u64 = 0,
+    hn: u64 = 0,
+    qkv: u64 = 0,
+    heads_out: u64 = 0,
+    att: u64 = 0,
+    o: u64 = 0,
+    gu: u64 = 0,
+    act: u64 = 0,
+    q: u64 = 0,
+    kk: u64 = 0,
+    v: u64 = 0,
+    qc: u64 = 0,
+    qs: u64 = 0,
+    ws: u64 = 0,
+    mod: u64 = 0,
+    t_emb: u64 = 0,
+    idx: u64 = 0,
+    rope: u64 = 0,
+    a_in: u64 = 0,
+    rows: u64 = 0,
+    arows: u64 = 0,
+    emb: u64 = 0,
+    aemb: u64 = 0,
+    fada: u64 = 0,
+    vout: u64 = 0,
+    aout: u64 = 0,
+    layout_key: ?[6]u32 = null,
     /// The fast schedule (`fuse`: fused gate_add + norm_mod, attention stored as rows; `graphs`: the step's launches replayed
     /// as a CUDA graph per shape and buffer set). Both default on, both off with STK_H3_REF=1 (the reference path), and a
     /// probe or a profile always runs the eager schedule. `graph_error` is why graphs turned themselves off, if they did.
@@ -162,7 +189,7 @@ pub const Dit = struct {
     step_graphs: std.ArrayList(StepGraph) = .empty,
     mod2: u64 = 0, // the second modulation buffer: block i + 1's, while block i's is still read by the fused kernel
     idx_host: []i32 = &.{}, // the modulation row of every token, kept per layout (uploaded when it changes)
-    idx_key: ?[7]u32 = null,
+    idx_key: ?[9]u32 = null,
     extra_launches: u64 = 0, // the NVFP4 and row-copy launches (the H3 kernels count in `launch.count`)
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const Weights, s: cuda.Stream, max_s: u32, max_l: u32) !Dit {
@@ -179,15 +206,16 @@ pub const Dit = struct {
         const bf = 2;
         const qr = plan.rows(@intCast(r), ffn, plan.TB); // the widest quantized rows (K up to 14336)
         inline for (.{
-            .{ "context", @as(u64, max_l) * dim * bf },       .{ "h", r * dim * bf },              .{ "hn", r * dim * bf },
-            .{ "qkv", r * 3 * inner * bf },                   .{ "heads_out", r * inner * bf },    .{ "att", r * inner * bf },
-            .{ "o", r * dim * bf },                           .{ "gu", r * 2 * ffn * bf },         .{ "act", r * ffn * bf },
-            .{ "q", @as(u64, max_l) * inner * bf },           .{ "kk", @as(u64, max_l) * inner * bf }, .{ "v", @as(u64, max_l) * inner * bf },
-            .{ "qc", qr.fp8_bytes },                          .{ "qs", qr.scales_bytes },          .{ "ws", launch.Kitchen.Plan.of(heads, max_s).total },
-            .{ "mod", 2 * ada_n * 4 },                        .{ "mod2", 2 * ada_n * 4 },       .{ "t_emb", 2 * t_dim * 4 },         .{ "idx", r * 4 },
-            .{ "rope", r * 48 * 4 * bf },                     .{ "a_in", r * bf },                 .{ "rows", r * 96 * 4 },
-            .{ "arows", r * 32 * 4 },                         .{ "emb", r * dim * 4 },             .{ "aemb", r * dim * 4 },
-            .{ "fada", 2 * 2 * dim * 4 },                     .{ "vout", r * 96 * 4 },             .{ "aout", r * 32 * 4 },
+            .{ "context", @as(u64, max_l) * dim * bf }, .{ "h", r * dim * bf },                  .{ "hn", r * dim * bf },
+            .{ "qkv", r * 3 * inner * bf },             .{ "heads_out", r * inner * bf },        .{ "att", r * inner * bf },
+            .{ "o", r * dim * bf },                     .{ "gu", r * 2 * ffn * bf },             .{ "act", r * ffn * bf },
+            .{ "q", @as(u64, max_l) * inner * bf },     .{ "kk", @as(u64, max_l) * inner * bf }, .{ "v", @as(u64, max_l) * inner * bf },
+            .{ "qc", qr.fp8_bytes },                    .{ "qs", qr.scales_bytes },              .{ "ws", launch.Kitchen.Plan.of(heads, max_s).total },
+            .{ "mod", 3 * ada_n * 4 },                  .{ "mod2", 3 * ada_n * 4 },              .{ "t_emb", 3 * t_dim * 4 },
+            .{ "idx", r * 4 },                          .{ "rope", r * 48 * 4 * bf },            .{ "a_in", r * bf },
+            .{ "rows", r * 96 * 4 },                    .{ "arows", r * 32 * 4 },                .{ "emb", r * dim * 4 },
+            .{ "aemb", r * dim * 4 },                   .{ "fada", 3 * 2 * dim * 4 },            .{ "vout", r * 96 * 4 },
+            .{ "aout", r * 32 * 4 },
         }) |e| @field(x, e[0]) = try x.alloc(e[1]);
         return x;
     }
@@ -196,6 +224,8 @@ pub const Dit = struct {
         for (x.step_graphs.items) |*g| if (g.exec) |*e| e.deinit();
         x.step_graphs.deinit(x.gpa);
         x.gpa.free(x.idx_host);
+        x.gpa.free(x.text_tags);
+        for (&x.cond_bufs) |*slot| if (slot.*) |*b| b.free();
         for (x.bufs.items) |*b| b.free();
         x.bufs.deinit(x.gpa);
     }
@@ -290,6 +320,10 @@ pub const Dit = struct {
     /// final norm), kept for every step of the run.
     pub fn prepare(x: *Dit, text: u64, l: u32) !void {
         if (l > x.max_l) return error.PromptTooLong;
+        x.cond_hw = null;
+        x.layout_key = null;
+        x.gpa.free(x.text_tags);
+        x.text_tags = &.{};
         const L: u64 = l;
         const w = x.w;
         try x.gemmBf16("refiner.condition_proj", text, w.cond_w, w.cond_b, x.h, L, dim, text_dim);
@@ -326,6 +360,49 @@ pub const Dit = struct {
         x.ctx_rows = l;
     }
 
+    /// After prepare: normalized first-frame fp32 latent [24,1,h,w], modality tags of the expanded text context.
+    /// Noise restarts the portable stream at the request seed. The augmented rows remain constant across steps.
+    pub fn firstFrame(x: *Dit, z: u64, h: u32, w: u32, seed: u64, tags: []const u8) !void {
+        if (h == 0 or w == 0 or h % 2 != 0 or w % 2 != 0 or tags.len != x.ctx_rows) return error.BadCondition;
+        for (tags) |tag| if (tag > 1) return error.BadCondition;
+        const rows: u64 = @as(u64, h / 2) * (w / 2);
+        if (rows + x.ctx_rows > x.max_s) return error.VideoTooLong;
+        const n = rows * 96;
+        const owned = try x.gpa.dupe(u8, tags);
+        errdefer x.gpa.free(owned);
+        var cb = try cuda.DeviceBuffer.alloc(x.d, @intCast(n * 4));
+        errdefer {
+            x.s.synchronize() catch {};
+            cb.free();
+        }
+        var eb = try cuda.DeviceBuffer.alloc(x.d, @intCast(rows * dim * 4));
+        errdefer eb.free();
+        const cr = try cb.at(0);
+        const ce = try eb.at(0);
+        var noise = try cuda.DeviceBuffer.alloc(x.d, @intCast(n * 4));
+        defer {
+            x.s.synchronize() catch {};
+            noise.free();
+        }
+        const host = try x.gpa.alloc(f32, @intCast(n));
+        defer x.gpa.free(host);
+        qi.noise.fill(seed, host);
+        const np = try noise.at(0);
+        try x.upload(np, std.mem.sliceAsBytes(host));
+        try x.pre("cond_rows", &.{ .{ .role = "z", .ptr = z, .bytes = n * 4 }, .{ .role = "noise", .ptr = np, .bytes = n * 4 } });
+        try x.k.h3.conditionRows(x.s, z, np, cr, h, w);
+        try x.post("cond_rows", &.{.{ .role = "y", .ptr = cr, .bytes = n * 4 }});
+        try x.s.synchronize();
+        x.gpa.free(x.text_tags);
+        x.text_tags = owned;
+        x.cond_rows = cr;
+        x.cond_emb = ce;
+        for (&x.cond_bufs) |*slot| if (slot.*) |*b| b.free();
+        x.cond_bufs = .{ cb, eb };
+        x.cond_hw = .{ h, w };
+        x.layout_key = null;
+    }
+
     // ------------------------------------------------------------------ one step
     /// video bf16 [24, T, H, W] and the sampler's carried audio bf16 [32, 2, A] at `sigma` -> the velocities ComfyUI
     /// returns (negated; the audio back on the carry), into `vel_v` / `vel_a`. Host work a step repeats is cached per
@@ -335,9 +412,13 @@ pub const Dit = struct {
     /// use runs eagerly, which loads whatever a kernel loads lazily, the second captures, later ones replay).
     pub fn step(x: *Dit, video: u64, audio: u64, sigma: f32, t: u32, h: u32, w: u32, a: u32, vel_v: u64, vel_a: u64) !void {
         const L = x.ctx_rows;
-        const ly = lay.Layout.init(L, t, h, w, a);
+        var ly = lay.Layout.init(L, t, h, w, a);
+        if (x.cond_hw) |hw| {
+            if (hw[0] != h or hw[1] != w) return error.BadCondition;
+            ly = ly.withFirstFrame();
+        }
         if (ly.s > x.max_s) return error.VideoTooLong;
-        const key: [5]u32 = .{ L, t, h, w, a };
+        const key: [6]u32 = .{ L, t, h, w, a, ly.cond };
         if (x.layout_key == null or !std.mem.eql(u32, &x.layout_key.?, &key)) {
             const pos = try x.gpa.alloc([3]f64, ly.s);
             defer x.gpa.free(pos);
@@ -350,11 +431,11 @@ pub const Dit = struct {
             x.idx_key = null;
         }
         const sc = lay.stepScalars(sigma);
-        var unique: [2]f32 = undefined;
-        const mr = ly.modRows(sc, &unique, x.idx_host[0..ly.s]);
-        var temb: [2 * t_dim]f32 = undefined;
+        var unique: [3]f32 = undefined;
+        const mr = ly.modRows(sc, x.text_tags, &unique, x.idx_host[0..ly.s]);
+        var temb: [3 * t_dim]f32 = undefined;
         lay.curveTEmb(x.w.table, grid, t_dim, unique[0..mr.m], temb[0 .. mr.m * t_dim]);
-        const ik: [7]u32 = .{ L, t, h, w, a, mr.row_v, mr.row_a };
+        const ik: [9]u32 = .{ L, t, h, w, a, ly.cond, mr.row_v, mr.row_a, mr.row_c };
         if (x.idx_key == null or !std.mem.eql(u32, &x.idx_key.?, &ik)) {
             try x.uploadAsync(x.idx, std.mem.sliceAsBytes(x.idx_host[0..ly.s]));
             x.idx_key = ik;
@@ -381,7 +462,7 @@ pub const Dit = struct {
     /// The step graph of this shape and buffer set: replayed if captured; eager the first time a key is seen; captured
     /// (and launched) the second time. A capture that fails turns graphs off (`graph_error` says why) and runs eagerly.
     fn stepGraph(x: *Dit, bd: Body) !void {
-        const gk: [12]u64 = .{ bd.ly.l, bd.t, bd.h, bd.w, bd.a, bd.m, bd.row_v, bd.row_a, bd.video, bd.vel_v, bd.vel_a, @intFromBool(x.fuse) };
+        const gk: [14]u64 = .{ bd.ly.l, bd.t, bd.h, bd.w, bd.a, bd.m, bd.row_v, bd.row_a, bd.video, bd.vel_v, bd.vel_a, @intFromBool(x.fuse), bd.ly.cond, x.cond_rows };
         var at: ?usize = null;
         for (x.step_graphs.items, 0..) |sg, i| {
             if (std.mem.eql(u64, &sg.key, &gk)) {
@@ -403,7 +484,10 @@ pub const Dit = struct {
         x.stepBody(bd) catch |err| {
             failed = err;
         };
-        var g = cuda.graph.endCapture(x.s) catch |err| return x.graphFallback(failed orelse err, bd);
+        var g = cuda.graph.endCapture(x.s) catch |err| {
+            cuda.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later copy
+            return x.graphFallback(failed orelse err, bd);
+        };
         defer g.deinit();
         if (failed) |err| return x.graphFallback(err, bd);
         const exec = g.instantiate() catch |err| return x.graphFallback(err, bd);
@@ -441,9 +525,13 @@ pub const Dit = struct {
         try x.post("audio_rows", &.{.{ .role = "y", .ptr = x.arows, .bytes = na * 4 }});
         try x.gemmF32("video_patch_proj", x.rows, x.w.vp_w, x.w.vp_b, x.emb, nv, dim, 96);
         try x.gemmF32("audio_patch_proj", x.arows, x.w.ap_w, x.w.ap_b, x.aemb, 2 * @as(u64, a), dim, 32);
-        // [text | audio | video] rows: the context, then the embeddings rounded to bf16
+        // [text | cond | audio | video] rows: the context, the image condition (if any), then the embeddings rounded to bf16
         try x.k.ops.copyRows(x.s, x.h, x.context, x.ctx_rows, dim * 2, dim * 2, dim * 2);
         x.extra_launches += 1;
+        if (bd.ly.cond > 0) {
+            try x.gemmF32("cond_patch_proj", x.cond_rows, x.w.vp_w, x.w.vp_b, x.cond_emb, bd.ly.cond, dim, 96);
+            try x.k.h3.toBf16(x.s, x.cond_emb, x.h + @as(u64, x.ctx_rows) * dim * 2, @as(u64, bd.ly.cond) * dim);
+        }
         try x.k.h3.toBf16(x.s, x.aemb, x.h + @as(u64, ar[0]) * dim * 2, 2 * @as(u64, a) * dim);
         try x.k.h3.toBf16(x.s, x.emb, x.h + @as(u64, vr[0]) * dim * 2, nv * dim);
         try x.markEnd(.embed);

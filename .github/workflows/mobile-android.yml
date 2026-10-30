@@ -1,0 +1,42 @@
+# An installable Android build of the phone app (apps/mobile): a release APK, JavaScript bundled in, signed with the
+# debug key, so it installs by sideloading and needs no Metro server. It runs on pull requests and pushes to main that
+# change the app (a broken native build shows before the merge), and from the Actions tab (`gh workflow run
+# mobile-android.yml`). The APK is the run's artifact.
+name: Mobile Android build
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['apps/mobile/**', '.github/workflows/mobile-android.yml']
+  push:
+    branches: [main]
+    paths: ['apps/mobile/**', '.github/workflows/mobile-android.yml']
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: generate the native project
+        run: pnpm exec expo prebuild --platform android --no-install
+      - name: build the release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localrouter-mobile-${{ github.sha }}
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error

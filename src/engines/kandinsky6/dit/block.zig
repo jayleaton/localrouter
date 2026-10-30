@@ -40,6 +40,7 @@ pub const Hook = struct {
 pub const Linear = struct {
     w: View, // bf16 [out, in]
     b: ?View, // bf16 [1, out]
+    k_first: u32 = 0, // launch.Kernels.gemm's K order: the native kernel's partial K tile, 0 for none
 };
 
 pub const Attn = struct {
@@ -146,7 +147,11 @@ pub fn bindWeights(c: Config, lookup: anytype, text_blocks: []TextBlock, blocks:
     const Da: u64 = c.model_dim_a;
     const T: u64 = c.time_dim;
     var w: Weights = .{
-        .visual_in = try B.lin(lookup, "visual_embeddings.in_layer", .{}, D, c.patchIn(), true),
+        .visual_in = blk: {
+            var l = try B.lin(lookup, "visual_embeddings.in_layer", .{}, D, c.patchIn(), true);
+            l.k_first = c.patchKFirst();
+            break :blk l;
+        },
         .type_table = try B.t(lookup, "visual_token_type_embeddings.weight", .{}, c.token_types, D),
         .out_mod = try B.lin(lookup, "out_layer.modulation.out_layer", .{}, 2 * D, T, true),
         .out = try B.lin(lookup, "out_layer.out_layer", .{}, 4 * @as(u64, c.out_visual_dim), D, true),
@@ -323,7 +328,7 @@ pub const Dit = struct {
     }
 
     fn linear(x: *const Dit, l: Linear, in: View, out: View) Error!void {
-        try x.k.gemm(x.s, in, l.w, l.b, out, .bias);
+        try x.k.gemm(x.s, in, l.w, l.b, out, .bias, l.k_first);
     }
 
     /// Modulation: bf16(silu(float(tm)) . float(W)^T + float(b)) into `out` [1, n].
@@ -338,8 +343,8 @@ pub const Dit = struct {
         while (r < in.rows) : (r += x.p.ffn_rows) {
             const n = @min(x.p.ffn_rows, in.rows - r);
             const h = x.buf(x.p.hidden, n, ff, .bf16);
-            try x.k.gemm(x.s, in.slice(r, n), f.up, null, h, .gelu);
-            try x.k.gemm(x.s, h, f.down, null, out.slice(r, n), .bias);
+            try x.k.gemm(x.s, in.slice(r, n), f.up, null, h, .gelu, 0);
+            try x.k.gemm(x.s, h, f.down, null, out.slice(r, n), .bias, 0);
         }
     }
 

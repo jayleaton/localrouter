@@ -141,7 +141,9 @@ pub const Kernels = struct {
 
     /// out[M, N] = x[M, K] . w[N, K]^T with the epilogue (bias: + bias[N] in fp32, null for none; gelu: GELU of the
     /// bf16-rounded product, no bias). Rows are independent: a row chunk gives the rows' bits of the whole call.
-    pub fn gemm(k: *const Kernels, s: cuda.Stream, x: View, w: View, bias: ?View, out: View, epi: Epilogue) Error!void {
+    /// `k_first` (0 for one ascending pass, at most K): the K elements reduced first, as a CUTLASS 2.x kernel takes its
+    /// partial K tile (gemm.cu); the caller passes K mod the native kernel's K tile where K % 16 != 0.
+    pub fn gemm(k: *const Kernels, s: cuda.Stream, x: View, w: View, bias: ?View, out: View, epi: Epilogue, k_first: u32) Error!void {
         const m = x.rows;
         const n = w.rows;
         const kd = x.cols;
@@ -150,7 +152,8 @@ pub const Kernels = struct {
         try out.expect(.bf16, m, n);
         if (bias) |b| try b.expect(.bf16, 1, n);
         if (epi == .gelu and bias != null) return error.InvalidGemm;
-        const vec = kd % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 and w.ptr % 16 == 0;
+        if (k_first > kd) return error.InvalidGemm;
+        const vec = kd % 8 == 0 and k_first % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 and w.ptr % 16 == 0;
         if (m == 0 or m > std.math.maxInt(i32) or n > std.math.maxInt(i32)) return error.InvalidGemm;
         var a: cuda.launch.Args = .{};
         a.add(x.ptr);
@@ -161,6 +164,7 @@ pub const Kernels = struct {
         inline for (.{ x.ld, w.ld, out.ld }) |v| a.add(i64of(v));
         a.add(@backingInt(epi));
         a.add(@as(i32, @intFromBool(vec)));
+        a.add(i32of(k_first));
         try go(k.gemm_fn, s, .{ .x = blocks(n, 128), .y = blocks(m, 128) }, .{ .x = 256 }, 0, &a);
     }
 

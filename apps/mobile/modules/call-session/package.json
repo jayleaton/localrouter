@@ -1,0 +1,10 @@
+{
+  "name": "call-session",
+  "version": "0.1.0",
+  "description": "Registers the app's voice session as a system call (CallKit on iOS, Core-Telecom on Android)",
+  "private": true,
+  "main": "src/index.ts",
+  "license": "UNLICENSED",
+  "author": "Sidebud",
+  "homepage": "https://github.com/jayleaton/remote-voice-agent"
+}

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The weights half of `install.sh`, inside the NGC PyTorch container (the twin's PyTorch) with $LOCALROUTER_HOME at
 # /workspace/localrouter. MODELS: "image", "video" or both (default). Idempotent: a finished part (its manifest present) is skipped.
+# Every checkpoint is checked file by file against its pin (tools/twin/packs/sources/) before a pack is made from it.
+# DOWNLOAD_ONLY=1: the checkpoints and venvs only, no pack (needs no GPU memory; run again without it for the packs).
 #   image: the official Qwen-Image 2.1 checkpoint downloaded once, then the packs the image tool serves (checked byte for
 #          byte against the committed digests) and each precision's Triton cubins for this GPU (PRECISIONS: "fp8s", the
 #          default; "fp8s nvfp4" adds the faster NVFP4). Result: weights/qwen-image-2.1/ (fp8s/, nvfp4/, te/, vae/).
@@ -22,6 +24,18 @@ MODELS=${MODELS:-image video}
 want() { [[ " $MODELS " == *" $1 "* ]]; }
 source $STK/twin/pod/env.sh
 step() { echo "[prepare $(date +%T)] $*"; }
+# verified DIR SOURCE: DIR holds packs/sources/SOURCE.json's files, each by size and digest (tools/package/verify_assets.py),
+# checked once: DIR/.verified records the manifest it passed
+verified() {
+    local m=$STK/repo/tools/twin/packs/sources/$2.json sum
+    sum=$(sha256sum $m | cut -c1-64)
+    [[ -f $1/.verified && $(cat $1/.verified) == $sum ]] && return 0
+    step "verify $2 (every file against $m)"
+    python3 -I $STK/repo/tools/package/verify_assets.py $m $1 > $1.verify.log || { echo "prepare: $1 differs from $m: $1.verify.log" >&2; exit 1; }
+    echo $sum > $1/.verified
+}
+# DOWNLOAD_ONLY=1: the checkpoints (and the venvs), each verified, and no pack: the part that needs no GPU memory
+packs() { [[ ${DOWNLOAD_ONLY:-0} != 1 ]]; }
 for m in $MODELS; do [[ $m == image || $m == video ]] || { echo "prepare: MODELS has '$m'; use image, video or both" >&2; exit 2; }; done
 
 # ---- image
@@ -32,10 +46,12 @@ export MODEL=$MODEL_VOL STK_ATTN=stk STK_OPS=stk STK_TE=stk STK_VAE=stk
 W=$STK/weights/qwen-image-2.1; PK=$STK/repo/tools/twin/packs; C=$STK/captures
 T="python -m stk_twin"
 mkdir -p $W
+verified $MODEL_VOL qwen-image-2.1
 
 IMAGE_MODELS=${IMAGE_MODELS:-qwen-image-2.1 qwen-image-2.1-turbo}
 wantimg() { [[ " $IMAGE_MODELS " == *" $1 "* ]]; }
 for p in ${PRECISIONS:-fp8s}; do
+    packs || break
     wantimg qwen-image-2.1 || continue
     pp=${p%s}   # the pack command's name: nvfp4 or fp8
     if [[ ! -f $W/$p/manifest.json ]]; then
@@ -53,13 +69,19 @@ for p in ${PRECISIONS:-fp8s}; do
 done
 if wantimg qwen-image-2.1-turbo; then
     TW=$STK/models/Qwen-Image-2.1-Turbo; TURBO_REV=d65dbc9a7e8f6b5479e33dee6030eaab2a906509
-    if [[ ! -f $TW/.complete ]]; then
+    # one --include per pattern: hf takes further positional arguments as file names and then ignores --include,
+    # which fetched no transformer; a .complete without transformer weights (left by that) is downloaded again
+    if [[ ! -f $TW/.complete ]] || ! compgen -G "$TW/transformer/*.safetensors" > /dev/null; then
         step "download Qwen-Image-2.1-Turbo (its own files, about 14 GB)"
-        hf download Qwen/Qwen-Image-2.1-Turbo --revision $TURBO_REV --include "transformer/*" "scheduler/*" model_index.json LICENSE README.md \
-            --local-dir $TW --max-workers 16 > /dev/null && touch $TW/.complete
+        hf download Qwen/Qwen-Image-2.1-Turbo --revision $TURBO_REV --include "transformer/*" --include "scheduler/*" \
+            --include model_index.json --include LICENSE --include README.md --local-dir $TW --max-workers 16 > /dev/null
+        compgen -G "$TW/transformer/*.safetensors" > /dev/null || { echo "prepare: Qwen-Image-2.1-Turbo has no transformer weights" >&2; exit 1; }
+        touch $TW/.complete
     fi
+    verified $TW qwen-image-2.1-turbo
     for d in text_encoder processor vae; do [[ -e $TW/$d ]] || ln -s ../Qwen-Image-2.1/$d $TW/$d; done
     for p in ${PRECISIONS:-fp8s}; do
+        packs || break
         pp=${p%s}
         [[ -f $PK/acts-$pp-turbo.json ]] || { echo "prepare: no committed Turbo scales for $p (acts-$pp-turbo.json); skipping turbo-$p" >&2; continue; }
         if [[ ! -f $W/turbo-$p/manifest.json ]]; then
@@ -76,10 +98,17 @@ if wantimg qwen-image-2.1-turbo; then
         fi
     done
 fi
+if packs; then
 [[ -f $W/te/manifest.json ]] || { step "pack te"; $T pack --model $MODEL --precision te --out $W/te; }
 [[ -f $W/vae/manifest.json ]] || { step "pack vae"; $T pack --model $MODEL --precision vae --out $W/vae; }
+# image edit: the vision tower into te/, the VAE encoder into vae/, then edit.json (the tool lists image_edit only with it)
+[[ -f $W/edit.json ]] || { step "pack edit"; $T pack --model $MODEL --precision edit --out $W; }
+# an edit pack from before #84: its te/manifest.json carried the installed transformers' version (so its pin differed by
+# box); rewritten with the checkpoint's vision fields only, and edit.json with it (metadata, no re-pack)
+python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.pack_edit import normalise; normalise('$W') and print('[prepare] edit pack metadata normalised (#84)')"
 python -c "import sys; sys.path.insert(0, '$TWIN'); from stk_twin.files import readable; readable('$W')"
-step "image done: $(du -sh $W | cut -f1) in $W"
+fi
+step "image done$(packs || echo ' (DOWNLOAD_ONLY: the checkpoints only)'): $(du -sh $W | cut -f1) in $W"
 fi
 
 # ---- video
@@ -115,9 +144,12 @@ if ! { pack_done && shipped_done; }; then
     done
     have_ckpt || { echo "prepare: the MiniMax-H3 checkpoints are not all in $V (network? disk?):" >&2
                    for f in "${CKPT[@]}"; do [[ -s $V/$f ]] || echo "  missing $f" >&2; done; exit 1; }
+    verified $V minimax-h3
+    rm -rf $V/.dl   # hf's resume state and any partial file a killed run left: every checkpoint is in place and verified
     source $POD/video-env.sh   # again: on a fresh $LOCALROUTER_HOME the venv exists only now
     python -c "import torch, tensorfold.cuda.nvfp4.checkpoint" || { echo "prepare: the video venv is not usable" >&2; exit 1; }
 
+    packs || { step "video done (DOWNLOAD_ONLY: the checkpoints and the venv only)"; exit 0; }
     if ! pack_done; then
         step "pack h3-turbo-nvfp4 (the Turbo LoRA merged, NVFP4 scales calibrated; about 15 minutes)"
         rm -rf $PACK   # a half-written pack from an earlier try

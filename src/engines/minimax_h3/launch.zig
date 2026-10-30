@@ -36,6 +36,7 @@ pub const Ops = struct {
     scale_fn: cuda.Function,
     uncarry_fn: cuda.Function,
     patchify_fn: cuda.Function,
+    cond_fn: cuda.Function,
     unpatchify_fn: cuda.Function,
     pack_audio_fn: cuda.Function,
     unpack_audio_fn: cuda.Function,
@@ -54,13 +55,14 @@ pub const Ops = struct {
         var o: Ops = undefined;
         o.module = m;
         inline for (.{
-            .{ "norm_mod_fn", "h3_norm_mod" },             .{ "gate_add_fn", "h3_gate_add" },     .{ "swiglu_fn", "h3_swiglu" },
-            .{ "gate_add_norm_mod_fn", "h3_gate_add_norm_mod" }, .{ "silu_mul_fn", "h3_silu_mul_split" },       .{ "rms_fn", "h3_rms_norm" },          .{ "final_mod_fn", "h3_final_mod" },
-            .{ "scale_fn", "h3_scale" },                   .{ "uncarry_fn", "h3_uncarry" },       .{ "patchify_fn", "h3_patchify" },
-            .{ "unpatchify_fn", "h3_unpatchify_neg" },     .{ "pack_audio_fn", "h3_pack_audio" }, .{ "unpack_audio_fn", "h3_unpack_audio_neg" },
-            .{ "add_fn", "h3_add" },                       .{ "gemm_fn", "h3_gemm_f32" },         .{ "to_bf16_fn", "h3_f32_to_bf16" },
-            .{ "heads_fn", "h3_heads_to_rows" },          .{ "denoise_fn", "h3_denoise" },       .{ "euler_fn", "h3_euler32" },
-            .{ "res2_fn", "h3_res2" },                    .{ "scale32_fn", "h3_scale32" },
+            .{ "norm_mod_fn", "h3_norm_mod" },                   .{ "gate_add_fn", "h3_gate_add" },             .{ "swiglu_fn", "h3_swiglu" },
+            .{ "gate_add_norm_mod_fn", "h3_gate_add_norm_mod" }, .{ "silu_mul_fn", "h3_silu_mul_split" },       .{ "rms_fn", "h3_rms_norm" },
+            .{ "final_mod_fn", "h3_final_mod" },                 .{ "scale_fn", "h3_scale" },                   .{ "uncarry_fn", "h3_uncarry" },
+            .{ "patchify_fn", "h3_patchify" },                   .{ "cond_fn", "h3_cond_rows" },                .{ "unpatchify_fn", "h3_unpatchify_neg" },
+            .{ "pack_audio_fn", "h3_pack_audio" },               .{ "unpack_audio_fn", "h3_unpack_audio_neg" }, .{ "add_fn", "h3_add" },
+            .{ "gemm_fn", "h3_gemm_f32" },                       .{ "to_bf16_fn", "h3_f32_to_bf16" },           .{ "heads_fn", "h3_heads_to_rows" },
+            .{ "denoise_fn", "h3_denoise" },                     .{ "euler_fn", "h3_euler32" },                 .{ "res2_fn", "h3_res2" },
+            .{ "scale32_fn", "h3_scale32" },
         }) |e| @field(o, e[0]) = try m.function(e[1]);
         return o;
     }
@@ -162,6 +164,16 @@ pub const Ops = struct {
         a.add(x);
         inline for (.{ c, t, h, w }) |v| a.add(@as(i32, @intCast(v)));
         try go(o.unpatchify_fn, s, .{ .x = blocks(@as(u64, c) * t * h * w) }, .{ .x = block }, 0, &a);
+    }
+
+    pub fn conditionRows(o: *const Ops, s: cuda.Stream, z: Ptr, noise: Ptr, rows: Ptr, h: u32, w: u32) !void {
+        var a: cuda.launch.Args = .{};
+        inline for (.{ z, noise, rows }) |p| a.add(p);
+        a.add(@as(i32, @intCast(h)));
+        a.add(@as(i32, @intCast(w)));
+        a.add(@as(f32, 0.999));
+        a.add(@as(f32, 0.001)); // Python computes 1-aug in double before casting this scalar to fp32.
+        try go(o.cond_fn, s, .{ .x = blocks(24 * @as(u64, h) * w) }, .{ .x = block }, 0, &a);
     }
 
     pub fn packAudio(o: *const Ops, s: cuda.Stream, x: Ptr, rows: Ptr, c: u32, n: u32) !void {
@@ -287,10 +299,10 @@ pub const Kitchen = struct {
         var k: Kitchen = undefined;
         k.module = m;
         inline for (.{
-            .{ "anchor", sym_anchor },               .{ "qk_c64_rot4", sym_qk_c64_rot4 }, .{ "qk_c64_rot128", sym_qk_c64_rot128 },
-            .{ "qk_c128", sym_qk_c128 },             .{ "v128", sym_v128 },               .{ "v512", sym_v512 },
-            .{ "attn_c64", sym_attn_c64 },           .{ "attn_c64_fuse", sym_attn_c64_fuse },
-            .{ "attn_c128_fuse", sym_attn_c128_fuse }, .{ "rope", sym_rope },
+            .{ "anchor", sym_anchor },     .{ "qk_c64_rot4", sym_qk_c64_rot4 },     .{ "qk_c64_rot128", sym_qk_c64_rot128 },
+            .{ "qk_c128", sym_qk_c128 },   .{ "v128", sym_v128 },                   .{ "v512", sym_v512 },
+            .{ "attn_c64", sym_attn_c64 }, .{ "attn_c64_fuse", sym_attn_c64_fuse }, .{ "attn_c128_fuse", sym_attn_c128_fuse },
+            .{ "rope", sym_rope },
         }) |e| @field(k, e[0]) = try m.function(e[1]);
         try k.attn_c64.allowDynamicShared(32768);
         try k.attn_c64_fuse.allowDynamicShared(32768);
@@ -325,7 +337,7 @@ pub const Kitchen = struct {
             var p: Plan = .{ .cta_k = cta_k, .padded_k = padded_k, .q8 = 0, .k8 = 0, .v8 = 0, .qs = 0, .ks = 0, .vs = 0, .anchor = 0, .total = 0 };
             var at: u64 = 0;
             inline for (.{
-                .{ "q8", @as(u64, heads) * s * d },     .{ "k8", @as(u64, heads) * s * d }, .{ "v8", @as(u64, heads) * d * padded_k },
+                .{ "q8", @as(u64, heads) * s * d },        .{ "k8", @as(u64, heads) * s * d },        .{ "v8", @as(u64, heads) * d * padded_k },
                 .{ "qs", @as(u64, heads) * q_scales * 4 }, .{ "ks", @as(u64, heads) * k_scales * 4 }, .{ "vs", @as(u64, heads) * d * 4 },
                 .{ "anchor", @as(u64, heads) * 4 },
             }) |e| {

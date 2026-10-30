@@ -1,0 +1,40 @@
+{
+  "host": "127.0.0.1",
+  "gpu_lock": "/var/lock/gpu.lock",
+  "defaults": {"text_to_speech": "fishaudio/drama-3"},
+  "tools": [
+    {
+      "id": "fishaudio/drama-3",
+      "kind": "speech",
+      "capabilities": ["text_to_speech", "voice_clone"],
+      "name": "Fish Audio Drama 3 (TensorFold native, 44.1 kHz). Built with Fish Audio",
+      "cmd": ["/usr/bin/python3", "-I", "/opt/localrouter/tools/speech/drama3/drama3_worker.py"],
+      "weights": "/data/models/drama3",
+      "qualification": "/data/models/drama3/nvfp4-qualification.json",
+      "resident_bytes": 22309502976,
+      "working_bytes": 0,
+      "keep_loaded": true,
+      "priority": 50,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 1200,
+      "generate_timeout_s": 900,
+      "options": {
+        "variant": "nvfp4",
+        "voices": ["Mae", "Arlo", "Ezra", "Nora", "Theo", "Wren"],
+        "default_voice": "Mae",
+        "voices_dir": "/data/models/drama3/voices",
+        "min_speed": 1,
+        "max_speed": 1,
+        "max_input_chars": 4096,
+        "stream": true,
+        "references": true,
+        "instructions": "[{s}] ",
+        "port": 18793,
+        "max_frames": 1024,
+        "long_form": false,
+        "verify": "size",
+        "clone_working_bytes": 2147483648
+      }
+    }
+  ]
+}

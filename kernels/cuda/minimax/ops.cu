@@ -148,6 +148,15 @@ extern "C" __global__ void h3_uncarry(const bf16* a, bf16* v, float c1, float c2
     if (i < n) v[i] = h3_st(__fadd_rn(h3_bf(__fmul_rn(c1, h3_ld(a, i))), h3_bf(__fmul_rn(c2, h3_ld(v, i)))));
 }
 
+// First-frame normalized fp32 [24,1,H,W] -> augmented condition rows; no bf16 cast before augmentation.
+extern "C" __global__ void h3_cond_rows(const float* z, const float* noise, float* rows, int H, int W, float aug, float noise_scale) {
+    const long long e=(long long)blockIdx.x*256+threadIdx.x;
+    if(e>=24LL*H*W) return;
+    const int j=e%96, r=e/96, c=j/4, dy=(j%4)/2, dx=j%2;
+    const int y=(r/(W/2))*2+dy, x=(r%(W/2))*2+dx;
+    rows[e]=__fadd_rn(__fmul_rn(aug,z[((long long)c*H+y)*W+x]),__fmul_rn(noise_scale,noise[e]));
+}
+
 // patchify_video: x bf16 [C, T, H, W] -> rows fp32 [T * (H/2) * (W/2), C * 4], row (t, h, w), column c * 4 + p * 2 + q,
 // value x[c][t][2h + p][2w + q]. launch: block 256, grid ceil(rows * C * 4 / 256).
 extern "C" __global__ void h3_patchify(const bf16* x, float* rows, int C, int T, int H, int W) {

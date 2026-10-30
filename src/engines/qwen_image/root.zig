@@ -18,6 +18,8 @@ pub const vae = @import("vae.zig");
 pub const sampler = @import("sampler.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const upload = @import("upload.zig");
+/// Per-process caps on native GPU memory in front of the driver: open every driver with `memcap.open`.
+pub const memcap = @import("memcap.zig");
 pub const kernels = @import("qwen_kernels");
 /// TensorFold's tokenizer.json implementation, re-exported for the video engine (which has no import of its own).
 pub const tokenizer = @import("tokenizer");
@@ -31,4 +33,18 @@ test {
     _ = repack;
     _ = te;
     _ = sampler;
+    _ = memcap;
+    _ = vision;
+    _ = vae_enc;
+    _ = edit_pack;
+    _ = edit_prompt;
+    _ = @import("edit_layout.zig");
+    _ = edit_prepare;
 }
+
+pub const edit_pack = @import("edit_pack.zig");
+pub const edit_prompt = @import("edit_prompt.zig");
+
+pub const vision = @import("vision.zig");
+pub const vae_enc = @import("vae_enc.zig");
+pub const edit_prepare = @import("edit_prepare.zig");

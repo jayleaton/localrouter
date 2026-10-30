@@ -8,6 +8,7 @@ const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
+const testdir = @import("testdir.zig");
 
 pub const DType = enum {
     bf16,
@@ -71,13 +72,8 @@ pub const Pack = struct {
         const a = p.arena.allocator();
         const man_text = try Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(16 << 20));
         try p.parseManifest(a, man_text);
-        const path = try std.fs.path.joinZ(a, &.{ dir, "weights.safetensors" });
-        p.file = try Io.Dir.cwd().openFile(io, path, .{});
-        errdefer p.file.close(io);
-        p.direct = posix.openatZ(posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .DIRECT = true, .CLOEXEC = true }, 0) catch -1;
-        errdefer if (p.direct >= 0) {
-            _ = linux.close(p.direct);
-        };
+        try p.openData(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }));
+        errdefer p.closeData(io);
         var len_buf: [8]u8 = undefined;
         if (try p.file.readPositionalAll(io, &len_buf, 0) != 8) return error.BadPack;
         const hlen = std.mem.readInt(u64, &len_buf, .little);
@@ -96,8 +92,8 @@ pub const Pack = struct {
         var p: Pack = .{ .arena = .init(gpa), .file = undefined, .data_start = 0, .data_len = 0 };
         errdefer p.arena.deinit();
         const a = p.arena.allocator();
-        p.file = try Io.Dir.cwd().openFile(io, path, .{});
-        errdefer p.file.close(io);
+        try p.openData(io, path);
+        errdefer p.closeData(io);
         var len_buf: [8]u8 = undefined;
         if (try p.file.readPositionalAll(io, &len_buf, 0) != 8) return error.BadPack;
         const hlen = std.mem.readInt(u64, &len_buf, .little);
@@ -111,9 +107,23 @@ pub const Pack = struct {
     }
 
     pub fn close(p: *Pack, io: Io) void {
-        if (p.direct >= 0) _ = linux.close(p.direct);
-        p.file.close(io);
+        p.closeData(io);
         p.arena.deinit();
+    }
+
+    /// Opens the safetensors file at `path` twice: buffered (headers, small reads) and, where the filesystem allows
+    /// it, O_DIRECT for the bulk reads of `readAligned`. Every opener goes through here, so a published checkpoint
+    /// loads at the drive's speed like a pack.
+    pub fn openData(p: *Pack, io: Io, path: []const u8) !void {
+        const z = try p.arena.allocator().dupeSentinel(u8, path, 0);
+        p.file = try Io.Dir.cwd().openFile(io, z, .{});
+        p.direct = posix.openatZ(posix.AT.FDCWD, z, .{ .ACCMODE = .RDONLY, .DIRECT = true, .CLOEXEC = true }, 0) catch -1;
+    }
+
+    pub fn closeData(p: *Pack, io: Io) void {
+        if (p.direct >= 0) _ = linux.close(p.direct);
+        p.direct = -1;
+        p.file.close(io);
     }
 
     /// The tensor named `name`; `error.MissingTensor` names a pack that does not match the engine.
@@ -204,11 +214,11 @@ pub const Pack = struct {
 test "open a pack: manifest kinds, tensors, reads" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/tmp/stk-pack-test";
-    Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const dir = try testdir.make(io, arena.allocator(), "/tmp", "stk-pack-test");
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/manifest.json", .data =
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(arena.allocator(), dir, "manifest.json"), .data =
         \\{"format": "stk-pack/1", "model": "qwen-image-2.1", "precision": "nvfp4", "kinds": {"L0.qkv": "nvfp4", "L0.out": "fp8"}, "tensors": {}}
     });
     const header = "{\"L0.qkv.codes\":{\"dtype\":\"U8\",\"shape\":[2,3],\"data_offsets\":[0,6]},\"L0.out.w8\":{\"dtype\":\"F8_E4M3\",\"shape\":[2],\"data_offsets\":[6,8]},\"__metadata__\":{}}";
@@ -216,7 +226,7 @@ test "open a pack: manifest kinds, tensors, reads" {
     std.mem.writeInt(u64, file[0..8], header.len, .little);
     @memcpy(file[8 .. 8 + header.len], header);
     @memcpy(file[8 + header.len ..], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/weights.safetensors", .data = &file });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(arena.allocator(), dir, "weights.safetensors"), .data = &file });
 
     var p = try Pack.open(gpa, io, dir);
     defer p.close(io);
@@ -230,14 +240,16 @@ test "open a pack: manifest kinds, tensors, reads" {
     try std.testing.expectError(error.MissingTensor, p.get("nope"));
 }
 
-test "aligned reads: odd offsets and lengths come back exact, direct and buffered alike" {
+test "aligned reads: odd offsets and lengths come back exact, direct and buffered alike, from a pack or a checkpoint" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/var/tmp/stk-pack-direct-test"; // a disk filesystem, so O_DIRECT is taken where it exists
-    Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().createDirPath(io, dir);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try testdir.make(io, a, "/var/tmp", "stk-pack-direct-test"); // a disk filesystem, so O_DIRECT is taken where it exists
     defer Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/manifest.json", .data =
+    const weights = try testdir.file(a, dir, "weights.safetensors");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try testdir.file(a, dir, "manifest.json"), .data =
         \\{"format": "stk-pack/1", "precision": "nvfp4", "kinds": {}, "tensors": {}}
     });
     const n = 3 * block + 777; // a tensor that starts mid-block (after the odd header) and ends mid-block
@@ -248,15 +260,20 @@ test "aligned reads: odd offsets and lengths come back exact, direct and buffere
     @memcpy(file[8 .. 8 + header.len], header);
     const data = file[8 + header.len ..];
     for (data, 0..) |*c, j| c.* = @truncate(j *% 131 +% 7);
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/weights.safetensors", .data = file });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = weights, .data = file });
 
-    var p = try Pack.open(gpa, io, dir);
-    defer p.close(io);
-    const t = try p.get("t");
+    var pack = try Pack.open(gpa, io, dir);
+    defer pack.close(io);
+    var ckpt = try Pack.openFile(gpa, io, weights);
+    defer ckpt.close(io);
+    try std.testing.expectEqual(pack.direct >= 0, ckpt.direct >= 0); // a checkpoint takes direct I/O wherever a pack does
     const buf = try gpa.alignedAlloc(u8, .fromByteUnits(block), n + 2 * block);
     defer gpa.free(buf);
-    for ([_][2]usize{ .{ 0, n }, .{ 1, 5 }, .{ block - 3, 9 }, .{ 2 * block + 1, n - 2 * block - 1 }, .{ 100, 2 * block } }) |r| {
-        const from = try p.readAligned(io, t, r[0], r[1], buf);
-        try std.testing.expectEqualSlices(u8, data[r[0]..][0..r[1]], buf[from..][0..r[1]]);
+    for ([_]*const Pack{ &pack, &ckpt }) |p| {
+        const t = try p.get("t");
+        for ([_][2]usize{ .{ 0, n }, .{ 1, 5 }, .{ block - 3, 9 }, .{ 2 * block + 1, n - 2 * block - 1 }, .{ 100, 2 * block } }) |r| {
+            const from = try p.readAligned(io, t, r[0], r[1], buf);
+            try std.testing.expectEqualSlices(u8, data[r[0]..][0..r[1]], buf[from..][0..r[1]]);
+        }
     }
 }

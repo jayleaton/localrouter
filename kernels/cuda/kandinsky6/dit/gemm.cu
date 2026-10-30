@@ -3,7 +3,8 @@
 //
 // k6_gemm_bf16: C[M, N] = A[M, K] . B[N, K]^T, bf16 in and out, fp32 accumulation over K tiles of 32 in ascending order
 //   inside mma.sync m16n8k16, no split-K. The tiling and staging are kernels/cuda/qwen_image/gemm.cu's stk_gemm_bf16
-//   (blob b8a36617767be100793b7d413893bb768ca77c97) unchanged; the epilogue adds the DiT's two output forms:
+//   (blob b8a36617767be100793b7d413893bb768ca77c97) unchanged but for k_first; the epilogue adds the DiT's two output
+//   forms:
 //     EPI_BIAS  out = bf16(acc + float(bias[n]))           (nn.Linear in bf16: the bias joins the fp32 accumulator, one
 //                                                            rounding; bias may be null)
 //     EPI_GELU  out = bf16(gelu(float(bf16(acc))))         (_GELUProjection: the bias-free proj rounds to bf16, then
@@ -11,6 +12,11 @@
 //   vec = 1 stages with 16-byte cp.async (K % 8 == 0, lda / ldb % 8 == 0, A and B 16-byte aligned); vec = 0 stages
 //   element by element (any K and strides: the 132-feature patch embedding). Both fill the same shared tiles (zeros
 //   past K and past M / N), so the arithmetic and the bits are the same. ldc >= N.
+//   k_first (0 < k_first < K; anything else is one ascending pass) reduces k in [0, k_first) first, zero-padded to
+//   the tile, then k_first, k_first + 32, ... to K: the order of a CUTLASS 2.x kernel (cuBLASLt's sm80 tensor-op
+//   algorithms), whose predicated iterators take the partial K tile (K mod its K tile) before the full ones. Only K %
+//   16 != 0 can tell the orders apart, so the caller passes K mod the native kernel's K tile there and 0 elsewhere;
+//   vec needs k_first % 8 == 0 as well.
 //
 // k6_gemv_f32: C[M, N] = act(A[M, K]) . float(W[N, K])^T + float(bias[N]) in fp32 for the timestep MLP and the
 //   modulations (M: the batch, a handful of rows). A is fp32 or bf16 (in_bf16), act is identity or SiLU (silu), C is
@@ -86,7 +92,19 @@ __device__ __forceinline__ void chunk8(__nv_bfloat16* dst, const __nv_bfloat16* 
         dst[e] = row < rows && k + e < K ? X[(long long)row * ld + k + e] : __float2bfloat16_rn(0.0f);
 }
 
-// One K tile of A (BM x BK) and B (BN x BK) into stage s: each thread copies 2 + 2 chunks of 16 bytes.
+// Tile t of the K order: k0, and the end of its segment (zeros from there on); t1 tiles cover [0, kr).
+__device__ __forceinline__ void tile_at(int t, int t1, int kr, int K, int& k0, int& kend) {
+    if (t < t1) {
+        k0 = t * BK;
+        kend = kr;
+    } else {
+        k0 = kr + (t - t1) * BK;
+        kend = K;
+    }
+}
+
+// One K tile of A (BM x BK) and B (BN x BK) into stage s: each thread copies 2 + 2 chunks of 16 bytes; K is the end
+// of the tile's segment.
 __device__ __forceinline__ void stage(__nv_bfloat16* sa, __nv_bfloat16* sb, const __nv_bfloat16* A, const __nv_bfloat16* B,
                                       long long lda, long long ldb, int M, int N, int K, int m0, int n0, int k0, int vec) {
 #pragma unroll
@@ -112,7 +130,7 @@ extern "C" __global__ void __launch_bounds__(256) k6_gemm_bf16(const __nv_bfloat
                                                                 const __nv_bfloat16* __restrict__ bias,
                                                                 __nv_bfloat16* __restrict__ C, int M, int N, int K,
                                                                 long long lda, long long ldb, long long ldc, int epi,
-                                                                int vec) {
+                                                                int vec, int k_first) {
     using namespace k6_gemm;
     __shared__ __align__(16) __nv_bfloat16 sa[2][BM * LD];
     __shared__ __align__(16) __nv_bfloat16 sb[2][BN * LD];
@@ -123,12 +141,18 @@ extern "C" __global__ void __launch_bounds__(256) k6_gemm_bf16(const __nv_bfloat
     for (int i = 0; i < 4; ++i)
 #pragma unroll
         for (int j = 0; j < 4; ++j) acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
-    const int tiles = (K + BK - 1) / BK;
-    stage(sa[0], sb[0], A, B, lda, ldb, M, N, K, m0, n0, 0, vec);
+    const int kr = k_first > 0 && k_first < K ? k_first : 0;
+    const int t1 = (kr + BK - 1) / BK, tiles = t1 + (K - kr + BK - 1) / BK;
+    int k0, kend;
+    tile_at(0, t1, kr, K, k0, kend);
+    stage(sa[0], sb[0], A, B, lda, ldb, M, N, kend, m0, n0, k0, vec);
     commit();
     for (int t = 0; t < tiles; ++t) {
         const int s = t & 1;
-        if (t + 1 < tiles) stage(sa[s ^ 1], sb[s ^ 1], A, B, lda, ldb, M, N, K, m0, n0, (t + 1) * BK, vec);
+        if (t + 1 < tiles) {
+            tile_at(t + 1, t1, kr, K, k0, kend);
+            stage(sa[s ^ 1], sb[s ^ 1], A, B, lda, ldb, M, N, kend, m0, n0, k0, vec);
+        }
         commit();
         wait_group<1>();
         __syncthreads();

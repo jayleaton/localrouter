@@ -360,7 +360,7 @@ pub const Pipeline = struct {
         }
         errdefer p.closeTokenizers();
 
-        p.d = try cuda.Driver.open();
+        p.d = try qi.memcap.open(); // its allocations behind the per-process caps
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();

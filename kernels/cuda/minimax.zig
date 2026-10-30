@@ -20,3 +20,6 @@ pub const vae_video: []const u8 = if (with_kernels) &Blob("minimax_fatbin_vae_vi
 
 /// The 32B text encoder's RoPE frequencies as ComfyUI's CUDA run computes them (kernels/minimax/te32_inv_freq.json).
 pub const te32_inv_freq: []const u8 = @embedFile("minimax_te32_inv_freq");
+
+pub const vae_enc: []const u8 = if (with_kernels) &Blob("minimax_fatbin_vae_enc").bytes else &.{};
+pub const te_vision: []const u8 = if (with_kernels) &Blob("minimax_fatbin_te_vision").bytes else &.{};

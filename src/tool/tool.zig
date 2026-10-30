@@ -29,6 +29,8 @@ pub const Output = struct {
     files: []const []const u8,
     seed: u64 = 0,
     ms: u64 = 0,
+    finish_reason: []const u8 = "", // speech: why the audio ended (stop, length, silence); "": the tool does not say
+    segments: []const u8 = "", // speech: a long-form reply's segments, "N;S2,S3,..." (sample offsets); "": one
 };
 
 /// One request for a tool: where its inputs and outputs live and what to make.
@@ -74,8 +76,14 @@ pub const Tool = struct {
         generate: *const fn (ptr: *anyopaque, job: *const Job, sink: Sink, arena: std.mem.Allocator) Error!Output,
         unload: *const fn (ptr: *anyopaque) void,
         abort: *const fn (ptr: *anyopaque) void,
+        cancel: *const fn (ptr: *anyopaque) bool,
         state: *const fn (ptr: *anyopaque) State,
         failure: *const fn (ptr: *anyopaque) Failure,
+        // Whether it runs on this machine now (its memory and the host's GPU lock are this scheduler's); null: always.
+        // A remote tool (`node.zig`) runs on another node, which admits it there.
+        local: ?*const fn (ptr: *anyopaque) bool = null,
+        // The pid of the model's own server process while it is loaded (`openai_server`), for sched/yielder.zig; 0: none.
+        server_pid: ?*const fn (ptr: *anyopaque) std.posix.pid_t = null,
     };
 
     /// The tool's configuration (id, kind, timeouts).
@@ -102,11 +110,26 @@ pub const Tool = struct {
     pub fn abort(t: Tool) void {
         t.vtable.abort(t.ptr);
     }
+    /// Asks a running generate to end early and the tool to stay loaded (that call returns `error.Cancelled`); false
+    /// when the tool cannot, and only `abort` ends it.
+    pub fn cancel(t: Tool) bool {
+        return t.vtable.cancel(t.ptr);
+    }
     /// Safe to read from any thread.
     pub fn state(t: Tool) State {
         return t.vtable.state(t.ptr);
     }
     pub fn failure(t: Tool) Failure {
         return t.vtable.failure(t.ptr);
+    }
+    /// The model's own server process while loaded (a proxied chat server), which may be paused; 0: none.
+    pub fn serverPid(t: Tool) std.posix.pid_t {
+        const f = t.vtable.server_pid orelse return 0;
+        return f(t.ptr);
+    }
+    /// Whether it runs here now, on this machine's memory and GPU (false: another node runs it).
+    pub fn local(t: Tool) bool {
+        const f = t.vtable.local orelse return true;
+        return f(t.ptr);
     }
 };

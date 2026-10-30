@@ -1,0 +1,509 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JJ Eaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:00:00 +0000
+Subject: [PATCH] drama: a voice's reference rows are prefilled once and
+ resumed from on later prompts
+
+A referenced prompt's rows through its system message (instruction, transcripts, reference codes and its <|im_end|>) are the speech request's new prefix_rows, 0 for a plain prompt. Its prompt pass runs them in their own chunks of up to 128 rows, then the rest, so a pass that resumes after them runs exactly the chunks it skips; a plain prompt's passes are as before. After the chunk ending there, the backbone's own sequence (its whole DeltaNet state buffer, its attention k and v rows, position and chunk metadata) and the tower's k and v rows and position are copied to a cache entry keyed by the prompt rows [0, prefix_rows] in full (the last row is the tower's label for that chunk). A later request whose rows match restores the entry after both models' reset and starts its pass at prefix_rows. Guidance's second sequence prefills the plain prompt, which has no reference rows, and is not cached. DRAMA_PREFIX_CACHE sets the entries kept (default 2, least recently used dropped; 0 turns the cache off); an entry takes about 152 MiB plus 46 KiB a prefix row, and a failed allocation or copy leaves no entry and never fails the request.
+---
+ zig/src/core/engine_api.zig         |   3 +
+ zig/src/families/drama/backbone.zig |  47 +++++++++
+ zig/src/families/drama/tower.zig    |  29 +++++
+ zig/src/native/drama_host.zig       |  53 +++++++++-
+ zig/src/native/drama_prefix.zig     | 157 ++++++++++++++++++++++++++++
+ zig/src/server/drama_prompt.zig     |  10 +-
+ zig/src/server/speech.zig           |   7 +-
+ zig/src/server/speech_long.zig      |   1 +
+ 8 files changed, 297 insertions(+), 10 deletions(-)
+ create mode 100644 zig/src/native/drama_prefix.zig
+
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 2e75346d..f15d5adc 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -112,6 +112,9 @@ pub const SpeechRequest = struct {
+     cfg_gamma: f32 = 1,
+     /// Decode while generating and report each final prefix with ``audio`` events; false: one decode after EOS.
+     stream: bool = false,
++    /// Prompt rows through the voice references' system message (its ``<|im_end|>\n``), 0 without references: an
++    /// engine may resume after them from the state an earlier prompt with the same first rows left.
++    prefix_rows: u32 = 0,
+ };
+ 
+ pub const SpeechInfo = struct {
+diff --git a/zig/src/families/drama/backbone.zig b/zig/src/families/drama/backbone.zig
+index 450f24f1..d14e7d88 100644
+--- a/zig/src/families/drama/backbone.zig
++++ b/zig/src/families/drama/backbone.zig
+@@ -125,6 +125,41 @@ pub const Sequence = struct {
+         q.poisoned = false;
+     }
+ 
++    /// A snapshot's host half: the position and every DeltaNet layer's chunk metadata (its addresses are this
++    /// sequence's).
++    pub const Saved = struct { pos: usize, gdn_states: [config.linear_layers]gdn.State };
++
++    /// Device bytes of a snapshot after `rows` rows: the whole state buffer, then each attention layer's k and v rows.
++    pub fn snapshotBytes(rows: usize) usize {
++        return state_bytes + 2 * config.full_layers * kvBytes(rows);
++    }
++
++    /// The sequence's state after its `pos` rows into `dst` (snapshotBytes(pos) bytes) on `stream`, waited for.
++    pub fn snapshot(q: *const Sequence, stream: cuda.Stream, dst: cuda.DeviceBuffer) !Saved {
++        if (q.poisoned) return error.DramaStateNeedsReset;
++        const kv = kvBytes(q.pos);
++        try dst.copyFrom(0, q.state_buf.ptr, q.state_buf.len, stream.handle);
++        for (0..2 * config.full_layers) |c| try dst.copyFrom(q.state_buf.len + c * kv, q.kv_buf.ptr + c * kvBytes(q.context), kv, stream.handle);
++        try stream.synchronize();
++        return .{ .pos = q.pos, .gdn_states = q.gdn_states };
++    }
++
++    /// Right after `reset`: the state a `snapshot` of this sequence copied to `src`, so the next run continues at
++    /// saved.pos. KV rows past it are rewritten before they are read, as after reset. A failure leaves it poisoned.
++    pub fn restore(q: *Sequence, stream: cuda.Stream, src: u64, saved: Saved) !void {
++        if (q.poisoned) return error.DramaStateNeedsReset;
++        if (q.pos != 0) return error.DramaRestoreNeedsReset;
++        if (saved.pos > q.context) return error.DramaContextOverflow;
++        q.poisoned = true;
++        const kv = kvBytes(saved.pos);
++        try q.state_buf.copyFrom(0, src, q.state_buf.len, stream.handle);
++        for (0..2 * config.full_layers) |c| try q.kv_buf.copyFrom(c * kvBytes(q.context), src + q.state_buf.len + c * kv, kv, stream.handle);
++        try stream.synchronize();
++        q.gdn_states = saved.gdn_states;
++        q.pos = saved.pos;
++        q.poisoned = false;
++    }
++
+     fn kvBytes(context: usize) usize {
+         return context * config.kv_heads * config.head_dim * 2;
+     }
+@@ -248,6 +283,18 @@ pub const Model = struct {
+         return self.seq.reset(stream);
+     }
+ 
++    /// The Model's own sequence's snapshot (`Sequence.snapshot`, `Sequence.restore`): the prompt prefix cache's.
++    pub const Saved = Sequence.Saved;
++    pub const snapshotBytes = Sequence.snapshotBytes;
++
++    pub fn snapshot(self: *const Model, stream: cuda.Stream, dst: cuda.DeviceBuffer) !Saved {
++        return self.seq.snapshot(stream, dst);
++    }
++
++    pub fn restore(self: *Model, stream: cuda.Stream, src: u64, saved: Saved) !void {
++        return self.seq.restore(stream, src, saved);
++    }
++
+     /// Another sequence of the Model's context, sharing its weights and scratch.
+     pub fn sequence(self: *const Model) !Sequence {
+         return Sequence.alloc(self.d, self.options.context);
+diff --git a/zig/src/families/drama/tower.zig b/zig/src/families/drama/tower.zig
+index 595b0c1d..95c3e1a3 100644
+--- a/zig/src/families/drama/tower.zig
++++ b/zig/src/families/drama/tower.zig
+@@ -653,6 +653,35 @@ pub const Model = struct {
+         // cache would be wasted work and is not needed for request isolation.
+     }
+ 
++    /// Device bytes of a snapshot after `rows` rows: every layer's k and v cache rows, layer by layer.
++    pub fn snapshotBytes(rows: usize) usize {
++        return layer_count * 2 * rows * kv_width * 2;
++    }
++
++    /// After a prefill, no row staged: the cache rows before `position` into `dst` on `stream`, waited for; their
++    /// count. Nothing else a prefill writes outlives it (result and seed are reset's, from the request).
++    pub fn snapshot(self: *const Model, stream: cuda.Stream, dst: Buffer) !usize {
++        const p = self.impl;
++        if (p.input_rows != 0 or p.step != 0) return error.BadTowerRows;
++        const cache_bytes = p.options.context * kv_width * 2;
++        const bytes = p.position * kv_width * 2;
++        for (0..layer_count * 2) |c| try dst.copyFrom(c * bytes, p.cache.ptr + c * cache_bytes, bytes, stream.handle);
++        try stream.synchronize();
++        return p.position;
++    }
++
++    /// Right after `reset`: `rows` cache rows a `snapshot` copied to `src`; the next prefill continues after them.
++    pub fn restore(self: *Model, stream: cuda.Stream, src: u64, rows: usize) !void {
++        const p = self.impl;
++        if (p.position != 0 or p.step != 0 or rows > p.options.context) return error.BadTowerRows;
++        const cache_bytes = p.options.context * kv_width * 2;
++        const bytes = rows * kv_width * 2;
++        for (0..layer_count * 2) |c| try p.cache.copyFrom(c * cache_bytes, src + c * bytes, bytes, stream.handle);
++        try stream.synchronize();
++        p.position = rows;
++        p.input_rows = 0;
++    }
++
+     /// Stage input frames once, before the backbone consumes the same rows.
+     /// The returned BF16 codebook-1 embedding is borrowed until the next setInput.
+     pub fn setInput(self: *Model, stream: cuda.Stream, frames: []const Frame) !?Buffer {
+diff --git a/zig/src/native/drama_host.zig b/zig/src/native/drama_host.zig
+index d7d13d10..fe1acaa5 100644
+--- a/zig/src/native/drama_host.zig
++++ b/zig/src/native/drama_host.zig
+@@ -7,6 +7,7 @@ const drama = @import("drama");
+ const budget = @import("cuda_memory.zig");
+ const guide = @import("drama_guide.zig");
+ const generation = @import("drama_generate.zig");
++const prefix_cache = @import("drama_prefix.zig");
+ const Guide = guide.Guide;
+ const Allocator = std.mem.Allocator;
+ 
+@@ -74,9 +75,10 @@ const Host = struct {
+     eos: u32 = 0,
+     thread: ?std.Thread = null,
+ 
+-    // Worker-thread only: the prompt pass's frames and the generated codes, sized once at open.
++    // Worker-thread only: the prompt pass's frames and the generated codes, sized once at open; the prefix cache.
+     frames: [chunk_rows + 1]Frame = undefined,
+     codes: []Codes = &.{},
++    prefixes: prefix_cache.Cache = undefined,
+ 
+     // Under `mutex`: the one admitted request and what status reports of it.
+     mutex: std.Io.Mutex = .init,
+@@ -283,7 +285,8 @@ const Host = struct {
+         try h.check();
+         try h.ctx.makeCurrent(); // CUDA binds per thread: the worker's calls need the context current
+         const guided = if (r.unconditioned.len > 0) try h.guide.?.prefill(h, r) else null;
+-        const last = try prefill(&h.backbone, &h.tower, h.stream, &h.frames, r.prompt, r.codes, chunk_rows, r.seed, {}, h);
++        var resumer: Resumer = .{ .h = h, .r = r, .rows = prefix_cache.prefixRows(r) };
++        const last = try prefillResuming(&h.backbone, &h.tower, h.stream, &h.frames, r.prompt, r.codes, chunk_rows, r.seed, {}, h, &resumer);
+         const prefilled = h.now();
+         stats.prefill_seconds = @as(f64, @floatFromInt(prefilled - began)) / 1e9;
+         h.notePrefill(r.prompt.len + r.unconditioned.len, began, prefilled);
+@@ -386,14 +389,24 @@ pub const Row = struct { hidden: cuda.DeviceBuffer, logits: cuda.DeviceBuffer };
+ /// Resets both models for a synthesis seeded `seed`, then the prompt pass in chunks of `chunk` (up to chunk_rows) rows,
+ /// each staged in the tower, run through the backbone (runTraced), all but the last row teacher-forced; check() each.
+ pub fn prefill(b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream, frames: *[chunk_rows + 1]Frame, prompt: []const u32, codes: []const Codes, chunk: usize, seed: u64, trace: anytype, check: anytype) !Row {
++    return prefillResuming(b, t, s, frames, prompt, codes, chunk, seed, trace, check, {});
++}
++
++/// `prefill` with the prefix cache's hooks: `resumer` is `{}` (void: `prefill` as it is) or a pointer to a resumer with
++/// `rows` (the prompt's reference rows, 0 for none), `resumed(b, t, s) !usize` (both models just reset: the row the
++/// pass starts at, 0 or `rows`) and `reached(b, t, s) void` (both synchronized after the chunk ending at `rows`).
++/// The reference rows run in chunks of their own, so a pass resumed after them runs exactly the chunks it skips.
++pub fn prefillResuming(b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream, frames: *[chunk_rows + 1]Frame, prompt: []const u32, codes: []const Codes, chunk: usize, seed: u64, trace: anytype, check: anytype, resumer: anytype) !Row {
+     if (chunk == 0 or chunk > chunk_rows) return error.BadDramaChunk;
+     try b.reset(s);
+     try t.reset(s, prompt, seed);
++    const prefix: usize = if (@TypeOf(resumer) == void) 0 else resumer.rows;
+     var last: drama.backbone.Rows = undefined;
+-    var start: usize = 0;
++    const hooked = @TypeOf(resumer) != void;
++    var start: usize = if (hooked and prefix > 0) try resumer.resumed(b, t, s) else 0;
+     while (start < prompt.len) {
+         if (@TypeOf(check) != void) try check.check();
+-        const end = @min(start + chunk, prompt.len);
++        const end = @min(start + chunk, if (start < prefix) prefix else prompt.len);
+         const n = end - start;
+         const look = @min(end + 1, prompt.len); // this chunk's frames and the next row's, for its last label
+         for (frames[0 .. look - start], start..) |*frame, i| frame.* = promptFrame(prompt, codes, i);
+@@ -404,11 +417,38 @@ pub fn prefill(b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream,
+         if (taught > 0) try t.prefill(s, last.hidden, frames[1 .. 1 + taught]);
+         // the final row's tower pass is generate's: it stages that row alone when prefill consumed the chunk
+         if (end == prompt.len and taught > 0) _ = try t.setInput(s, frames[n - 1 .. n]);
++        if (hooked and prefix > 0 and end == prefix) resumer.reached(b, t, s);
+         start = end;
+     }
+     return .{ .hidden = try lastRow(last.hidden, last.rows, b.hidden * 2), .logits = try lastRow(last.semantic_logits, 1, logit_cols * 4) };
+ }
+ 
++/// The host's prefix cache for one request's prompt pass (`prefillResuming`'s resumer).
++const Resumer = struct {
++    h: *Host,
++    r: *const api.SpeechRequest,
++    rows: usize,
++
++    /// `rows` when a cached entry holds the request's rows through them (restored), else 0. A failed restore drops
++    /// the entry and resets both models again.
++    fn resumed(x: *Resumer, b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream) !usize {
++        const cache = &x.h.prefixes;
++        const i = cache.find(x.r, x.rows) orelse return 0;
++        cache.restore(i, s, b, t) catch |e| {
++            std.log.warn("drama: prefix cache: restore failed ({s}); prefilling the whole prompt", .{@errorName(e)});
++            cache.drop(i);
++            try b.reset(s);
++            try t.reset(s, x.r.prompt, x.r.seed);
++            return 0;
++        };
++        return x.rows;
++    }
++
++    fn reached(x: *Resumer, b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream) void {
++        x.h.prefixes.store(s, &x.h.driver, b, t, x.r, x.rows);
++    }
++};
++
+ /// Feeds `frame` to the backbone as the next row, its codes staged in the tower: the next step's source.
+ pub fn feed(b: *drama.backbone.Model, t: *drama.tower.Model, s: cuda.Stream, frame: *const [1]Frame, trace: anytype) !Row {
+     const extra = try t.setInput(s, frame);
+@@ -525,6 +565,9 @@ pub fn open(gpa: Allocator, io: std.Io, checkpoint_dir: []const u8, kernel_dir:
+ 
+     if (h.backbone.hidden != tower_hidden) return error.DramaHiddenMismatch;
+     if (h.codec.sample_rate != sample_rate or h.codec.frame_length != frame_length or h.codec.num_codebooks != 10) return error.UnsupportedDramaCodec;
++    h.prefixes = try prefix_cache.Cache.init(gpa);
++    errdefer h.prefixes.deinit();
++    std.log.info("drama: prompt prefix cache: {d} entries (DRAMA_PREFIX_CACHE, default {d}; 0: off), each {d} MiB + {d} KiB a row", .{ h.prefixes.capacity, prefix_cache.default_capacity, (drama.backbone.Model.snapshotBytes(0) + drama.tower.Model.snapshotBytes(0)) >> 20, (drama.backbone.Model.snapshotBytes(1) - drama.backbone.Model.snapshotBytes(0) + drama.tower.Model.snapshotBytes(1)) >> 10 });
+     h.semantic_start = h.backbone.semantic_start;
+     h.semantic_end = h.backbone.semantic_end;
+     h.eos = h.backbone.eos;
+@@ -573,6 +616,7 @@ fn close(ctx: *anyopaque) void {
+     h.thread = null;
+     h.ctx.makeCurrent() catch {}; // the closing thread frees device memory
+     h.stream.synchronize() catch {};
++    h.prefixes.deinit();
+     h.codec.deinit();
+     h.tower.deinit();
+     if (h.guide) |g| g.destroy(h.gpa);
+@@ -592,6 +636,7 @@ fn close(ctx: *anyopaque) void {
+ test {
+     _ = generation;
+     _ = guide;
++    _ = prefix_cache;
+ }
+ 
+ test "without --max-frames the limits are as before; a larger limit takes its rows from the prompt's share" {
+diff --git a/zig/src/native/drama_prefix.zig b/zig/src/native/drama_prefix.zig
+new file mode 100644
+index 00000000..5cea0c49
+--- /dev/null
++++ b/zig/src/native/drama_prefix.zig
+@@ -0,0 +1,157 @@
++//! Drama 3's prompt prefix cache: the backbone and tower state after a prompt's reference rows (its system message),
++//! so a later prompt whose first rows are the same resumes its prompt pass after them. Entries are compared row by
++//! row in full; DRAMA_PREFIX_CACHE sets how many are kept (0: none), the least recently used dropped first.
++const std = @import("std");
++const cuda = @import("cuda");
++const api = @import("engine_api");
++const drama = @import("drama");
++const Allocator = std.mem.Allocator;
++
++const Frame = drama.tower.Frame;
++const Backbone = drama.backbone.Model;
++const Tower = drama.tower.Model;
++
++/// Entries kept without DRAMA_PREFIX_CACHE.
++pub const default_capacity = 2;
++
++/// u32 a row's frame takes in a key.
++const width = 11;
++
++comptime {
++    std.debug.assert(@sizeOf(Frame) == width * 4);
++}
++
++/// Prompt row `i`'s frame: its token, then its codes when the prompt carries them.
++pub fn promptFrame(r: *const api.SpeechRequest, i: usize) Frame {
++    var frame: Frame = @splat(0);
++    frame[0] = r.prompt[i];
++    if (r.codes.len > 0) frame[1..].* = r.codes[i];
++    return frame;
++}
++
++/// The rows a request's prompt pass may resume after: its prefix_rows, or 0 unless they leave a row to run.
++pub fn prefixRows(r: *const api.SpeechRequest) usize {
++    const rows: usize = r.prefix_rows;
++    return if (rows < r.prompt.len) rows else 0;
++}
++
++const Entry = struct {
++    /// Prompt rows [0, rows] as frames: row `rows` too, the label the tower's last prefix chunk was taught with.
++    key: []u32,
++    rows: usize,
++    /// Backbone.snapshot's bytes, then Tower.snapshot's.
++    buffer: cuda.DeviceBuffer,
++    saved: Backbone.Saved,
++    used: u64,
++
++    fn matches(e: *const Entry, r: *const api.SpeechRequest, rows: usize) bool {
++        if (e.rows != rows) return false;
++        for (0..rows + 1) |i| {
++            const frame = promptFrame(r, i);
++            if (!std.mem.eql(u32, &frame, e.key[i * width ..][0..width])) return false;
++        }
++        return true;
++    }
++};
++
++pub const Cache = struct {
++    gpa: Allocator,
++    capacity: usize,
++    entries: std.ArrayList(Entry) = .empty,
++    clock: u64 = 0,
++    warned: bool = false,
++
++    /// DRAMA_PREFIX_CACHE entries (a whole number), else default_capacity.
++    pub fn init(gpa: Allocator) !Cache {
++        const text = std.mem.span(std.c.getenv("DRAMA_PREFIX_CACHE") orelse return .{ .gpa = gpa, .capacity = default_capacity });
++        const capacity = std.fmt.parseInt(usize, text, 10) catch {
++            std.log.err("drama: DRAMA_PREFIX_CACHE={s}: a whole number of entries", .{text});
++            return error.BadDramaPrefixCache;
++        };
++        return .{ .gpa = gpa, .capacity = capacity };
++    }
++
++    /// Frees every entry's device and host memory (the context current, its stream idle).
++    pub fn deinit(c: *Cache) void {
++        for (c.entries.items) |*e| free(c.gpa, e);
++        c.entries.deinit(c.gpa);
++        c.* = undefined;
++    }
++
++    fn free(gpa: Allocator, e: *Entry) void {
++        e.buffer.free();
++        gpa.free(e.key);
++    }
++
++    /// The entry holding the request's rows [0, rows], marked used; null when none does.
++    pub fn find(c: *Cache, r: *const api.SpeechRequest, rows: usize) ?usize {
++        for (c.entries.items, 0..) |*e, i| if (e.matches(r, rows)) {
++            c.clock += 1;
++            e.used = c.clock;
++            return i;
++        };
++        return null;
++    }
++
++    /// Entry `i` into both models, each just reset; on failure both need a reset again.
++    pub fn restore(c: *const Cache, i: usize, s: cuda.Stream, b: *Backbone, t: *Tower) !void {
++        const e = &c.entries.items[i];
++        try b.restore(s, e.buffer.ptr, e.saved);
++        try t.restore(s, e.buffer.ptr + Backbone.snapshotBytes(e.rows), e.rows);
++        std.log.info("drama: prefix cache: resumed after {d} prompt rows ({d} MiB)", .{ e.rows, e.buffer.len >> 20 });
++    }
++
++    pub fn drop(c: *Cache, i: usize) void {
++        free(c.gpa, &c.entries.items[i]);
++        _ = c.entries.swapRemove(i);
++    }
++
++    /// Both models' state after the request's first `rows` rows (the pass ending there synchronized) as a new entry,
++    /// the least recently used dropped first when full. Never fails the request: a failure leaves no entry.
++    pub fn store(c: *Cache, s: cuda.Stream, d: *const cuda.Driver, b: *const Backbone, t: *const Tower, r: *const api.SpeechRequest, rows: usize) void {
++        if (c.capacity == 0) return;
++        if (c.entries.items.len >= c.capacity) c.drop(c.oldest());
++        const bytes = Backbone.snapshotBytes(rows) + Tower.snapshotBytes(rows);
++        var buffer = cuda.DeviceBuffer.alloc(d, bytes) catch |e| {
++            if (!c.warned) std.log.warn("drama: prefix cache: no room for {d} MiB ({s}); prompts without an entry are prefilled whole", .{ bytes >> 20, @errorName(e) });
++            c.warned = true;
++            return;
++        };
++        c.fill(s, buffer, b, t, r, rows) catch |e| {
++            buffer.free();
++            std.log.warn("drama: prefix cache: no entry for {d} prompt rows: {s}", .{ rows, @errorName(e) });
++            return;
++        };
++        std.log.info("drama: prefix cache: kept {d} prompt rows ({d} MiB), {d} of {d} entries", .{ rows, bytes >> 20, c.entries.items.len, c.capacity });
++    }
++
++    fn fill(c: *Cache, s: cuda.Stream, buffer: cuda.DeviceBuffer, b: *const Backbone, t: *const Tower, r: *const api.SpeechRequest, rows: usize) !void {
++        try c.entries.ensureUnusedCapacity(c.gpa, 1);
++        const key = try c.gpa.alloc(u32, (rows + 1) * width);
++        errdefer c.gpa.free(key);
++        for (0..rows + 1) |i| key[i * width ..][0..width].* = promptFrame(r, i);
++        const split = Backbone.snapshotBytes(rows);
++        const saved = try b.snapshot(s, buffer);
++        const tower = try t.snapshot(s, .{ .d = buffer.d, .ptr = buffer.ptr + split, .len = buffer.len - split, .borrowed = true });
++        if (saved.pos != rows or tower != rows) return error.DramaPrefixRows;
++        c.clock += 1;
++        c.entries.appendAssumeCapacity(.{ .key = key, .rows = rows, .buffer = buffer, .saved = saved, .used = c.clock });
++    }
++
++    fn oldest(c: *const Cache) usize {
++        var at: usize = 0;
++        for (c.entries.items, 0..) |e, i| if (e.used < c.entries.items[at].used) {
++            at = i;
++        };
++        return at;
++    }
++};
++
++test "a request resumes only after rows that leave one to run" {
++    var result: api.SpeechResult = .{};
++    var r: api.SpeechRequest = .{ .prompt = &.{ 1, 2, 3 }, .pcm = &.{}, .result = &result, .seed = 0, .prefix_rows = 2 };
++    try std.testing.expectEqual(@as(usize, 2), prefixRows(&r));
++    r.prefix_rows = 3;
++    try std.testing.expectEqual(@as(usize, 0), prefixRows(&r));
++    try std.testing.expectEqual(@as(u32, 2), promptFrame(&r, 1)[0]);
++}
+diff --git a/zig/src/server/drama_prompt.zig b/zig/src/server/drama_prompt.zig
+index 11c90d57..3cca87d7 100644
+--- a/zig/src/server/drama_prompt.zig
++++ b/zig/src/server/drama_prompt.zig
+@@ -36,7 +36,9 @@ pub const Codes = [codebooks]u32;
+ pub const Reference = struct { text: []const u8, frames: []const Codes };
+ 
+ /// A prompt with audio rows: each row's token and codes, ``build_prompt_rows``'s column 0 and columns 1..10.
+-pub const Rows = struct { tokens: []const u32, codes: []const Codes };
++/// `prefix`: the rows through the system message, which every prompt with the same references starts with; 0 for a
++/// plain prompt.
++pub const Rows = struct { tokens: []const u32, codes: []const Codes, prefix: usize = 0 };
+ 
+ /// The segments one prompt is encoded from, in order.
+ pub const segment_count = 7;
+@@ -167,8 +169,10 @@ pub fn encodeReferenced(a: Allocator, text: model_text.Text, input: []const u8,
+             try rows.codes.append(a, frame);
+         }
+     }
+-    for ([_][]const u8{ message_end, "<|im_start|>user\n", try tagged(a, input), message_end, generation_start }) |segment| try rows.text(a, text, segment);
+-    return .{ .tokens = rows.tokens.items, .codes = rows.codes.items };
++    try rows.text(a, text, message_end);
++    const prefix = rows.tokens.items.len;
++    for ([_][]const u8{ "<|im_start|>user\n", try tagged(a, input), message_end, generation_start }) |segment| try rows.text(a, text, segment);
++    return .{ .tokens = rows.tokens.items, .codes = rows.codes.items, .prefix = prefix };
+ }
+ 
+ /// A plain prompt's ids with no codes, or ``build_prompt_rows`` with the references.
+diff --git a/zig/src/server/speech.zig b/zig/src/server/speech.zig
+index 48ad9baf..d39ef125 100644
+--- a/zig/src/server/speech.zig
++++ b/zig/src/server/speech.zig
+@@ -50,7 +50,7 @@ pub const Format = enum {
+ };
+ 
+ /// A synthesis's prompt and sources, or a long-form reply; `dropped`: `¶` marks not honoured; `stripped`: controls cut.
+-const Plan = struct { prompt: []const u32, codes: []const drama_prompt.Codes, input: []const u8, references: []const drama_prompt.Reference, format: Format, stream: bool, long: ?speech_long.Long = null, dropped: usize = 0, stripped: ?usize = null };
++const Plan = struct { prompt: []const u32, codes: []const drama_prompt.Codes, prefix_rows: usize = 0, input: []const u8, references: []const drama_prompt.Reference, format: Format, stream: bool, long: ?speech_long.Long = null, dropped: usize = 0, stripped: ?usize = null };
+ 
+ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
+     const sp = srv.info.speech orelse {
+@@ -143,7 +143,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
+     };
+     if (rows.tokens.len > sp.max_prompt_tokens)
+         return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows.tokens.len, sp.max_prompt_tokens });
+-    return .{ .prompt = rows.tokens, .codes = rows.codes, .input = input, .references = references, .format = format, .stream = stream, .dropped = marked.dropped, .stripped = stripped };
++    return .{ .prompt = rows.tokens, .codes = rows.codes, .prefix_rows = rows.prefix, .input = input, .references = references, .format = format, .stream = stream, .dropped = marked.dropped, .stripped = stripped };
+ }
+ 
+ /// What ``voice`` names: the built-in voice (none), --default-voice's for ``default``, else a --voices file's.
+@@ -164,7 +164,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
+     defer srv.gpa.free(pcm);
+     if (srv.keepalive) |k| k.begin();
+     defer if (srv.keepalive) |k| k.end();
+-    var spoken: speech_redraw.Spoken = .{ .text = plan.input, .rows = .{ .tokens = plan.prompt, .codes = plan.codes } };
++    var spoken: speech_redraw.Spoken = .{ .text = plan.input, .rows = .{ .tokens = plan.prompt, .codes = plan.codes, .prefix = plan.prefix_rows } };
+     const rows = &spoken.rows;
+     var next: ?speech_redraw.Spoken = null; // what redraws speak, made at the first trip
+     var start_by: ?i96 = null; // a redraw's latest start: a busy engine is waited out until then
+@@ -192,6 +192,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
+             .unconditioned = guided.unconditioned,
+             .cfg_gamma = guided.gamma,
+             .stream = plan.stream,
++            .prefix_rows = @intCast(rows.prefix),
+         };
+         var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
+         defer box.deinit();
+diff --git a/zig/src/server/speech_long.zig b/zig/src/server/speech_long.zig
+index b174cf8a..eeb11afa 100644
+--- a/zig/src/server/speech_long.zig
++++ b/zig/src/server/speech_long.zig
+@@ -164,6 +164,7 @@ const Reply = struct {
+                 .unconditioned = guided.unconditioned,
+                 .cfg_gamma = guided.gamma,
+                 .stream = live,
++                .prefix_rows = @intCast(rows.prefix),
+             };
+             var box: Mailbox = .{ .io = r.srv.io, .gpa = r.srv.gpa };
+             defer box.deinit();
+-- 
+2.55.0
+

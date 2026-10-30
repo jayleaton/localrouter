@@ -20,6 +20,7 @@ const VaeOps = @import("vae.zig").VaeOps;
 const sampler = @import("sampler.zig");
 const noise = @import("noise.zig");
 const upload_mod = @import("upload.zig");
+const memcap = @import("memcap.zig");
 const smath = @import("smath.zig");
 
 pub const Packs = struct { dit: []const u8, te: []const u8, vae: []const u8 };
@@ -35,9 +36,11 @@ pub const Times = struct { encode: f64 = 0, prefix: f64 = 0, sample: f64 = 0, de
 pub const LoadTimes = struct {
     context: f64 = 0, // driver, context, stream
     kernels: f64 = 0, // fatbins and Triton cubins
+    open: f64 = 0, // what the pack headers and the tokenizer still needed after the kernels (they are read alongside them)
     dit: f64 = 0,
     te: f64 = 0,
     vae: f64 = 0, // and the scratch buffers
+    edit: f64 = 0,
     total: f64 = 0,
     gib: f64 = 0, // weights copied to the device
     read: f64 = 0, // in pread
@@ -46,19 +49,26 @@ pub const LoadTimes = struct {
 };
 
 pub const max_tokens = 1024; // the template's tokens a prompt may take
+pub const edit_ref_pixels: u64 = 1024 * 1024; // each reference is resized to about this many pixels (the reference pipeline's calculate_dimensions)
+/// A reference's longest side after that resize, at most (4:1 at one megapixel); independent of the output's max_side.
+pub const edit_ref_side: u32 = 2048;
 
-/// Milliseconds between `create`'s phases.
-const LoadClock = struct {
+/// Milliseconds between `create`'s phases (H3's `create` reports with it too).
+pub const LoadClock = struct {
     io: std.Io,
     t0: std.Io.Timestamp,
     last: std.Io.Timestamp,
 
-    fn lap(c: *LoadClock) f64 {
+    pub fn start(io: std.Io) LoadClock {
+        const t = std.Io.Clock.awake.now(io);
+        return .{ .io = io, .t0 = t, .last = t };
+    }
+    pub fn lap(c: *LoadClock) f64 {
         const t = std.Io.Clock.awake.now(c.io);
         defer c.last = t;
         return @as(f64, @floatFromInt(c.last.durationTo(t).nanoseconds)) * 1e-6;
     }
-    fn total(c: *const LoadClock) f64 {
+    pub fn total(c: *const LoadClock) f64 {
         return @as(f64, @floatFromInt(c.t0.durationTo(std.Io.Clock.awake.now(c.io)).nanoseconds)) * 1e-6;
     }
 };
@@ -88,13 +98,35 @@ pub const Pipeline = struct {
     sched: sampler.Config,
     max_h: u32,
     max_w: u32,
+    max_area: u32, // h * w at most, in 16x16 patches: what the scratch is sized for
+    ref_area: u32 = 0, // the largest reference image, in 16x16 patches (0 without the edit weights); sides up to edit_ref_side
     bufs: [4]cuda.DeviceBuffer, // latents, the next latents, velocity, pixels
     times: Times = .{},
     load: LoadTimes = .{},
     weights_bytes: u64 = 0,
+    edit_state: ?*@import("pipeline_edit.zig").State = null,
 
-    /// Loads everything for images up to max_side x max_side pixels (multiples of 16).
-    pub fn create(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32) !*Pipeline {
+    /// Loads everything for images up to max_side pixels a side and max_pixels in all (multiples of 16; the scratch,
+    /// most of the memory past the weights, is sized by max_pixels).
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64) !*Pipeline {
+        return createConfigured(gpa, io, packs, source, max_side, max_pixels, 0);
+    }
+
+    /// As `create`, plus the edit weights (the vision tower and the VAE encoder from the edit pack, `edit_pack`) and
+    /// scratch for `refs` reference images, each resized to about one megapixel (`edit_prepare.maxArea`).
+    pub fn createEdit(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64, refs: u32) !*Pipeline {
+        var ar: std.heap.ArenaAllocator = .init(gpa);
+        defer ar.deinit();
+        const te_dir = std.mem.trimEnd(u8, packs.te, "/");
+        const vae_dir = std.mem.trimEnd(u8, packs.vae, "/");
+        const root = std.fs.path.dirname(te_dir) orelse return error.BadEditPackPath;
+        if (!std.mem.eql(u8, std.fs.path.basename(te_dir), "te") or !std.mem.eql(u8, std.fs.path.basename(vae_dir), "vae") or !std.mem.eql(u8, std.fs.path.dirname(vae_dir) orelse "", root)) return error.BadEditPackPath;
+        const limit = try @import("edit_pack.zig").validate(ar.allocator(), io, root);
+        if (refs == 0 or refs > limit) return error.BadReferences;
+        return createConfigured(gpa, io, packs, source, max_side, max_pixels, refs);
+    }
+
+    fn createConfigured(gpa: std.mem.Allocator, io: std.Io, packs: Packs, source: TritonSource, max_side: u32, max_pixels: u64, refs: u32) !*Pipeline {
         const p = try gpa.create(Pipeline);
         errdefer gpa.destroy(p);
         p.gpa = gpa;
@@ -103,10 +135,23 @@ pub const Pipeline = struct {
         errdefer p.arena.deinit();
         p.max_h = max_side / 16;
         p.max_w = max_side / 16;
+        p.max_area = @intCast(@min(max_pixels / 256, @as(u64, p.max_h) * p.max_w));
+        p.ref_area = if (refs > 0) @import("edit_prepare.zig").maxArea(edit_ref_pixels, edit_ref_side) else 0;
+        const ref_side: u32 = if (refs > 0) edit_ref_side / 16 else 0; // the VAE encodes references up to this side
         p.times = .{};
         p.load = .{};
-        var clock = LoadClock{ .io = io, .t0 = std.Io.Clock.awake.now(io), .last = std.Io.Clock.awake.now(io) };
-        p.d = try cuda.Driver.open();
+        var clock = LoadClock.start(io);
+        // the pack headers and the tokenizer are plain file reads: they run alongside the driver, the context and the
+        // module loads (which do not touch them), and are collected after the kernels
+        var opening = io.async(openInputs, .{ gpa, io, packs });
+        var opened_taken = false;
+        errdefer if (!opened_taken) {
+            if (opening.await(io)) |o_| {
+                var o = o_;
+                o.close(io);
+            } else |_| {}
+        };
+        p.d = try memcap.open();
         errdefer p.d.close();
         p.ctx = try cuda.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();
@@ -135,13 +180,18 @@ pub const Pipeline = struct {
         errdefer p.tri.unload();
         p.load.kernels = clock.lap();
 
-        p.dit_pack = try Pack.open(gpa, io, packs.dit);
+        const opened = try opening.await(io);
+        opened_taken = true;
+        p.dit_pack = opened.dit;
         errdefer p.dit_pack.close(io);
-        if (tri[2] == null and !std.mem.eql(u8, p.dit_pack.precision, "nvfp4")) return error.NoSwigluCubin; // FP8's MLP
-        p.te_pack = try Pack.open(gpa, io, packs.te);
+        p.te_pack = opened.te;
         errdefer p.te_pack.close(io);
-        p.vae_pack = try Pack.open(gpa, io, packs.vae);
+        p.vae_pack = opened.vae;
         errdefer p.vae_pack.close(io);
+        p.prompt = opened.prompt;
+        errdefer p.prompt.deinit();
+        p.load.open = clock.lap();
+        if (tri[2] == null and !std.mem.eql(u8, p.dit_pack.precision, "nvfp4")) return error.NoSwigluCubin; // FP8's MLP
         p.sched = try schedulerConfig(p.arena.allocator(), io, packs.dit) orelse
             try schedulerConfig(p.arena.allocator(), io, packs.te) orelse return error.NoSchedulerConfig;
 
@@ -151,20 +201,18 @@ pub const Pipeline = struct {
         errdefer p.w.deinit();
         try p.s.synchronize();
         p.load.dit = clock.lap();
-        p.prompt = try te_mod.Prompt.load(gpa, io, packs.te);
-        errdefer p.prompt.deinit();
         const inv = try te_mod.invFreq(p.arena.allocator(), kernels.te_inv_freq);
-        p.te = try te_mod.TextEncoder.init(gpa, &p.d, &p.tk, &p.ops, p.s, &p.te_pack, &up, inv, max_tokens);
+        p.te = try te_mod.TextEncoder.init(gpa, &p.d, &p.tk, &p.ops, p.s, &p.te_pack, &up, inv, max_tokens + refs * (p.ref_area / 4));
         errdefer p.te.deinit();
         try p.s.synchronize();
         p.load.te = clock.lap();
         const om = try smath.omegas(kernels.rope_omega);
         const kk: @import("dit.zig").Kernels = .{ .ops = &p.ops, .nv = &p.nv, .tri = &p.tri, .major = p.major, .minor = p.minor };
-        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_h * p.max_w, max_tokens);
+        p.dit = try Dit.init(gpa, &p.d, kk, &p.w, p.s, om, p.max_area, max_tokens + refs * p.ref_area);
         errdefer p.dit.deinit();
-        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, p.max_h, p.max_w);
+        p.vae = try Vae.init(gpa, io, &p.d, &p.vk, &p.tk, &p.ops, p.s, &p.vae_pack, &up, packs.vae, @max(p.max_h, ref_side), @max(p.max_w, ref_side), @max(p.max_area, p.ref_area));
         errdefer p.vae.deinit();
-        const n: usize = 64 * @as(usize, p.max_h) * p.max_w;
+        const n: usize = 64 * @as(usize, p.max_area);
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, [_]usize{ 2 * n, 2 * n, 2 * n, 256 * n / 64 * 4 }) |*b, len| {
@@ -173,6 +221,9 @@ pub const Pipeline = struct {
         }
         try p.s.synchronize();
         p.load.vae = clock.lap();
+        p.edit_state = null;
+        if (refs > 0) p.edit_state = try @import("pipeline_edit.zig").State.create(p, packs, &up, refs);
+        p.load.edit = clock.lap();
         p.load.total = clock.total();
         const ns_ms = 1e-6;
         p.load.gib = @as(f64, @floatFromInt(up.stats.bytes)) / (1 << 30);
@@ -184,6 +235,7 @@ pub const Pipeline = struct {
     }
 
     pub fn destroy(p: *Pipeline) void {
+        if (p.edit_state) |e| e.destroy();
         for (&p.bufs) |*b| b.free();
         p.vae.deinit();
         p.dit.deinit();
@@ -206,6 +258,11 @@ pub const Pipeline = struct {
         gpa.destroy(p);
     }
 
+    pub fn edit(p: *Pipeline, prompt_text: []const u8, images: []const @import("edit_prepare.zig").Prepared, height: u32, width: u32, steps: u32, seed: u64, pixels: []u8, progress: ?Progress, probe: ?@import("dit.zig").Probe) !@import("pipeline_edit.zig").Result {
+        const state = p.edit_state orelse return error.EditWeightsUnavailable;
+        return state.generate(prompt_text, images, height, width, steps, seed, pixels, progress, probe);
+    }
+
     /// The sigmas for this size and step count (`steps + 1` values, the last 0); caller frees.
     pub fn sigmas(p: *const Pipeline, a: std.mem.Allocator, height: u32, width: u32, steps: u32) ![]f32 {
         const out = try a.alloc(f32, steps + 1);
@@ -220,7 +277,7 @@ pub const Pipeline = struct {
         if (height % 16 != 0 or width % 16 != 0) return error.SizeNotMultipleOf16;
         const h = height / 16;
         const w = width / 16;
-        if (h > p.max_h or w > p.max_w) return error.ImageTooLarge;
+        if (h > p.max_h or w > p.max_w or h * w > p.max_area) return error.ImageTooLarge;
         if (pixels.len != @as(usize, height) * width * p.vae.out_channels) return error.BadPixelBuffer;
         const gpa = p.gpa;
         var clock = Clock{ .io = p.io, .s = p.s };
@@ -258,9 +315,13 @@ pub const Pipeline = struct {
             const dt: f32 = @floatCast(@as(f64, sig[i + 1]) - @as(f64, sig[i])); // Python floats, then float32
             try p.dit.euler("euler", lat, vel, nxt, n, dt);
             std.mem.swap(u64, &lat, &nxt);
-            if (progress) |pr| pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            if (progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
+                try p.s.synchronize();
+                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            }
         }
         p.times.sample = try clock.lap();
+        if (progress) |pr| pr.report(pr.ctx, "decode", 1, 1); // a pause point before the VAE (speech first)
         const px = try p.bufs[3].at(0);
         try p.vae.decode(lat, h, w, px);
         try p.d.check(p.d.api.cuMemcpyDtoH_v2(pixels.ptr, px, pixels.len), "cuMemcpyDtoH");
@@ -291,6 +352,32 @@ const Clock = struct {
         return @as(f64, @floatFromInt(us)) / 1000.0;
     }
 };
+
+/// What `create` opens before any weight moves: plain file reads, no CUDA.
+const Opened = struct {
+    dit: Pack,
+    te: Pack,
+    vae: Pack,
+    prompt: te_mod.Prompt,
+
+    fn close(o: *Opened, io: std.Io) void {
+        o.prompt.deinit();
+        o.vae.close(io);
+        o.te.close(io);
+        o.dit.close(io);
+    }
+};
+
+fn openInputs(gpa: std.mem.Allocator, io: std.Io, packs: Packs) anyerror!Opened { // an explicit set: `io.async` reads the return type
+    var dit = try Pack.open(gpa, io, packs.dit);
+    errdefer dit.close(io);
+    var te = try Pack.open(gpa, io, packs.te);
+    errdefer te.close(io);
+    var vae = try Pack.open(gpa, io, packs.vae);
+    errdefer vae.close(io);
+    const prompt = try te_mod.Prompt.load(gpa, io, packs.te);
+    return .{ .dit = dit, .te = te, .vae = vae, .prompt = prompt };
+}
 
 /// The `scheduler` of a pack's manifest, null when it has none.
 fn schedulerConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?sampler.Config {

@@ -949,20 +949,24 @@ pub const Ops = struct {
     }
 
     /// The middle attention, math formulation (audio.cu k6a_sdpa_math), q, k, v, out [BH, T, D] contiguous, softmax
-    /// scale 1/sqrt(D) applied as sqrt of it on each operand; `scratch` holds BH * T * T floats. A comparison candidate
-    /// for the native SDPA, whose backend choice is not yet recorded: diagnostic only, never selected automatically.
-    pub fn midAttentionMath(o: *const Ops, s: cuda.Stream, use: Use, q: View, k: View, v: View, out: View, scratch: View) !void {
+    /// scale 1/sqrt(D) applied as sqrt of it on each operand; `scratch` holds BH * T * T floats (the probabilities after
+    /// the call). The scores sum d in slices of `kslice` (>= D: one chain); the softmax is torch's warp softmax, which
+    /// covers T <= 1024 only. A comparison candidate for the native SDPA, whose backend choice is not yet recorded:
+    /// diagnostic only, never selected automatically.
+    pub fn midAttentionMath(o: *const Ops, s: cuda.Stream, use: Use, q: View, k: View, v: View, out: View, scratch: View, kslice: u64) !void {
         try vae.admitOp(.mid_attention_sdpa, use);
         const bh = q.shape[0];
         const t = q.shape[1];
         const d = q.shape[2];
         for ([_]View{ q, k, v, out }) |x| try x.expect(.cuda, &.{ bh, t, d });
         try scratch.expect(.cuda, &.{ bh, t, t });
+        if (t > 1024 or kslice == 0) return error.InvalidArgument;
         const c: f32 = @floatCast(@sqrt(1.0 / @sqrt(@as(f64, @floatFromInt(d)))));
         var a: cuda.Args = .{};
         inline for (.{ q.addr(), k.addr(), v.addr(), out.addr(), scratch.addr() }) |p| a.add(p);
         a.add(i64of(t));
         a.add(i64of(d));
+        a.add(i64of(@min(kslice, d)));
         a.add(c);
         try go(o.sdpa_math_fn, s, .{ .x = @intCast(t), .y = @intCast(bh) }, block, &a);
     }
@@ -1332,6 +1336,10 @@ const Carver = struct {
 /// One activation normalization's arithmetic: eps, the device reduction order and the denominator rounding.
 pub const NormPolicy = struct { eps: f32, reduce: DeviceReduce, den: Acc };
 
+/// The `k6a_sdpa_math` candidate's split-K slice of the scores (D3 probe dumps, T 218: 172, cuBLASLt's split-K 12 under
+/// CUTLASS's slice rule, reproduces the native scores offline; other T are unverified).
+pub const math_candidate_kslice: u64 = 172;
+
 /// Every numeric choice of a decoder forward, named; none has a default. The values the native twin uses on the target
 /// are what the GPU harness determines; until then a decode is a diagnostic comparison run.
 pub const DecodePolicy = struct {
@@ -1349,7 +1357,7 @@ pub const DecodePolicy = struct {
     norm_residual: NormPolicy,
     norm_qkv: NormPolicy,
     /// The middle attention off the native geometry: the `k6a_sdpa_math` comparison candidate (the native 1 x 218 decoder
-    /// always runs the qualified `midAttentionTf32`).
+    /// always runs the qualified `midAttentionTf32`). Its scores sum in slices of `math_candidate_kslice`.
     attention: enum { math_candidate },
 };
 
@@ -1479,6 +1487,7 @@ fn decodeWith(o: anytype, s: anytype, use: Use, d: vae.Decoder, w: *const vae.De
                     cv.at("k6a.decoder.v", sc.v, &.{ bh, t, hd }),
                     cv.at("k6a.decoder.attn_out", sc.out, &.{ bh, t, hd }),
                     cv.at("k6a.decoder.scores", sc.scores, &.{ bh, t, t }),
+                    math_candidate_kslice,
                 ),
             }
             if (hook) |h| try h.op(h.ctx, "attention_out", cv.at("k6a.decoder.attn_out", sc.out, &.{ bh, t, hd }));
@@ -1969,7 +1978,7 @@ const Recorder = struct {
         try r.write(k);
         try r.write(v);
     }
-    fn midAttentionMath(r: *Recorder, _: void, use: Use, q: View, k: View, v: View, out: View, scores: View) !void {
+    fn midAttentionMath(r: *Recorder, _: void, use: Use, q: View, k: View, v: View, out: View, scores: View, _: u64) !void {
         try r.read(k);
         try r.read(v);
         try r.write(scores);

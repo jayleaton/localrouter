@@ -33,6 +33,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import block as B
+from . import budget
 from . import kernels as K
 from . import native as N
 
@@ -168,6 +169,23 @@ def ops(k: K.Kernels, u, tc: dict, c: B.Config, sh: B.Shape, W: dict, valid: int
     for r0, r1 in chunks(N_):
         k.gemm(xp[r0:r1], pw, pb, pp[r0:r1], K.EPI_BIAS)
     exact("gemm/rows_chunked/patch_k132", pp, pe, vec=K.Kernels.gemm_vec(xp, pw))
+    # k_first: the native patch kernel's order (k < 4 first, then 4 + 32 j) is a plain pass over K padded as
+    # [x[:, :4], 28 zeros, x[:, 4:]] (the same mma chunks, plus one all-zero chunk that adds exact zeros)
+    kf = c.patch_k_first()
+    pk = torch.empty_like(pe)
+    k.gemm(xp, pw, pb, pk, K.EPI_BIAS, kf)
+    pkc = torch.empty_like(pe)
+    for r0, r1 in chunks(N_):
+        k.gemm(xp[r0:r1], pw, pb, pkc[r0:r1], K.EPI_BIAS, kf)
+    exact("gemm/rows_chunked/patch_k132_k_first", pkc, pk)
+
+    def padded(t):
+        z = torch.zeros(t.shape[0], 32 - kf, dtype=t.dtype, device=DEV)
+        return torch.cat([t[:, :kf], z, t[:, kf:]], 1).contiguous()
+
+    pr = torch.empty_like(pe)
+    k.gemm(padded(xp), padded(pw), pb, pr, K.EPI_BIAS)
+    exact("gemm/k_first_equals_padded_reorder/patch_k132", pk, pr)
     pad = torch.zeros(N_, D + 1, dtype=BF, device=DEV)
     pad[:, :D] = x
     xu = pad[:, :D]  # row stride D + 1: no cp.async
@@ -185,6 +203,11 @@ def ops(k: K.Kernels, u, tc: dict, c: B.Config, sh: B.Shape, W: dict, valid: int
     o = torch.empty_like(gw)
     k.gemm(xu, up, None, o, K.EPI_GELU)
     exact("gemm/vec0_equals_vec1/odd_ld/gelu", o, gw, vec=vecs)
+    o1, o0 = torch.empty_like(whole), torch.empty_like(whole)
+    k.gemm(x, wq, bq, o1, K.EPI_BIAS, 8)    # cp.async staging from k 8
+    k.gemm(xu, wq, bq, o0, K.EPI_BIAS, 8)   # element-wise staging
+    exact("gemm/vec0_equals_vec1/k_first8/bias", o0, o1,
+          vec={"aligned": K.Kernels.gemm_vec(x, wq, 8), "odd_ld": K.Kernels.gemm_vec(xu, wq, 8)})
     report("faithfulness", "op/linear_bias (nn.Linear)", whole, nb.video_dec_block.self_attention.to_query(x))
     report("faithfulness", "op/linear_gelu (_GELUProjection)", gw, nb.video_dec_block.feed_forward.net[0](x))
     hh = torch.empty_like(gw)
@@ -192,7 +215,7 @@ def ops(k: K.Kernels, u, tc: dict, c: B.Config, sh: B.Shape, W: dict, valid: int
     k.gemm(x, up, None, hh, K.EPI_GELU)
     k.gemm(hh, down, None, ffo, K.EPI_BIAS)
     report("faithfulness", "op/feed_forward (FeedForward)", ffo, nb.video_dec_block.feed_forward(x))
-    report("faithfulness", "op/patch_linear_k132 (nn.Linear)", pe, F.linear(xp, pw, pb))
+    report("faithfulness", "op/patch_linear_k132 (nn.Linear)", pk, F.linear(xp, pw, pb))
 
     # ---- RMSNorm + RoPE: the rotation exact, the norm reported
     q = rnd(N_, D, scale=3.0)
@@ -454,6 +477,7 @@ def main(argv=None) -> int:
         ap.error("--blocks must be >= 1")
 
     torch.cuda.init()
+    cap = budget.apply("test_ops")  # before the first allocation: the step's Torch budget, when a node job set one
     k = K.Kernels(fatbins=a.fatbins)
     u = N.upstream()
     N.pipeline_numerics()
@@ -468,7 +492,7 @@ def main(argv=None) -> int:
         "torch": torch.__version__, "cuda": torch.version.cuda, "python": platform.python_version(),
         "fatbins": k.digests, "upstream": str(u.src), "config": tc, "twin_config": c.__dict__,
         "shape": sh.__dict__, "tokens": sh.tokens(), "valid_text": a.valid, "seed": a.seed,
-        "plan_bytes": plan.bytes(), "fp32_linear": a.fp32_linear,
+        "plan_bytes": plan.bytes(), "fp32_linear": a.fp32_linear, "torch_cap": cap,
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "sdp": {"flash": torch.backends.cuda.flash_sdp_enabled(),
                 "mem_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),

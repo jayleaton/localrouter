@@ -56,8 +56,8 @@ pub const VaeOps = struct {
 };
 
 /// One conv: weight [cout, k] (k = cin * kh * kw, a multiple of 8), bias [cout].
-const Conv = struct { w: Ptr, b: Ptr, cin: u32, cout: u32, kh: u32, kw: u32, stride: u32, pad: [4]u32 };
-const Norm = struct { gamma: Ptr, c: u32, scale: f32 };
+pub const Conv = struct { w: Ptr, b: Ptr, cin: u32, cout: u32, kh: u32, kw: u32, stride: u32, pad: [4]u32, kpad: u32 = 0 };
+pub const Norm = struct { gamma: Ptr, c: u32, scale: f32 };
 const Dup = struct { cin: u32, cout: u32, fs: u32, factor: u32, repeats: u32, fti: u32 };
 
 const Manifest = struct {
@@ -91,10 +91,11 @@ pub const Vae = struct {
     pm: Ptr = 0,
     max_h: u32,
     max_w: u32,
+    max_area: u64, // h * w at most: what the activations are sized for
 
-    /// Weights from the pack `p` and scratch for latents up to max_h x max_w (the image is 16x that).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32) !Vae {
-        var v: Vae = .{ .gpa = gpa, .arena = .init(gpa), .d = d, .k = k, .tk = tk, .ops = ops, .s = s, .max_h = max_h, .max_w = max_w, .mem = .init(d, gpa) };
+    /// Weights from the pack `p` and scratch for latents up to max_h x max_w and max_area in all (the image is 16x that).
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32, max_area: u64) !Vae {
+        var v: Vae = .{ .gpa = gpa, .arena = .init(gpa), .d = d, .k = k, .tk = tk, .ops = ops, .s = s, .max_h = max_h, .max_w = max_w, .max_area = @min(max_area, @as(u64, max_h) * max_w), .mem = .init(d, gpa) };
         errdefer v.deinit();
         const a = v.arena.allocator();
         const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(64 << 20));
@@ -133,7 +134,7 @@ pub const Vae = struct {
 
         // the largest activation: C x (16h x 16w) over the decoder's stages is 288 x 16h x 16w (block 3's upsample
         // and block 4's input); the attention's [L, L] scores at L = h * w; the decoder's widest stage 1152 x h x w x 4
-        const hw: u64 = @as(u64, max_h) * max_w;
+        const hw: u64 = v.max_area;
         v.act_bytes = 2 * @max(@max(288 * 256 * hw, hw * hw + 8 * hw), 1152 * 16 * hw);
         for (&v.pool) |*b| b.* = try v.alloc(v.act_bytes);
         // a band of columns (or one output row of the widest conv), and its GEMM output: cout / k <= 2 (conv_in)
@@ -160,25 +161,25 @@ pub const Vae = struct {
     }
 
     // ------------------------------------------------------------------ the activation pool
-    fn take(v: *Vae) !usize {
+    pub fn take(v: *Vae) !usize {
         for (&v.busy, 0..) |*b, i| if (!b.*) {
             b.* = true;
             return i;
         };
         return error.VaePoolExhausted;
     }
-    fn give(v: *Vae, i: usize) void {
+    pub fn give(v: *Vae, i: usize) void {
         v.busy[i] = false;
     }
 
-    fn pre(v: *Vae, name: []const u8, ins: []const Io) !void {
+    pub fn pre(v: *Vae, name: []const u8, ins: []const Io) !void {
         if (v.probe) |p| try p.before(p.ctx, name, ins);
     }
-    fn post(v: *Vae, name: []const u8, outs: []const Io) !void {
+    pub fn post(v: *Vae, name: []const u8, outs: []const Io) !void {
         if (v.probe) |p| try p.after(p.ctx, name, outs);
     }
 
-    fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: cuda.launch.Dim3, args: *cuda.launch.Args) !void {
+    pub fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: cuda.launch.Dim3, args: *cuda.launch.Args) !void {
         try cuda.launch.launch(f, .{ .grid = grid, .block = blk, .shared = 0 }, s, args);
     }
 
@@ -192,20 +193,20 @@ pub const Vae = struct {
     }
 
     // ------------------------------------------------------------------ ops (each one twin op)
-    const Shape = struct { c: u32, h: u32, w: u32 };
+    pub const Shape = struct { c: u32, h: u32, w: u32 };
 
-    fn bytesOf(sh: Shape) u64 {
+    pub fn bytesOf(sh: Shape) u64 {
         return @as(u64, sh.c) * sh.h * sh.w * 2;
     }
 
-    fn conv(v: *Vae, name: []const u8, x: Ptr, sh: Shape, y: Ptr) !Shape {
+    pub fn conv(v: *Vae, name: []const u8, x: Ptr, sh: Shape, y: Ptr) !Shape {
         const c = v.convs.get(name) orelse return error.MissingConv;
         if (c.cin != sh.c) return error.ShapeMismatch;
         const ho = (sh.h + c.pad[0] + c.pad[1] - c.kh) / c.stride + 1;
         const wo = (sh.w + c.pad[2] + c.pad[3] - c.kw) / c.stride + 1;
         const out: Shape = .{ .c = c.cout, .h = ho, .w = wo };
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = bytesOf(sh) }});
-        const kpad: u64 = @as(u64, c.cin) * c.kh * c.kw;
+        const kpad: u64 = if (c.kpad != 0) c.kpad else @as(u64, c.cin) * c.kh * c.kw;
         const rows: u64 = @max(1, band_bytes / (@as(u64, wo) * kpad * 2));
         var y0: u64 = 0;
         while (y0 < ho) : (y0 += rows) {
@@ -226,7 +227,7 @@ pub const Vae = struct {
     }
 
     /// y may alias x.
-    fn norm(v: *Vae, name: []const u8, x: Ptr, sh: Shape, y: Ptr) !void {
+    pub fn norm(v: *Vae, name: []const u8, x: Ptr, sh: Shape, y: Ptr) !void {
         const n = v.norms.get(name) orelse return error.MissingNorm;
         if (n.c != sh.c) return error.ShapeMismatch;
         const hw: u64 = @as(u64, sh.h) * sh.w;
@@ -240,14 +241,14 @@ pub const Vae = struct {
         try v.post(name, &.{.{ .role = "y", .ptr = y, .bytes = bytesOf(sh) }});
     }
 
-    fn silu(v: *Vae, name: []const u8, x: Ptr, sh: Shape) !void {
+    pub fn silu(v: *Vae, name: []const u8, x: Ptr, sh: Shape) !void {
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = bytesOf(sh) }});
         try v.ops.pointwise(v.s, .silu, x, x, bytesOf(sh) / 2);
         try v.post(name, &.{.{ .role = "y", .ptr = x, .bytes = bytesOf(sh) }});
     }
 
     /// out = x + z (out may alias either); the twin's roles: inputs x, y; output y.
-    fn add(v: *Vae, name: []const u8, x: Ptr, z: Ptr, out: Ptr, bytes: u64) !void {
+    pub fn add(v: *Vae, name: []const u8, x: Ptr, z: Ptr, out: Ptr, bytes: u64) !void {
         try v.pre(name, &.{ .{ .role = "x", .ptr = x, .bytes = bytes }, .{ .role = "y", .ptr = z, .bytes = bytes } });
         var args: cuda.launch.Args = .{};
         inline for (.{ x, z, out }) |p| args.add(p);
@@ -274,7 +275,7 @@ pub const Vae = struct {
 
     // ------------------------------------------------------------------ blocks
     /// QwenImage21ResidualBlock: x (pool slot xi) -> a new slot (returned); xi is left as it was.
-    fn resBlock(v: *Vae, name: []const u8, xi: usize, sh: Shape) !struct { usize, Shape } {
+    pub fn resBlock(v: *Vae, name: []const u8, xi: usize, sh: Shape) !struct { usize, Shape } {
         var nb: [160]u8 = undefined;
         const x = v.pool[xi];
         var hi: ?usize = null; // the shortcut's slot, when there is a conv
@@ -302,7 +303,7 @@ pub const Vae = struct {
     }
 
     /// The mid block's attention: one head over the h * w pixels, channel dim C. x (slot xi) -> a new slot.
-    fn attention(v: *Vae, name: []const u8, xi: usize, sh: Shape) !usize {
+    pub fn attention(v: *Vae, name: []const u8, xi: usize, sh: Shape) !usize {
         var nb: [160]u8 = undefined;
         const C: u64 = sh.c;
         const L: u64 = @as(u64, sh.h) * sh.w;
@@ -400,7 +401,7 @@ pub const Vae = struct {
 
     /// Normalised latents `lat` [64, h, w] (the sampler's) -> uint8 pixels `out` [16h, 16w, out_channels] (HWC).
     pub fn decode(v: *Vae, lat: Ptr, h: u32, w: u32, out: Ptr) !void {
-        if (h > v.max_h or w > v.max_w) return error.ImageTooLarge;
+        if (h > v.max_h or w > v.max_w or @as(u64, h) * w > v.max_area) return error.ImageTooLarge;
         @memset(&v.busy, false);
         const zs: Shape = .{ .c = z_dim, .h = h, .w = w };
         const zi = try v.take();

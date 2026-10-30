@@ -3,10 +3,14 @@ a zig that fails, prints nothing, prints a non-version, an older or a prerelease
 refusal must exit nonzero with the kit byte-for-byte unchanged and no operator spec written; every supported zig must
 restage with build.json recording exactly that version. No GPU, nvcc or Zig build.
 
-  python3 -I build-kit-fixture.py --pybundle DIR [--zig DIR] [--builder build-kit.sh] [--out DIR]
+  python3 -I build-kit-fixture.py --pybundle DIR [--zig DIR] [--builder build-kit.sh] [--out DIR] [--work-root DIR]
 
-DIR holds the pinned original bundle's MANIFEST.sha256 and requirements.txt (operator_spec.py checks them); --zig is
-the directory of the supported zig (default: the one on PATH); --builder defaults to this directory's build-kit.sh.
+DIR is the pinned original bundle. A refused case gets only its MANIFEST.sha256 and requirements.txt (it exits before
+the spec); an accepted case gets the whole bundle, links included, because operator_spec.py's stage tree refuses a kit
+whose bundle lacks a listed file or one of the pinned links. That copy is a reflink (cp --reflink=always), so the work
+root (default: the bundle's grandparent) must be on the bundle's copy-on-write filesystem; a plain copy is refused.
+--zig is the directory of the supported zig (default: the one on PATH); --builder defaults to this directory's
+build-kit.sh.
 """
 
 from __future__ import annotations
@@ -44,12 +48,16 @@ def snapshot(kit: Path) -> dict:
     return out
 
 
-def make_kit(root: Path, pybundle: Path) -> Path:
+def make_kit(root: Path, pybundle: Path, whole: bool) -> Path:
     kit = root / "kit"
-    for d in ("pybundle", "upstream", "inputs", "bin", "fatbin"):
+    for d in ("upstream", "inputs", "bin", "fatbin"):
         (kit / d).mkdir(parents=True)
-    for n in ("MANIFEST.sha256", "requirements.txt"):
-        shutil.copyfile(pybundle / n, kit / "pybundle" / n)
+    if whole:
+        subprocess.run(["cp", "-a", "--reflink=always", str(pybundle), str(kit / "pybundle")], check=True)
+    else:
+        (kit / "pybundle").mkdir()
+        for n in ("MANIFEST.sha256", "requirements.txt"):
+            shutil.copyfile(pybundle / n, kit / "pybundle" / n)
     (kit / "pybundle.json").write_text("{}\n")
     (kit / "upstream/README").write_text("fixture\n")
     (kit / "inputs/inputs.json").write_text("{}\n")
@@ -82,11 +90,12 @@ def main() -> int:
     ap.add_argument("--zig", type=Path, default=None)
     ap.add_argument("--builder", type=Path, default=HERE / "build-kit.sh")
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--work-root", type=Path, default=None)
     a = ap.parse_args()
     zig_dir = (a.zig or Path(shutil.which("zig") or "/nonexistent").parent).resolve()
     assert (zig_dir / "zig").exists(), f"no supported zig at {zig_dir}"
     real = subprocess.run([str(zig_dir / "zig"), "version"], capture_output=True, text=True, check=True).stdout.strip()
-    work = Path(tempfile.mkdtemp(prefix="build-kit-fixture-"))
+    work = Path(tempfile.mkdtemp(prefix=".build-kit-fixture-", dir=a.work_root or a.pybundle.resolve().parent.parent))
     results, failed = [], []
     try:
         farm = path_without_zig(work)
@@ -98,7 +107,7 @@ def main() -> int:
         for name, fake, accept in CASES + [("zig-supported", "real", True)]:
             root = work / name
             root.mkdir()
-            kit = make_kit(root, a.pybundle.resolve())
+            kit = make_kit(root, a.pybundle.resolve(), whole=accept)
             path = [str(farm)]
             want = None
             if fake == "real":
@@ -112,11 +121,11 @@ def main() -> int:
                 (bindir / "zig").chmod(0o755)
                 path.insert(0, str(bindir))
                 want = out
-            before = snapshot(kit)
+            before = snapshot(kit) if not accept else None   # an accepted case is judged on its outputs, not unchanged
             env = {**os.environ, "PATH": os.pathsep.join(path), "TOOLS_ONLY": "1", "KIT": str(kit),
                    "NODE_IMAGES": str(images), "ASSETS_PROGRESS": str(assets), "PYTHONDONTWRITEBYTECODE": "1"}
             r = subprocess.run(["bash", str(a.builder.resolve())], env=env, capture_output=True, text=True)
-            after = snapshot(kit)
+            after = snapshot(kit) if not accept else None
             row = {"case": name, "accept": accept, "exit": r.returncode, "stderr_tail": r.stderr.strip().splitlines()[-1:]}
             if accept:
                 build = json.loads((kit / "build.json").read_text())
@@ -135,6 +144,7 @@ def main() -> int:
             if not ok:
                 failed.append(name)
     finally:
+        subprocess.run(["chmod", "-R", "u+w", str(work)], check=False)
         shutil.rmtree(work)
     report = {"build_kit_fixture": "passed" if not failed else "FAILED", "builder": str(a.builder.resolve()),
               "builder_sha256": sha256(a.builder.resolve()), "supported_zig": real, "failed": failed, "cases": results}

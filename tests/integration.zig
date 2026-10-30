@@ -1,6 +1,10 @@
 //! End to end: the real `localrouter` daemon and real worker processes, driven over HTTP. No part is mocked; the
 //! testpattern engine stands in for a GPU engine (same protocol, memory accounting and output paths).
-//! `harness.zig` starts the daemon; `router.zig` has the tests of priorities, image inputs and the stdio bridge.
+//! `harness.zig` starts the daemon; `router.zig` has the tests of priorities, image inputs and the stdio bridge;
+//! `speech.zig` those of text to speech and speech to text; `chat.zig` those of the chat kind (tests/fixtures/chat_server.py); `responses.zig` the Responses API over it; `jarvis.zig` chat and voice warm together;
+//! `drama3.zig` those of the Drama 3 adapter; `voice.zig` the voice loop over a WebSocket; `pairing.zig` device pairing; `contract.zig` the harness contract
+//! (`/v1/capabilities`, and our clients' recorded requests replayed); `dropin.zig` that every kind's model is swapped by
+//! config alone (the same MCP tools, endpoints and voice loop on another model set, capabilities honoured).
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,6 +23,20 @@ const mcpText = harness.mcpText;
 
 test {
     _ = @import("router.zig");
+    _ = @import("speech.zig");
+    _ = @import("chat.zig");
+    _ = @import("responses.zig");
+    _ = @import("decide.zig");
+    _ = @import("jarvis.zig");
+    _ = @import("drama3.zig");
+    _ = @import("voice.zig");
+    _ = @import("mcp.zig");
+    _ = @import("models.zig");
+    _ = @import("pairing.zig");
+    _ = @import("contract.zig");
+    _ = @import("nodes.zig");
+    _ = @import("ranks.zig");
+    _ = @import("dropin.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;
@@ -32,6 +50,10 @@ test "images: deterministic, validated, and concurrent requests queue" {
     try testing.expectEqual(std.http.Status.ok, r1.status);
     const png1 = try firstPng(a, r1.body);
     try testing.expectEqualSlices(u8, "\x89PNG\r\n\x1a\n", png1[0..8]);
+    // the machine-generated label: tEXt Comment naming the tool, and the IPTC source type in the XMP packet
+    try testing.expect(std.mem.indexOf(u8, png1, "Comment\x00AI-generated (machine-generated) by model tp with LocalRouter") != null);
+    try testing.expect(std.mem.indexOf(u8, png1, "XML:com.adobe.xmp") != null);
+    try testing.expect(std.mem.indexOf(u8, png1, "digitalsourcetype/trainedAlgorithmicMedia") != null);
     const png2 = try firstPng(a, (try image(&d, a, "tp", ",\"seed\":7")).body);
     try testing.expectEqualSlices(u8, png1, png2); // same seed, same bytes
     const png3 = try firstPng(a, (try image(&d, a, "tp", ",\"seed\":8")).body);
@@ -75,7 +97,7 @@ test "mcp: initialize, tools, an image inline and a video by URL, a job polled t
     try testing.expectEqual(std.http.Status.accepted, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")).status);
     try testing.expectEqual(std.http.Status.method_not_allowed, (try d.call(a, .GET, "/mcp", null)).status);
     const list = try std.json.parseFromSliceLeaky(std.json.Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")).body, .{});
-    try testing.expectEqual(@as(usize, 6), list.object.get("result").?.object.get("tools").?.array.items.len);
+    try testing.expectEqual(@as(usize, 19), list.object.get("result").?.object.get("tools").?.array.items.len);
 
     // an image: the PNG inline, and its URL serves the same bytes
     const img = try mcpCall(&d, a, "generate_image", "{\"prompt\":\"bars\",\"size\":\"256x256\",\"seed\":7}");
@@ -187,6 +209,10 @@ test "a killed worker fails one job; the next one reloads; cancel and idle unloa
     const mp4 = try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/videos/{s}/content", .{v3.id}), null);
     try testing.expectEqual(std.http.Status.ok, mp4.status);
     try testing.expectEqualSlices(u8, "ftyp", mp4.body[4..8]);
+    // the machine-generated label: the ilst comment (©cmt) naming the tool, and the IPTC source type
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "\xa9cmt") != null);
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "AI-generated (machine-generated) by model slow with LocalRouter") != null);
+    try testing.expect(std.mem.indexOf(u8, mp4.body, "digitalsourcetype/trainedAlgorithmicMedia") != null);
     try testing.expectEqualStrings("ready", try d.toolState(a, "slow"));
     sleepMs(io, 2500);
     try testing.expectEqualStrings("unloaded", try d.toolState(a, "slow"));

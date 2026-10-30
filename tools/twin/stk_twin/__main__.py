@@ -3,7 +3,7 @@
   gate       bf16 twin vs the diffusers transformer (per-step cosine) and the whole image vs the diffusers pipeline
   fp32ref    the bf16 twin and bf16 diffusers (two attention backends) against diffusers in fp32, same inputs as gate
   calibrate  NVFP4 static input scales over the calibration prompts -> --out acts.json
-  pack       converted weights for --precision nvfp4|fp8 (+ --acts), te (the text encoder) or vae -> --out DIR
+  pack       converted weights for --precision nvfp4|fp8 (+ --acts), te (the text encoder), vae, or edit (augment existing te/vae packs) -> --out DIR
   render     the gate prompts with a pack (or --precision bf16) -> --out DIR (PNGs + timings.json)
   bench      warm end-to-end and per-step times with a pack
   tegate     LocalRouter's text encoder vs transformers' (cosine per prompt), its determinism and time
@@ -258,6 +258,10 @@ FP8_MARGIN = 2.0
 def cmd_pack(a):
     from . import pack
 
+    if a.precision == "edit":
+        from . import pack_edit
+        print(json.dumps(pack_edit.write(twin(a, "none").pipe, a.out)))
+        return
     if a.precision == "te":  # the text encoder's bf16 pack and tokenizer
         man = pack.write_te(twin(a, "none").pipe, a.out, {"repo": a.repo, "dir": a.model})
         print(json.dumps({"pack": a.out, "precision": "te", "tensors": len(man["tensors"])}))

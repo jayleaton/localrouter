@@ -61,7 +61,8 @@ precision and SDPA flags, environment variables, fatbin and upstream digests); D
 DIR/receipt-<phase>.json {env, tables, sites[], blocks{}, first_divergence, ok};
 DIR/fixtures/<site>/<tensor>.{bin,json} for every input and native output of at most 4 Mi elements (raw
 little-endian bytes, json header with dtype, shape and sha256) so Zig / twin runs can replay them offline; larger
-tensors are recorded by sha256 only (the input tables excepted).
+tensors are recorded by sha256 only (the input tables and the fp32/* operands excepted: 134 Mi bf16 weight values,
+268 MB a run, so the GEMV's reduction order can be replayed offline).
 
 Resources (estimates, checked against --max-gib before a child starts and against free device memory in the child;
 GB10 memory is unified, hashing copies 256 MiB at a time; torch.cuda.max_memory_allocated is recorded a site):
@@ -102,6 +103,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import block as B
+from . import budget
 from . import kernels as K
 from . import native as N
 from . import test_ops as T
@@ -292,11 +294,14 @@ def cdiv(a: int, b: int) -> int:
     return -(-a // b)
 
 
-def gemm_math(x2, w, m: int, n: int, epi: str, chunk: int | None = None) -> dict:
+def gemm_math(x2, w, m: int, n: int, epi: str, chunk: int | None = None, k_first: int = 0) -> dict:
     rows = min(m, chunk) if chunk else m
-    return {"kernel": "k6_gemm_bf16", "epilogue": epi, "vec": K.Kernels.gemm_vec(x2, w), "m": m, "n": n,
-            "k": int(w.shape[1]), "grid": [cdiv(n, 128), cdiv(rows, 128)], "block": 256, "row_chunk": chunk,
-            "math": "mma.sync bf16, fp32 accumulation, K ascending in 32-wide tiles, no split-K, one rounding"}
+    order = (f"k < {k_first} first (zero-padded tile), then {k_first} + 32 j" if 0 < k_first < int(w.shape[1])
+             else "K ascending")
+    return {"kernel": "k6_gemm_bf16", "epilogue": epi, "vec": K.Kernels.gemm_vec(x2, w, k_first), "m": m, "n": n,
+            "k": int(w.shape[1]), "k_first": k_first, "grid": [cdiv(n, 128), cdiv(rows, 128)], "block": 256,
+            "row_chunk": chunk,
+            "math": f"mma.sync bf16, fp32 accumulation, {order} in 32-wide tiles, no split-K, one rounding"}
 
 
 def gemv_math(math_: str, m: int, n: int, k: int, silu: bool, out: str) -> dict:
@@ -355,7 +360,9 @@ def visual_embeddings_site(c: B.Config, sh: B.Shape, wb: int) -> Site:
 
         return Case({"x_video": x, "weight": ve.in_layer.weight, "bias": ve.in_layer.bias},
                     lambda: ve(x).reshape(Nt, D), twin,
-                    {"patchify": "k6_patchify f32", **gemm_math(prow, ve.in_layer.weight, Nt, D, "bias")},
+                    {"patchify": "k6_patchify f32",
+                     "kernel": "k6_visual_gemm_bf16", "epilogue": "bias", "m": Nt, "n": D, "k": c.patch_in(),
+                     "math": "the reference's aligned-2, K32, three-stage BF16 reduction"},
                     f"VisualEmbeddings({C}, {D}, (1, 2, 2)) on {list(x_shape)} fp32")
 
     return Site("linear/visual_embeddings", "linear",
@@ -1361,7 +1368,10 @@ def run_site(ctx: Ctx, site: Site, out: Path) -> dict:
         rec.update(compare(nat, tw))
         rec["sha_native"] = tensor_record(nat, out, site.name, "native")["sha256"]
         rec["sha_twin"] = tensor_record(tw, out, site.name, "twin")["sha256"]
-    rec["inputs"] = {n: tensor_record(t, out, site.name, f"input.{n}") for n, t in case.inputs.items()}
+    # fp32/* operands whatever their size: the modulation weights (up to 37.7 Mi bf16) are what an offline replay
+    # needs to pin the native GEMV's FP32 reduction order against the fp32 output fixture
+    rec["inputs"] = {n: tensor_record(t, out, site.name, f"input.{n}", force=site.kind == "fp32")
+                     for n, t in case.inputs.items()}
     if site.kind == "block":
         h = hashlib.sha256()
         for n, _d, _s in B.manifest(ctx.c):
@@ -1415,9 +1425,10 @@ def worker(a) -> int:
     try:
         check_env()
         torch.cuda.init()
+        cap = budget.apply(f"gate {name}")  # before the first allocation: the step's Torch budget, when set
         num = oracle_numerics()
         if name == "env":
-            write_json(path, environment(a, num))
+            write_json(path, {**environment(a, num), "torch_cap": cap})
             return 0
         site = {s.name: s for s in table(a.phase, a.text_valid)}.get(name)
         if site is None:
@@ -1436,6 +1447,7 @@ def worker(a) -> int:
             rec = run_tables(ctx, site, out) if site.kind == "tables" else run_site(ctx, site, out)
         torch.cuda.synchronize()
         rec["numerics"] = num
+        rec["torch_cap"] = cap
         rec["gated"] = site.gated
         if torch.get_float32_matmul_precision() != "high":
             raise SetupError("the float32 matmul precision changed during the run")
@@ -1452,6 +1464,11 @@ def worker(a) -> int:
 # ---------------------------------------------------------------------------------------------------- the parent
 def spawn(a, name: str, out: Path) -> tuple[int, Path, Path]:
     """One child for `name`, its cuBLAS / cuBLASLt logging set before its interpreter (and CUDA) starts."""
+    try:
+        budget.host_only("gate parent")  # a node job budgets this process as host-only: it never touches CUDA
+    except budget.CapError as e:
+        print(f"SETUP {e}", flush=True)
+        sys.exit(2)
     lt, cb = out / "logs" / f"{safe(name)}.cublaslt.log", out / "logs" / f"{safe(name)}.cublas.log"
     for p in (lt, cb):
         p.unlink(missing_ok=True)

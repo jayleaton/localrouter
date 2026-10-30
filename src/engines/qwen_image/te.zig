@@ -14,6 +14,8 @@ const dit = @import("dit.zig");
 const Io = dit.Io;
 const Probe = dit.Probe;
 
+pub const Visual = struct { start: u32, count: u32, embed: u64, deepstack: [3]u64 };
+
 pub const layers = 36;
 pub const dim = 4096;
 pub const heads = 32;
@@ -110,8 +112,19 @@ pub const TextEncoder = struct {
     embed_w: u64 = 0,
     w: [layers]Layer = undefined,
     // scratch
-    ids: u64 = 0, h: u64 = 0, x: u64 = 0, q: u64 = 0, kk: u64 = 0, v: u64 = 0, at: u64 = 0, o: u64 = 0,
-    g: u64 = 0, u: u64 = 0, gu: u64 = 0, cos: u64 = 0, sin: u64 = 0,
+    ids: u64 = 0,
+    h: u64 = 0,
+    x: u64 = 0,
+    q: u64 = 0,
+    kk: u64 = 0,
+    v: u64 = 0,
+    at: u64 = 0,
+    o: u64 = 0,
+    g: u64 = 0,
+    u: u64 = 0,
+    gu: u64 = 0,
+    cos: u64 = 0,
+    sin: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, inv: [64]f32, max_rows: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .ops = ops, .s = s, .inv = inv, .max_rows = max_rows, .mem = .init(d, gpa) };
@@ -120,10 +133,10 @@ pub const TextEncoder = struct {
         var nb: [64]u8 = undefined;
         for (&t.w, 0..) |*l, i| {
             inline for (.{
-                .{ "input_layernorm", dim, 0 },          .{ "q_proj", heads * head_dim, dim }, .{ "k_proj", kv, dim },
-                .{ "v_proj", kv, dim },                  .{ "q_norm", head_dim, 0 },           .{ "k_norm", head_dim, 0 },
-                .{ "o_proj", dim, heads * head_dim },    .{ "post_attention_layernorm", dim, 0 }, .{ "gate_proj", mlp, dim },
-                .{ "up_proj", mlp, dim },                .{ "down_proj", dim, mlp },
+                .{ "input_layernorm", dim, 0 },       .{ "q_proj", heads * head_dim, dim },    .{ "k_proj", kv, dim },
+                .{ "v_proj", kv, dim },               .{ "q_norm", head_dim, 0 },              .{ "k_norm", head_dim, 0 },
+                .{ "o_proj", dim, heads * head_dim }, .{ "post_attention_layernorm", dim, 0 }, .{ "gate_proj", mlp, dim },
+                .{ "up_proj", mlp, dim },             .{ "down_proj", dim, mlp },
             }) |e| {
                 const name = try std.fmt.bufPrint(&nb, "te.{d}.{s}", .{ i, e[0] });
                 @field(l, e[0]) = try t.tensor(up, p, name, &.{ e[1], e[2] });
@@ -189,15 +202,35 @@ pub const TextEncoder = struct {
         try t.post(name, &.{.{ .role = "y", .ptr = t.h, .bytes = n * 2 }});
     }
 
+    fn copy(t: *TextEncoder, name: []const u8, dst: u64, src: u64, rows: u32) !void {
+        const bytes = @as(u64, rows) * dim * 2;
+        try t.pre(name, &.{.{ .role = "src", .ptr = src, .bytes = bytes }});
+        try t.ops.copyRows(t.s, dst, src, rows, dim * 2, dim * 2, dim * 2);
+        try t.post(name, &.{.{ .role = "y", .ptr = dst, .bytes = bytes }});
+    }
+
     /// ids -> the hidden states [len, 4096] at `h` (the returned pointer; rows `drop..` are the context).
     pub fn forward(t: *TextEncoder, ids: []const u32) !u64 {
+        return t.forwardMm(ids, null, &.{});
+    }
+
+    /// The edit path changes only position tables and visual rows; all decoder kernels are shared.
+    pub fn forwardMm(t: *TextEncoder, ids: []const u32, positions: ?[]const [3]f32, visuals: []const Visual) !u64 {
         const L: u32 = @intCast(ids.len);
         if (L == 0 or L > t.max_rows) return error.PromptTooLong;
         const n: u64 = @as(u64, L) * dim;
         {
             const tab = try t.gpa.alloc(f32, 2 * @as(usize, L) * 64);
             defer t.gpa.free(tab);
-            ropeTables(&t.inv, tab[0 .. L * 64], tab[L * 64 ..]);
+            if (positions) |pos| {
+                if (pos.len != L) return error.BadPositions;
+                for (pos, 0..) |row, r| for (t.inv, 0..) |f, j| {
+                    const axis: usize = if (j < 60 and j % 3 == 1) 1 else if (j < 60 and j % 3 == 2) 2 else 0;
+                    const sc = smath.sincos(@as(f64, f * row[axis]));
+                    tab[r * 64 + j] = @floatCast(sc.cos);
+                    tab[L * 64 + r * 64 + j] = @floatCast(sc.sin);
+                };
+            } else ropeTables(&t.inv, tab[0 .. L * 64], tab[L * 64 ..]);
             try t.upload(t.cos, std.mem.sliceAsBytes(tab[0 .. L * 64]));
             try t.upload(t.sin, std.mem.sliceAsBytes(tab[L * 64 ..]));
             try t.upload(t.ids, std.mem.sliceAsBytes(ids));
@@ -206,6 +239,11 @@ pub const TextEncoder = struct {
         try t.k.embed(t.s, t.embed_w, t.ids, t.h, L, dim);
         try t.post("te.embed", &.{.{ .role = "y", .ptr = t.h, .bytes = n * 2 }});
         var nb: [64]u8 = undefined;
+        for (visuals, 0..) |v, j| {
+            if (v.start > L or v.count > L - v.start) return error.BadVisualSpan;
+            const name = try std.fmt.bufPrint(&nb, "te.visual{d}.embed", .{j});
+            try t.copy(name, t.h + @as(u64, v.start) * dim * 2, v.embed, v.count);
+        }
         for (&t.w, 0..) |*l, i| {
             const nm = struct {
                 fn f(buf: []u8, layer: usize, op: []const u8) []const u8 {
@@ -240,6 +278,15 @@ pub const TextEncoder = struct {
             try t.post(sm_name, &.{.{ .role = "y", .ptr = t.gu, .bytes = nm_bytes }});
             try t.gemm(nm(&nb, i, "down_proj"), t.gu, l.down_proj, t.o, L, dim, mlp);
             try t.residual(nm(&nb, i, "mlp_residual"), t.o, n);
+            if (i < 3) for (visuals, 0..) |v, j| {
+                const ptr = t.h + @as(u64, v.start) * dim * 2;
+                const bytes = @as(u64, v.count) * dim * 2;
+                const name = try std.fmt.bufPrint(&nb, "te.{d}.visual{d}.deepstack", .{ i, j });
+                try t.pre(name, &.{ .{ .role = "x", .ptr = ptr, .bytes = bytes }, .{ .role = "z", .ptr = v.deepstack[i], .bytes = bytes } });
+                try t.k.add(t.s, ptr, v.deepstack[i], t.x, bytes / 2);
+                try t.post(name, &.{.{ .role = "y", .ptr = t.x, .bytes = bytes }});
+                try t.copy(try std.fmt.bufPrint(&nb, "te.{d}.visual{d}.scatter", .{ i, j }), ptr, t.x, v.count);
+            };
         }
         return t.h;
     }

@@ -12,6 +12,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const h3 = @import("minimax_h3");
+const qi = @import("qwen_image");
 const mp4 = @import("../media/mp4.zig");
 const memory = @import("../sched/memory.zig");
 const pl = h3.pipeline;
@@ -125,7 +126,7 @@ const Sampler = struct {
 
 /// Device memory in use by every process (cuMemGetInfo), through a context of its own; null without a driver.
 fn gpuUsedMib() ?u64 {
-    var d = cuda.Driver.open() catch return null;
+    var d = qi.memcap.open() catch return null;
     defer d.close();
     var c = cuda.Context.init(&d, 0) catch return null;
     defer c.deinit();
@@ -172,7 +173,7 @@ fn writeMp4(io: std.Io, gpa: std.mem.Allocator, path: []const u8, o: Opts, sh: p
     };
     try mp4.writeWav(io, wav_path, inter, pl.sample_rate, pl.audio_channels);
     defer std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
-    var w = try mp4.Writer.open(io, gpa, path, .{ .width = o.width, .height = o.height, .fps = fps, .wav = wav_path });
+    var w = try mp4.Writer.open(io, gpa, path, .{ .width = o.width, .height = o.height, .fps = fps, .wav = wav_path, .marker = .{ .model = "minimax-h3" } });
     errdefer w.abort();
     const fb: usize = @as(usize, o.width) * o.height * 3;
     for (0..sh.frames) |f| try w.frame(px[f * fb ..][0..fb]);
@@ -254,10 +255,11 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     try w.print("{{\"h3_bench\": {{\"gpu\": \"sm_{d}{d}\", \"size\": \"{d}x{d}\", \"frames\": {d}, \"steps\": {d}, \"unload_te\": {}, \"runs\": {d}, " ++
         "\"shapes\": {{\"latent_t\": {d}, \"latent_grid\": \"{d}x{d}\", \"audio_t\": {d}, \"text_tokens\": {d}, \"video_tokens\": {d}, \"audio_tokens\": {d}, \"seq_tokens\": {d}}}, " ++
         "\"load_ms\": {d}, \"weights_bytes\": {d}, \"weights\": {{\"dit\": {d}, \"te\": {d}, \"vae_audio\": {d}, \"vae_video\": {d}}}, ", .{
-        p.major,       p.minor,    o.width, o.height, sh.frames,  o.steps,       o.unload_te, o.runs,
-        sh.latent_t,   sh.lh,      sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
-        load_ms,       p.weights_bytes, w_dit, w_te,   w_aud,    w_vid,
+        p.major,     p.minor,         o.width, o.height,   sh.frames,   o.steps,                                           o.unload_te,              o.runs,
+        sh.latent_t, sh.lh,           sh.lw,   sh.audio_t, text_tokens, @as(u64, sh.latent_t) * (sh.lh / 2) * (sh.lw / 2), 2 * @as(u64, sh.audio_t), seq,
+        load_ms,     p.weights_bytes, w_dit,   w_te,       w_aud,       w_vid,
     });
+    try w.print("\"load_phases_ms\": {s}, ", .{try std.json.Stringify.valueAlloc(a, p.load, .{})}); // where load_ms went
     try w.writeAll("\"first_ms\": ");
     try writeTimes(w, runs[0].t);
     try w.writeAll(", \"warm_ms\": ");

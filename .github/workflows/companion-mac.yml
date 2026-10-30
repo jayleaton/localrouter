@@ -1,0 +1,265 @@
+name: Companion (macOS)
+on:
+  push:
+    # Branches only: a companion-v* tag builds through companion-release.yml.
+    branches: ['**']
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-mac.yml
+  pull_request:
+    paths:
+      - apps/companion/**
+      - apps/desktop-helper/**
+      - src/voice/voice.html
+      - .github/workflows/companion-mac.yml
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Also the Intel build, as a release makes it (no release is made)
+        type: boolean
+        default: false
+  # A release (companion-release.yml): the same checks, plus the Intel build.
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/companion/package-lock.json
+            apps/desktop-helper/package-lock.json
+      - run: npm ci
+      - name: type-check (tsc --noEmit)
+        run: npm run type-check
+      - name: lint (eslint)
+        run: npm run lint
+      - name: tests (vitest)
+        run: npm test
+      - name: helper tests on macOS (every JXA script compiled by osacompile; displays, pointer and grants read for real)
+        working-directory: apps/desktop-helper
+        run: |
+          npm ci
+          npm test
+      - name: build and package (esbuild, @electron/packager, ad-hoc codesign, dmg, zip)
+        run: |
+          if [ -z "$LR_SIGN_P12" ]; then
+            # No stable identity yet: a throwaway one, so the signing path is still what is built and checked.
+            bash scripts/make-signing-identity.sh --dry-run --keep "$RUNNER_TEMP/throwaway" > /dev/null
+            LR_SIGN_P12=$(base64 < "$RUNNER_TEMP/throwaway/localrouter-signing.p12" | tr -d '\n')
+            LR_SIGN_PASSWORD=$(cat "$RUNNER_TEMP/throwaway/localrouter-signing.password")
+            export LR_SIGN_P12 LR_SIGN_PASSWORD LR_SIGN_THROWAWAY=1
+            rm -rf "$RUNNER_TEMP/throwaway"
+          fi
+          npm run build
+          # The update test's "previous" build: the same sources with one more resource (another app code hash, as any
+          # update has) and a helper that differs in bytes; then the build that ships. Same signing identity for both.
+          echo previous > dist/ui/build-stamp.txt
+          LR_KEYCHAIN_CFLAGS='-DLR_NOISE="previous"' bash scripts/package-mac.sh
+          mkdir -p "$RUNNER_TEMP/previous"
+          ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$RUNNER_TEMP/previous/LocalRouter.app"
+          rm dist/ui/build-stamp.txt
+          bash scripts/package-mac.sh
+        env:
+          # One self-signed identity for every build (scripts/make-signing-identity.sh), so macOS keeps Accessibility
+          # and Screen Recording across updates. Absent: an ad-hoc build, with a warning.
+          LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+      - name: Touch ID helper (packaged, signed; a runner has no Touch ID, so it must say so and why, and a verify ends at once)
+        run: |
+          presence="out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-presence"
+          codesign --verify --strict "$presence"
+          check=$("$presence" check)
+          echo "check: $check"
+          node -e 'const v = JSON.parse(process.argv[1]); if (typeof v.biometrics !== "boolean" || typeof v.code !== "number") process.exit(1)' "$check"
+          set +e
+          verify=$(echo 'LocalRouter CI' | perl -e 'alarm shift; exec @ARGV' 20 "$presence" verify)
+          code=$?
+          set -e
+          echo "verify: $verify (exit $code)"
+          # No Touch ID here: 4 (unavailable, with its code). 0 would be a pass nobody gave.
+          [ "$code" = 4 ] || [ "$code" = 3 ]
+          # Automation, checked without asking (never automation-ask here: nobody can answer a prompt on a runner).
+          automation=$(perl -e 'alarm shift; exec @ARGV' 30 "$presence" automation com.apple.systemevents)
+          echo "automation: $automation"
+          node -e 'const v = JSON.parse(process.argv[1]); if (!Number.isInteger(v.status)) process.exit(1)' "$automation"
+      - name: smoke (the packaged app starts, its UI loads, the executor answers; the MCP launcher lists its tools)
+        run: |
+          app="out/LocalRouter-darwin-arm64/LocalRouter.app"
+          bin="$app/Contents/MacOS/LocalRouter"
+          version=$(node -p 'require("./package.json").version')
+          # macOS has no timeout(1): perl's alarm kills the process after 90 s.
+          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+          limit 90 "$bin" --version > "$RUNNER_TEMP/version.txt" 2> "$RUNNER_TEMP/version.err" || { cat "$RUNNER_TEMP/version.err"; exit 1; }
+          cat "$RUNNER_TEMP/version.txt"
+          grep -qx "LocalRouter $version" "$RUNNER_TEMP/version.txt" || { echo "::error::--version did not print LocalRouter $version"; exit 1; }
+
+          set +e
+          limit 90 "$bin" --smoke > "$RUNNER_TEMP/smoke.txt" 2> "$RUNNER_TEMP/smoke.err"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/smoke.txt"
+          echo "--- stderr"; cat "$RUNNER_TEMP/smoke.err"
+          smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke.txt" | sed 's/^COMPANION_SMOKE //' || true)
+          [ -n "$smoke" ] || { echo "::error::no COMPANION_SMOKE line (exit $code)"; exit 1; }
+          printf '%s\n' "$smoke" > "$RUNNER_TEMP/smoke.json"
+          [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] || { echo "::error::smoke not ok (exit $code): $smoke"; exit 1; }
+          [ "$code" -eq 0 ] || { echo "::error::smoke ok but exit $code"; exit 1; }
+
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | limit 90 "$app/Contents/Resources/localrouter-executor-mcp" > "$RUNNER_TEMP/mcp.txt"
+          cat "$RUNNER_TEMP/mcp.txt"
+          tools=$(jq -c 'select(.id == 2) | [.result.tools[].name]' "$RUNNER_TEMP/mcp.txt")
+          echo "tools: $tools"
+          [ "$(jq 'index("computer_use") != null' <<< "$tools")" = "true" ] || { echo "::error::MCP tools/list has no computer_use"; exit 1; }
+      - name: update keeps the stored token with no keychain prompt (previous build moves an old token; launches and updates never ask; a refused move asks to pair again; 3 rounds)
+        run: |
+          apps="$RUNNER_TEMP/Applications"; mkdir -p "$apps"; app="$apps/LocalRouter.app"; bin="$app/Contents/MacOS/LocalRouter"
+          ms() { perl -MTime::HiRes=time -e 'printf "%d", time*1000'; }
+          sha() { printf '%s' "$1" | shasum -a 256 | cut -c1-12; }
+          trace="$RUNNER_TEMP/helper-trace.log"
+          step() { # NAME HOME ARGS…: the app's own secret store, headless; its COMPANION_SECRETS line, wall time, and the helper's phases
+            local name=$1 h=$2; shift 2
+            : > "$trace"; local t0; t0=$(ms)
+            LOCALROUTER_COMPANION_HOME="$h" LR_KEYCHAIN_NO_UI=1 LR_KEYCHAIN_TRACE="$trace" "$bin" --secrets-selftest "$@" > "$RUNNER_TEMP/s.txt" 2> "$RUNNER_TEMP/s.err" &
+            local pid=$! waited=0 code
+            while kill -0 "$pid" 2>/dev/null && [ $waited -lt 400 ]; do
+              sleep 0.1; waited=$((waited + 1))
+              if [ $waited -eq 350 ]; then
+                echo "  $name still running at 35 s; processes:"
+                ps -axo pid,ppid,etime,stat,%cpu,command | grep -E 'LocalRouter|localrouter-keychain|SecurityAgent|codesign' | grep -v grep | cut -c1-200 | sed 's/^/    /'
+                # Where its main thread is (the call graph's heaviest stack, top 45 frames).
+                sample "$pid" 2 -file "$RUNNER_TEMP/sample.txt" > /dev/null 2>&1 || true
+                awk '/^Call graph:/{p=1} p' "$RUNNER_TEMP/sample.txt" 2>/dev/null | head -45 | cut -c1-200 | sed 's/^/    sample: /'
+              fi
+            done
+            if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid"; wait "$pid" 2>/dev/null || true; code=killed; else wait "$pid" && code=0 || code=$?; fi
+            local line; line=$(grep -m1 '^COMPANION_SECRETS ' "$RUNNER_TEMP/s.txt" | sed 's/^COMPANION_SECRETS //' || true)
+            echo "$name ($code, $(( $(ms) - t0 )) ms): ${line:-no answer after 40 s}"
+            sed "s/^/    trace[$name]: /" "$trace"
+            if [ -z "$line" ]; then sed 's/^/    stderr: /' "$RUNNER_TEMP/s.err" | grep -v 'XPC error' | tail -15; line='{"ok":false,"timeout":true}'; fi
+            printf '%s' "$line" > "$RUNNER_TEMP/$name.json"
+          }
+          # The runner's login keychain (where macOS partitions items made by apps without a Team ID; a temporary
+          # keychain does not, so the control below could not fail there). Each job is its own VM: nothing shares it.
+          login="$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -d user -s "$login"
+          security show-keychain-info "$login"
+          clean() {
+            for svc in "LocalRouter Safe Storage" "LocalRouter"; do while security delete-generic-password -s "$svc" "$login" > /dev/null 2>&1; do :; done; done
+            rm -rf "$RUNNER_TEMP/lrhome" "$RUNNER_TEMP/lrcontrol" "$app"
+          }
+          j() { jq -r "$2" "$RUNNER_TEMP/$1.json"; }
+          fail=0; check() { if [ "$1" = "$2" ]; then echo "ok   $3"; else echo "::error::round $round: $3: got $1, want $2"; fail=1; fi; }
+          gone() { if security find-generic-password -s "$1" "$login" > /dev/null 2>&1; then echo kept; else echo gone; fi; }
+          for round in 1 2 3; do
+            echo "=== round $round"
+            clean
+            home="$RUNNER_TEMP/lrhome"; control="$RUNNER_TEMP/lrcontrol"
+            ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"
+            step a-write-legacy "$home" write-legacy tok-from-an-old-build     # an older build's safeStorage file and item
+            step a-migrate "$home" migrate                                      # the one-time move, in its child process
+            a_item=$(gone "LocalRouter Safe Storage")
+            step a-load "$home" load                                            # a second launch: no move, no keychain prompt
+            step a-control "$control" write-legacy control-token
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"   # the update
+            step b-load "$home" load
+            step b-save "$home" save tok-saved-after-update
+            step b-load2 "$home" load                                           # a second launch after the update
+            step b-legacy-control "$control" load-legacy                        # the old store: asks after an update
+            export LR_MIGRATE_TIMEOUT_MS=15000; step b-deny "$control" migrate; unset LR_MIGRATE_TIMEOUT_MS   # nobody answers that prompt (or Deny)
+            step b-deny-again "$control" migrate                                # never asked again
+            step b-deny-load "$control" load                                    # no token: pair again
+            rm -rf "$app"; ditto "$RUNNER_TEMP/previous/LocalRouter.app" "$app"; step c-load "$home" load        # another update
+            rm -rf "$app"; ditto out/LocalRouter-darwin-arm64/LocalRouter.app "$app"; step d-load "$home" load  # and another
+            set +e; "$home/bin/localrouter-keychain" get LocalRouter spark-tokens > /dev/null 2>&1; direct=$?; set -e
+            t1=$(sha tok-from-an-old-build); t2=$(sha tok-saved-after-update)
+            check "$(j a-migrate .outcome)/$(j a-migrate .migration.state)/$(j a-migrate .token)" "migrated/done/$t1" "the older build's token moved into the keychain helper, once"
+            check "$(j a-migrate .legacy_file)/$a_item" false/gone "after the move: the old file and the old Safe Storage item are gone"
+            check "$(j a-load .ok)/$(j a-load .token)" "true/$t1" "a second launch: the token, no prompt"
+            check "$(j b-load .ok)/$(j b-load .store)/$(j b-load .token)" "true/keychain/$t1" "the first launch after an update: the token, no prompt"
+            check "$(j b-save .token)" "$t2" "after the update: saves and reads back, no prompt"
+            check "$(j b-load2 .ok)/$(j b-load2 .token)" "true/$t2" "a second launch after the update: no prompt"
+            check "$(j b-legacy-control .ok)" false "control: the old safeStorage store cannot read after the update without asking"
+            check "$(j b-deny .outcome)/$(j b-deny .migration.state)/$(j b-deny .legacy_file)" failed/failed/false "an unanswered or refused move: recorded, the old file dropped"
+            check "$(j b-deny-again .outcome)" none "a refused move is never asked again"
+            check "$(j b-deny-load .ok)/$(j b-deny-load .token)/$(j b-deny-load .migration.state)" "true//failed" "after a refused move: no token, so the app asks to pair again"
+            check "$(j c-load .ok)/$(j c-load .token)" "true/$t2" "another update: no prompt"
+            check "$(j d-load .ok)/$(j d-load .token)" "true/$t2" "and another: no prompt"
+            check "$direct" 3 "the helper answers only LocalRouter"
+            echo "### Keychain across updates, round $round" >> "$GITHUB_STEP_SUMMARY"
+            for f in a-migrate a-load b-load b-save b-load2 b-legacy-control b-deny b-deny-again b-deny-load c-load d-load; do echo "- $f: \`$(cat "$RUNNER_TEMP/$f.json")\`" >> "$GITHUB_STEP_SUMMARY"; done
+          done
+          echo "installed helper: $(codesign -dvvv "$RUNNER_TEMP/lrhome/bin/localrouter-keychain" 2>&1 | grep '^CDHash=')"
+          echo "bundled helper:   $(codesign -dvvv out/LocalRouter-darwin-arm64/LocalRouter.app/Contents/Resources/localrouter-keychain 2>&1 | grep '^CDHash=')"
+          clean
+          exit $fail
+      - name: Intel build for a release (cross-built on this arm64 runner, same identity; started under Rosetta, its UI loads, its smoke passes)
+        if: inputs.release
+        run: |
+          LR_MAC_ARCH=x64 bash scripts/package-mac.sh
+          bin="out/LocalRouter-darwin-x64/LocalRouter.app/Contents/MacOS/LocalRouter"
+          lipo -archs "$bin" | grep -qx x86_64 || { echo "::error::$bin is $(lipo -archs "$bin"), not x86_64"; exit 1; }
+          /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license > /dev/null
+          limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          limit 90 /usr/bin/arch -x86_64 "$bin" --version
+          # Rosetta translates each binary on its first launch (the app, its helpers, its frameworks): the first smoke
+          # can stall long enough for its first requests to fail (seen: the proxy's first two fetches, a 55 s stall). An
+          # Intel Mac runs the app natively. So a second launch may pass it; one whole pass is required.
+          for attempt in 1 2; do
+            set +e
+            limit 150 /usr/bin/arch -x86_64 "$bin" --smoke > "$RUNNER_TEMP/smoke-x64.txt" 2> "$RUNNER_TEMP/smoke-x64.err"
+            code=$?
+            set -e
+            smoke=$(grep -m1 '^COMPANION_SMOKE ' "$RUNNER_TEMP/smoke-x64.txt" | sed 's/^COMPANION_SMOKE //' || true)
+            echo "x64 smoke, launch $attempt (exit $code): $smoke"
+            if [ -n "$smoke" ] && [ "$(jq -r '.ok' <<< "$smoke")" = "true" ] && [ "$(jq -r '.arch' <<< "$smoke")" = "x64" ] && [ "$code" -eq 0 ]; then exit 0; fi
+            tail -20 "$RUNNER_TEMP/smoke-x64.err"
+          done
+          echo "::error::x64 smoke not ok on two launches"
+          exit 1
+        env:
+          LR_SIGN_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          LR_SIGN_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+      - name: job summary
+        if: always()
+        run: |
+          {
+            echo "### LocalRouter for macOS"
+            echo
+            echo "Signed by: $(cat out/signed-by.txt 2>/dev/null || echo unknown)"
+            echo
+            echo "| File | Size |"
+            echo "| --- | --- |"
+            for f in out/*.dmg out/*.zip; do
+              [ -f "$f" ] && echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo "Smoke: \`$(cat "$RUNNER_TEMP/smoke.json" 2>/dev/null || echo 'not run')\`"
+            echo
+            echo "Install: open the dmg, drag LocalRouter to Applications, then right-click > Open (or \`xattr -dr com.apple.quarantine /Applications/LocalRouter.app\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.release && 'LocalRouter-macos' || 'LocalRouter-macos-arm64' }}
+          path: |
+            apps/companion/out/*.dmg
+            apps/companion/out/*.zip
+          retention-days: 14
+          if-no-files-found: error

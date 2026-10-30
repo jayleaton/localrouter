@@ -60,7 +60,7 @@ pub const Profile = struct {
     /// ms per class, summed over the recorded spans; the stream must have finished (synchronized).
     pub fn sums(p: *const Profile) ![n_classes]f64 {
         var out: [n_classes]f64 = @splat(0);
-        for (0..p.n) |i| out[@intFromEnum(p.cls[i])] += try p.ev[2 * i].elapsedMs(p.ev[2 * i + 1]);
+        for (0..p.n) |i| out[@backingInt(p.cls[i])] += try p.ev[2 * i].elapsedMs(p.ev[2 * i + 1]);
         return out;
     }
 };

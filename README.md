@@ -4,90 +4,140 @@
 > [!WARNING]
 > **Early preview.** LocalRouter is new and under active development: expect bugs and breaking changes. Please [open an issue](https://github.com/jayleaton/localrouter/issues) if something doesn't work.
 
-**LocalRouter runs generative models on your own GPU box and hands them to your agents.** One small daemon owns the
-machine: an agent asks for an image or a video over MCP (or an OpenAI-style HTTP API), LocalRouter loads the model
-that can do it, makes room for it if it has to, runs the job and unloads the model when it goes idle. Nothing is held
-in memory that nobody is using, and the models you care about can stay warm.
+**LocalRouter turns one NVIDIA DGX Spark into a full-duplex "Jarvis" box.** You talk to it and it talks back. You can
+interrupt it mid-sentence, and it can make a picture or a video while you talk. Everything runs on the box:
 
-It starts on the NVIDIA DGX Spark with two hand-built engines, written in Zig with their own GPU kernels and checked
-bit for bit against reference implementations of the same models:
+- **Chat:** Qwen3.8 27B on TensorFold, with the DFlash2 drafter.
+- **Voice:** Fish Audio Drama 3, streamed as it speaks, with six fixed voices.
+- **Hearing:** Whisper large-v3-turbo with the Silero VAD.
+- **Images:** Qwen-Image 2.1 Turbo: text to image, and edits of one or two input images (an instruction, optionally a mask).
+- **Video with audio:** MiniMax H3: text to video, and image to video (the input image as the first frame), up to 1280x704 and 8 s.
 
-| Model | Can do | On a DGX Spark (GB10) |
-| --- | --- | --- |
-| **Qwen-Image 2.1** (FP8 by default, closest to the original model; NVFP4 is the faster option) | text to image only; image edit not yet supported | FP8: 1024x1024 in 16.7 s warm, about 22 s from cold; 576x576 in 5.0 s. NVFP4: 12.7 s warm, 16.1 s from cold |
-| **Qwen-Image 2.1 Turbo** (the same 7B architecture with its own weights and the 8-step schedule its checkpoint ships; FP8) | text to image only | FP8, 8 steps: 1024x1024 in 6.3 s warm, about 11.3 s from cold |
-| **MiniMax H3** (video with audio, Turbo 8 steps) | text to video only; image to video not yet supported | 768x448 with stereo audio, warm: a 2.3 s clip (56 frames) in 21.7 s, a 5 s clip (124 frames) in 54 s |
-| **Kandinsky-6 Pro distilled** (video with coupled audio, 10 PiFlow steps) | not yet available: the engine is built in but refuses to load until its GPU qualification passes | 832x480 landscape only (the default; other sizes are refused), 121 frames at 24 fps with mono 44.1 kHz audio; not yet measured |
+One small Zig daemon owns the machine. It keeps the voice loop and chat warm, loads the other models when asked,
+makes room for them, and hands every tool to your agents over MCP and an OpenAI-compatible API.
 
-The API accepts image-edit and image-to-video inputs, but both shipped model engines refuse those requests until
-their input-image ports land. Check each model's advertised capabilities before submitting a job.
+## Quick start
 
-More models, and more kinds (speech, music, 3D), come as adapters: see [Adding a model](docs/ARCHITECTURE.md#adding-a-model).
+Tell your coding agent (Claude Code, Codex, T3, ...):
 
-## Why
+> *Read INSTALL.md and set up LocalRouter Jarvis on this box.*
 
-- **One door for every agent.** MCP clients and your own scripts add one MCP server and get
-  `generate_image` and `generate_video`, with the outputs inline or as links.
-- **Memory is managed for you.** Each model says what it needs before it loads. If it does not fit, idle models are
-  unloaded: lowest priority first, then least recently used. A model can be marked `keep_loaded` to stay warm
-  (an image model and a voice model side by side) and still give way when a video job needs the whole machine.
-- **Fast.** The engines read their weights at the drive's speed (direct I/O, about 12 GB/s on the Spark), run
-  NVFP4 / FP8 / INT8 kernels written for the GPU they ship on, and capture each sampling step as a CUDA graph.
-- **Correct.** Every engine is verified operation by operation against a Python reference of the model, then from
-  prompt to pixels and audio samples, on the hardware it runs on. Speed work keeps those bits or it does not ship.
-- **Small.** One Zig binary. The idle daemon uses a few MB and no GPU memory. Every loaded model is its own process,
-  so unloading returns all of its memory and a crash costs one job.
-
-## Install on a DGX Spark
+[INSTALL.md](INSTALL.md) is written for agents. It is a deterministic sequence of commands, with what to check at each
+step and what to ask you: which licences you accept, and whether the GPU may be used. To run it yourself:
 
 ```bash
-git clone <this repo> localrouter && bash localrouter/tools/spark/install.sh
+git clone https://github.com/jayleaton/localrouter && cd localrouter
+tools/install/bootstrap.sh --profile jarvis-gb10 --dry-run   # the plan: steps, downloads, disk, memory, licences
+tools/install/bootstrap.sh --profile jarvis-gb10 --accept    # after reading the licences the plan lists
 ```
 
-The installer checks the machine (GPU, Docker with the NVIDIA runtime, disk), downloads the official checkpoints and
-converts them inside NVIDIA's PyTorch container (the first run takes a while and needs about 200 GB free; the converted
-image DiT weights are verified against committed reference digests), builds and starts the service (it restarts with the machine), makes
-one image and a one-second clip through MCP as a check (printing the clip's wall time), and prints how to connect
-agents. `MODELS=image` or `MODELS=video` installs just one (about 110 GB free for images only; the default, both,
-needs about 200 GB). The image model is FP8 (`qwen-image-2.1`, kept warm); `PRECISIONS="fp8s nvfp4"` also builds the
-faster NVFP4 pack and serves it as `qwen-image-2.1-nvfp4`. Qwen-Image 2.1 Turbo is installed beside it as
-`qwen-image-2.1-turbo` (about 25 GB more: only its DiT differs, the text encoder and VAE are shared) and becomes the
-image model a request gets when it names none, kept warm; `IMAGE_MODELS=qwen-image-2.1` installs the base model only,
-`IMAGE_DEFAULT=qwen-image-2.1` keeps it the default. LocalRouter listens on `127.0.0.1` only unless you say
-otherwise: on a terminal the installer asks "Make LocalRouter reachable from your tailnet? [y/N]" once, and remembers the
-answer in `.env` under `LOCALROUTER_HOME`. Re-running it updates the service using the existing packs. The complete two-model installer still needs an
-end-to-end check on a DGX Spark; the video installation path has only been exercised with stubs.
+**What it does.** It installs every model of [deploy/profiles/jarvis-gb10.json](deploy/profiles/jarvis-gb10.json), checks
+every download against its pin and qualifies chat and Drama 3 on the GPU. It leaves one systemd user service on
+`127.0.0.1:8190`, which starts at boot and is reachable on your tailnet through `tailscale serve`. It is resumable: after
+a failure, do what it says and run it again. Models already on the box are reused, not downloaded again.
+`tools/install/doctor.sh --profile jarvis-gb10` lists anything missing, with its fix.
 
-Prebuilt Qwen-Image 2.1 packs are available as an optional download from
+**A fresh install on DGX-01** (measured 2026-10-22):
+
+| Part | Measured |
+| --- | --- |
+| Downloads and builds | 31.5 min, 175.7 GB downloaded |
+| Chat qualification on the GPU | 113 s |
+| Drama 3 qualification on the GPU | 20.5 min |
+| Image and video pack builds | not yet timed end to end |
+
+## What you get
+
+| Where | What |
+| --- | --- |
+| `/voice` | The web app. A full-duplex voice conversation: barge-in, spoken picture requests, and a voice picker with previews |
+| `/v1` | OpenAI-compatible API: chat completions (whole or streamed, with tools), audio speech and transcriptions, images, videos, and the Realtime API at `/v1/realtime` |
+| `/mcp` | Every tool over MCP: `chat`, `synthesize_speech`, `transcribe_audio`, `generate_image`, `generate_video`, `list_models`, `list_voices`, jobs. Setup for Claude Code, Codex, Cursor and any client: [docs/MCP.md](docs/MCP.md) |
+
+```bash
+claude mcp add --transport http localrouter http://127.0.0.1:8190/mcp
+```
+
+## Desktop app (beta)
+
+**LocalRouter for desktop** brings Jarvis to your Mac, Windows or Linux computer: chat and calls with your box's
+models, and, after your approval, control of that computer. **[Download it from the Releases
+page](https://github.com/jayleaton/localrouter/releases)**: a `.dmg` for Apple silicon or Intel Macs, an installer for
+Windows, an AppImage or `.deb` for Linux. The builds are not notarized (macOS) or code-signed (Windows); each release's
+notes say how to open them. More in [apps/companion](apps/companion/README.md).
+
+## Measured on a DGX Spark
+
+DGX-01, NVIDIA GB10, 2026-10-22. Only figures we measured are listed.
+
+| What | Measured |
+| --- | --- |
+| Voice turn: end of speech to first audio | about 0.9 s median (916 to 959 ms across today's smoke runs); 0.72 to 0.95 s for the first turn after an image or a video |
+| Drama 3: first audio | 0.14 s p50, 0.18 s p95. Real-time factor 0.68. From its GPU qualification |
+| Chat: first content | 0.15 s for a short prompt, streamed |
+| "Generate a picture of a dog", spoken | picture done 8.1 to 10.2 s after the end of speech; spoken confirmation 8.8 to 11.4 s |
+| Image: Qwen-Image 2.1 Turbo, 1024x1024 | 6.3 s warm |
+| Image edit: Qwen-Image 2.1 Turbo, one input at 1024x1024 | 11 to 12.5 s (a 1024x576 edit 7.2 s; two inputs 15.9 s) |
+| Video: MiniMax H3 with audio, the engine alone | 864x480, 5.17 s: 83 s warm. 1280x704, 5.17 s: 244 s. 1280x704, 8 s: 397 s |
+| Video through the API (load included) | a 2.3 s clip at 768x448, text or image to video: 33 to 39 s |
+| Memory with chat, Drama 3, Whisper and the image model warm | 24 + 42 + 3.6 + 35.2 GiB resident; 13.7 GiB still available after a start, 11 to 12 GiB in use, of 121.7 GiB |
+
+A video job unloads only the image model while it runs, and the image model comes back after it. Chat, Drama 3 and
+Whisper are never unloaded for an image or a video.
+
+## Hardware
+
+| Need | jarvis-gb10 (the tested profile) |
+| --- | --- |
+| Box | NVIDIA DGX Spark (GB10, `aarch64`): 128 GB unified memory, at least 110 GiB visible to the OS |
+| Software | DGX OS / Ubuntu 24.04, NVIDIA driver 580 or newer, CUDA 13 (`nvcc`), Docker with the NVIDIA runtime (for the image and video packs), systemd user services |
+| Disk | about 250 GiB free for a fresh install (216 GiB plus a 30 GiB margin). `--dry-run` prints the exact figure |
+| Network | HTTPS to huggingface.co, github.com, ziglang.org, pypi.org, download.pytorch.org and nvcr.io during the install |
+
+No other profile is tested yet. The chat and Drama 3 engines here are GB10 builds, and their qualification refuses
+other GPUs.
+
+## How it works
+
+- **One door for every agent.** Add one MCP server, or point any OpenAI client at `/v1`.
+- **Memory is managed for you.** Each model says what it needs before it loads. If it does not fit, idle models of
+  lower priority give way. Kept-warm models (the voice set and chat) come back by themselves, and only with room to
+  spare.
+- **Correct.** The image and video engines are LocalRouter's own, written in Zig with their own GPU kernels. They are
+  verified operation by operation against a Python reference of each model, then from prompt to pixels and audio
+  samples. Chat and Drama 3 are qualified on the box's own GPU before the service serves them.
+- **Small.** One Zig binary. Every loaded model is its own process, so unloading returns all of its memory and a crash
+  costs one job.
+
+## Image and video only (Docker)
+
+`bash tools/spark/install.sh` installs just the image and video models as a Docker service. The script's header
+documents it: `MODELS`, `PRECISIONS` (FP8 by default, NVFP4 optional), `IMAGE_MODELS`, and binding with
+`LOCALROUTER_BIND=localhost|tailscale|all`. Prebuilt Qwen-Image 2.1 packs are optional, from
 [Hugging Face](https://huggingface.co/jayleaton/localrouter-qwen-image-2.1), for non-commercial research or evaluation
-only under the Qwen Research License. The installer still converts the official checkpoint locally by default.
-
-## Expose it to your tailnet
-
-By default LocalRouter listens on `127.0.0.1`, so only this machine can reach it. To serve your Tailscale network:
-`LOCALROUTER_BIND=tailscale bash tools/spark/install.sh` (or `localrouter serve --host tailscale` without Docker). It
-listens on the machine's tailnet address (100.64.0.0/10) and nothing else, and starts correctly at boot even when Docker
-comes up before Tailscale. `LOCALROUTER_BIND` also takes `localhost`, `all` (every interface) or an IPv4 address.
+only under the Qwen Research License.
 
 ## Connect an agent
-
-```bash
-localrouter mcp-stdio --url http://<host>:8190
-```
 
 Any MCP client: `{"mcpServers": {"localrouter": {"type": "http", "url": "http://<host>:8190/mcp"}}}`. For clients that
 only speak stdio: `localrouter mcp-stdio --url http://<host>:8190`.
 
 | MCP tool | Does |
 | --- | --- |
-| `list_models` | the models, what each can do, which capabilities each serves by default (`default_for`), and whether it is loaded |
-| `generate_image` | text to image. Waits, returns the PNGs inline and as links; edit inputs are accepted by the API but refused by the current engines |
-| `generate_video` | text to video. Waits up to `wait_s`, then returns the MP4's link or a job id; image inputs are refused by the current engines |
-| `get_job`, `cancel_job` | follow or stop a video job |
+| `list_models`, `list_voices` | the models (what each can do, `default_for`, state, memory) and the speech voices |
+| `reserve_for`, `unload_model`, `load_model` | make room for a heavy job (what it unloads comes back after it), unload or load one model; never the chat model. The procedure is a skill: [skills/jarvis-model-manager](skills/jarvis-model-manager/SKILL.md) |
+| `generate_image` | text to image. Waits up to `wait_s`, returns the PNGs inline and as links, or a job id |
+| `edit_image` | an edit of one or more input images by an instruction, optionally with a mask; the same reply as `generate_image` |
+| `generate_video` | text to video, or image to video with `image`. Waits up to `wait_s`, then returns the MP4's link or a job id |
+| `chat` | a chat completion from the chat model: the reply's text (or its tool calls), then the whole completion. `reasoning: false` answers without thinking |
+| `synthesize_speech`, `transcribe_audio` | speech as WAV (inline and a link) in any listed voice; the transcript of a URL, base64 audio or a file on the box |
+| `get_job`, `cancel_job` | follow or stop a long job |
 | `release_models` | unload everything now |
 
-The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generations`, `/v1/images/edits`, `/v1/videos`):
-[docs/AGENTS.md](docs/AGENTS.md). An agent skill is in [skill/localrouter](skill/localrouter/SKILL.md).
+Config snippets for every client, an example call for every tool and the security note are in [docs/MCP.md](docs/MCP.md).
+The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an agent skill is in
+[skill/localrouter](skill/localrouter/SKILL.md). What a harness on another device may rely on (versioned, with
+`GET /v1/capabilities` to discover it and what is not offered) is [docs/HARNESS.md](docs/HARNESS.md).
 
 ## Configuration
 
@@ -105,7 +155,7 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
     {"id": "qwen-image-2.1-nvfp4", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
      "priority": 10, "options": {"precision": "nvfp4"}},
     {"id": "minimax-h3", "kind": "video", "engine": "minimax_h3", "weights": "/models/minimax-h3",
-     "idle_ttl_s": 300, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
+     "idle_ttl_s": 30, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
   ]
 }
 ```
@@ -116,29 +166,34 @@ The same jobs are available over HTTP in OpenAI's shapes (`/v1/images/generation
 | `data_dir` | `/data` | job inputs and outputs (`jobs/`) and worker logs (`logs/<tool>.log`) |
 | `reserve_bytes` | 8 GiB | memory always left free for the OS and other services |
 | `budget_bytes` | 0 (none) | a cap on what loaded models and running jobs may use |
-| `keep_outputs_s` | 86400 | how long outputs stay |
+| `keep_outputs_s` | 86400 | how long outputs stay (in `data_dir`/jobs; on start the daemon also removes older ones left from before a restart) |
 | `defaults` | none | the model a request that names none gets, per capability: `{"text_to_image": "qwen-image-2.1-turbo"}`. Unset: the first model (in config order) that can do it. Each must name a configured model with that capability, or `serve` refuses to start. `localrouter models` and `list_models` show the result |
+| `gpu_lock` | none | the host's GPU lock file, the one GPU jobs outside LocalRouter take exclusively. LocalRouter holds it once, shared and without waiting, while any of its models is loaded, and releases it when none is; while someone else holds it nothing loads (503). LocalRouter's own models never take it: they are admitted by memory alone, so chat, speech and transcription stay loaded side by side |
 | `allow_private_urls` | false | let input image URLs (edits, image to video) name loopback, private and link-local hosts; by default they are refused, redirects are never followed, and only the daemon's own output URLs are fetched from the machine itself |
 | `tools[].engine` / `cmd` | | a compiled-in engine, or any program speaking the [worker protocol](docs/ARCHITECTURE.md#any-program-the-cmd-adapter) |
-| `tools[].priority` | 0 | higher is unloaded later when memory is needed |
-| `tools[].keep_loaded` | false | load at start, never unload for idleness, reload when memory frees |
+| `tools[].priority` | 0 (chat: 100) | higher is unloaded later when memory is needed |
+| `tools[].keep_loaded` | false (chat: true) | load at start, never unload for idleness, reload as soon as the scheduler is idle (unloading idle tools of lower priority) |
+| `tools[].qualification` | none | a file the model's qualify script writes on this machine. Until it exists and says `"qualified": true` the model is listed (`"qualified": false` in `/v1/models`) and refused with a 503 saying it is not GPU-qualified on this host |
 | `tools[].idle_ttl_s` | 120 | unload after this long unused (0: right after each job) |
-| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video` |
-| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq`, `qwen_inv_freq` and `audio` are required; the exact `audio` values are in `kernels/cuda/kandinsky6/audio/QUALIFICATION.md`), `testpattern` |
-| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
+| `tools[].capabilities` | from the engine | `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `text_to_speech`, `speech_to_text`, `chat_completion` |
+| `tools[].engine` | | `qwen_image` (Qwen-Image 2.1, 25 steps), `qwen_image_turbo` (Qwen-Image 2.1 Turbo, its checkpoint's 8 steps; other step counts are refused), `minimax_h3`, `kandinsky6` (refuses to load until qualified; its options `fp32_linear`, `clip_linear`, `qwen_rope_freq`, `qwen_inv_freq` and `audio` are required; the exact `audio` values are in `kernels/cuda/kandinsky6/audio/QUALIFICATION.md`), `openai_server` (a model's own OpenAI-compatible server run as the worker: chat), `testpattern` |
+| `tools[].options` | | engine settings (precision: `fp8s`, the default, or `nvfp4`; `max_side`; `max_pixels`, the largest width x height, which sizes the image engines' scratch (about 4.6 KiB a pixel on GB10 FP8); default steps; the Qwen engines' `dit`: the DiT pack directory, default `<precision>` or `turbo-<precision>`) |
 
 There is no authentication: it listens on localhost unless you choose otherwise; use a private network or a tailnet
-(see "Expose it to your tailnet") and never `all` on an untrusted network.
+(the Jarvis install puts `tailscale serve` HTTPS in front of it; `--host tailscale` binds the tailnet address) and never
+`all` on an untrusted network.
 
 ## Build and test
 
 Zig 0.17.0; ffmpeg for video output. The GPU engines need nvcc and an NVIDIA GPU (sm_120 / sm_121); without `-Dnvcc` the
 binary builds without embedded CUDA kernels, and the GPU-free test engine runs the tests. The model engines
-remain registered but cannot generate without their kernels.
+remain registered but cannot generate without their kernels. To check a running box from any machine as a client:
+`tools/harness/nemo_check.sh --url http://<box>:8190` ([HARNESS.md](docs/HARNESS.md#harnesses)).
 
 ```bash
 zig build                                    # zig-out/bin/localrouter
 zig build test                               # unit + integration tests (a real daemon and real workers)
+zig build integration-exe && zig-out/bin/integration-test   # the integration tests one at a time, each named as it runs
 zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120   # with the GPU engines
 localrouter check selftest                   # a private daemon, one image and one video, no GPU
 ```
@@ -152,16 +207,43 @@ milestones are in [docs/dev](docs/dev/).
 
 ## Credits
 
-LocalRouter stands on [**TensorFold**](https://github.com/ashhart/TensorFold) by **Ash Hart**: its CUDA runtime, its
-NVFP4 kernels and its Python model implementations were the baselines these engines were ported from and verified
-against. Thank you, Ash. We expect to contribute parts of the Zig work back upstream.
+LocalRouter stands on the work of these projects and teams:
 
-The INT8 attention kernels are SageAttention's, as shipped in NVIDIA's comfy-kitchen. Qwen-Image is by the Qwen team
-MiniMax H3 by MiniMax and Kandinsky-6 by Kandinsky Lab; their weights are downloaded from their publishers under their own licenses.
-Qwen-Image 2.1 is restricted to non-commercial research or evaluation under its
-[Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
-MiniMax H3's [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU,
-UK and South Korea and imposes downstream use conditions. Check these terms before installing or using either model.
+- [**TensorFold**](https://github.com/ashhart/TensorFold) by **Ash Hart**. Its CUDA runtime, NVFP4 kernels and Python
+  model implementations were the baselines our image and video engines were ported from and verified against. Its
+  native server runs the chat model, and Drama 3 runs on it. Thank you, Ash; we expect to contribute parts of the Zig
+  work back upstream.
+- **Qwen** (Alibaba): Qwen3.8 27B for chat, and Qwen-Image 2.1 and 2.1 Turbo for images.
+- **z-lab**: the [DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) speculative drafter for Qwen3.8 27B.
+- **Fish Audio**: [Drama 3](https://huggingface.co/fishaudio/drama-3), the voice. Built with Fish Audio.
+- [**drama-tensorfold**](https://github.com/plotarmordev/drama-tensorfold) by **plotarmordev** (Apache-2.0), which ports
+  Drama 3 to TensorFold.
+- **OpenAI**: [Whisper](https://github.com/openai/whisper) large-v3-turbo, for speech to text.
+- [**Silero VAD**](https://github.com/snakers4/silero-vad): voice activity detection.
+- **MiniMax**: MiniMax H3, video with audio.
+- **Kandinsky Lab**: Kandinsky-6 Pro distilled, video with coupled audio (built in; it refuses to load until its GPU
+  qualification passes).
+- **NVIDIA**: the DGX Spark (GB10) and the NGC PyTorch container the packs are built in. The INT8 attention kernels
+  are SageAttention's, as shipped in NVIDIA's comfy-kitchen.
+
+The weights are downloaded from their publishers under their own licences. Check these terms before installing or
+using a model (a summary, not legal advice; the licence text is what binds):
+
+| Model | Licence | Use | Restrictions / notice |
+| --- | --- | --- | --- |
+| Qwen3.8 27B (chat; TensorFold's MLX 4-bit checkpoint and z-lab's DFlash2 drafter) | [Apache 2.0](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) | any, commercial included | |
+| KnowLine-4B Gen5.5 (decisions) | [Apache 2.0](https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5) | any, commercial included | |
+| Whisper large-v3-turbo (speech to text) | [MIT](https://huggingface.co/openai/whisper-large-v3-turbo) | any, commercial included | |
+| Fish Audio Drama 3 (speech) | [Fish Audio Community License v1.0](https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE) | research and non-commercial; commercial only under USD 500,000 annual revenue | no Hosted Service (third parties generating speech, e.g. through an API) without a separate licence from Fish Audio, so keep LocalRouter on loopback or your tailnet for it ([details](docs/dev/DRAMA3.md#licences)). "Built with Fish Audio" |
+| Kitten TTS 2 (optional speech tool) | [Stellon Labs Community License](https://huggingface.co/KittenML/kitten-tts-2/blob/f2eee74f4467855ad58fe16f1fb7b7df473263fd/LICENSE.md) | research, non-commercial; commercial after registering with Stellon Labs, until USD 1,000,000 annual revenue or total funding | outputs may not train another model. "Powered by Stellon Labs" ([details](docs/dev/KITTEN-TTS2.md#licences)) |
+| Qwen-Image 2.1 and 2.1 Turbo (images) | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
+| MiniMax H3 (video) | [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) | outside the excluded territories, under its Acceptable Use Policy; commercial included, over USD 20 million yearly revenue with MiniMax's written authorization | the model and its outputs are not licensed in the US, EU, UK or South Korea. Content published to the public must be disclosed as machine-generated; a commercial product shows "MiniMax H3" in its interface |
+| Kandinsky-6 Pro distilled (video; not yet available) | [MIT](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers) | any, commercial included | |
+
+`GET /v1/models` lists each model's licence as `license` (from the tool's config, else its engine's), and
+`GET /v1/capabilities` lists them all. LocalRouter informs; it does not enforce any of these terms, and installing
+locally does not waive them.
+
 The Apache-2.0 licence below covers the software. See [NOTICE](NOTICE).
 
 ## License

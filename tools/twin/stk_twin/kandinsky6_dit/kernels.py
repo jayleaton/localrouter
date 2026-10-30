@@ -278,14 +278,15 @@ class Kernels:
 
     # ---------------------------------------------------------------------------------------------------- launchers
     @staticmethod
-    def gemm_vec(x, w) -> bool:
-        """The staging gemm() picks: 16-byte cp.async when K, both row strides and both pointers allow it."""
+    def gemm_vec(x, w, k_first=0) -> bool:
+        """The staging gemm() picks: 16-byte cp.async when K, k_first, both row strides and both pointers allow it."""
         x, w = view(x), view(w)
-        return x.cols % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 and w.ptr % 16 == 0
+        return x.cols % 8 == 0 and k_first % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 \
+            and w.ptr % 16 == 0
 
-    def gemm(self, x, w, bias, out, epi=EPI_BIAS) -> None:
+    def gemm(self, x, w, bias, out, epi=EPI_BIAS, k_first=0) -> None:
         """out[M, N] = x[M, K] . w[N, K]^T, epilogue bias (+ bias[N] in fp32; None for none) or gelu (of the
-        bf16-rounded product, no bias)."""
+        bf16-rounded product, no bias); k_first (0 or at most K) the K elements reduced first, as launch.zig."""
         epi = {"bias": EPI_BIAS, "gelu": EPI_GELU}.get(epi, epi)
         x, w, out = view(x), view(w), view(out)
         b = view(bias) if bias is not None else None
@@ -297,11 +298,14 @@ class Kernels:
             b.expect("bf16", 1, n)
         if epi not in (EPI_BIAS, EPI_GELU) or (epi == EPI_GELU and b is not None):
             raise InvalidGemm("gelu takes no bias")
-        vec = kd % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 and w.ptr % 16 == 0
+        if not 0 <= k_first <= kd:
+            raise InvalidGemm(f"k_first {k_first} K {kd}")
+        vec = kd % 8 == 0 and k_first % 8 == 0 and x.ld % 8 == 0 and w.ld % 8 == 0 and x.ptr % 16 == 0 \
+            and w.ptr % 16 == 0
         if m == 0 or m > I32_MAX or n > I32_MAX:
             raise InvalidGemm(f"M {m} N {n}")
         args = [u64(x.ptr), u64(w.ptr), u64(b.ptr if b is not None else 0), u64(out.ptr), i32(m), i32(n), i32(kd),
-                i64(x.ld), i64(w.ld), i64(out.ld), ctypes.c_int32(epi), ctypes.c_int32(int(vec))]
+                i64(x.ld), i64(w.ld), i64(out.ld), ctypes.c_int32(epi), ctypes.c_int32(int(vec)), i32(k_first)]
         self._go(self.gemm_fn, (blocks(n, 128), blocks(m, 128)), 256, 0, args)
 
     def visual_gemm(self, x, w, bias, out) -> None:

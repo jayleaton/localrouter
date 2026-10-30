@@ -1,6 +1,9 @@
-//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits and /v1/videos (with a model gateway's
-//! `kind`, `running` and `machine` extras), output files, /v1/tools for residency, and /mcp (`mcp.zig`, the same
-//! jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
+//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
+//! /v1/chat/completions (`chat.zig`), /v1/responses (`responses.zig`, the Responses API over the chat path), /v1/systemone (`decide.zig`, typed decisions)
+//! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
+//! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
+//! `capabilities.zig`), and /mcp
+//! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
 
 const std = @import("std");
@@ -13,6 +16,15 @@ const Config = @import("../config.zig").Config;
 const mcp = @import("mcp.zig");
 const inputs = @import("inputs.zig");
 const engine = @import("../engine/engine.zig");
+const speech = @import("speech.zig");
+const chat = @import("chat.zig");
+const responses = @import("responses.zig");
+const decide = @import("decide.zig");
+const realtime = @import("realtime.zig");
+const pair = @import("pair.zig");
+const desktop = @import("desktop.zig");
+const voices = @import("voices.zig");
+const Need = @import("../pair.zig").Need;
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -22,6 +34,27 @@ pub const App = struct {
     table: *jobs.Table,
     jobs_dir: []const u8,
     self_addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) }, // where this daemon listens, for fetching its own output URLs
+    decode_mutex: Io.Mutex = .init, // audio uploads decode one at a time (`speech.startTranscription`)
+    voice: realtime.Registry = .{}, // open voice sessions, closed at shutdown
+    pair_guard: @import("../pair.zig").Guard = .{}, // wrong pairing codes (`pair.redeem`)
+    computer: ?*desktop.Service = null, // computer control (desktop.zig); null when the config switches it off
+    cloned: @import("../voices.zig").Store = .{}, // cloned voices (`voices.zig`, `api/voices.zig`)
+    assistant: @import("../assistant.zig").Store = .{}, // the assistant's name (`assistant.zig`, `api/assistant.zig`)
+    plan: ?*const @import("../topology.zig").Plan = null, // where each tool runs (a multi-node topology); null: here
+
+    /// Why tool `c` is refused on this machine until it is qualified here (`engine.unqualified`), or null; a tool that
+    /// runs on another node now is that node's to check.
+    pub fn unqualified(app: *App, a: std.mem.Allocator, c: *const @import("../config.zig").ToolConfig, buf: []u8) ?[]const u8 {
+        if (toolIndex(app, c.id)) |i| if (!app.scheduler.slots[i].tool.local()) return null;
+        return engine.unqualified(app.io, a, c, buf);
+    }
+
+    /// The node that runs tool `id` ("" in a single topology): its own node for a tool served here, else its host's.
+    pub fn nodeOf(app: *const App, id: []const u8) []const u8 {
+        const p = app.plan orelse return "";
+        if (!p.multi) return "";
+        return if (p.hostOf(id)) |n| n.id else p.nodes[p.self].id;
+    }
 
     /// What URL inputs may reach for a request that arrived with this Host header.
     pub fn policy(app: *const App, host: []const u8) inputs.Policy {
@@ -29,7 +62,7 @@ pub const App = struct {
     }
 };
 
-pub fn handle(app: *App, req: *h.Request) !void {
+pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     var arena: std.heap.ArenaAllocator = .init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -37,17 +70,90 @@ pub fn handle(app: *App, req: *h.Request) !void {
     const m = req.head.method;
     const host = try a.dupe(u8, h.host(req)); // headers are gone once the body is read
     const ctype = try a.dupe(u8, req.head.content_type orelse "");
+    const scheme = h.scheme(req); // a static string: it outlives the headers
+    // With pairing required, every route but the open ones needs its scope: refused before the body or the upgrade.
+    const caller: pair.Caller = if (need(m, p)) |n| (try pair.admit(app, req, a, n)) orelse return else .{};
     if (m == .GET and std.mem.eql(u8, p, "/health")) return h.json(req, .ok, "{\"ok\":true}");
-    if (eql(p, "/mcp")) return mcp.handle(app, req, a, host);
+    if (eql(p, "/mcp")) return mcp.handle(app, req, a, host, caller);
+    if (m == .GET and eql(p, "/v1/realtime")) return realtime.serve(app, conn, req, a, caller);
+    if (m == .GET and eql(p, "/v1/desktop")) return desktop.serve(app, conn, req, a);
+    if (std.mem.startsWith(u8, p, "/v1/computer/")) return desktop.route(app, req, a, p["/v1/computer/".len..]);
+    if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
+    if (m == .POST and eql(p, "/v1/pair")) return pair.redeem(app, req, a);
+    if (m == .GET and eql(p, "/v1/pair")) return pair.status(app, req, a);
+    if (m == .GET and eql(p, "/")) return req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = "/voice" }} });
     if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models"))) return models(app, req, a);
-    if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, ctype, false);
-    if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, ctype, true);
-    if (m == .POST and eql(p, "/v1/videos")) return videoCreate(app, req, a, host, ctype);
-    if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..]);
-    if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..]);
+    if (m == .GET and eql(p, "/v1/capabilities")) return @import("capabilities.zig").serve(app, req, a);
+    if (m == .POST and eql(p, "/v1/images/generations")) return images(app, req, a, host, scheme, ctype, false, caller);
+    if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, scheme, ctype, true, caller);
+    if (m == .POST and eql(p, "/v1/videos")) return videoCreate(app, req, a, host, ctype, caller);
+    if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..], caller);
+    if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a, caller.owner());
+    if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype, caller.owner());
+    if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a, caller.owner());
+    if (m == .POST and eql(p, "/v1/responses")) return responses.create(app, req, a, caller.owner());
+    if (std.mem.startsWith(u8, p, "/v1/responses/")) return responses.stored(req, a);
+    if (m == .POST and eql(p, "/v1/systemone")) return decide.systemOne(app, req, a, caller.owner());
+    if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
+    if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..], caller);
+    if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..], caller);
+    if (m == .GET and eql(p, "/v1/skills/model-manager")) return h.jsonValue(req, a, .ok, .{ .enabled = app.cfg.voice.tools and app.cfg.voice.manage_models, .text = try @import("voice_local.zig").modelSkill(app, a) });
+    if (eql(p, "/v1/voices")) return voices.route(app, req, a, host, ctype, "", caller);
+    if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
+    if (eql(p, "/v1/assistant")) return @import("assistant.zig").route(app, req, a);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
+    if (std.mem.startsWith(u8, p, "/v1/node/")) return @import("node.zig").route(app, req, a, p["/v1/node/".len..], caller);
     return h.fail(req, a, 404, "invalid_request_error", "no such route");
+}
+
+/// What a route needs from the caller's device when pairing is required (`pair.admit`); null only for the routes anyone
+/// reaches: /health, pairing itself, the voice page and the redirect to it, and computer control (which checks its own
+/// scopes always: computer/gate.zig). The job routes need only a paired device: a job is then its owner's alone
+/// (`Caller.sees`). Anything not named here (another method, a new route, no route at all) needs `manage`, the
+/// strictest: a route is never open by omission.
+pub fn need(m: std.http.Method, p: []const u8) ?Need {
+    const starts = std.mem.startsWith;
+    if (eql(p, "/health") or eql(p, "/v1/pair") or eql(p, "/voice") or eql(p, "/voice/") or eql(p, "/")) return null;
+    if (m == .GET and eql(p, "/v1/capabilities")) return null; // how to get in has to be readable before getting in
+    if (eql(p, "/v1/desktop") or starts(u8, p, "/v1/computer/")) return null;
+    if (eql(p, "/mcp")) return .mcp;
+    if (eql(p, "/v1/realtime")) return .realtime;
+    if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/skills/model-manager"))) return .read;
+    if (m == .GET and (eql(p, "/v1/voices") or starts(u8, p, "/v1/voices/"))) return .read; // creating, renaming and deleting a voice: manage
+    if (m == .GET and eql(p, "/v1/assistant")) return .paired; // every client shows the name; renaming it: manage
+    if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
+    if (eql(p, "/v1/systemone")) return .decisions;
+    if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or starts(u8, p, "/v1/audio/")) return .media;
+    if (starts(u8, p, "/v1/videos/") or starts(u8, p, "/v1/jobs/") or starts(u8, p, "/v1/files/")) return .owned;
+    return .manage; // POST /v1/tools/..., and whatever is not named above
+}
+
+test "every route class needs its scope; only the open routes need none; an unnamed route needs manage" {
+    const t = std.testing;
+    const open = [_][]const u8{ "/health", "/v1/pair", "/voice", "/voice/", "/", "/v1/desktop", "/v1/computer/approvals/x", "/v1/capabilities" };
+    for (open) |p| try t.expect(need(.GET, p) == null);
+    const Case = struct { std.http.Method, []const u8, Need };
+    const cases = [_]Case{
+        .{ .POST, "/mcp", .mcp },                    .{ .GET, "/v1/realtime", .realtime },
+        .{ .GET, "/v1/models", .read },              .{ .GET, "/models", .read },
+        .{ .GET, "/v1/tools", .read },               .{ .GET, "/v1/skills/model-manager", .read },
+        .{ .POST, "/v1/tools/release", .manage },    .{ .POST, "/v1/tools/x/load", .manage },
+        .{ .POST, "/v1/tools/x/unload", .manage },   .{ .POST, "/v1/chat/completions", .inference },
+        .{ .POST, "/v1/responses", .inference },     .{ .GET, "/v1/responses/resp_1", .inference },
+        .{ .POST, "/v1/systemone", .decisions },     .{ .POST, "/v1/images/generations", .media },
+        .{ .POST, "/v1/images/edits", .media },      .{ .POST, "/v1/videos", .media },
+        .{ .POST, "/v1/audio/speech", .media },      .{ .POST, "/v1/audio/transcriptions", .media },
+        .{ .GET, "/v1/videos/v_1/content", .owned }, .{ .DELETE, "/v1/videos/v_1", .owned },
+        .{ .GET, "/v1/jobs/img_1", .owned },         .{ .GET, "/v1/files/img_1/0.png", .owned },
+        .{ .POST, "/v1/models", .manage },           .{ .GET, "/v1/something-new", .manage },
+        .{ .GET, "/v1/voices", .read },              .{ .GET, "/v1/voices/JJ", .read },
+        .{ .POST, "/v1/voices", .manage },           .{ .PATCH, "/v1/voices/draft-1", .manage },
+        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/assistant", .paired },
+        .{ .PATCH, "/v1/assistant", .manage },       .{ .GET, "/v1/node/status", .manage },
+        .{ .POST, "/v1/node/jobs", .manage },
+    };
+    for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
@@ -57,25 +163,51 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const std.json.Value = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i) };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .machine = app.cfg.machine, .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .capabilities = try engine.capabilityList(a, c), .default_for = try defaultFor(app, a, i), .license = engine.license(c) };
+        var info = engine.audioInfo(c);
+        if (c.kind == .speech) info.voices = try speechVoices(app, a, c);
+        inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
+        var buf: [512]u8 = undefined;
+        if (c.qualification.len > 0 and slot.tool.local()) e.qualified = engine.unqualified(app.io, a, c, &buf) == null; // listed either way; a remote tool's node lists its own
+        const n = app.nodeOf(c.id);
+        if (n.len > 0) e.node = n;
+        if (c.kind == .chat) e.min_thinking_tokens = c.min_thinking_tokens; // a smaller limit answers without thinking
     }
     try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list });
 }
 
+/// A speech model's voices as listed: its configured `voices`, then the voices cloned for it (null: it lists none and
+/// has none cloned).
+pub fn speechVoices(app: *App, a: std.mem.Allocator, c: *const @import("../config.zig").ToolConfig) !?[]const std.json.Value {
+    const own = engine.voices(c);
+    const cloned = try app.cloned.names(app.io, a, c.id);
+    if (cloned.len == 0) return own;
+    var out: std.ArrayList(std.json.Value) = .empty;
+    try out.appendSlice(a, own orelse &.{});
+    for (cloned) |n| try out.append(a, .{ .string = n });
+    return out.items;
+}
+
+/// Whether speech model `c` has `voice`: configured, or cloned for it (a draft included).
+pub fn hasVoice(app: *App, c: *const @import("../config.zig").ToolConfig, voice: []const u8) bool {
+    return engine.hasVoice(c, voice) or app.cloned.has(app.io, c.id, voice);
+}
+
 fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, capabilities: []const engine.Capability, last_error: []const u8 };
+    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8, license: ?@import("../config.zig").License, node: ?[]const u8 = null, local: bool = true };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message };
+        const n = app.nodeOf(c.id);
+        e.* = .{ .node = if (n.len > 0) n else null, .local = slot.tool.local(), .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message, .license = engine.license(c) };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
-    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes });
+    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });
 }
 
 /// POST /v1/tools/{id}/load, /v1/tools/{id}/unload, /v1/tools/release.
@@ -92,7 +224,7 @@ fn toolControl(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u
     return tools(app, req, a);
 }
 
-fn toolIndex(app: *App, id: []const u8) ?usize {
+pub fn toolIndex(app: *App, id: []const u8) ?usize {
     for (app.scheduler.slots, 0..) |slot, i| if (eql(slot.tool.config().id, id)) return i;
     return null;
 }
@@ -129,10 +261,27 @@ pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Ref
     return first;
 }
 
+/// The speech model for a request: the one it names, else the text_to_speech default; but when it names no model and
+/// a voice the default lacks, the first speech model that lists that voice (voices are per model, so one picker can
+/// offer every model's).
+pub fn resolveSpeech(app: *App, model: ?[]const u8, voice: []const u8, why: *Refusal) ?usize {
+    const i = resolve(app, model, .text_to_speech, why) orelse return null;
+    if (model != null or voice.len == 0 or hasVoice(app, app.scheduler.slots[i].tool.config(), voice)) return i;
+    for (app.scheduler.slots, 0..) |slot, k| {
+        const c = slot.tool.config();
+        if (engine.supports(c, .text_to_speech) and hasVoice(app, c, voice)) return k;
+    }
+    return i;
+}
+
 fn article(k: request.Kind) []const u8 {
     return switch (k) {
         .image => "an image",
         .video => "a video",
+        .speech => "a speech",
+        .transcription => "a transcription",
+        .chat => "a chat",
+        .decision => "a decision",
     };
 }
 
@@ -164,7 +313,7 @@ const ImageBody = struct {
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
     n: u32 = 1,
-    size: []const u8 = "1024x1024",
+    size: []const u8 = "", // "": 1024x1024, or for an edit the input's shape
     response_format: []const u8 = "b64_json",
     seed: ?u64 = null,
     steps: u32 = 0,
@@ -199,21 +348,27 @@ pub fn parseBody(comptime T: type, app: *App, a: std.mem.Allocator, host: []cons
     return b;
 }
 
-fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8, edit: bool) !void {
+fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, scheme: []const u8, ctype: []const u8, edit: bool, caller: pair.Caller) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     var why: []const u8 = "the body is not a valid image request";
     var raws: std.ArrayList([]const u8) = .empty;
     const b = (if (edit) parseBody(ImageBody, app, a, host, text, ctype, &.{ "image", "image[]", "images" }, &raws, &why) else parseBody(ImageBody, app, a, host, text, ctype, &.{}, &raws, &why)) catch
         return h.fail(req, a, 400, "invalid_request_error", why);
-    const files = inputs.validate(a, "ref", raws.items, (request.Limits{}).max_references, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
-    if (edit and files.len == 0) return h.fail(req, a, 400, "invalid_request_error", "image is required: send image (or image[]) as files, base64 or URLs");
-    const wh = request.parseSize(if (eql(b.size, "auto")) "1024x1024" else b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
-    const refs = try a.alloc([]const u8, files.len);
-    for (refs, files) |*d, f| d.* = f.name;
+    var mask_raw: std.ArrayList([]const u8) = .empty;
+    if (edit) _ = parseBody(struct {}, app, a, host, text, ctype, &.{"mask"}, &mask_raw, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    if (mask_raw.items.len > 1) return h.fail(req, a, 400, "invalid_request_error", "send one mask");
+    const refs_files = inputs.validate(a, "ref", raws.items, (request.Limits{}).max_references, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    if (edit and refs_files.len == 0) return h.fail(req, a, 400, "invalid_request_error", "image is required: send image (or image[]) as files, base64 or URLs");
+    const mask_files = inputs.validate(a, "mask", mask_raw.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    const files = try std.mem.concat(a, inputs.File, &.{ refs_files, mask_files });
+    // an edit without a size (or "auto") keeps the input's shape, at the size the model picks
+    const wh = if (edit and (b.size.len == 0 or eql(b.size, "auto"))) [2]u32{ 0, 0 } else request.parseSize(if (b.size.len == 0 or eql(b.size, "auto")) "1024x1024" else b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
+    const refs = try a.alloc([]const u8, refs_files.len);
+    for (refs, refs_files) |*d, f| d.* = f.name;
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs } };
-    const j = (try submit(app, req, a, tool, r, files)) orelse return;
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
+    const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
     const Item = struct { b64_json: ?[]const u8 = null, url: ?[]const u8 = null };
@@ -221,7 +376,7 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     const as_url = eql(b.response_format, "url");
     for (items, j.files) |*it, f| {
         if (as_url) {
-            it.* = .{ .url = try std.fmt.allocPrint(a, "http://{s}/v1/files/{s}/{s}", .{ host, j.id, f }) };
+            it.* = .{ .url = try std.fmt.allocPrint(a, "{s}://{s}/v1/files/{s}/{s}", .{ scheme, host, j.id, f }) };
         } else {
             const path = try std.fs.path.join(a, &.{ j.dir, f });
             const png = try Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(h.max_body));
@@ -235,28 +390,37 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
 /// Why `enqueue` refused: the HTTP status, OpenAI's error type and a message (which may point into `buf`).
 pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_request_error", message: []const u8 = "", buf: [512]u8 = undefined };
 
-/// Validates and queues `r` for `tool` (the HTTP routes and the MCP tools share it), saving `files` in its job
+/// Fills in the model's defaults, then validates and queues `asked` for `tool` on behalf of `owner` (a device id, or
+/// "": `pair.Caller.owner`; the HTTP routes, the MCP tools and voice sessions share it), saving `files` in its job
 /// directory first; null with `why` set on refusal. A model without the capability the request needs is refused.
-pub fn enqueue(app: *App, tool: usize, r: request.Request, files: []const inputs.File, why: *Refusal) ?*jobs.Job {
+pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const inputs.File, owner: []const u8, why: *Refusal) ?*jobs.Job {
     const cfg = app.scheduler.slots[tool].tool.config();
+    if (app.plan) |p| if (p.places[tool] == .follower) {
+        why.message = std.fmt.bufPrint(why.buf[0..384], "this node runs rank {d} of '{s}', which serves no requests: send them to rank 0's node, {s} (or the front)", .{ p.places[tool].follower.rank, cfg.id, p.nodes[p.places[tool].follower.nodes[0]].id }) catch "this node runs another rank of the model: send requests to its rank 0";
+        return null;
+    };
+    var r = asked;
+    engine.fill(cfg, &r); // what the request left to the model (a video's size)
     if (!engine.supports(cfg, r.capability())) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' cannot do {s} (its capabilities: {s}); pick a model that lists {s} in list_models", .{ cfg.id, @tagName(r.capability()), capabilityNames(&why.buf, cfg), @tagName(r.capability()) }) catch "the model lacks a capability this request needs";
         return null;
     }
-    request.validate(r, .{}, &why.message) catch {
-        // a model with one supported size names it, even for a size the generic limits refuse (0x0, 4000x480)
-        if (engine.defaultSize(cfg) != null) {
-            var w0: Io.Writer = .fixed(why.buf[0..384]);
-            if (!engine.check(cfg, &r, &w0) and w0.end > 0) why.message = w0.buffered();
-        }
-        return null;
-    };
+    request.validate(r, .{}, &why.message) catch return null;
     var w: Io.Writer = .fixed(why.buf[0..384]);
     if (!engine.check(cfg, &r, &w)) {
         why.message = if (w.end > 0) w.buffered() else "the model cannot serve this request";
         return null;
     }
-    const j = app.table.create(app.io, app.jobs_dir, tool, r, sched.nowUnix(app.io)) catch |err| {
+    // A model gated by a qualification file is refused before anything loads until this machine has qualified it.
+    var gate: std.heap.ArenaAllocator = .init(app.gpa);
+    defer gate.deinit();
+    if (app.unqualified(gate.allocator(), cfg, why.buf[0..384])) |msg| {
+        why.status = 503;
+        why.typ = "server_error";
+        why.message = msg;
+        return null;
+    }
+    const j = app.table.create(app.io, app.jobs_dir, tool, r, owner, sched.nowUnix(app.io)) catch |err| {
         why.* = .{ .status = 500, .typ = "server_error", .message = @errorName(err) };
         return null;
     };
@@ -287,9 +451,9 @@ fn abandon(app: *App, j: *jobs.Job, why: *Refusal, status: u16, msg: []const u8)
 }
 
 /// `enqueue` for the HTTP routes: on refusal the error response is already sent and the result is null.
-fn submit(app: *App, req: *h.Request, a: std.mem.Allocator, tool: usize, r: request.Request, files: []const inputs.File) !?*jobs.Job {
+fn submit(app: *App, req: *h.Request, a: std.mem.Allocator, tool: usize, r: request.Request, files: []const inputs.File, owner: []const u8) !?*jobs.Job {
     var why: Refusal = .{};
-    const j = enqueue(app, tool, r, files, &why) orelse {
+    const j = enqueue(app, tool, r, files, owner, &why) orelse {
         try h.fail(req, a, why.status, why.typ, why.message);
         return null;
     };
@@ -308,7 +472,7 @@ const VideoBody = struct {
     model: ?[]const u8 = null,
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
-    size: ?[]const u8 = null, // absent: the model's default size (engine.defaultSize), else 1344x768
+    size: []const u8 = "", // "": the model's own size
     seconds: []const u8 = "5", // OpenAI sends seconds as a string
     fps: u32 = 24,
     seed: ?u64 = null,
@@ -318,27 +482,27 @@ const VideoBody = struct {
 };
 
 /// `input_reference` (OpenAI's name) is the first frame: a multipart file, or JSON base64, a data URL or a URL.
-fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8) !void {
+fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ctype: []const u8, caller: pair.Caller) !void {
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     var why: []const u8 = "the body is not a valid video request";
     var raws: std.ArrayList([]const u8) = .empty;
     const b = parseBody(VideoBody, app, a, host, text, ctype, &.{"input_reference"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const wh = request.resolveSize(b.size, engine.defaultSize(app.scheduler.slots[tool].tool.config()), .{ 1344, 768 }) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
     const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
-    const j = (try submit(app, req, a, tool, r, files)) orelse return;
+    const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     try videoObject(app, req, a, j);
 }
 
 /// GET {id}, GET {id}/content, DELETE {id}.
-fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8) !void {
+fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8, caller: pair.Caller) !void {
     const content = std.mem.endsWith(u8, rest, "/content");
     const id = if (content) rest[0 .. rest.len - "/content".len] else rest;
     const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such video");
-    if (j.kind() != .video) return h.fail(req, a, 404, "invalid_request_error", "no such video");
+    if (j.kind() != .video or !caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such video");
     switch (req.head.method) {
         .DELETE => {
             app.scheduler.cancel(j);
@@ -353,6 +517,28 @@ fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8
         },
         else => return h.fail(req, a, 405, "invalid_request_error", "method not allowed"),
     }
+}
+
+/// GET /v1/jobs/{id}: any job's state and, once done, its output URLs (a client that lost a job's result event, such as a
+/// voice session that reconnected while its picture was made, asks here).
+fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, caller: pair.Caller) !void {
+    const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such job");
+    if (!caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such job"); // another device's: as if absent
+    const Err = struct { code: []const u8, message: []const u8 };
+    try app.table.mutex.lock(app.io);
+    defer app.table.mutex.unlock(app.io);
+    const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
+    for (urls, 0..) |*u, i| u.* = try std.fmt.allocPrint(a, "/v1/files/{s}/{s}", .{ j.id, j.files[i] });
+    try h.jsonValue(req, a, .ok, .{
+        .id = j.id,
+        .object = "job",
+        .kind = @tagName(j.kind()),
+        .status = @tagName(j.status),
+        .progress = j.percent,
+        .phase = try a.dupe(u8, j.phaseName()),
+        .urls = urls,
+        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+    });
 }
 
 fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !void {
@@ -379,16 +565,23 @@ fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !
 
 // ---------------------------------------------------------------- files
 
+/// The content type of an output file, by its extension.
+pub fn contentType(name: []const u8) []const u8 {
+    const types = [_][2][]const u8{ .{ ".png", "image/png" }, .{ ".mp4", "video/mp4" }, .{ ".wav", "audio/wav" }, .{ ".json", "application/json" }, .{ ".txt", "text/plain; charset=utf-8" } };
+    for (types) |t| if (std.mem.endsWith(u8, name, t[0])) return t[1];
+    return "application/octet-stream";
+}
+
 /// GET /v1/files/{job}/{name}: an output file (`response_format: url`).
-fn file(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8) !void {
+fn file(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8, caller: pair.Caller) !void {
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return h.fail(req, a, 404, "invalid_request_error", "no such file");
     const j = app.table.get(app.io, rest[0..slash]) orelse return h.fail(req, a, 404, "invalid_request_error", "no such file");
+    if (!caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such file");
     const name = rest[slash + 1 ..];
     for (j.files) |f| {
         if (!eql(f, name)) continue;
         const data = try Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(1 << 31));
-        const ct = if (std.mem.endsWith(u8, f, ".png")) "image/png" else if (std.mem.endsWith(u8, f, ".mp4")) "video/mp4" else "application/octet-stream";
-        return h.bytes(req, ct, data);
+        return h.bytes(req, contentType(f), data);
     }
     return h.fail(req, a, 404, "invalid_request_error", "no such file");
 }

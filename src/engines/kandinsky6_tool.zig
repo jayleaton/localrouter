@@ -46,7 +46,14 @@ const k6 = @import("kandinsky6");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .default_size = .{ k6.shapes.out_width, k6.shapes.out_height } };
+pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license };
+
+/// The weights' licence, unless a tool's config names its own.
+pub const license: @import("../config.zig").License = .{
+    .name = "MIT License",
+    .url = "https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers",
+    .commercial = true,
+};
 
 const S = k6.shapes;
 const P = k6.pipeline;
@@ -57,18 +64,30 @@ const default_resident_mb = 92_000;
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image => 0,
+        .image, .speech, .transcription, .chat, .decision => 0,
         // frames (at most the nominal size) and waveform on the host, the WAV, and ffmpeg's own buffers
         .video => S.sample_frames * S.width * S.height * 3 + S.audio_samples * (4 + 2) + (64 << 20),
     };
     return .{ .resident = engine.optionInt(cfg, "resident_mb", default_resident_mb) << 20, .working = working };
 }
 
+/// A video without a size gets the one this model supports, 832x480.
+fn defaults(cfg: *const ToolConfig, req: *Request) void {
+    _ = cfg;
+    switch (req.*) {
+        .video => |*v| if (v.width == 0 and v.height == 0) {
+            v.width = S.out_width;
+            v.height = S.out_height;
+        },
+        .image, .speech, .transcription, .chat, .decision => {},
+    }
+}
+
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     _ = cfg;
     const v = switch (req.*) {
         .video => |x| x,
-        .image => {
+        .image, .speech, .transcription, .chat, .decision => {
             why.writeAll("Kandinsky-6 Pro distilled makes videos only") catch {};
             return false;
         },
@@ -122,7 +141,7 @@ const Kandinsky6 = struct {
         const t: *Kandinsky6 = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .video => |x| x,
-            .image => return engine.Refused.Refused,
+            .image, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
         var why_buf: [256]u8 = undefined;
         var why: std.Io.Writer = .fixed(&why_buf);
@@ -144,7 +163,7 @@ const Kandinsky6 = struct {
         const wav = try std.fs.path.join(arena, &.{ job.dir, "audio.wav" });
         try mp4.writeWav(t.env.io, wav, wave, S.sample_rate, 1);
         const out = try std.fs.path.join(arena, &.{ job.dir, "video.mp4" });
-        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = geo.width, .height = geo.height, .fps = S.fps, .wav = wav, .shortest = false });
+        var w = try mp4.Writer.open(t.env.io, arena, out, .{ .width = geo.width, .height = geo.height, .fps = S.fps, .wav = wav, .shortest = false, .marker = .{ .model = t.cfg.id } });
         errdefer w.abort();
         for (0..geo.frames) |f| {
             try w.frame(frames[f * frame_bytes ..][0..frame_bytes]);
@@ -190,10 +209,11 @@ test "only the native request passes the check: 832x480, also when the size is o
     var why: std.Io.Writer = .fixed(&buf);
     const ok: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480 } };
     try std.testing.expect(check(&cfg, &ok, &why));
-    // a request naming no size gets the model's default (request.resolveSize), which passes
-    const omitted = @import("../tool/request.zig").resolveSize(null, engine.defaultSize(&cfg), .{ 1344, 768 }).?;
-    try std.testing.expectEqual([2]u32{ 832, 480 }, omitted);
-    const dflt: Request = .{ .video = .{ .prompt = "waves", .width = omitted[0], .height = omitted[1] } };
+    // a request naming no size gets the model's own (engine.fill), which passes
+    var dflt: Request = .{ .video = .{ .prompt = "waves" } };
+    engine.fill(&cfg, &dflt);
+    try std.testing.expectEqual(@as(u32, 832), dflt.video.width);
+    try std.testing.expectEqual(@as(u32, 480), dflt.video.height);
     try std.testing.expect(check(&cfg, &dflt, &why));
     // portrait, the generation size, other sizes and the API's generic default are refused before any GPU work
     for ([_][2]u32{ .{ 480, 832 }, .{ 864, 480 }, .{ 640, 480 }, .{ 0, 0 }, .{ 1344, 768 } }) |wh| {

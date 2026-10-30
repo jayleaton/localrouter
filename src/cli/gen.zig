@@ -92,7 +92,7 @@ fn video(client: *std.http.Client, io: Io, a: std.mem.Allocator, o: Opts) !u8 {
     const body = try std.json.Stringify.valueAlloc(a, .{
         .model = o.model,
         .prompt = o.prompt,
-        .size = o.size, // absent: the server picks the model's default size
+        .size = o.size, // null: the model's own size
         .seconds = o.seconds orelse "5",
         .seed = if (o.seed) |s| try std.fmt.parseInt(u64, s, 10) else null,
         .steps = try int(o.steps, 0),

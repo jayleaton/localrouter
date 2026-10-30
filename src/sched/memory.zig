@@ -6,16 +6,28 @@ const posix = std.posix;
 
 /// MemAvailable from /proc/meminfo in bytes; null when it cannot be read.
 pub fn available() ?u64 {
+    return meminfo("MemAvailable:");
+}
+
+/// MemTotal from /proc/meminfo in bytes; null when it cannot be read.
+pub fn total() ?u64 {
+    return meminfo("MemTotal:");
+}
+
+fn meminfo(comptime key: []const u8) ?u64 {
     var buf: [4096]u8 = undefined;
     const fd = posix.openatZ(posix.AT.FDCWD, "/proc/meminfo", .{}, 0) catch return null;
     defer _ = posix.system.close(fd);
     const n = posix.read(fd, &buf) catch return null;
-    return parseAvailable(buf[0..n]);
+    return parseField(buf[0..n], key);
 }
 
 /// Parses the "MemAvailable:  123 kB" line.
 pub fn parseAvailable(text: []const u8) ?u64 {
-    const key = "MemAvailable:";
+    return parseField(text, "MemAvailable:");
+}
+
+fn parseField(text: []const u8, key: []const u8) ?u64 {
     const at = std.mem.indexOf(u8, text, key) orelse return null;
     const rest = std.mem.trimStart(u8, text[at + key.len ..], " \t");
     const end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;

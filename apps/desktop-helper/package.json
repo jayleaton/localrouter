@@ -1,0 +1,24 @@
+{
+  "name": "localrouter-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LocalRouter's desktop helper: lets the assistant on the box use this Mac, with every action granted by the box",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "localrouter-desktop": "src/main.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts run",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

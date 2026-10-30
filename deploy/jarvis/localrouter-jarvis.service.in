@@ -1,0 +1,26 @@
+# LocalRouter, the whole Jarvis box: a systemd user unit (install.sh renders the @…@ paths and installs it).
+# Loopback only; tailscale serve puts HTTPS in front of it for the tailnet (install.sh).
+[Unit]
+Description=LocalRouter Jarvis (chat, voice, image, video) on @HOST@:@PORT@
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=@DEPLOY@
+Environment=PATH=@J@/bin:/usr/local/bin:/usr/bin:/bin
+# this install's own paths for the scripts the unit runs (leftovers.sh): another prefix's Drama 3 server is not ours
+Environment=JARVIS=@J@ DEPLOY=@DEPLOY@ PORT=@PORT@ DRAMA_ROOT=@DRAMA_ROOT@
+ExecStart=@DEPLOY@/current/zig-out/bin/localrouter serve --config @DEPLOY@/config.json --host @HOST@ --port @PORT@ --data @DEPLOY@/data
+# Workers are in this unit's cgroup: stopping it stops every model. GB10 memory is unified; 112 GiB leaves the host room.
+KillMode=control-group
+MemoryMax=112G
+# Drama 3's worker stops its server unit (up to 120 s) before it exits: give it the time, then clean up after a kill.
+TimeoutStopSec=180
+ExecStopPost=-@DEPLOY@/current/deploy/jarvis/leftovers.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

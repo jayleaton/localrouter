@@ -126,7 +126,7 @@ pub const Prof = struct {
             return;
         }
         try p.evs[p.n - 1].synchronize();
-        for (1..p.n) |i| p.ms[@intFromEnum(p.cls[i])] += try cuda.Event.elapsedMs(p.evs[i - 1], p.evs[i]);
+        for (1..p.n) |i| p.ms[@backingInt(p.cls[i])] += try cuda.Event.elapsedMs(p.evs[i - 1], p.evs[i]);
         p.n = 0;
     }
 
@@ -258,9 +258,9 @@ pub const Tile = struct {
         t.w = try loadWeights(&t.store, up, p);
         try t.store.done(up); // the weights have landed
         const sizes = .{
-            .{ "rows", max_p * zc * 2 },           .{ "pq", max_p * zc * 2 },        .{ "hs", max_s * dim * 2 },        .{ "n", max_s * dim * 2 },
-            .{ "qkv", max_s * 3 * dim * 2 },       .{ "table", max_s * 24 * 4 * 2 }, .{ "vt", heads * hd * max_sp * 2 }, .{ "sc", heads * max_s * max_sp * 2 },
-            .{ "att", max_s * dim * 2 },           .{ "gu", max_s * 2 * ffn * 2 },   .{ "act", max_s * ffn * 2 },       .{ "proj", max_p * 3 * 4 * 16 * 16 * 2 },
+            .{ "rows", max_p * zc * 2 },     .{ "pq", max_p * zc * 2 },        .{ "hs", max_s * dim * 2 },         .{ "n", max_s * dim * 2 },
+            .{ "qkv", max_s * 3 * dim * 2 }, .{ "table", max_s * 24 * 4 * 2 }, .{ "vt", heads * hd * max_sp * 2 }, .{ "sc", heads * max_s * max_sp * 2 },
+            .{ "att", max_s * dim * 2 },     .{ "gu", max_s * 2 * ffn * 2 },   .{ "act", max_s * ffn * 2 },        .{ "proj", max_p * 3 * 4 * 16 * 16 * 2 },
         };
         inline for (sizes) |e| @field(t, e[0]) = try t.store.alloc(e[1]);
         return t;

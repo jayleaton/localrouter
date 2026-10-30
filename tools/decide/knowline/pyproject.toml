@@ -1,0 +1,35 @@
+[project]
+name = "localrouter-decide-knowline"
+version = "0.1.0"
+description = "KnowLine-4B typed-decision server (/v1/systemone) for LocalRouter's openai_server engine"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.13.0",
+    "transformers==5.19.0",
+    "requests>=2.32,<3",
+    "accelerate>=1.10,<2", # transformers' own loader (KNOWLINE_STOCK_LOAD=1, the comparison run); serve.py loads without it
+]
+
+[tool.uv]
+package = false
+# As tools/speech/whisper: x86_64 Linux (DEV, CPU wheels) and aarch64 Linux (GB10 / DGX Spark, CUDA 13.0 wheels).
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "platform_machine == 'x86_64'" },
+    { index = "pytorch-cu130", marker = "platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

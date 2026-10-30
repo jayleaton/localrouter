@@ -1,0 +1,372 @@
+diff --git a/common/cpp/audioapi/HostObjects/AudioContextHostObject.cpp b/common/cpp/audioapi/HostObjects/AudioContextHostObject.cpp
+index c39498080d4abba72a11432e48e8b03357f5b0d0..b4d2e83d346fe1e775f8be46ce89373076646038 100644
+--- a/common/cpp/audioapi/HostObjects/AudioContextHostObject.cpp
++++ b/common/cpp/audioapi/HostObjects/AudioContextHostObject.cpp
+@@ -29,10 +29,10 @@ AudioContextHostObject::AudioContextHostObject(
+ JSI_HOST_FUNCTION_IMPL(AudioContextHostObject, close) {
+   auto audioContext = std::static_pointer_cast<AudioContext>(context_);
+   auto promise = promiseVendor_->createAsyncPromise([audioContext = std::move(audioContext)]() {
+-    return [audioContext](jsi::Runtime &runtime) {
+-      audioContext->close();
+-      return jsi::Value::undefined();
+-    };
++    // Engine teardown can wait for the audio thread. Never do that on the
++    // JS resolver thread, where it freezes cancellation and the entire UI.
++    audioContext->close();
++    return [](jsi::Runtime &runtime) { return jsi::Value::undefined(); };
+   });
+ 
+   return promise;
+diff --git a/ios/audioapi/ios/core/IOSAudioRecorder.mm b/ios/audioapi/ios/core/IOSAudioRecorder.mm
+index ad7617a1713a16b94aef6308c4cba45347c7a5bc..edbc4b3b00707276bd523e3fa9cd267c5ebabc6a 100644
+--- a/ios/audioapi/ios/core/IOSAudioRecorder.mm
++++ b/ios/audioapi/ios/core/IOSAudioRecorder.mm
+@@ -87,8 +87,12 @@ void IOSAudioRecorder::runSideEffects(const AudioBufferList *inputBuffer, int nu
+ 
+   if (usesCallback()) {
+     if (auto lock = Locker::tryLock(callbackMutex_)) {
+-      std::static_pointer_cast<IOSRecorderCallback>(dataCallback_)
+-          ->receiveAudioData(inputBuffer, numFrames);
++      // Re-check under the lock (as Android does): JavaScript can replace or clear the
++      // callback while recording (`onAudioReady` again), nulling it between the check above and here.
++      auto dataCallback = std::static_pointer_cast<IOSRecorderCallback>(dataCallback_);
++      if (usesCallback() && dataCallback != nullptr) {
++        dataCallback->receiveAudioData(inputBuffer, numFrames);
++      }
+     }
+   }
+ 
+diff --git a/ios/audioapi/ios/core/NativeAudioPlayer.m b/ios/audioapi/ios/core/NativeAudioPlayer.m
+index d5292e417fdf5307ed57eb2d16d8b9d634afa1a8..91ddcf927ad84c61a1d27cb32635183858e4dd90 100644
+--- a/ios/audioapi/ios/core/NativeAudioPlayer.m
++++ b/ios/audioapi/ios/core/NativeAudioPlayer.m
+@@ -65,7 +65,10 @@
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+   AudioSessionManager *sessionManager = [AudioSessionManager sharedInstance];
+-  assert(audioEngine != nil);
++  // The engine is gone once the module is invalidated (a JavaScript reload); fail instead of aborting.
++  if (audioEngine == nil) {
++    return false;
++  }
+ 
+   NSError *error = nil;
+   if (![sessionManager ensureActive:false error:&error]) {
+@@ -97,7 +100,9 @@
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+   AudioSessionManager *sessionManager = [AudioSessionManager sharedInstance];
+-  assert(audioEngine != nil);
++  if (audioEngine == nil) {
++    return false;
++  }
+ 
+   NSError *error = nil;
+   if (![sessionManager ensureActive:false error:&error]) {
+@@ -111,10 +116,10 @@
+ - (void)suspend
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+-  assert(audioEngine != nil);
+-
+-  [self detachSourceNodeIfAttached:audioEngine];
+-  [audioEngine stopIfPossible];
++  if (audioEngine != nil) {
++    [self detachSourceNodeIfAttached:audioEngine];
++    [audioEngine stopIfPossible];
++  }
+ }
+ 
+ - (void)cleanup
+diff --git a/ios/audioapi/ios/core/NativeAudioRecorder.m b/ios/audioapi/ios/core/NativeAudioRecorder.m
+index a90b3fec8e5eafaf067a785d390def2b2f1ac469..d99f07aa641759768e17065c5f52f6fa89760de1 100644
+--- a/ios/audioapi/ios/core/NativeAudioRecorder.m
++++ b/ios/audioapi/ios/core/NativeAudioRecorder.m
+@@ -99,7 +99,15 @@ static inline uint32_t nextPowerOfTwo(uint32_t x)
+ - (BOOL)start:(NSError **)error
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+-  assert(audioEngine != nil);
++  // The engine is gone once the module is invalidated (a JavaScript reload); fail instead of aborting.
++  if (audioEngine == nil) {
++    if (error != nil) {
++      *error = [NSError errorWithDomain:@"NativeAudioRecorder"
++                                   code:2
++                               userInfo:@{NSLocalizedDescriptionKey : @"The audio engine is not available"}];
++    }
++    return NO;
++  }
+ 
+   // AudioEngine allows us to attach and connect nodes at runtime but with few
+   // limitations in this case if it is the first recorder node and player
+@@ -146,11 +154,14 @@ static inline uint32_t nextPowerOfTwo(uint32_t x)
+ - (void)stop
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+-  assert(audioEngine != nil);
+   self.inputArmed = NO;
+-  [audioEngine detachInputNode];
+-  [audioEngine stopIfPossible];
+-  [audioEngine restartAudioEngine];
++  // A recorder still running when JavaScript reloads is destroyed after the module has torn the
++  // engine down (and its input with it); asserting here aborted the app mid-call.
++  if (audioEngine != nil) {
++    [audioEngine detachInputNode];
++    [audioEngine stopIfPossible];
++    [audioEngine restartAudioEngine];
++  }
+   self.resolvedInputFormat = nil;
+   self.resolvedBufferSize = 0;
+ }
+@@ -158,18 +169,16 @@ static inline uint32_t nextPowerOfTwo(uint32_t x)
+ - (void)pause
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+-  assert(audioEngine != nil);
+-
+   self.inputArmed = NO;
+-  [audioEngine pauseIfNecessary];
++  if (audioEngine != nil) {
++    [audioEngine pauseIfNecessary];
++  }
+ }
+ 
+ - (BOOL)resume
+ {
+   AudioEngine *audioEngine = [AudioEngine sharedInstance];
+-  assert(audioEngine != nil);
+-
+-  if (![audioEngine startIfNecessary]) {
++  if (audioEngine == nil || ![audioEngine startIfNecessary]) {
+     return NO;
+   }
+ 
+diff --git a/ios/audioapi/ios/system/AudioEngine.h b/ios/audioapi/ios/system/AudioEngine.h
+index 71279285cf833428f31e1f9c33d05b33c5c15b74..a180fd52ce2c60361b37ae00c7709618e548da2a 100644
+--- a/ios/audioapi/ios/system/AudioEngine.h
++++ b/ios/audioapi/ios/system/AudioEngine.h
+@@ -53,6 +53,7 @@ typedef NS_ENUM(NSInteger, AudioEngineState) {
+ - (void)stopIfPossible;
+ 
+ - (void)restartAudioEngine;
++- (void)handleConfigurationChangeFromEngineAddress:(uintptr_t)notifyingEngineAddress;
+ 
+ - (void)logAudioEngineState;
+ 
+diff --git a/ios/audioapi/ios/system/AudioEngine.mm b/ios/audioapi/ios/system/AudioEngine.mm
+index d0e77d89c1d26f721e093702b2fd75e02339a86e..0262e6544cf3f8ce6976534754f73985d719e8fb 100644
+--- a/ios/audioapi/ios/system/AudioEngine.mm
++++ b/ios/audioapi/ios/system/AudioEngine.mm
+@@ -27,6 +27,8 @@
+ @interface AudioEngine () {
+   std::recursive_mutex _engineLock;
+   BOOL _isRebuildingAudioEngine;
++  BOOL _voiceProcessingApplied;
++  NSString *_runningConfiguration;
+ }
+ 
+ @property (nonatomic, strong)
+@@ -39,6 +41,9 @@
+ - (AVAudioFormat *)currentInputConnectionFormat;
+ - (void)materializeSourceNodeWithId:(NSString *)sourceNodeId;
+ - (BOOL)materializeInputNodeIfNeeded;
++- (void)applyVoiceProcessing;
++- (void)applyVoiceProcessingDucking:(AVAudioInputNode *)inputNode;
++- (NSString *)configurationSignature;
+ - (void)materializeTrackedNodesIfNeeded;
+ 
+ - (AVAudioFormat *)liveInputFormat;
+@@ -88,6 +93,8 @@ static AudioEngine *_sharedInstance = nil;
+   self.sourceFormats = [[NSMutableDictionary alloc] init];
+   self.inputNode = nil;
+   self.graphNeedsRebuild = hadGraph;
++  _voiceProcessingApplied = NO;
++  _runningConfiguration = nil;
+ 
+   if (!preserveSessionDeactivationState) {
+     self.sessionDeactivationInvalidatedGraph = false;
+@@ -142,6 +149,50 @@ static AudioEngine *_sharedInstance = nil;
+   }
+ }
+ 
++// Backport of upstream 6f579e9: voiceChat must opt into AVAudioEngine voice I/O.
++// Apply before reading formats or connecting nodes; voice processing changes the
++// hardware format. This app uses voiceChat only for full-duplex conversation.
++- (void)applyVoiceProcessing
++{
++  BOOL wantsVoiceProcessing =
++      self.inputRegistration != nil &&
++      [self.sessionManager.desiredMode isEqualToString:AVAudioSessionModeVoiceChat];
++  if ((!wantsVoiceProcessing && !_voiceProcessingApplied) || self.audioEngine == nil) {
++    return;
++  }
++  AVAudioInputNode *systemInputNode = self.audioEngine.inputNode;
++  if (systemInputNode.isVoiceProcessingEnabled == wantsVoiceProcessing) {
++    _voiceProcessingApplied = wantsVoiceProcessing;
++    [self applyVoiceProcessingDucking:systemInputNode];
++    return;
++  }
++  if ([self.audioEngine isRunning]) {
++    [self.audioEngine stop];
++  }
++  NSError *error = nil;
++  if (![systemInputNode setVoiceProcessingEnabled:wantsVoiceProcessing error:&error]) {
++    NSLog(@"[AudioEngine] Could not configure voice processing: %@", error);
++    return;
++  }
++  _voiceProcessingApplied = wantsVoiceProcessing;
++  [self applyVoiceProcessingDucking:systemInputNode];
++}
++
++// Voice processing ducks other apps' audio by default, for as long as it runs. Sidebud keeps it on
++// only while a call streams, and asks for the least ducking, only while someone is speaking.
++- (void)applyVoiceProcessingDucking:(AVAudioInputNode *)inputNode
++{
++  if (!inputNode.isVoiceProcessingEnabled) {
++    return;
++  }
++  if (@available(iOS 17.0, *)) {
++    AVAudioVoiceProcessingOtherAudioDuckingConfiguration ducking;
++    ducking.enableAdvancedDucking = YES;
++    ducking.duckingLevel = AVAudioVoiceProcessingOtherAudioDuckingLevelMin;
++    inputNode.voiceProcessingOtherAudioDuckingConfiguration = ducking;
++  }
++}
++
+ - (void)materializeSourceNodeWithId:(NSString *)sourceNodeId
+ {
+   AudioEngineSourceRegistration *registration = self.sourceRegistrations[sourceNodeId];
+@@ -150,6 +201,7 @@ static AudioEngine *_sharedInstance = nil;
+     return;
+   }
+ 
++  [self applyVoiceProcessing];
+   AVAudioFormat *format =
+       [[AVAudioFormat alloc] initStandardFormatWithSampleRate:registration.sampleRate
+                                                      channels:registration.channelCount];
+@@ -219,6 +271,7 @@ static AudioEngine *_sharedInstance = nil;
+     return NO;
+   }
+ 
++  [self applyVoiceProcessing];
+   AVAudioFormat *inputFormat = [self currentInputConnectionFormat];
+ 
+   if (inputFormat == nil) {
+@@ -234,6 +287,7 @@ static AudioEngine *_sharedInstance = nil;
+ 
+ - (void)materializeTrackedNodesIfNeeded
+ {
++  [self applyVoiceProcessing];
+   NSArray<NSString *> *sourceNodeIds =
+       [[self.sourceRegistrations allKeys] sortedArrayUsingSelector:@selector(compare:)];
+   for (NSString *sourceNodeId in sourceNodeIds) {
+@@ -407,6 +461,7 @@ static AudioEngine *_sharedInstance = nil;
+   }
+ 
+   self.state = AudioEngineState::AudioEngineStateRunning;
++  _runningConfiguration = [self configurationSignature];
+   self.sessionDeactivationInvalidatedGraph = false;
+   [self notifyConfigurationChanges];
+ }
+@@ -500,6 +555,7 @@ static AudioEngine *_sharedInstance = nil;
+   }
+ 
+   self.state = AudioEngineState::AudioEngineStateRunning;
++  _runningConfiguration = [self configurationSignature];
+   self.sessionDeactivationInvalidatedGraph = false;
+   return true;
+ }
+@@ -568,6 +624,54 @@ static AudioEngine *_sharedInstance = nil;
+   }
+ }
+ 
++// Voice-I/O setup posts configuration/route notifications too. Once the engine
++// is running with those same formats and devices, rebuilding would enable voice
++// I/O again and post another notification forever. Compare on the engine lock,
++// after delivery to the main queue, and ignore notifications from retired engines.
++- (NSString *)configurationSignature
++{
++  AVAudioSession *session = [AVAudioSession sharedInstance];
++  NSMutableArray<NSString *> *parts = [NSMutableArray array];
++  AVAudioFormat *output = [self.audioEngine.outputNode inputFormatForBus:0];
++  [parts addObject:[NSString stringWithFormat:@"out:%f:%u", output.sampleRate, output.channelCount]];
++  if (self.inputRegistration != nil) {
++    AVAudioFormat *input = [self.audioEngine.inputNode outputFormatForBus:0];
++    [parts addObject:[NSString stringWithFormat:@"in:%f:%u", input.sampleRate, input.channelCount]];
++  }
++  for (AVAudioSessionPortDescription *port in session.currentRoute.inputs) {
++    [parts addObject:[@"input:" stringByAppendingString:port.UID]];
++  }
++  for (AVAudioSessionPortDescription *port in session.currentRoute.outputs) {
++    [parts addObject:[@"output:" stringByAppendingString:port.UID]];
++  }
++  return [parts componentsJoinedByString:@"|"];
++}
++
++- (void)handleConfigurationChangeFromEngineAddress:(uintptr_t)notifyingEngineAddress
++{
++  std::scoped_lock lock(_engineLock);
++  if (notifyingEngineAddress != 0 &&
++      notifyingEngineAddress != (uintptr_t)(__bridge void *)self.audioEngine) {
++    return;
++  }
++  if (![self hasTrackedGraph]) {
++    return;
++  }
++  if (!self.graphNeedsRebuild && !self.sessionDeactivationInvalidatedGraph &&
++      [_runningConfiguration isEqualToString:[self configurationSignature]]) {
++    // AVAudioEngine stops itself on configuration notifications. If the format
++    // is unchanged, resume this graph instead of recreating voice I/O (which
++    // posts another notification and can repeatedly invalidate the input).
++    if (![self.audioEngine isRunning]) {
++      [self startEngine];
++      [self notifyConfigurationChanges];
++    }
++    return;
++  }
++  [self.sessionManager markInactive];
++  [self rebuildAudioEngineAndResumeIfNeeded];
++}
++
+ - (void)restartAudioEngine
+ {
+   std::scoped_lock lock(_engineLock);
+diff --git a/ios/audioapi/ios/system/AudioSessionManager.mm b/ios/audioapi/ios/system/AudioSessionManager.mm
+index d11583738a67f9d9100ed163f60db04ac691881d..b1d164419b5333740fa9fcee09d248e711d35a03 100644
+--- a/ios/audioapi/ios/system/AudioSessionManager.mm
++++ b/ios/audioapi/ios/system/AudioSessionManager.mm
+@@ -139,6 +139,12 @@ static AudioSessionManager *_sharedInstance = nil;
+ 
+   if (configChanged && self.isActive) {
+     [self configureAudioSession:nil];
++    // A running graph takes the new mode now: voice processing follows it (on for voiceChat,
++    // off otherwise), without stopping capture for longer than the rebuild.
++    AudioEngine *audioEngine = [AudioEngine sharedInstance];
++    if (audioEngine != nil && [audioEngine isEngineRunning]) {
++      [audioEngine restartAudioEngine];
++    }
+   }
+ }
+ 
+diff --git a/ios/audioapi/ios/system/SystemNotificationManager.mm b/ios/audioapi/ios/system/SystemNotificationManager.mm
+index 5b37cbfdb045c0acb598311eab682d89799a580d..34ea57c3aa887a3fabc15f87231228821a349407 100644
+--- a/ios/audioapi/ios/system/SystemNotificationManager.mm
++++ b/ios/audioapi/ios/system/SystemNotificationManager.mm
+@@ -247,11 +247,13 @@ static NSString *NotificationManagerContext = @"SystemNotificationManagerContext
+ - (void)handleEngineConfigurationChange:(NSNotification *)notification
+ {
+   AudioEngine *audioEngine = self.audioAPIModule.audioEngine;
+-  AudioSessionManager *sessionManager = self.audioAPIModule.audioSessionManager;
+-
++  // A notification can outlive the engine it identifies. The device zombie
++  // trace caught a retain of a retired engine in the queued handler. Carry
++  // only its address for comparison; never retain or message the old sender.
++  __unsafe_unretained id sender = notification.object;
++  uintptr_t notifyingEngineAddress = (uintptr_t)(__bridge void *)sender;
+   dispatch_async(dispatch_get_main_queue(), ^{
+-    [sessionManager markInactive];
+-    [audioEngine restartAudioEngine];
++    [audioEngine handleConfigurationChangeFromEngineAddress:notifyingEngineAddress];
+   });
+ }
+ 

@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install Zig 0.17.0 and ffmpeg
         run: |
           sudo apt-get update
@@ -17,5 +19,72 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig"
           tar -xJf /tmp/zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - name: the installer's scripts and manifests parse, and its plan runs (INSTALL.md)
+        run: |
+          for f in tools/install/*.sh deploy/jarvis/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
+          for f in deploy/profiles/*.json tools/twin/packs/sources/*.json tools/twin/packs/built/*.json; do jq empty "$f"; done
+          for p in deploy/profiles/*.json; do tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
       - run: zig build
       - run: zig build test
+        timeout-minutes: 20
+      - name: zig fmt on the Zig files this change touches (prints what it would change)
+        if: always()
+        run: |
+          files=$(git diff --name-only --diff-filter=AMR "$(git merge-base origin/main HEAD)" -- '*.zig')
+          if [ -z "$files" ]; then exit 0; fi
+          zig fmt $files
+          git diff --exit-code -- $files
+  mobile:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: lint (expo lint)
+        run: pnpm lint
+      - name: type-check (the app, and the headless check under Node)
+        run: pnpm type-check
+      - name: unit tests (protocol, conversation, voice decisions)
+        run: pnpm test
+  desktop-helper:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/desktop-helper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop-helper/package-lock.json
+      - run: npm ci
+      - name: type-check (tsc --noEmit)
+        run: npm run type-check
+      - name: tests (vitest, fake backend)
+        run: npm test
+  companion:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/package-lock.json
+      - run: npm ci
+      - name: type-check (tsc --noEmit, the executor and the helper code it reuses)
+        run: npm run type-check
+      - name: lint (eslint)
+        run: npm run lint
+      - name: tests (vitest; policy parity with the box, approvals, the broker on the fake Mac)
+        run: npm test

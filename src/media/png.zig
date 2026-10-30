@@ -1,7 +1,9 @@
-//! PNG encoder: 8-bit RGB/RGBA, Up-filtered rows, zlib via std.compress.flate, no allocator needed.
+//! PNG encoder: 8-bit RGB/RGBA, Up-filtered rows, zlib via std.compress.flate, no allocator needed. Writes the
+//! machine-generated label (`marker`) on request, and adds it to a PNG made elsewhere (`mark`).
 const std = @import("std");
 const Writer = std.Io.Writer;
 const flate = std.compress.flate;
+const marker = @import("marker.zig");
 
 /// Pixel layout of the input buffer (8 bits per channel).
 pub const Format = enum { rgb8, rgba8 };
@@ -9,10 +11,12 @@ pub const Format = enum { rgb8, rgba8 };
 pub const Level = enum { fastest, fast, default, best };
 /// A tEXt chunk (key must be 1-79 Latin-1 bytes, value is Latin-1).
 pub const Text = struct { key: []const u8, value: []const u8 };
-/// Encoder options.
-pub const Options = struct { level: Level = .fast, text: []const Text = &.{} };
+/// Encoder options. `marker`: the machine-generated label, written right after IHDR (as `mark` inserts it).
+pub const Options = struct { level: Level = .fast, text: []const Text = &.{}, marker: ?marker.Marker = null };
 
-const signature = "\x89PNG\r\n\x1a\n";
+pub const signature = "\x89PNG\r\n\x1a\n";
+/// The XMP packet's iTXt keyword.
+const xmp_key = "XML:com.adobe.xmp";
 
 fn flateOptions(l: Level) flate.Compress.Options {
     return switch (l) {
@@ -83,14 +87,8 @@ pub fn encode(w: *Writer, pixels: []const u8, width: u32, height: u32, format: F
     try ihdr.put(&hdr);
     try ihdr.end();
 
-    for (opts.text) |t| {
-        if (t.key.len == 0 or t.key.len > 79) return error.InvalidTextKey;
-        var c = try Chunk.begin(w, "tEXt", t.key.len + 1 + t.value.len);
-        try c.put(t.key);
-        try c.put(&.{0});
-        try c.put(t.value);
-        try c.end();
-    }
+    if (opts.marker) |m| try writeMarker(w, m, true);
+    for (opts.text) |t| try writeText(w, t);
 
     var idat_buf: [16 * 1024]u8 = undefined;
     var idat: IdatWriter = .{
@@ -124,6 +122,59 @@ pub fn encode(w: *Writer, pixels: []const u8, width: u32, height: u32, format: F
     try iend.end();
 }
 
+fn writeText(w: *Writer, t: Text) !void {
+    if (t.key.len == 0 or t.key.len > 79) return error.InvalidTextKey;
+    var c = try Chunk.begin(w, "tEXt", t.key.len + 1 + t.value.len);
+    try c.put(t.key);
+    try c.put(&.{0});
+    try c.put(t.value);
+    try c.end();
+}
+
+/// The label's chunks: tEXt `Software` and `Comment`, then (with `with_xmp`) the XMP packet as an uncompressed iTXt.
+fn writeMarker(w: *Writer, m: marker.Marker, with_xmp: bool) !void {
+    var cbuf: [marker.comment_max]u8 = undefined;
+    try writeText(w, .{ .key = "Software", .value = marker.software });
+    try writeText(w, .{ .key = "Comment", .value = marker.comment(&cbuf, m) });
+    if (!with_xmp) return;
+    var xbuf: [marker.xmp_max]u8 = undefined;
+    const packet = marker.xmp(&xbuf, m);
+    // keyword, NUL, compression flag and method (none), empty language tag and translated keyword (two NULs)
+    var c = try Chunk.begin(w, "iTXt", xmp_key.len + 5 + packet.len);
+    try c.put(xmp_key);
+    try c.put(&.{ 0, 0, 0, 0, 0 });
+    try c.put(packet);
+    try c.end();
+}
+
+/// Adds the label to a PNG made elsewhere (a `cmd` tool's): the chunks go right after IHDR, everything else is copied
+/// byte for byte. Null when a text chunk already carries a label; the XMP packet is left out when the file has one.
+/// Caller frees the result.
+pub fn mark(gpa: std.mem.Allocator, data: []const u8, m: marker.Marker) !?[]u8 {
+    const ihdr_end = signature.len + 12 + 13;
+    if (data.len < ihdr_end or !std.mem.eql(u8, data[0..signature.len], signature) or !std.mem.eql(u8, data[12..16], "IHDR")) return error.NotPng;
+    var has_xmp = false;
+    var pos: usize = signature.len;
+    while (pos + 12 <= data.len) {
+        const len = std.mem.readInt(u32, data[pos..][0..4], .big);
+        if (len > data.len - pos - 12) return error.NotPng;
+        const tag = data[pos + 4 ..][0..4];
+        const body = data[pos + 8 ..][0..len];
+        if (std.mem.eql(u8, tag, "tEXt") or std.mem.eql(u8, tag, "iTXt")) {
+            if (marker.present(body)) return null;
+            if (std.mem.startsWith(u8, body, xmp_key ++ "\x00")) has_xmp = true;
+        }
+        if (std.mem.eql(u8, tag, "IEND")) break;
+        pos += 12 + len;
+    }
+    var out: Writer.Allocating = try .initCapacity(gpa, data.len + marker.comment_max + marker.xmp_max);
+    errdefer out.deinit();
+    try out.writer.writeAll(data[0..ihdr_end]);
+    try writeMarker(&out.writer, m, !has_xmp);
+    try out.writer.writeAll(data[ihdr_end..]);
+    return try out.toOwnedSlice();
+}
+
 const testing = std.testing;
 
 fn gradient(a: std.mem.Allocator, w: u32, h: u32, ch: usize) ![]u8 {
@@ -150,6 +201,7 @@ fn roundTrip(w: u32, h: u32, format: Format, opts: Options) !void {
     defer idat.deinit(a);
     var pos: usize = 8;
     var texts: usize = 0;
+    var labels: usize = 0;
     var saw_iend = false;
     while (pos < png.len) {
         const len = std.mem.readInt(u32, png[pos..][0..4], .big);
@@ -165,11 +217,13 @@ fn roundTrip(w: u32, h: u32, format: Format, opts: Options) !void {
         }
         if (std.mem.eql(u8, tag, "IDAT")) try idat.appendSlice(a, body);
         if (std.mem.eql(u8, tag, "tEXt")) texts += 1;
+        if (std.mem.eql(u8, tag, "iTXt") and std.mem.startsWith(u8, body, xmp_key ++ "\x00") and marker.present(body)) labels += 1;
         if (std.mem.eql(u8, tag, "IEND")) saw_iend = true;
         pos += 12 + len;
     }
     try testing.expect(saw_iend);
-    try testing.expectEqual(opts.text.len, texts);
+    try testing.expectEqual(opts.text.len + if (opts.marker != null) @as(usize, 2) else 0, texts); // Software, Comment
+    try testing.expectEqual(@as(usize, if (opts.marker != null) 1 else 0), labels);
 
     var in: std.Io.Reader = .fixed(idat.items);
     var win: [flate.max_window_len]u8 = undefined;
@@ -197,6 +251,49 @@ test "rgb and rgba round trip" {
 test "tEXt chunks and multi-chunk IDAT" {
     const t = [_]Text{ .{ .key = "prompt", .value = "a cat" }, .{ .key = "seed", .value = "42" } };
     try roundTrip(300, 200, .rgba8, .{ .level = .default, .text = &t });
+}
+
+/// The concatenated IDAT payloads of a PNG.
+fn idatBytes(a: std.mem.Allocator, data: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var pos: usize = signature.len;
+    while (pos < data.len) {
+        const len = std.mem.readInt(u32, data[pos..][0..4], .big);
+        if (std.mem.eql(u8, data[pos + 4 ..][0..4], "IDAT")) try out.appendSlice(a, data[pos + 8 ..][0..len]);
+        pos += 12 + len;
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "machine-generated label: chunks valid, pixel data identical, mark matches the writer and is idempotent" {
+    const a = testing.allocator;
+    const m: marker.Marker = .{ .model = "qwen-image", .edit = true };
+    const t = [_]Text{.{ .key = "seed", .value = "42" }};
+    try roundTrip(97, 61, .rgb8, .{ .text = &t, .marker = m }); // CRCs, chunk counts, pixels
+
+    const px = try gradient(a, 97, 61, 3);
+    defer a.free(px);
+    var plain: Writer.Allocating = .init(a);
+    defer plain.deinit();
+    try encode(&plain.writer, px, 97, 61, .rgb8, .{ .text = &t });
+    var labelled: Writer.Allocating = .init(a);
+    defer labelled.deinit();
+    try encode(&labelled.writer, px, 97, 61, .rgb8, .{ .text = &t, .marker = m });
+    const ia = try idatBytes(a, plain.written());
+    defer a.free(ia);
+    const ib = try idatBytes(a, labelled.written());
+    defer a.free(ib);
+    try testing.expectEqualSlices(u8, ia, ib); // the compressed pixels, byte for byte
+
+    const marked = (try mark(a, plain.written(), m)).?;
+    defer a.free(marked);
+    try testing.expectEqualSlices(u8, labelled.written(), marked);
+    try testing.expect((try mark(a, marked, m)) == null);
+    var cbuf: [marker.comment_max]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, marked, "Comment\x00" ++ "AI-edited") != null);
+    try testing.expect(std.mem.indexOf(u8, marked, marker.comment(&cbuf, m)) != null);
+    try testing.expect(std.mem.indexOf(u8, marked, marker.composite) != null);
+    try testing.expectError(error.NotPng, mark(a, "not a png at all, just some bytes here", m));
 }
 
 test "invalid dimensions" {

@@ -73,6 +73,9 @@ pub const Block = struct {
     norm_k: u64,
 };
 
+/// Bytes of codes a streamed FP8 slice reads (rounded down to whole 64-row blocks).
+const fp8_slice: usize = 16 << 20;
+
 /// Device memory owned together, and the pack loaders every engine shares (`upload.zig` moves the bytes): plain
 /// tensors, f32 scalars, and block linears in the layouts the kernels read. A load ends with `done`, which waits for
 /// its copies and kernels and frees the load's scratch.
@@ -84,6 +87,7 @@ pub const Store = struct {
     host: std.ArrayList(u8) = .empty,
     tmp: std.ArrayList(u8) = .empty,
     bulk: []align(block) u8 = &.{},
+    bulk2: []align(block) u8 = &.{}, // the streamed FP8 load's second slice
     staged: ?cuda.DeviceBuffer = null,
     stream: ?cuda.Stream = null, // where pack4 may still read `staged`
 
@@ -114,6 +118,8 @@ pub const Store = struct {
         w.tmp = .empty;
         w.gpa.free(w.bulk);
         w.bulk = &.{};
+        w.gpa.free(w.bulk2);
+        w.bulk2 = &.{};
     }
 
     pub fn alloc(w: *Store, n: usize) !u64 {
@@ -150,6 +156,54 @@ pub const Store = struct {
         }
         const from = try p.readAligned(io, t, 0, t.len(), w.bulk);
         return w.bulk[from..][0..t.len()];
+    }
+
+    /// `w.bulk` and `w.bulk2` of at least `need` bytes each.
+    fn slices(w: *Store, need: usize) !void {
+        for ([_]*[]align(block) u8{ &w.bulk, &w.bulk2 }) |b| {
+            if (b.len >= need) continue;
+            w.gpa.free(b.*);
+            b.* = &.{};
+            b.* = try w.gpa.alignedAlloc(u8, .fromByteUnits(block), need);
+        }
+    }
+
+    /// Codes rows [row0, row0 + rows) of `t` (k bytes a row) into `buf`; where they start in it.
+    fn readRows(io: std.Io, p: *const Pack, t: Tensor, k: usize, row0: usize, rows: usize, buf: []align(block) u8) anyerror!usize {
+        return p.readAligned(io, t, row0 * k, rows * k, buf);
+    }
+
+    /// An FP8 linear's codes [n, k] to `dst` in fragment order (npad rows), read in row slices into two buffers: the
+    /// next slice is read on `io` while this one is reordered into the upload chunks, so the read overlaps the layout
+    /// work instead of preceding it. Every output byte is the one `fp8Order` makes.
+    fn fp8Codes(w: *Store, io: std.Io, p: *const Pack, up: *Uploader, t: Tensor, n: usize, k: usize, npad: usize, dst: u64) !void {
+        const blk = 64 * k;
+        const per = @max(1, fp8_slice / blk) * 64; // rows a slice, whole 64-row blocks
+        if (p.direct < 0 or n <= per) { // one slice (or no direct reads): the whole tensor, then its layout
+            const codes = try w.readBulk(io, p, t);
+            return up.produce(dst, npad * k, blk, Fp8Fill{ .codes = codes, .n = n, .k = k }, Fp8Fill.fill);
+        }
+        try w.slices(per * k + 2 * block);
+        const bufs = [2][]align(block) u8{ w.bulk, w.bulk2 };
+        var cur: usize = 0;
+        var lead = try readRows(io, p, t, k, 0, per, bufs[0]);
+        var row0: usize = 0;
+        while (row0 < n) {
+            const rows = @min(per, n - row0);
+            const next0 = row0 + rows;
+            var pending: ?std.Io.Future(anyerror!usize) = null;
+            if (next0 < n) pending = io.async(readRows, .{ io, p, t, k, next0, @min(per, n - next0), bufs[1 - cur] });
+            errdefer if (pending) |*f| {
+                _ = f.await(io) catch {};
+            };
+            const b0 = row0 / 64;
+            const b1 = if (next0 < n) next0 / 64 else npad / 64; // the last slice also makes the zero rows to npad
+            const fill: Fp8RowsFill = .{ .rows = bufs[cur][lead..][0 .. rows * k], .row0 = row0, .n = n, .k = k, .b0 = b0 };
+            try up.produce(dst + b0 * blk, (b1 - b0) * blk, blk, fill, Fp8RowsFill.fill);
+            if (pending) |*f| lead = try f.await(io);
+            cur = 1 - cur;
+            row0 = next0;
+        }
     }
 
     pub fn scalar(io: std.Io, p: *const Pack, name: []const u8) !f64 {
@@ -197,6 +251,34 @@ pub const Store = struct {
         }
     };
 
+    /// `repack.fp8OrderRows` of one slice into an upload chunk, its 64-row blocks split over up to 4 threads.
+    const Fp8RowsFill = struct {
+        rows: []const u8,
+        row0: usize,
+        n: usize,
+        k: usize,
+        b0: usize, // the slice's first block (produce's offsets start at 0)
+
+        fn fill(c: Fp8RowsFill, at: usize, out: []u8) void {
+            const blk = 64 * c.k;
+            const first = c.b0 + at / blk;
+            const nb = out.len / blk;
+            const per = (nb + 3) / 4;
+            var ts: [4]?std.Thread = @splat(null);
+            var i: usize = 0;
+            while (i * per < nb) : (i += 1) {
+                const lo = i * per;
+                const hi = @min(nb, lo + per);
+                const args = .{ c.rows, c.row0, c.n, c.k, first + lo, first + hi, out[lo * blk .. hi * blk] };
+                ts[i] = std.Thread.spawn(.{}, repack.fp8OrderRows, args) catch blk2: {
+                    @call(.auto, repack.fp8OrderRows, args);
+                    break :blk2 null;
+                };
+            }
+            for (ts) |t| if (t) |th| th.join();
+        }
+    };
+
     /// A block linear in the layout its GEMM reads: NVFP4 codes through `pack4` (queued on `up`'s stream after they
     /// arrive) and host-repacked block scales; FP8 in fragment order, made in parallel into the upload chunks.
     pub fn linear(w: *Store, io: std.Io, p: *const Pack, nv: *Nvfp4, up: *Uploader, key: []const u8) !Linear {
@@ -225,10 +307,9 @@ pub const Store = struct {
                 const n: u32 = @intCast(w8.dim(0));
                 const k: u32 = @intCast(w8.dim(1));
                 const npad = (n + 127) / 128 * 128;
-                const codes = try w.readBulk(io, p, w8);
                 const act = Store.scalar(io, p, try std.fmt.bufPrint(&nb, "{s}.act", .{key})) catch return error.Fp8PackWithoutStaticScales;
                 const dst = try w.alloc(@as(usize, npad) * k);
-                try up.produce(dst, @as(usize, npad) * k, 64 * @as(usize, k), Fp8Fill{ .codes = codes, .n = n, .k = k }, Fp8Fill.fill);
+                try w.fp8Codes(io, p, up, w8, n, k, npad, dst);
                 return .{ .kind = .fp8, .n = n, .k = k, .npad = npad, .w = dst, .ws = 0, .scale = try Store.scalar(io, p, try std.fmt.bufPrint(&nb, "{s}.scale", .{key})), .act = act };
             },
             .bf16 => return error.Bf16LinearsUnsupported, // the reference precision stays in the twin
@@ -260,10 +341,10 @@ pub const Weights = struct {
         errdefer w.deinit();
         const st = &w.store;
         const side = .{
-            .{ "img_in.weight", &w.img_in },                                   .{ "txt_in.in_layer.weight", &w.txt_in1 },
-            .{ "txt_in.out_layer.weight", &w.txt_in2 },                        .{ "time_text_embed.timestep_embedder.linear_1.weight", &w.t1 },
+            .{ "img_in.weight", &w.img_in },                                 .{ "txt_in.in_layer.weight", &w.txt_in1 },
+            .{ "txt_in.out_layer.weight", &w.txt_in2 },                      .{ "time_text_embed.timestep_embedder.linear_1.weight", &w.t1 },
             .{ "time_text_embed.timestep_embedder.linear_2.weight", &w.t2 }, .{ "modulation.1.weight", &w.mod },
-            .{ "norm_out.linear.weight", &w.norm_out },                        .{ "proj_out.weight", &w.proj_out },
+            .{ "norm_out.linear.weight", &w.norm_out },                      .{ "proj_out.weight", &w.proj_out },
         };
         inline for (side) |e| e[1].* = try st.tensor(up, p, e[0]);
         { // the zero-centred text norm: weight + 1 in f32

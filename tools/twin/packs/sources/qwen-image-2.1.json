@@ -1,0 +1,147 @@
+{
+  "repo_id": "Qwen/Qwen-Image-2.1",
+  "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+  "note": "the files tools/spark/prepare.sh downloads, as Hugging Face served them at this revision (size, and LFS sha256 or git blob sha1); checked by tools/package/verify_assets.py",
+  "selected_files": [
+    {
+      "path": ".gitattributes",
+      "size_bytes": 1630,
+      "git_blob_sha1": "7236eee3e26bfd60df2cd50255284a1c1716274a"
+    },
+    {
+      "path": "LICENSE",
+      "size_bytes": 7831,
+      "git_blob_sha1": "13ae08d5a5828f508cf0e852b1b316c0c0bbb9b3"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 5707,
+      "git_blob_sha1": "db44574023ab5c2df91d7c5a3e64b59e41f02657"
+    },
+    {
+      "path": "assets/qr.png",
+      "size_bytes": 3332800,
+      "lfs_sha256": "9b1c6d8996a3560f12060affd070575dd8a3938462b15233c0dc15b2604a9243"
+    },
+    {
+      "path": "model_index.json",
+      "size_bytes": 447,
+      "git_blob_sha1": "85d02d05f150cbe24a8fd3542062b565767bbe7b"
+    },
+    {
+      "path": "processor/added_tokens.json",
+      "size_bytes": 707,
+      "git_blob_sha1": "b54f9135e44c1e81047e8d05cb027af8bc039eed"
+    },
+    {
+      "path": "processor/chat_template.jinja",
+      "size_bytes": 5292,
+      "git_blob_sha1": "124386803f142761528f710e77ae483f5f8c4fc4"
+    },
+    {
+      "path": "processor/merges.txt",
+      "size_bytes": 1671853,
+      "git_blob_sha1": "31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"
+    },
+    {
+      "path": "processor/preprocessor_config.json",
+      "size_bytes": 782,
+      "git_blob_sha1": "2fa6553554f69b4e3a6b742a75264ff9dff90ad0"
+    },
+    {
+      "path": "processor/special_tokens_map.json",
+      "size_bytes": 613,
+      "git_blob_sha1": "ac23c0aaa2434523c494330aeb79c58395378103"
+    },
+    {
+      "path": "processor/tokenizer.json",
+      "size_bytes": 11422654,
+      "lfs_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "path": "processor/tokenizer_config.json",
+      "size_bytes": 5445,
+      "git_blob_sha1": "fec7f182135c384a08ea2fc9635566ca79c45afc"
+    },
+    {
+      "path": "processor/video_preprocessor_config.json",
+      "size_bytes": 817,
+      "git_blob_sha1": "e32b1d90356f74457edbfca27aa1e121dab7cdc7"
+    },
+    {
+      "path": "processor/vocab.json",
+      "size_bytes": 2776833,
+      "git_blob_sha1": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    },
+    {
+      "path": "scheduler/scheduler_config.json",
+      "size_bytes": 485,
+      "git_blob_sha1": "45cd05b021892b1cafbd16d61ce692637e88bedd"
+    },
+    {
+      "path": "text_encoder/config.json",
+      "size_bytes": 1517,
+      "git_blob_sha1": "581ce4655dde5272e577065dd08b1fda7e97d6e8"
+    },
+    {
+      "path": "text_encoder/generation_config.json",
+      "size_bytes": 213,
+      "git_blob_sha1": "bdb4e0372b04220c80df250f2b3354d1c81c97cb"
+    },
+    {
+      "path": "text_encoder/model-00001-of-00004.safetensors",
+      "size_bytes": 4998056552,
+      "lfs_sha256": "dde00291b5f7fb92013895310a3da0ddba78674df9f10d505d375243dc01fc6f"
+    },
+    {
+      "path": "text_encoder/model-00002-of-00004.safetensors",
+      "size_bytes": 4915962464,
+      "lfs_sha256": "9047faccc0a6d98496a52d55f27be1c94a9c259d1e283fbea0128d054a948d42"
+    },
+    {
+      "path": "text_encoder/model-00003-of-00004.safetensors",
+      "size_bytes": 4915962496,
+      "lfs_sha256": "8c54187654c0176b73ae73785bf791dc9a14c9df7fb4310083a09d42048cb57e"
+    },
+    {
+      "path": "text_encoder/model-00004-of-00004.safetensors",
+      "size_bytes": 2704357976,
+      "lfs_sha256": "5311532aaaeae3259eb6a7b2c600636be1159adf7ded35f53579f7d0e7d43cdd"
+    },
+    {
+      "path": "text_encoder/model.safetensors.index.json",
+      "size_bytes": 67795,
+      "git_blob_sha1": "6d4d74c934b05b8addb0744305eef3674650cd8b"
+    },
+    {
+      "path": "transformer/config.json",
+      "size_bytes": 370,
+      "git_blob_sha1": "706df60672976086089e99f6595037f917d7602e"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "size_bytes": 9968332504,
+      "lfs_sha256": "9e6bc2d641e67bf277895ea8777141044a38f3edb7101bc469b2961dd7c36b4b"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "size_bytes": 4261951904,
+      "lfs_sha256": "3aaf234dcbe128530479735854a346b5e3e66283b7c11db56f836bbd1c13ebaa"
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+      "size_bytes": 30283,
+      "git_blob_sha1": "bd64579cfd093a6a4ea8fb492217790018c53c0d"
+    },
+    {
+      "path": "vae/config.json",
+      "size_bytes": 2079,
+      "git_blob_sha1": "ac6fe795d898a5eff16e4527256c2d039f5b0d4b"
+    },
+    {
+      "path": "vae/diffusion_pytorch_model.safetensors",
+      "size_bytes": 1350989512,
+      "lfs_sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417"
+    }
+  ]
+}

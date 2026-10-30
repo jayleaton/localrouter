@@ -1,0 +1,204 @@
+{
+  "upstream": {
+    "repository": "https://github.com/plotarmordev/drama-tensorfold.git",
+    "commit": "1a53b8aea738a99d3630f949b6b2a1f9389f0795",
+    "license": "Apache-2.0",
+    "dir": "drama-tensorfold",
+    "files": {
+      "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "NOTICE": "c035c0a56f888e47cab6c40d4283ac65aea03067c207dcc1be24a7200598d71c",
+      "engine/UPSTREAM": "3d46d9be8938b9268ec109214e74fad9ab86beb836d2b56bf719c69b7b61e2f8",
+      "engine/patches/SHA256SUMS": "3775d4484cebfec7f766640cf51e27a35df2132df4429c45602ce7386a290e9f",
+      "recipe/checksums/checkpoint.sha256": "05a2c591710090237f24a43461ad8a09fa4deeff3d3a0a76c8485317ce4b081e",
+      "recipe/pilot.py": "864987c2fc0850910de4a6d3933bc9d3ab8281ed3a1773f2df8e01b368405ff4",
+      "recipe/sources.json": "df9a63661ca2d69535a916d2bf1f42f800105febaf7b16da9bb3c48fc958fb3b",
+      "scripts/build-engine.sh": "d0e4726ed1382fc95626e62070aba045e284b0908a2a5518bc4d74d1ec32733e"
+    }
+  },
+  "patches": {
+    "dir": "engine/patches",
+    "count": 59,
+    "note": "series_sha256 is the sha256 of every engine/patches/*.patch file concatenated in byte-wise (LC_ALL=C) file-name order, the order scripts/build-engine.sh applies them in",
+    "series_sha256": "3fff8dd6448462f79912c827bbba401143031e696b574cc5e7415157a910d247",
+    "files": {
+      "0001-cuda-a-process-wide-cap-on-DeviceBuffer-and-pinned-H.patch": "a6e35b96ec26b6083eb94e099514596372c872ec38b4202880caa814c94f3c3a",
+      "0002-drama-the-Drama-3-text-backbone-on-CUDA.patch": "0b4af8a8869e5eebafe576e1a9e2b3557a4a4bd6cd94a61bd23902f8b33698c8",
+      "0003-drama-the-temporal-codebook-tower.patch": "9914f820d212380f1ce7537b98b5bb37d45e897bd910492c5c0af6ea63a4993d",
+      "0004-drama-the-speech-codec-with-codec.pth-read-without-P.patch": "b871bb6d8c3c8e8ceb20905a8be452dbbf698f5a8d171901e2d210d42c1edb7c",
+      "0005-engine_api-speech-requests-speech-info-and-a-submit_.patch": "e98caa337f0175a29b64741004c54a11c8c40dfed4e4230573102008eb7c1794",
+      "0006-native-Drama-3-fish_omni-on-CUDA.patch": "a19a8a9bd3e8e6d71517882bdb42705b4cc29210a79fb7eb071b18bd5cf68681",
+      "0007-server-POST-v1-audio-speech.patch": "86444a8c778afde3ce2dfc54ecac3bb7bd559c50b4de7ccfdd946efe09800552",
+      "0008-tests-Drama-3-backbone-and-tower-oracles-replays-and.patch": "7e84d20b93b23588e12f24e21d95d318bff44d2a1d080dcd14d8eb9d33eb4197",
+      "0009-tests-Drama-3-codec-oracle-replays-and-stage-trace.patch": "e8776bcbd659a28516d67b6245d66deee62c6492e8983186b63aa2a9706c402e",
+      "0010-build-Drama-3-backbone-and-tower-kernels-the-drama-m.patch": "4ff074c267477d3d51ec077e6bd85a76bed1d799c1034d73a50a1e61cc23d593",
+      "0011-build-the-Drama-3-codec-kernels-and-the-codec-tool-s.patch": "393c379e175bf36e1dbff1c02ee4127331595e0b7b201c7358bf43ab99daa402",
+      "0012-drama-the-codec-s-geometry-and-weight-image-move-to-.patch": "9760f86075124245cdeeee5d9585806f59d1d1dcf93e800bcd411610bad67f84",
+      "0013-drama-incremental-codec-decode-bit-identical-to-the-.patch": "b54c213a8695aa9d99bcc900decb94e9b0444d4cbff719d9741146b6af144a2b",
+      "0014-engine_api-audio-events-so-a-speech-engine-can-publi.patch": "baff6024918687d4dd49d626fa4d23689f4e819555a7a75360f847d46636debf",
+      "0015-server-stream-true-on-v1-audio-speech-sends-raw-PCM-.patch": "5a6dd3586b609015ec91d91de9fdd0aa8cf10b8e54e327cdbd6f7d410134c2d3",
+      "0016-tests-tf-drama-codec-stream-oracle-whole-against-chu.patch": "84c5b0a44010a1ea9fa986d6733713b1a5958ebc6ba0662b88f79a337dd8cf90",
+      "0017-drama-the-backbone-s-one-row-GEMM-stages-its-weights.patch": "d14edc9a8c5f19c3eff11fe276b243be498ba8a3f7ee39172ab69e7c59de7e23",
+      "0018-speech-a-Drama-3-reply-that-reaches-max_frames-retur.patch": "f1205f2acd84dad884a4d123803a8b2ae04f30edfcbbc3d145a1c29361450caa",
+      "0019-drama-one-row-backbone-GEMVs-stream-weights-through-.patch": "4dca6916851f59dcaac142320c8df748b474dfb20bca15c3c4ddbc012d04095e",
+      "0020-drama-add-norm-fused-with-the-routed-experts-FP8-act.patch": "91e310233417d4358463765c8ff9f359c42297c4b232b04fd954645eb1f0a65e",
+      "0021-drama-one-SwiGLU-launch-for-the-routed-and-shared-ex.patch": "2b30d9dcc9b05dc764bb6716fcdb619c3d988daeb132a0583e001a07292cd1b3",
+      "0022-drama-MoE-combine-on-8-wide-vectors.patch": "47d9709f320e1a5c3a9b5eb6ff228c98264949eb297c98988d30cba8958096bd",
+      "0023-drama-decode-attention-keeps-the-next-keys-loads-in-.patch": "874d2ee8d4c298a90d5c3466b75fb679ef8fd42603a6b8307fd1166077909f58",
+      "0024-drama-one-row-attention-runs-its-Q-K-norm-and-RoPE-p.patch": "67ebd19e7cf6ac35953063e2889912a21c65a925bd82267be60cdd66bd01754b",
+      "0025-drama-the-tower-s-one-decode-row-attends-as-a-thread.patch": "b68639202cc50953852bd593b5e40a32c1a2cdfca7190121128ad36d4d7d5afb",
+      "0026-drama-the-tower-samples-with-a-stable-radix-sort.patch": "0e298a0456343a9977ea4c710ea7c4ca365028b46cf56964a5ac8a813c91a357",
+      "0027-drama-checkpoint-weights-stream-onto-the-GPU-with-di.patch": "23220fe9fe74c894717fafc205ea5d9ad53ef53c4e20a179bd0e0068f32b9ef3",
+      "0028-drama-the-codec-builds-its-weights-on-its-own-thread.patch": "86f80bc7f72e66c10e44fbc4790ca924811c6c84698860a854fc04f5cba99cd9",
+      "0029-drama-the-tower-s-one-row-projections-on-drama_tower.patch": "9959ab7aa562f3a938d9921ca821e38913a375d89119ccaae6ab1d4d96b272c4",
+      "0030-drama-the-backbone-chain-launches-with-programmatic-.patch": "294b5176ac3efa1325f460315a68e630b76fe9fb15445716454ef79ed270c2e1",
+      "0031-drama-speech-requests-carry-voice-references-in-buil.patch": "92024cc8e43b44834dc2d1cf66d0d800ce93e8b6592f74db0a343c1d553a6ba3",
+      "0032-drama-voices-serves-voice-files-and-default-voice-pi.patch": "1277a4eee7a9fbf97da70633f7ca5f4d32e9ad5efae0af52bfa5fe2af5ed0658",
+      "0033-drama-tf-drama-reference-prefill-runs-the-backbone-o.patch": "7e5369e229ed29631a06f49150e8c16c1a8fc00f97b16a0fe64a0c1fb10a5658",
+      "0034-drama-a-speech-request-can-keep-the-codes-it-generat.patch": "37746f1aaf015cfc2606f2d64da8976ddd65e95b9e3147d2a5324e8bbd6364d3",
+      "0035-drama-long-form-speaks-long-inputs-in-segments-that-.patch": "4cb1a4502942cddb52711ff28575ccccf28fb039eaed661a854e8cd9a931ced2",
+      "0036-drama-long-form-joins-rest-as-the-punctuation-asks-a.patch": "5af560e26556465dc04c549da8fbcabdd76e3c27404ff6621099885be091c31b",
+      "0037-drama-long-form-cuts-the-fewest-balanced-segments-wh.patch": "30be9ec92a2d7358a5b1f1de74c7dfc265d21319a29678519c0edab472a07684",
+      "0038-drama-max-frames-lets-one-synthesis-speak-a-whole-lo.patch": "19c5fb60232a991fed4ad7e650e7e530064d4183823fe250c5d12fd685b4fbcd",
+      "0039-drama-a-synthesis-that-stays-silent-for-10-s-ends-th.patch": "24e53dc4f392f8ae0b90c74e96d5725368ec42fb375d2142c779ab13e897636d",
+      "0040-drama-backbone-attention-runs-the-reference-s-64-key.patch": "97645687534db45f6af21562abef831f56d50db4af9911b8107c7e90cae1f593",
+      "0041-drama-a-stream-s-silence-guard-hears-each-chunk-befo.patch": "030a996e4d0cedd48c42ae2dbd8aa67cbe5f22ce5034ce47f858cda4cf00c596",
+      "0042-drama-a-long-form-reply-s-trailers-are-formatted-wit.patch": "9449b87d92de7d9d5874cc81a563ebbefb077fe7f670e23cbf4cd0e157737f32",
+      "0043-docs-a-relative-voices-directory-resolves-from-the-s.patch": "949efa174c5ab0ccc0c27b4daca986eda042ef08cdd6c2d36a6ddacb51d303bc",
+      "0044-docs-the-changelog-says-where-the-backbone-and-strea.patch": "1377291c3b774a3b8f8963aec348078da910657ee46f9c37b27f6d193665dcf5",
+      "0045-drama-voices-say-whose-they-are-takes-are-prepared-a.patch": "8107576e84ecab0c1dde42ba9fced7ec2025a1afe54b4c7644eaea197b0b3605",
+      "0046-drama-drama_voice.py-prints-one-summary-when-tensorf.patch": "c40a0149966269abcd49102a49f80d0f5f492ae387fa475b17b4ce8b71d27dc9",
+      "0047-drama-drama_voice.py-runs-only-a-tensorfold-native-t.patch": "dbdcee13ba26ede64afac559fe257d73f26ea07b662d8de1d731ad7ab335d898",
+      "0048-drama-the-voice-loader-refuses-a-source-note-of-whit.patch": "20bf6c8129c7faa234c1e90130fdaa6e110d247e4e2cb349f3ab41fcc2572b11",
+      "0049-drama-clip-preparation-judges-noise-on-the-kept-clip.patch": "c85eaf351f813c307a8f9e750187553e9b7e87c15cffb13fd602f16fbb827036",
+      "0050-docs-drama-voices-say-what-clip-preparation-measures.patch": "54852e18f0af5c48caa3e70031aa5b34296e734d6d7ae604838448a9b6a9dc07",
+      "0051-drama-tensorfold-native-voice-encode-writes-a-voice-.patch": "2ce25d4edbeb1e4894810fcc0450d5b891ff5ecba9f16684e6bb4ce6674afe82",
+      "0052-drama-voice-encode-checks-a-WAV-s-whole-container-an.patch": "a681c33f23534eb7f0ce0b20edb039caab20c7de08817c652af9be671b8fcf70",
+      "0053-drama-voice-docs-say-only-what-was-measured-of-the-e.patch": "cd8c2954fd73634406e0d398be501c22b3beabf216fd0698b7cf4ec5b9a56cf5",
+      "0054-drama-clip-preparation-tells-two-speakers-apart-by-t.patch": "f2358220d442d3a768260212bfbcf9ee4b612cff2f3c5a9bbf487e8bd2786ae1",
+      "0055-drama-the-silence-guard-also-ends-a-reply-that-colla.patch": "16fb21d9710427ae4908b5eff1231d9f5cc1252320cc7a4dca2b79df0b69e359",
+      "0056-drama-a-test-pins-the-silence-guard-s-floor-at-40-dB.patch": "97e99934170a6b176c246ea72fcf28f876b271139bcc5ce2122e91f46ac9ebf0",
+      "0057-docs-the-silence-guard-s-floor-leaves-whispered-and-.patch": "4779a964dc88db97b2b7068e48a7090fbd7214e72008ae367421e34009635761",
+      "0058-drama-a-voice-file-can-hold-several-references-spoke.patch": "3a570ba344b07d36c7df126fec18c5acf6607f3f6f78dde16cc049fafc571960",
+      "0059-drama-drama_voice.py-combine-refuses-an-input-the-vo.patch": "c0496f21a2f4ef80d5e023d30b07f1985c59c01830e62e9171d3ffd48d132f7c"
+    }
+  },
+  "tensorfold": {
+    "repository": "https://github.com/ashhart/TensorFold.git",
+    "commit": "c7137bb31a7dad924fb541a7068422127b9a94b2",
+    "committer": "build-engine <build-engine@example.invalid>",
+    "note": "patched_head is the HEAD scripts/build-engine.sh leaves: the commit plus the series applied with git am --committer-date-is-author-date and that committer",
+    "patched_head": "459771e7531431490b80d7a8149c9160e03c01ce"
+  },
+  "checkpoint": {
+    "repo": "fishaudio/drama-3",
+    "revision": "e0a9218aa48888270f06ef1ed9ea67622c0e17d2",
+    "dir": "drama-3",
+    "license": "Fish Audio Community License 1.0 (FACL v1.0)",
+    "license_url": "https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE",
+    "weight_and_codec_bytes": 41474674072,
+    "files": {
+      "LICENSE": [
+        19685,
+        "733a32442087acbda12ecafe8e71eb8ee5890c89b50ce7ac4ea3777faa3c823e"
+      ],
+      "README.md": [
+        7513,
+        "f3631701881c2d621d3db52e7669224919676108d38f1ce6f34cba65ab88ba1f"
+      ],
+      "chat_template.jinja": [
+        7756,
+        "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+      ],
+      "codec.pth": [
+        1871099728,
+        "74fc41c5a7151c6f350af8bd7e5d6e3accfcc7f3dfbfac23afd35af07052bb2f"
+      ],
+      "config.json": [
+        5535,
+        "4b13a31b504cf54181f52df5bbb27604f5cc4b77b6e90a12ab85d62e0d70b693"
+      ],
+      "model-00001-of-00008.safetensors": [
+        5000202800,
+        "e486b4f438d0b2df28846e41e599bd2077a64a825893ed0371b332a40dc4b49b"
+      ],
+      "model-00002-of-00008.safetensors": [
+        5000496824,
+        "a67b726fe950ad57ebc15696009bde4a7dbbdc3645b42fa7d77e3a5fa1d70262"
+      ],
+      "model-00003-of-00008.safetensors": [
+        5000988520,
+        "acfdeb67b8c4cb4784d887339e85bddbc5d7b9be3bbee82e40fa10ffe305d965"
+      ],
+      "model-00004-of-00008.safetensors": [
+        5000496392,
+        "fa2960bddf128f51c3d4d74a1a942e34f61cc7ea294d10aec27f79dc10455c9f"
+      ],
+      "model-00005-of-00008.safetensors": [
+        5000227096,
+        "a49ed8717c47e12b354a711c71ecde8be153bad704ca0a25d4805534f4405971"
+      ],
+      "model-00006-of-00008.safetensors": [
+        4984792768,
+        "8867c0e3d600ebf28cf4734fc433dc98061fb990940e07b192ec0356ba1ff223"
+      ],
+      "model-00007-of-00008.safetensors": [
+        4977946704,
+        "51e7d473f8a270bf79b2896a6ea4f19162eeec5b1ea1c5a2ba7dc7750511dbda"
+      ],
+      "model-00008-of-00008.safetensors": [
+        4638423240,
+        "c5b065cce3b3b851369dfdb5a3b60f6abf2699121071c2b1a9dfd84acb7b8f7d"
+      ],
+      "model.safetensors.index.json": [
+        6880197,
+        "7a2d824d4b073963a816f0d7e3b2e33bac89ae10c691bf8652325e61abc9f5c0"
+      ],
+      "special_tokens_map.json": [
+        102779,
+        "08aed9e321dc05275ac68cf883bfa96006b3fc09ff5cccadf262b6bce0873adb"
+      ],
+      "tokenizer.json": [
+        20791070,
+        "0e9b9db76b2f0389b04b6ef057a2ac3b89100b7e96f2dd7034d19580a09654d6"
+      ],
+      "tokenizer_config.json": [
+        103580,
+        "00e800279d8436c324b924e97872c7eacd2b19406aa0fe71eeb557b4cd53aa3e"
+      ]
+    }
+  },
+  "engine_patches": {
+    "dir": "patches/engine",
+    "note": "LocalRouter's own engine patches, applied by build.sh after upstream's series (git am, the same fixed committer) to head: the voice prefix cache (a referenced prompt's system rows prefilled once per voice and resumed from; DRAMA_PREFIX_CACHE entries, default 2)",
+    "files": {
+      "0001-drama-a-voice-s-reference-rows-are-prefilled-once-an.patch": "eda63f1b80ab71b6c665aa0054f2550f20ff4487d5be16c16c8845db00b8495d"
+    },
+    "head": "efc6c2f82a4a12726e36dce66b0969c1d3aee3f7"
+  },
+  "voices": {
+    "dir": "voices",
+    "path": "voices",
+    "note": "Drama 3's named voices (voices/SOURCES.md: model-invented), installed by fetch.sh into ROOT/voices, the server's --voices directory",
+    "files": {
+      "Arlo.json": "46598d8ff922cb34ca99952a96d4a63479fe23465a4278f7e3ea92d453a58b8e",
+      "Ezra.json": "73ccdf19a2cb014148e1feda9f168dcb2d2fe4ba2ec5801bb555df1a2a2c5265",
+      "Mae.json": "f0882e7af17aaf85f62403c0332e830b0028472ee84de06f47e61e273558ef50",
+      "Nora.json": "a6bb78e495dbac589c6213616a1c54fc7cc9d2b983a10b51b697ae87059991de",
+      "Theo.json": "6652cc95b220858aab99bb4498c9bb8ebc4365ccb27eb3b808ebd5db14c62acc",
+      "Wren.json": "d972d6c33fb6bf51f4b0bd012c0d847cd9f0d66bfb64d9385ba50b343c64d6d7"
+    }
+  },
+  "toolchain": {
+    "zig": "0.17.0",
+    "cuda": "13"
+  },
+  "launcher": {
+    "patch": "patches/pilot-external-admission.patch",
+    "patch_sha256": "8b6304cd606cd59177249b56aab3744c0634efa412d8554a4c0804780b64d2fe",
+    "base": "recipe/pilot.py",
+    "base_sha256": "864987c2fc0850910de4a6d3933bc9d3ab8281ed3a1773f2df8e01b368405ff4",
+    "path": "launcher/pilot.py",
+    "sha256": "e0ce7087b066bdb365bb9be95559b3d90c5287c655ee03459abbc3d214c8140f",
+    "note": "upstream recipe/pilot.py with an --external-admission flag: LocalRouter admits the load from its own memory budget, so the launcher skips its 88 GiB MemAvailable admission and 34 GiB abort and gives the engine its least memory reserve (TENSORFOLD_MEMORY_RESERVE_GIB 2, not 34); the 54 GiB cgroup and allocator caps and the lock stay. fetch.sh writes path under ROOT, outside the upstream checkout"
+  }
+}
