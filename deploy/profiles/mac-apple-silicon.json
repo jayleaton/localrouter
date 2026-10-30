@@ -19,7 +19,7 @@
   "CHAT_ROOT": "$J/chat",
   "DRAMA_ROOT": "$J/qualify-drama3/root",
   "DRAMA_MARKER": "$J/qualify-drama3/drama3-macos-qualification.json",
-  "DRAMA_RESIDENT": "33285996544",
+  "DRAMA_RESIDENT": "30870077440",
   "DRAMA_PORT": "$((PORT + 10603))"
  },
  "prereqs": [
@@ -272,7 +272,7 @@
    "pins": "tools/speech/drama3/pins-macos.json",
    "download_bytes": 22600000000,
    "disk_bytes": 24500000000,
-   "memory_bytes": 33285996544,
+   "memory_bytes": 30870077440,
    "skip": "leave tts out of --models; the Mac then has no speech model and the voice loop cannot speak",
    "steps": [
     {

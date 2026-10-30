@@ -692,8 +692,11 @@ The same figures came out of four guided runs within 0.02 s and 0.02 RTF.
 - **Memory.** The server keeps 27.5 GiB wired between requests (its log), its `phys_footprint` peak is 9.75 GB (the
   packed experts are file-backed and not counted there), its resident size 17.7 GB. What the machine loses is what
   the scheduler must book: free+inactive fell by 31.15 to 32.76 GB (29.0 to 30.5 GiB) across three guided runs with the
-  server alone, and wired memory rose by 30.80 GB through the daemon. `resident_bytes` is therefore 33,285,996,544 (31.0
-  GiB: 500 MiB above the largest drop). Unguided: 31.72 GB. After unload, wired memory was back within 0.7 GB.
+  server alone, and wired memory rose by 30.80 GB through the daemon (unguided: 31.72 GB). That drop overstates it:
+  measured under load in the integration daemon with the full Mac set loaded (2026-10-31), Drama 3 held a 9.1 GiB
+  footprint plus 19.1 GiB of weights wired while speaking, a 28.2 GiB peak. `resident_bytes` (and the profile's
+  `DRAMA_RESIDENT` and `memory_bytes`) is therefore 30,870,077,440 (28.75 GiB: about 0.55 GiB above that peak; it was
+  33,285,996,544, 31.0 GiB, from the drop). After unload, wired memory was back within 0.7 GB.
 - **Clone encode:** 3.43 s for one 11.4 s reference through the worker; `drama3-generate --encode` peaks at 3.29 GB
   footprint (3.10 GB resident), so `clone_working_bytes` is 3,758,096,384 (3.5 GiB).
 - **Through the daemon** (`localrouter serve` from `feat/mac-foundation`, the tool from `config.example-macos.json`):

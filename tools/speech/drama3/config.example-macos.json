@@ -11,7 +11,7 @@
       "cmd": ["/opt/homebrew/bin/python3", "-I", "/Users/Shared/localrouter/src/tools/speech/drama3/drama3_worker_macos.py"],
       "weights": "/Users/Shared/localrouter/models/drama3",
       "qualification": "/Users/Shared/localrouter/models/drama3/macos-qualification.json",
-      "resident_bytes": 33285996544,
+      "resident_bytes": 30870077440,
       "working_bytes": 0,
       "keep_loaded": true,
       "priority": 95,
