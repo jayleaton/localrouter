@@ -277,6 +277,11 @@ work as above. Two differences matter to the voice loop:
   0.09 s from request to transcript (0.13 s with the HTTP API's recipe). Cold start, the warm-up included, is 1.5 s.
   The worker is resident at 3.2 GB and peaks at 4.35 GB on long-form audio with word timestamps.
 
+Through the daemon, the hearing path alone (`tools/speech/whisper/hearing.py`: fixtures streamed over `/v1/realtime`
+with server VAD and `silence_duration_ms` 500, no chat model) heard every turn in en, de, fr, ja and es. The final
+transcript arrived a median 466 ms after the speech ended, with a fixed language, and 590 ms with `auto` and partials
+every second. The early transcript was usually the final one, so it was ready when VAD ended the turn.
+
 Its transcripts are a Mac reference of their own, not the Spark's bit for bit. On the qualification fixtures, 15 of
 18 are identical to the transformers recipe, and greedy equals the recipe on all 17 speech fixtures. The README lists
 the rest.

@@ -30,9 +30,13 @@ A tool entry for the daemon:
 {"id": "whisper-large-v3-turbo", "kind": "transcription",
  "cmd": ["/Users/me/.cache/localrouter-speech/venv-mlx/bin/python", "/path/to/tools/speech/whisper/macos/worker.py"],
  "weights": "/Users/me/.cache/localrouter-speech/models/whisper-large-v3-turbo-mlx/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
- "resident_bytes": 3489660928, "working_bytes": 1342177280,
+ "resident_bytes": 3489660928, "working_bytes": 1342177280, "keep_loaded": true, "priority": 90, "lane": "realtime",
  "options": {"dtype": "float16", "threads": 4, "vad": "silero", "vad_model": "/path/to/silero_vad.jit"}}
 ```
+
+The bookings are measured: the load reports a footprint of 3.12–3.19 GB and peaks at 4.35 GB (the 280 s file with word
+timestamps), so 3.25 GiB resident plus 1.25 GiB working leaves headroom on both. The Mac profile
+(`deploy/profiles/mac-apple-silicon.json`, model key `stt`) installs this venv, the weights and the VAD.
 
 `options`: `dtype` auto|float16|float32 (auto is float16, the checkpoint's own precision), `threads` (torch CPU
 threads, used by the gate), `max_new_tokens` (mlx-whisper's `sample_len`), `vad`, `vad_model` (as on Linux: the gate
@@ -89,7 +93,10 @@ Differences from the Linux worker:
 
 * **Soft cancel.** The load reply says `"cancel": "signal"`, so the daemon's cancel sends SIGUSR1. The decode stops at
   its next Python step and Silero at its next 32 ms chunk. The reply is `{"ok":false,"type":"cancelled"}` and the
-  model stays loaded. Protocol lines are never cut mid-write.
+  model stays loaded. Protocol lines are never cut mid-write. A signal can arrive before the decode starts: the
+  generate may still be unread on stdin, or its audio still being read. It is then held and honoured as the decode
+  starts. A signal with no generate in hand raced a reply that was already sent, so it is ignored and can never cancel
+  the next job.
 * **A truncated WAV is refused.** If the data is shorter than its header says, the request is refused. The daemon
   already refuses such uploads.
 * **A daemon that goes away.** macOS has no `PR_SET_PDEATHSIG`, so a thread checks `LOCALROUTER_PARENT` every second,
@@ -128,13 +135,32 @@ transcript fixture exists to compare against.
 | WER against the human references | en 0–0.09 (LibriSpeech references are unpunctuated upper case; normalised), de/fr/es 0–0.035; CER ja 0, zh 0–0.048 |
 | word timestamps | in order, inside the audio and their segments, one per text word, on every fixture |
 | soft cancel (SIGUSR1 mid-decode on 280 s) | replied in 2 ms; the next request needed no reload |
-| `check.py` | 44 of 44 |
+| `check.py` | 45 of 45 |
 
 The three that differ from the recipe: `en_librispeech_1272-128104-0001` (recipe "Nor is Mr. Quilter's manner…",
 here lower case without punctuation; the same in float32, so not a precision effect), `speech_in_pink_noise_10db` (one
 comma) and `fr_fleurs_02` ("pourraient être mieux servis", where the recipe has "pour être mieux servis"; the human
 reference has "pourraient"). With word timestamps, the long-form text may differ from the same file without them. As
 in openai-whisper, the next window then starts at the last word's end rather than at the last timestamp token.
+
+## Through the daemon (M5 Ultra, 2026-10-30)
+
+The daemon was built from this branch (`zig build -Doptimize=ReleaseSafe` on `feat/mac-foundation`) and configured
+with the tool entry above, `keep_loaded`, the `realtime` lane, and `stt.language` set to `auto` for the
+qualification. The voice turns set their own language.
+
+| | |
+| --- | --- |
+| `../qualify.py` (`/v1/audio/transcriptions` and MCP `transcribe_audio`: every fixture including the MP3/Opus/FLAC uploads, refusals, formats, cancel, release) | 83 of 83 |
+| booked against measured | `keep_loaded` load reported 2,906–3,045 MiB (resident 3.12–3.19 GB); booking `resident_bytes` 3,489,660,928 plus `working_bytes` 1,342,177,280, against a 4.35 GB measured peak |
+| cold HTTP request (released → loaded → transcript, 5.9 s clip) | 1.6–1.8 s |
+| warm HTTP request, 5.9 s clip (recipe) | 0.13 s; repeats identical |
+| MCP `cancel_job` on the 280 s file | 0.26 s (MCP polls every 250 ms); the tool stays `ready` and the next request is served without a reload |
+| `release` | the tool unloads; 2.3–4.7 GB of available memory comes back (`vm_stat`, on a shared machine) |
+| `../hearing.py`: the voice loop's hearing path over `/v1/realtime` (server VAD, early and final transcripts, greedy) | 6 turns in en/de/fr/ja, fixed language: all heard, WER 0–0.06 (CER 0 for ja); speech end → final transcript median 466 ms with `silence_duration_ms` 500 (VAD stop → transcript 0 ms: the early transcript was the final one) |
+| the same, `auto` language, partials every 1 s | 4 turns in en/de/fr/es: languages detected, WER 0–0.03, 10–18 partials a turn, speech end → transcript median 590 ms |
+| 10 s of silence over `/v1/realtime` | no turn started |
+| daemon stopped with SIGTERM | the worker exited with it |
 
 ## Checks
 
@@ -143,6 +169,10 @@ V=$HOME/.cache/localrouter-speech/venv-mlx/bin/python
 LOCK="python3 -I /path/to/gpulock.py"   # on a shared machine: whatever serialises model loads
 $LOCK $V tools/speech/whisper/macos/check.py --weights $W --vad-model silero_vad.jit --fixtures ~/.cache/localrouter-speech/fixtures
 $LOCK $V tools/speech/whisper/macos/bench.py --weights $W --vad-model silero_vad.jit --fixtures ~/.cache/localrouter-speech/fixtures
+# with a daemon running this tool (keep_loaded, stt.language "auto"):
+python3 -I tools/speech/whisper/qualify.py --url http://127.0.0.1:8190 --model whisper-large-v3-turbo --fixtures ~/.cache/localrouter-speech/fixtures --report out/qualify.json
+python3 -I tools/speech/whisper/hearing.py --url http://127.0.0.1:8190 --fixtures ~/.cache/localrouter-speech/fixtures
+python3 -I tools/speech/whisper/hearing.py --url http://127.0.0.1:8190 --fixtures ~/.cache/localrouter-speech/fixtures --auto --partial-ms 1000
 ```
 
 Outputs go to `~/.cache/localrouter-speech/out/` (never the repository).
