@@ -11,7 +11,17 @@ Test hooks by the state's text: "offbook" (a choice that was not offered), "bads
 import json
 import signal
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
+import socketserver
+
+
+class ThreadingHTTPServer(_ThreadingHTTPServer):
+    """Without HTTPServer's reverse lookup of its own address (socket.getfqdn), which can take 30 s on a Mac."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 NAME = ""
 

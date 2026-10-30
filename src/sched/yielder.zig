@@ -15,6 +15,10 @@
 const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
+const darwin = @import("builtin").os.tag.isDarwin();
+
+extern "c" fn proc_listchildpids(ppid: posix.pid_t, buffer: *anyopaque, size: c_int) c_int;
+extern "c" fn proc_pidinfo(pid: posix.pid_t, flavor: c_int, arg: u64, buffer: *anyopaque, size: c_int) c_int;
 
 const max_holders = 8;
 
@@ -144,9 +148,14 @@ fn readProc(path: []const u8, buf: []u8) []const u8 {
     return buf[0..n];
 }
 
-/// The first child of `pid` (`/proc/<pid>/task/<pid>/children`: its main thread's), or 0.
+/// The first child of `pid` (`/proc/<pid>/task/<pid>/children`: its main thread's; macOS: libproc), or 0.
 pub fn childOf(pid: posix.pid_t) posix.pid_t {
     if (pid <= 0) return 0;
+    if (darwin) {
+        var pids: [64]posix.pid_t = undefined;
+        const n = proc_listchildpids(pid, &pids, @sizeOf(@TypeOf(pids)));
+        return if (n > 0) pids[0] else 0;
+    }
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/task/{d}/children", .{ pid, pid }) catch return 0;
     var buf: [256]u8 = undefined;
@@ -163,8 +172,13 @@ pub fn sleeper() !std.process.Child {
     return std.process.spawn(testing.io, .{ .argv = &.{ "sleep", "30" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
 }
 
-/// The process's state letter from /proc (T: stopped).
+/// The process's state letter from /proc (T: stopped; macOS: T or R, from libproc).
 fn stateOf(pid: posix.pid_t) u8 {
+    if (darwin) {
+        var info: [256]u8 align(8) = undefined; // struct proc_bsdinfo (136 bytes): pbi_status at offset 4
+        if (proc_pidinfo(pid, 3, 0, &info, info.len) <= 0) return 0; // PROC_PIDTBSDINFO
+        return if (std.mem.readInt(u32, info[4..8], .little) == 4) 'T' else 'R'; // SSTOP
+    }
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return 0;
     var buf: [512]u8 = undefined;
@@ -230,7 +244,7 @@ test "childOf finds a spawned child" {
         _ = posix.system.kill(child.id.?, posix.SIG.KILL);
         _ = child.wait(testing.io) catch {};
     }
-    const me: posix.pid_t = @intCast(std.os.linux.getpid());
+    const me: posix.pid_t = std.c.getpid();
     const found = childOf(me);
     try testing.expect(found > 0); // the test runner may have other children; this one is among them on Linux
 }

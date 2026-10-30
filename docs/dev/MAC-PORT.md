@@ -1,0 +1,206 @@
+# macOS Apple Silicon port
+
+This page consolidates the research of 2026-10-30 (base `fe24726`) for LocalRouter on macOS: what runs where, what is
+pinned, what is decided and what is still unmeasured. Target hardware: M5 Ultra, 96 GiB unified memory. Nothing here
+is a Mac measurement unless it says so; every size is a decimal-byte figure from HF metadata and every memory figure
+marked "estimate" is an admission starting point, not a peak.
+
+## Purpose and scope
+
+Mac targets, decided by JJ:
+
+- **Chat:** Qwen3.8 27B.
+- **Speech:** Drama 3 through plotarmordev's drama-tensorfold Metal NVFP4 path. **Not** mlx-audio.
+- **Decisions:** KnowLine-4B Gen5.5.
+- **Transcription:** Whisper large-v3-turbo with the Silero VAD gate.
+- **Images:** Qwen-Image 2.1 Turbo, and Qwen-Image 2.1 edit.
+
+Out of scope and **absent on macOS** (not ported, listed as disabled): Kandinsky-6, Kitten TTS 2, MiniMax H3.
+
+Spark/Linux behaviour does not change. Mac paths are added beside the Linux ones: comptime OS switches in Zig and
+separate pins files (`pins-macos.json`), never a replacement.
+
+## Per-model engines
+
+All rows are **planned**. "Seam" is either the `openai_server` wrapper (the daemon spawns a child HTTP server and
+proxies to it) or an external `cmd` worker (newline JSON, see [MODEL-DROPIN.md](MODEL-DROPIN.md)). `openai_server`
+declares chat and decision capabilities only, so it is not a media bridge.
+
+| Model | Mac engine / runtime | Seam | Pinned source | Weights | Owner |
+| --- | --- | --- | --- | --- | --- |
+| Qwen3.8 27B chat | TensorFold native Zig/Metal, `qwen27` family, DFlash2 drafter; macos-arm64 release archive plus its `lib/` (grammar dylib) | `openai_server` | TensorFold [v1.1.4 `eab8582`](https://github.com/ashhart/TensorFold/tree/eab8582819688325e371907e4706e1c602b8a273) release archive; [`TensorFold/Qwen3.8-27B-MLX-4bit@22d8d53`](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit/tree/22d8d538154e0e5b6f8dcb1fcc74a60a0798104c); drafter [`z-lab/Qwen3.8-27B-DFlash2@50307d4`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/tree/50307d4c4cde6860d4eee73e2547cd786fe8e8a4) | MLX affine 4-bit/g64, 16,054,541,349 B (14.95 GiB); drafter bf16 3,848,817,896 B (packed to 4-bit by the loader). Apache-2.0 | chat |
+| Drama 3 speech | drama-tensorfold Mac stack: TensorFold base plus `engine/nvfp4/macos/patches/` (Metal NVFP4 + CFG), Metal DAC decoder and encoder | `cmd` worker around the native HTTP server (native server takes startup voice catalogs, not per-request references) | [drama-tensorfold `db6ba7d`](https://github.com/plotarmordev/drama-tensorfold/tree/db6ba7da314b24b42b02978ba4401f54f6738311), base TensorFold [`3d219d2`](https://github.com/ashhart/TensorFold/tree/3d219d2156d4c25dcfb74370c8703cd89e58aa49); weights [`plotarmordev/drama-3-NVFP4-Pruned@494db08`](https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/tree/494db08481db952f834b2241bce63fb3dfa72554) | NVFP4 (E2M1 experts, E4M3 block-16 scales), 22,294,649,076 B (20.76 GiB) weights+codec; repo 22,323,516,597 B. FACL v1.0 | drama3 |
+| KnowLine-4B decisions | `mlx-lm` Qwen3.5 text model plus the author's scoring front end (`knowline_server.py`, `knowline_layout.py`); no TensorFold engine fits | server wrapper replacing `tools/decide/knowline/serve.py` (it hardcodes CUDA); `/v1/systemone` stays proxied | [`PelaAI/KnowLine-4B-Gen5.5@779944d`](https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/779944d2cc8ffa19cef386aee83c83bcb967ade2); [`mlx-lm@736ab0d`](https://github.com/ml-explore/mlx-lm/tree/736ab0d8c1d0edc79c3d798044fe6904e2fa23be) | bf16 baseline 9,319,828,224 B (8.68 GiB). Q5 option [`Liamariel/...-mlx-q5@053081f`](https://huggingface.co/Liamariel/knowline-4b-gen5.5-mlx-q5/tree/053081f764ffeddf4b1278d4183db95b72180520), 2,892,837,529 B, only after a decision-quality comparison. Apache-2.0 | knowline |
+| Whisper large-v3-turbo STT | `mlx-whisper` persistent worker; WhisperKit/Core ML is the alternate. No TensorFold Whisper | `cmd` worker | [`mlx-community/whisper-large-v3-turbo@a4aaeec`](https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb); `mlx-whisper` (research linked `main`; **pin a revision before use**) | FP16, 1,613,977,612 B (1.50 GiB). Optional q4 [`@660c343`](https://huggingface.co/mlx-community/whisper-large-v3-turbo-q4/tree/660c343bbf4e52ac257f0b7d952e5388e6f93bef) 463,664,664 B needs its own qualification. MIT | whisper |
+| Silero VAD | existing TorchScript JIT on CPU, beside the Whisper worker | in the Whisper `cmd` worker | [`snakers4/silero-vad@5cd7945`](https://github.com/snakers4/silero-vad/tree/5cd7945676eb32225748052e2e6a0580e4686a08) (v6.2.3), `silero_vad.jit` SHA-256 `e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720` | 2,272,526 B. MIT | whisper |
+| Qwen-Image 2.1 Turbo | MLX-Serve >= 26.10.2 (alternative: mflux) | `cmd` worker (load/generate/exit, progress, cancel, output files) | [`ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit@214ca34`](https://huggingface.co/ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit/tree/214ca346520a59597b89bd77408afa49d526bde5); runtime [`ddalcu/mlx-serve@1fa96c6`](https://github.com/ddalcu/mlx-serve/tree/1fa96c6d212866f7c2d57f5d7fc80d28cfa08d76); upstream [`Qwen/Qwen-Image-2.1-Turbo@fc13ba1`](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | q8/g64 pack, 17.73 GB repo, vision tower included. Qwen Research License (non-commercial) | qwen-image |
+| Qwen-Image 2.1 edit | mflux `QwenImage21Edit` (`mflux-generate-qwen-2.1-edit`) | `cmd` worker (same as Turbo) | [`Qwen/Qwen-Image-2.1@d26bb61`](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/d26bb61231c349cf6b7896fa83353113880e1ba3) via [`mflux@5171ae1`](https://github.com/mflux-community/mflux/tree/5171ae15e84f81046f9685fd77bf0bafa3187b61) | 33.12 GB BF16 source, quantised to q8 at load/export; edit VAE stays FP32 | qwen-image |
+
+Unverified or open, per the research:
+
+- **Chat pin.** The reviewed Mac baseline is TensorFold v1.1.4. The chat archive deployed on the Spark is v1.1.1
+  (`b10231b`), rolled back for a GB10 cache-latency regression. Whether Metal shows it is unknown. v1.1.9 exists
+  (`465e48b`); it is not qualified. Do not carry the GB10 qualification marker or booking across.
+- **Memory.** Chat: upstream footprint at 32,768 context with drafter is 26.5 GiB (M5 Max) / 21.8 GiB (M3 Ultra); the
+  32 GiB admission figure is an estimate. Drama NVFP4: no Mac peak exists (the only receipt is correctness-only on a
+  256 GiB M5 Ultra, no speed, WER or memory claim); the GB10 20.56 GiB booking is not a Mac figure. KnowLine 12-16 GiB
+  (bf16) and Whisper 4-6 GiB are estimates. Qwen-Image q8: 19.3 GB MLX peak is publisher-reported on a 256 GB M5 Ultra.
+- **Speed.** Upstream chat numbers (M5 Ultra, 100 greedy tokens: plain 46-52 tok/s, DFlash2 102-226 tok/s) are not
+  ours. No primary-source KnowLine or Whisper-MLX M5 numbers exist. Drama native Mac RTF/TTFA is unverified.
+- **Qwen-Image edit** at five references: latency, peak and quality are unverified; the Turbo pack's vision tower is
+  card-stated. Text-only exports cannot serve `image_edit`. Verify keys before advertising it.
+- **Licences travel with the weights.** Drama: FACL v1.0 (no Hosted Service without a separate licence; $500,000
+  threshold; "Built with Fish Audio"). Qwen-Image: Research License, and ignore community cards that claim Apache-2.0.
+
+## Decisions
+
+- **Engine correctness.** The Mac backend is a deliberate numerical change. Each model documents an explicit **Mac
+  reference baseline** (backend, checkpoint, precision) and its own acceptance gate. No bit-parity claim with the
+  Spark; Spark/CUDA receipts do not qualify Metal. TensorFold and mflux agreeing (PSNR 43.35 dB on Qwen-Image) is not
+  CUDA output identity.
+- **Out-of-process first.** Chat uses the TensorFold Metal server behind `openai_server`; everything else is a `cmd`
+  worker or external server. In-process Metal engines come later, if at all (contract below).
+- **No CUDA translation.** CUDA pointers, fatbins, NVFP4 `mma.sync` assembly, memcap and the vendor loader do not map to
+  Metal. Mac builds exclude them or provide a separate Mac scheme.
+- **One unified-memory budget.** Count each backing once; no "96 GiB VRAM plus 96 GiB RAM". Admission needs measured
+  resident/working bookings per model on this class of machine. Estimates above are placeholders. Servers' allocations
+  are invisible to the daemon, so trust only measured receipts and observed process footprint.
+- **Shared GPU, co-tenancy.** The scheduler still runs one job at a time and unloads idle tools by priority. During
+  development, every command that loads weights goes through the machine-wide GPU lock. Upstream reports of idle GPU
+  residency after a request (#1647, #1572) are unverified here; confirm unload/kill releases every server buffer.
+- **Drama on Mac is NVFP4 via drama-tensorfold.** Its Mac pin/patch stack is separate from the CUDA `drama-nvfp4`
+  fork; do not build the CUDA fork on Mac. The six voices need explicit conversion to the native catalog schema, not a
+  file copy. Cloning needs offline catalog publication or a new runtime reference contract.
+- **KnowLine keeps the author's scorer.** bf16 first. Preserve choice/noul/score, 64 questions / 255 labels,
+  read-twice up to 3,000 tokens, last-position logits for every label and the folded calibration. Top-k chat logprobs
+  cannot do this.
+- **STT.** Set `condition_on_previous_text=False` explicitly (MLX defaults to True), keep greedy decoding, the Silero
+  gate (16 kHz, threshold 0.5, min speech 250 ms, padding 30 ms) and the segment-overlap drop.
+- **Images.** Keep the fixed unshifted eight-node Turbo schedule. Apply the five-reference limit and mask convention;
+  set mflux steps explicitly (its default of 40 differs from LocalRouter's 25).
+- **Absent models.** Kandinsky-6, Kitten TTS 2 and MiniMax H3 are not registered on macOS and the Mac profile omits them.
+- **Toolchain.** Zig 0.17.0 only (Homebrew ships it). Metal shader builds need full Xcode: the licence must be accepted
+  (`sudo xcodebuild -license accept`, `sudo xcodebuild -runFirstLaunch`) and the Metal Toolchain component installed
+  (`xcodebuild -downloadComponent MetalToolchain`). The reference Mac has Xcode 27.2 and Metal Toolchain 27B47.
+  `xcode-select` there points at the Command Line Tools, so builds set
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. Prebuilt release archives need none of this.
+
+## Foundation design
+
+What makes the daemon build, test and run on macOS arm64 (`zig build`, `zig build test`). Linux behaviour is unchanged.
+
+**Build.** `build.zig` sets `build_config.cuda_engines` to whether the target is Linux. On macOS the CUDA modules
+(`cuda`, `nvfp4_kernels`, `qwen_image`, `minimax_h3`, `kandinsky6`, the vendor loader) are not imported or tested.
+`engine.entries` then holds only `testpattern` and `openai_server`. A tool whose `engine` is a CUDA one finds no
+engine: its worker exits with "no engine named ...", and the tool fails to load. The `check` subcommands for those
+engines are gone. `check gpu` prints the unified-memory budget instead of probing CUDA. The binary links Metal and
+libobjc, but only to read the GPU's working-set ceiling.
+
+**Workers die with the daemon.** Linux arms `PR_SET_PDEATHSIG`. macOS has no such call, so `src/engine/orphan.zig`
+provides two replacements:
+
+| Process | Linux | macOS |
+| --- | --- | --- |
+| compiled-in worker (`localrouter worker`) | `PR_SET_PDEATHSIG` SIGKILL | `orphan.arm(.KILL)`: a thread blocks on kqueue `EVFILT_PROC`/`NOTE_EXIT` for the parent, then signals itself |
+| `openai_server` worker and its model server | `PR_SET_PDEATHSIG` SIGTERM, whose handler kills the server | the same `orphan.arm(.TERM)`, so the same handler runs |
+| `cmd` worker (any program) | none: it sees stdin EOF | spawned as `localrouter guard <daemon pid> -- CMD...` (see below) |
+
+`guard` forks a watchdog twice, so launchd reaps it and it is never a zombie of CMD's. It then `exec`s CMD in place,
+so the daemon keeps the same pid, pipes, process group and signals (cancel's SIGUSR1, the yielder's SIGSTOP). The
+watchdog redirects stdin and stdout to `/dev/null`, so it holds none of the worker's pipes. It watches the daemon and
+the worker with kqueue. If the daemon exits first, it SIGKILLs the worker's process group: the worker, any server the
+worker started, and the watchdog itself. If the worker exits first, the watchdog just exits.
+`tests/orphans.zig` SIGKILLs a daemon that has a compiled-in worker, an `openai_server` worker with its server, and a
+`cmd` worker loaded. It then checks that every process that was under the daemon is gone within 10 s.
+
+**One unified-memory budget** (`src/sched/memory.zig`). The scheduler admits work against `memory.available()`, as
+on the GB10. On macOS that value is computed from three sources:
+
+- `host_statistics64(HOST_VM_INFO64)`: the VM's available memory is `hw.memsize` minus wired, compressor, and
+  non-purgeable anonymous pages. File cache counts as free, as with Linux's MemAvailable.
+- The GPU's headroom: its wired ceiling minus the memory wired now (Metal buffers in use are wired). The ceiling is
+  `iogpu.wired_limit_mb` when an administrator has set it, else Metal's `recommendedMaxWorkingSetSize`, else 3/4 of
+  memory.
+- Pressure from `kern.memorystatus_vm_pressure_level`. Critical pressure admits nothing.
+
+The budget is the smaller of the first two, or 0 under critical pressure. Memory is counted once: there is no
+separate VRAM figure. `budget_bytes` and `reserve_bytes` work as they do on Linux. On this M5 Ultra (96 GiB) the
+ceiling reads 79,626 MiB.
+
+**Smaller portability fixes.**
+
+- Loopback sockets set close-on-exec and non-blocking with `fcntl`, because macOS's `socket()` rejects
+  `SOCK_CLOEXEC`/`SOCK_NONBLOCK`. They also set `SO_NOSIGPIPE`.
+- The yielder's child and stopped-state probes use libproc instead of `/proc`.
+- The tests' process probes are in `tests/proc.zig` (libproc and `KERN_PROCARGS2` on macOS).
+
+**CI.** No macOS job was added, because macOS runners are billed. The PR proposes one. The CI plan check skips a
+profile whose `status` is `skeleton` until its models are filled in.
+
+The Mac deploy profile is `deploy/profiles/mac-apple-silicon.json`. It lists the host prerequisites (Zig 0.17.0, the
+Xcode Metal toolchain, python3) and an empty `models` list, which each model's port fills in.
+
+## Proposed Metal engine contract
+
+For a future in-process engine. It is the counterpart of the CUDA contract in
+[TENSORFOLD-RUNTIME.md](TENSORFOLD-RUNTIME.md#contract-for-engines), **not an existing contract**. TensorFold v1.1.4
+already ships a native Metal module with its own Objective-C bindings and no MLX
+([`metal.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/metal/metal.zig));
+LocalRouter builds only the CUDA runtime and tokenizer, so a pin bump alone selects nothing.
+
+1. **Ownership.** One Metal device and agreed command queue(s) per loaded engine; components borrow them. Explicit
+   autorelease-pool boundaries, worker threads included
+   ([`device.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/metal/device.zig),
+   [`command.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/metal/command.zig)).
+2. **Tensor handles.** `(MTLBuffer owner, byte offset, dtype, shape, strides)` with explicit borrowed views. Keep the
+   owner and no-copy mmap pages alive until the GPU completes; a bare `u64` address is not portable.
+3. **Ordering and staging.** Specify CPU write visibility, queue order, blit completion, event waits/signals and
+   multi-queue barriers. Shared storage removes copies, not synchronisation. Unretained command buffers put lifetime on
+   the caller.
+4. **Kernels and replay.** Publish shader symbols, argument layouts, supported hardware, precision and threadgroup
+   limits. ICB replay is recorded dispatches with declared resources, not inferred stream capture
+   ([`icb.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/metal/icb.zig)).
+   Match references at operator seams and on full output.
+5. **Memory and admission.** Reserve before allocating; count each unified-memory backing once, including mmap,
+   private copies, cache/drafter state and runtime overhead; report resident and working peaks plus process footprint;
+   honour system pressure and the recommended working set
+   ([`memory_policy.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/platform/memory_policy.zig),
+   [`cache_fit.zig`](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/zig/src/native/cache_fit.zig)).
+   TensorFold's 70% RAM policy is about 67.2 GiB on this machine before its margin; that is not a fit limit.
+6. **Failure and unload.** Stop submissions, prove bounded completion on every relevant queue, drop residency
+   references before freeing, release in dependency order. A faulted or timed-out operation never justifies freeing
+   live resources; worker exit is the final boundary.
+7. **Conformance.** Lifecycle, accounting, unavailable-capability, cancellation, server/worker death and exact-output
+   gates on the real Mac backend and checkpoint, per [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+Native Metal image/video building blocks (`tf-qwen-image`, `tf-h3-dit`) are test tools for a denoiser only: no prompt
+encoder, decoder or server registration. They are not a ready engine.
+
+## Sources
+
+Pinned, immutable revisions (full hashes are in the links).
+
+- TensorFold v1.1.4: [release](https://github.com/ashhart/TensorFold/releases/tag/v1.1.4), commit
+  [`eab8582`](https://github.com/ashhart/TensorFold/tree/eab8582819688325e371907e4706e1c602b8a273); Qwen recipe
+  [qwen3.8-27b](https://github.com/ashhart/TensorFold/blob/eab8582819688325e371907e4706e1c602b8a273/docs/recipes/qwen3.8-27b.md).
+  Latest observed v1.1.9: [release](https://github.com/ashhart/TensorFold/releases/tag/v1.1.9) (`465e48b`).
+- LocalRouter base [`fe24726`](https://github.com/jayleaton/localrouter/tree/fe24726cae6d0072e2970fc3b0027e353e129ad6);
+  [chat pins](https://github.com/jayleaton/localrouter/blob/fe24726cae6d0072e2970fc3b0027e353e129ad6/tools/chat/qwen38-27b/pins.json).
+- Chat: [Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit/tree/22d8d538154e0e5b6f8dcb1fcc74a60a0798104c),
+  [DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/tree/50307d4c4cde6860d4eee73e2547cd786fe8e8a4).
+- Drama: [drama-tensorfold `db6ba7d`](https://github.com/plotarmordev/drama-tensorfold/tree/db6ba7da314b24b42b02978ba4401f54f6738311),
+  [Mac recipe](https://github.com/plotarmordev/drama-tensorfold/blob/db6ba7da314b24b42b02978ba4401f54f6738311/recipe/README-macos.md),
+  [M5 Ultra receipt](https://github.com/plotarmordev/drama-tensorfold/blob/db6ba7da314b24b42b02978ba4401f54f6738311/results/macos-nvfp4.json),
+  [NVFP4 weights `494db08`](https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/tree/494db08481db952f834b2241bce63fb3dfa72554),
+  [fishaudio/drama-3 `e0a9218`](https://huggingface.co/fishaudio/drama-3/tree/e0a9218aa48888270f06ef1ed9ea67622c0e17d2)
+  (reference, FACL licence).
+- KnowLine: [original](https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/779944d2cc8ffa19cef386aee83c83bcb967ade2),
+  [Q5](https://huggingface.co/Liamariel/knowline-4b-gen5.5-mlx-q5/tree/053081f764ffeddf4b1278d4183db95b72180520),
+  [mlx-lm](https://github.com/ml-explore/mlx-lm/tree/736ab0d8c1d0edc79c3d798044fe6904e2fa23be).
+- STT: [Whisper MLX](https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb),
+  [Silero](https://github.com/snakers4/silero-vad/tree/5cd7945676eb32225748052e2e6a0580e4686a08).
+- Images: [Turbo MLX-Serve q8](https://huggingface.co/ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit/tree/214ca346520a59597b89bd77408afa49d526bde5),
+  [mlx-serve](https://github.com/ddalcu/mlx-serve/tree/1fa96c6d212866f7c2d57f5d7fc80d28cfa08d76),
+  [mflux](https://github.com/mflux-community/mflux/tree/5171ae15e84f81046f9685fd77bf0bafa3187b61),
+  [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/d26bb61231c349cf6b7896fa83353113880e1ba3),
+  [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b).

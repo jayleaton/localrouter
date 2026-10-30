@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
+const orphan = @import("../engine/orphan.zig");
 const engine = @import("../engine/engine.zig");
 const upstream = @import("../tool/upstream.zig");
 const ToolConfig = @import("../config.zig").ToolConfig;
@@ -26,7 +26,7 @@ fn needs(cfg: *const ToolConfig, _: *const Request) engine.Needs {
     return .{ .resident = cfg.resident_bytes, .working = cfg.working_bytes };
 }
 
-/// The running server's pid, for the SIGTERM handler (the daemon died: PR_SET_PDEATHSIG).
+/// The running server's pid, for the SIGTERM handler (the daemon died: `orphan.arm`).
 var server_pid: std.atomic.Value(posix.pid_t) = .init(0);
 
 const Server = struct {
@@ -75,7 +75,7 @@ const Server = struct {
         // The daemon's death reaches this worker as SIGTERM (not the default SIGKILL), so it can stop the server first.
         const act: posix.Sigaction = .{ .handler = .{ .handler = onTerm }, .mask = posix.sigemptyset(), .flags = 0 };
         posix.sigaction(posix.SIG.TERM, &act, null);
-        _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.TERM), 0, 0, 0);
+        _ = orphan.arm(.TERM);
         std.log.info("starting {s} on 127.0.0.1:{d}", .{ argv[0], s.listen_port });
         const child = std.process.spawn(s.env.io, .{ .argv = argv, .environ_map = &env, .stdin = .ignore, .stdout = .{ .file = std.Io.File.stderr() }, .stderr = .inherit }) catch |err| {
             engine.explain("could not start {s}: {s}", .{ argv[0], @errorName(err) });

@@ -4,6 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const opts = @import("build_options");
 const testing = std.testing;
+pub const proc = @import("proc.zig");
 
 pub const mib: u64 = 1 << 20;
 
@@ -70,34 +71,13 @@ pub const Daemon = struct {
     /// Pids of the daemon's worker processes (children whose PPid is the daemon).
     pub fn workers(d: *Daemon, a: std.mem.Allocator) ![]i32 {
         var list: std.ArrayList(i32) = .empty;
-        var proc = try Io.Dir.cwd().openDir(d.io, "/proc", .{ .iterate = true });
-        defer proc.close(d.io);
-        var it = proc.iterate();
-        while (try it.next(d.io)) |e| {
-            const pid = std.fmt.parseInt(i32, e.name, 10) catch continue;
-            var buf: [4096]u8 = undefined;
-            const status = readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/status", .{pid}, 0), &buf) orelse continue;
-            const at = std.mem.indexOf(u8, status, "PPid:\t") orelse continue;
-            const end = std.mem.indexOfScalarPos(u8, status, at, '\n') orelse continue;
-            const ppid = std.fmt.parseInt(i32, status[at + 6 .. end], 10) catch continue;
-            if (ppid == d.child.id.? and std.mem.indexOf(u8, status, "Name:\tlocalrouter") != null) try list.append(a, pid);
+        for (try proc.children(a, d.io, d.child.id.?)) |pid| {
+            var buf: [256]u8 = undefined;
+            if (std.mem.startsWith(u8, proc.name(a, pid, &buf), "localrouter")) try list.append(a, pid);
         }
         return list.items;
     }
 };
-
-/// A /proc file (they report size 0, so read until EOF with plain reads).
-pub fn readProc(path: [:0]const u8, buf: []u8) ?[]const u8 {
-    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path, .{}, 0) catch return null;
-    defer _ = std.posix.system.close(fd);
-    var n: usize = 0;
-    while (n < buf.len) {
-        const got = std.posix.read(fd, buf[n..]) catch return null;
-        if (got == 0) break;
-        n += got;
-    }
-    return buf[0..n];
-}
 
 pub fn image(d: *Daemon, a: std.mem.Allocator, model: []const u8, extra: []const u8) !Daemon.Resp {
     const size = if (std.mem.indexOf(u8, extra, "\"size\"") == null) ",\"size\":\"256x256\"" else "";

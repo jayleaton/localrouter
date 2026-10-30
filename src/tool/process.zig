@@ -19,6 +19,7 @@ const Request = @import("request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 const speech_gate = @import("../sched/speech_gate.zig");
 const yielder = @import("../sched/yielder.zig");
+const orphan = @import("../engine/orphan.zig");
 
 pub const Setup = struct {
     gpa: std.mem.Allocator,
@@ -305,7 +306,8 @@ pub const ProcessTool = struct {
             try env.put("LOCALROUTER_GPU_LOCK", try p.ownLock());
         }
         var pid_buf: [16]u8 = undefined; // the worker's orphan check compares its parent with this, not with 1
-        try env.put("LOCALROUTER_PARENT", try std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}));
+        const me = try std.fmt.bufPrint(&pid_buf, "{d}", .{std.c.getpid()});
+        try env.put("LOCALROUTER_PARENT", me);
         if (p.setup.speech_gate.len > 0) try env.put(speech_gate.env_name, p.setup.speech_gate);
         var rank_buf: [2][24]u8 = undefined;
         if (p.setup.rank) |r| {
@@ -313,7 +315,11 @@ pub const ProcessTool = struct {
             try env.put("LOCALROUTER_WORLD", try std.fmt.bufPrint(&rank_buf[1], "{d}", .{r.world}));
             try env.put("LOCALROUTER_MASTER", r.master);
         }
-        const argv: []const []const u8 = if (p.cfg.cmd.len > 0) p.cfg.cmd else &.{ p.setup.self_exe, "worker" };
+        const argv: []const []const u8 = if (p.cfg.cmd.len == 0) &.{ p.setup.self_exe, "worker" } else if (orphan.needs_guard)
+            try std.mem.concat(gpa, []const u8, &.{ &.{ p.setup.self_exe, "guard", me, "--" }, p.cfg.cmd }) // dies with the daemon
+        else
+            p.cfg.cmd;
+        defer if (p.cfg.cmd.len > 0 and orphan.needs_guard) gpa.free(argv);
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);
         Io.Dir.cwd().createDirPath(p.setup.io, std.fs.path.dirname(log_path).?) catch {}; // ids such as fishaudio/drama-3

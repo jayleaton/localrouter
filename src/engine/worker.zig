@@ -1,13 +1,13 @@
 //! `localrouter worker`: serves one compiled-in engine over the worker protocol on stdin/stdout. Logs go to stderr.
-//! It dies with the daemon (PR_SET_PDEATHSIG), so an orphan never holds GPU memory.
+//! It dies with the daemon (PR_SET_PDEATHSIG; on macOS a kqueue watch, `orphan.zig`), so an orphan never holds GPU memory.
 
 const std = @import("std");
-const linux = std.os.linux;
 const engine = @import("engine.zig");
 const wire = @import("../tool/wire.zig");
 const tool = @import("../tool/tool.zig");
 const ToolConfig = @import("../config.zig").ToolConfig;
 const speech_gate = @import("../sched/speech_gate.zig");
+const orphan = @import("orphan.zig");
 
 const stdin_fd = 0;
 const stdout_fd = 1;
@@ -15,8 +15,8 @@ const stdout_fd = 1;
 /// Runs until `exit` or EOF; `tool_json` is the tool's config as the daemon serialized it, `parent` the daemon's pid
 /// (LOCALROUTER_PARENT, 0 when unset: no check; it is 1 when the daemon is a container's init, so the check cannot compare with 1).
 pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i32, environ: ?*const std.process.Environ.Map) !u8 {
-    _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0);
-    if (parent != 0 and linux.getppid() != parent) return 0; // the daemon died before the line above
+    const armed = orphan.arm(.KILL);
+    if (parent != 0 and (!armed or std.c.getppid() != parent)) return 0; // the daemon died before the line above
     const parsed = try std.json.parseFromSlice(ToolConfig, gpa, tool_json, .{ .allocate = .alloc_always });
     defer parsed.deinit();
     const cfg = &parsed.value;

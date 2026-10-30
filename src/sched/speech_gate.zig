@@ -116,7 +116,7 @@ pub const Waiter = struct {
 test "a worker waits while the daemon holds the gate, and not after" {
     const io = std.testing.io;
     var pbuf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&pbuf, "/tmp/localrouter-speech-gate-{d}", .{std.os.linux.getpid()});
+    const path = try std.fmt.bufPrint(&pbuf, "/tmp/localrouter-speech-gate-{d}", .{std.c.getpid()});
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
     var h: Holder = .init(path);
     defer h.deinit();

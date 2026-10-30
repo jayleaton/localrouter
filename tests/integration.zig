@@ -14,7 +14,6 @@ const harness = @import("harness.zig");
 const Daemon = harness.Daemon;
 const mib = harness.mib;
 const reserve = harness.reserve;
-const readProc = harness.readProc;
 const image = harness.image;
 const firstPng = harness.firstPng;
 const sleepMs = harness.sleepMs;
@@ -28,7 +27,8 @@ test {
     _ = @import("responses.zig");
     _ = @import("decide.zig");
     _ = @import("jarvis.zig");
-    _ = @import("drama3.zig");
+    // the Drama 3 adapter in tools/speech/drama3 is the Spark's (Linux: prctl, CUDA engine); the Mac one is its own port
+    if (@import("builtin").os.tag == .linux) _ = @import("drama3.zig");
     _ = @import("voice.zig");
     _ = @import("mcp.zig");
     _ = @import("models.zig");
@@ -37,6 +37,7 @@ test {
     _ = @import("nodes.zig");
     _ = @import("ranks.zig");
     _ = @import("dropin.zig");
+    _ = @import("orphans.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;
@@ -234,10 +235,7 @@ test "overhead: idle daemon RSS and API latency" {
         try testing.expectEqual(std.http.Status.ok, r.status);
     }
     std.mem.sort(i64, &times, {}, std.sort.asc(i64));
-    var buf: [4096]u8 = undefined;
-    const status = readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/status", .{d.child.id.?}, 0), &buf) orelse return error.NoProc;
-    const at = std.mem.indexOf(u8, status, "VmRSS:") orelse return error.NoRss;
-    const rss_kb = try std.fmt.parseInt(u64, std.mem.trim(u8, status[at + 6 .. std.mem.indexOfScalarPos(u8, status, at, 'k').?], " \t"), 10);
+    const rss_kb = (harness.proc.rss(a, d.child.id.?) orelse return error.NoProc) >> 10;
     std.debug.print("\noverhead: /v1/models p50 {d} us, p99 {d} us; idle daemon RSS {d} KiB\n", .{ times[100], times[198], rss_kb });
     try testing.expect(times[100] < 5000);
     try testing.expect(rss_kb * 1024 < 30 * mib);
