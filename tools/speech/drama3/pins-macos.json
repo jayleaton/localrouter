@@ -1,0 +1,169 @@
+{
+ "note": "Drama 3 on macOS (Apple silicon): plotarmordev/drama-tensorfold's Mac path, the native TensorFold Zig/Metal engine at its Mac NVFP4 pin and patches, serving the same NVFP4 pruned weights as pins-nvfp4.json. setup-macos.sh fetches, verifies and builds from these pins; drama3_worker_macos.py reads them and the macOS qualification marker is bound to this file's sha256. pins.json and pins-nvfp4.json (the GB10's) are not read on macOS.",
+ "platform": "macos-arm64",
+ "variant": "nvfp4",
+ "lossy": {
+  "what": "routed experts NVFP4 (GPTQ, calibrated on 120 English requests) and pruned to 7,369 of 10,240 (each layer keeps the experts covering 90 % of router weight); every other weight, the codec included, unchanged",
+  "approved_by": "JJ Eaton",
+  "approved_at": "2026-10-24"
+ },
+ "upstream": {
+  "repository": "https://github.com/plotarmordev/drama-tensorfold.git",
+  "commit": "db6ba7da314b24b42b02978ba4401f54f6738311",
+  "license": "Apache-2.0",
+  "dir": "drama-tensorfold",
+  "files": {
+   "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+   "NOTICE": "e57a094f734ef47a098a106b0328a7e5af6e60f20457dff768aefba547119e8a",
+   "engine/nvfp4/macos/UPSTREAM": "9063d9e10f85c910dadac62719ab2052d3fa7469e01e83e571e84abb994e988b",
+   "engine/nvfp4/macos/patches/SHA256SUMS": "e7897c6563f162f172e53a1cf83689932b02a81f2e50afc49b24f4d095c6eaa0",
+   "recipe/README-macos.md": "6eb2da4b094f531917ec7dbb7752bbc4715cc6b83348a6d008529a82983cf1ac",
+   "recipe/checksums/nvfp4.sha256": "6694b907962f75c83f0b1db8aaea7583d184cfaa858ae353e8efa484b7744fe1",
+   "recipe/pilot_macos.py": "c7221f3fc33f0f0d63db3109b808b1304014f5fe25fbbfcd40620cd46bc065e7",
+   "recipe/sources.json": "373144c443732a54691b0a31b2ef71f2029ec11f0a0e53507a30df2ae821afc5",
+   "recipe/weight_selection.py": "2c436791a7678430a669d304fc3ea4cd8373baf567c3b2fc2a4fd0e4ef30c904",
+   "results/macos-nvfp4.json": "01448b8dd6116d304bf445f26259d6367c8f99cbe7160d5e5f7094a958b754d4",
+   "scripts/build-engine.sh": "a1f0699109f5d13dec41d0839e708a21d6d97e1568e20c67717d07f9e34f7a33"
+  }
+ },
+ "tensorfold": {
+  "repository": "https://github.com/ashhart/TensorFold.git",
+  "commit": "3d219d2156d4c25dcfb74370c8703cd89e58aa49",
+  "note": "drama-tensorfold's engine/nvfp4/macos/UPSTREAM: the Metal base (TensorFold 1.1.4 line). Upstream's scripts/build-engine.sh --weights nvfp4 applies engine/nvfp4/macos/patches with committer build-engine <build-engine@example.invalid> and --committer-date-is-author-date, so its HEAD is patched_head on every run, and builds native, drama3-generate and drama3-voice with -Dcpu=apple_m1",
+  "patches": {
+   "dir": "engine/nvfp4/macos/patches",
+   "files": {
+    "0001-drama3-metal-nvfp4-cfg.patch": "f282318f0e8dae43b19d1fa93ec05691696a0352eaeac41f9ffc334690d8b388",
+    "0002-shared-gate-stress-regression.patch": "0a68a3b66da1991f1a04980cb6958e4acc8856a88efdbe1fe10adc6df588cfc8",
+    "0003-shared-cli-extension-point.patch": "794a5b6008487ec705cadb098eb1c15737da743aee0855b610510506a0ce38db",
+    "0004-speech-sampling-controls.patch": "c9c1406dc344ab359693b03584184119569ad05c686606d2f4c976eb667ce54d",
+    "0005-sampling-json-boundaries.patch": "158ac17113ca3ffd04706782189a14706d4c63e343e40b81af287bae1b55cefc"
+   }
+  },
+  "patched_head": "a2b8f03e2330e2eb974cfcaa15827a239dc6bef7"
+ },
+ "build": {
+  "dir": "build/tensorfold-nvfp4",
+  "record": "engine-macos.json",
+  "binaries": {
+   "native": "zig-out/native/bin/tensorfold-native",
+   "generate": "zig-out/bin/drama3-generate",
+   "voice": "zig-out/bin/drama3-voice"
+  }
+ },
+ "serve": [
+  "--cfg-gamma",
+  "1.5",
+  "--cfg-batched"
+ ],
+ "launcher": {
+  "base": "recipe/pilot_macos.py",
+  "patch": "patches/pilot-macos-external-admission.patch",
+  "patch_sha256": "a4e701a1633669aac201c697ca189c23817b9bae974b4abbd158286b1db7ff3e",
+  "path": "launcher/pilot_macos.py",
+  "sha256": "24e617ab1066a23e37d21ac8de55c14715e7ecdd7ecf2060e9f114516f0c367f",
+  "support": {
+   "recipe/weight_selection.py": "launcher/weight_selection.py"
+  },
+  "note": "upstream's macOS launcher with --external-admission (LocalRouter admits the load: no free+inactive admission, no 34 GiB abort) and --parent-pid (stops the server when the worker is gone: macOS has no parent-death signal); setup-macos.sh writes it, and the module it imports, under ROOT/launcher"
+ },
+ "voices": {
+  "source": "voices",
+  "dir": "voices-macos",
+  "converter": "voices_macos.py",
+  "note": "the six named voices (voices/*.json, drama3-voice/1, pinned by pins.json) converted by voices_macos.py to the Metal server's drama3-http-voice/1 catalog (frame-major codes, source synthetic); setup-macos.sh writes them to ROOT/voices-macos and checks each sha256 here",
+  "files": {
+   "Arlo.json": "ff0445cc54e377667bfdd70ea0bcb81558ccee53d9d1e577db949c6902b5e895",
+   "Ezra.json": "2998a170bd8915066b71f03aa6fa52b8121ce367deed9fd594421312554dc5ae",
+   "Mae.json": "9a77a40f7d2e0a2e03462d726db1704b3f72f4b0a16048f6b2ba08092e01fea1",
+   "Nora.json": "bf3293e2e74745152fa21042e74c6109543ed9fa9f4a62e58a3682ac0fea8d01",
+   "Theo.json": "98e35eb3d3d84a67ed4083ce1be5fa98d681e8476ead9854d4831b5482ac06db",
+   "Wren.json": "970bc9ef7f4f130601fc122ad91423980f951f1b59c71ff9c616e231c8dd04f3"
+  }
+ },
+ "toolchain": {
+  "zig": "0.17.0",
+  "zig_archive": "zig-aarch64-macos-0.17.0.tar.xz",
+  "zig_archive_sha256": "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a",
+  "metal": "Xcode's Metal compiler (xcrun -f metal), with the Xcode licence accepted"
+ },
+ "checkpoint": {
+  "repo": "plotarmordev/drama-3-NVFP4-Pruned",
+  "revision": "494db08481db952f834b2241bce63fb3dfa72554",
+  "dir": "drama-3-NVFP4-Pruned",
+  "license": "Fish Audio Community License 1.0 (FACL v1.0), byte-identical to fishaudio/drama-3's",
+  "license_url": "https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/blob/494db08481db952f834b2241bce63fb3dfa72554/LICENSE",
+  "weight_and_codec_bytes": 22294649076,
+  "files": {
+   "LICENSE": [
+    19685,
+    "733a32442087acbda12ecafe8e71eb8ee5890c89b50ce7ac4ea3777faa3c823e"
+   ],
+   "NOTICE": [
+    2107,
+    "2489564106627d583a2cb148ba86ffd2fb43f9175a65f565779b7b893e6c0351"
+   ],
+   "chat_template.jinja": [
+    7756,
+    "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+   ],
+   "codec.pth": [
+    1871099728,
+    "74fc41c5a7151c6f350af8bd7e5d6e3accfcc7f3dfbfac23afd35af07052bb2f"
+   ],
+   "config.json": [
+    5535,
+    "4b13a31b504cf54181f52df5bbb27604f5cc4b77b6e90a12ab85d62e0d70b693"
+   ],
+   "model-00001-of-00008.safetensors": [
+    3281771064,
+    "d02b64a75fd47bae94d2fb1d8687f502a255efdeca9f55d3c37a630fe5ed2c4f"
+   ],
+   "model-00002-of-00008.safetensors": [
+    2513024212,
+    "a79909a7b43219e42daccdd4740a4ff28908e68519e84b26284a2a76af8b9400"
+   ],
+   "model-00003-of-00008.safetensors": [
+    2253727044,
+    "525be638744ae030c9e3bb3d58ef6e8e281082d18a9a30473e7421507901ee8d"
+   ],
+   "model-00004-of-00008.safetensors": [
+    2186746904,
+    "a14de9dec3ccedee4a9d3b2e622435bc44696b8f5cf4bee6a4dd0d33e1530855"
+   ],
+   "model-00005-of-00008.safetensors": [
+    2041759452,
+    "768e2818b834daf1a06588c0cdeff1e159b426f0fd32b4203fad551d5d816ff8"
+   ],
+   "model-00006-of-00008.safetensors": [
+    1985058776,
+    "330d16af1b202a5517fd1f88c27abb8400d8be80ad571161564fdd9302d5168e"
+   ],
+   "model-00007-of-00008.safetensors": [
+    2566060020,
+    "80b5caac7da73489d7f3e177adf8d4e7e91e9972d5a47a818e32f7fff024e8b3"
+   ],
+   "model-00008-of-00008.safetensors": [
+    3595401876,
+    "aad2f494b1359fe2ab7a2e55eb6ba819c747149263d36e23b6d0409d49e47592"
+   ],
+   "model.safetensors.index.json": [
+    7488990,
+    "125d92992e0ab23363b5ee212c45fccf8200053bc43c42884c6eb5bd5b4a7cbe"
+   ],
+   "special_tokens_map.json": [
+    102779,
+    "08aed9e321dc05275ac68cf883bfa96006b3fc09ff5cccadf262b6bce0873adb"
+   ],
+   "tokenizer.json": [
+    20791070,
+    "0e9b9db76b2f0389b04b6ef057a2ac3b89100b7e96f2dd7034d19580a09654d6"
+   ],
+   "tokenizer_config.json": [
+    103580,
+    "00e800279d8436c324b924e97872c7eacd2b19406aa0fe71eeb557b4cd53aa3e"
+   ]
+  },
+  "note": "downloaded with the Hugging Face CLI into its shared cache; ROOT/drama-3-NVFP4-Pruned links to that revision's snapshot. Every file here by size and sha256, the same digests as upstream's recipe/checksums/nvfp4.sha256 at the pinned commit, plus LICENSE and NOTICE"
+ }
+}
