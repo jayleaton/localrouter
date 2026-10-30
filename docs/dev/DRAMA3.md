@@ -655,8 +655,13 @@ reference; upstream's own M5 Ultra receipt (`results/macos-nvfp4.json`) is corre
 
 **First-audio gate.** The GB10's bar is warm streamed first audio p50 at most 0.5 s. With guidance (`--cfg-gamma 1.5
 --cfg-batched`, as on the GB10) the M5 Ultra measures 0.52 s: the server already sends its first chunk after 4 frames
-(186 ms of audio); the rest is resuming the voice's snapshot and prefilling the text for both CFG states. The Mac
-profile qualifies at `--first-audio-gate 0.55` until that is decided; `guidance: false` measures 0.25 s (below).
+(186 ms of audio); the rest is resuming the voice's snapshot and prefilling the text for both CFG states. Decided
+2026-10-30: the Mac keeps guidance on, as the GB10 does, and qualifies at `--first-audio-gate 0.55` (the Mac profile's
+qualify step).
+
+**Unguided, for later.** `"guidance": false` (no CFG) measures 0.25 s warm first audio and RTF 0.54 on the M5 Ultra
+(below), but its effect on quality with the named and cloned voices has not been measured (no WER, similarity or
+listening comparison against guided). It is an option to evaluate, not a configuration to deploy.
 
 ### Measured on the Mac Studio (M5 Ultra)
 
