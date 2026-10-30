@@ -200,6 +200,8 @@ def main():
     ap.add_argument("--tool", default="fishaudio/drama-3")
     ap.add_argument("--texts", type=int, default=5, help="compare-texts.txt lines per voice (the first fills the voice)")
     ap.add_argument("--accept-native-numerics", action="store_true")
+    ap.add_argument("--first-audio-gate", type=float, default=FIRST_AUDIO_GATE_S,
+                    help="warm streamed first-audio p50 bound, seconds (default: the GB10's 0.5)")
     args = ap.parse_args()
     tool = load_tool(args.config, args.tool)
     os.makedirs(args.out, exist_ok=False)
@@ -210,7 +212,10 @@ def main():
         texts = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")][:args.texts]
 
     # assets
-    w = mac.MacWorker({**tool, "options": {**tool.get("options", {}), "verify": "sha256"}}, require_qualification=False)
+    # its own runtime directory: the operator's clone cache is neither read nor changed, and the clone below always
+    # takes the restart path
+    options = {**tool.get("options", {}), "verify": "sha256", "runtime_dir": os.path.join(os.path.abspath(args.out), "runtime")}
+    w = mac.MacWorker({**tool, "options": options}, require_qualification=False)
     o = w.opts
     began = time.monotonic()
     try:
@@ -265,6 +270,7 @@ def main():
 
     # a clone of a model-invented voice (its first request restarts the server: the first server's peak is kept)
     _, peak_named = footprint(w.unit)
+    lowest_named = sampler.min_available  # the server alone, before the encoder runs beside it
     clone = {}
     with tempfile.TemporaryDirectory() as tmp:
         job = tempfile.mkdtemp(dir=tmp)
@@ -329,6 +335,7 @@ def main():
               "server_phys_footprint_peak_named_voices_bytes": peak_named,
               "server_max_rss_sampled_bytes": sampler.max_rss,
               "available_drop_bytes": before - lowest if lowest is not None else None,
+              "available_drop_named_voices_bytes": before - lowest_named if lowest_named is not None else None,
               "resident_bytes_configured": tool.get("resident_bytes")}
     report.add("memory", bool(peak) and (not tool.get("resident_bytes") or peak <= tool["resident_bytes"]), **memory)
 
@@ -340,9 +347,10 @@ def main():
              "first_sentence_first_audio_s": {v: results[v]["first_sentence_first_audio_s"] for v in results},
              "per_voice": {v: {k: m[k] for k in m if k != "requests"} for v, m in results.items()},
              "clone": clone, "memory": memory}
-    report.add("gates", p50(warm_first) is not None and p50(warm_first) <= FIRST_AUDIO_GATE_S
+    report.add("gates", p50(warm_first) is not None and p50(warm_first) <= args.first_audio_gate
                and p50(warm_rtf) is not None and p50(warm_rtf) < RTF_GATE,
-               warm_first_audio_p50_s=bench["warm_first_audio_p50_s"], warm_rtf_p50=bench["warm_rtf_p50"])
+               warm_first_audio_p50_s=bench["warm_first_audio_p50_s"], warm_rtf_p50=bench["warm_rtf_p50"],
+               first_audio_gate_s=args.first_audio_gate, rtf_gate=RTF_GATE, guidance=o.guidance)
     with open(os.path.join(args.out, "requests.json"), "w") as f:
         json.dump(results, f, indent=1)
     return finish(args, tool, report, w, bench)
