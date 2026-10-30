@@ -9,12 +9,14 @@ serve  starts the tool's `options.server` argv itself (same env; --no-drafter dr
 port   runs the suite against an OpenAI-compatible endpoint already on 127.0.0.1:PORT (the LocalRouter daemon).
        Memory is read from PID (default: the one running tensorfold-native, if any).
 
-The suite: prompts.json whole twice and streamed once with each prompt's expectations, whole = whole (determinism)
-and stream = whole (TensorFold's reasoning trailing-newline exception admitted, as qualify.py); speed at a short code
-prompt and ~2k / ~8k / ~28k-token document prompts, streamed, reasoning off, each prompt cold (a unique prefix);
-a cached follow-up (an ~8k-token turn, then the same conversation plus one question) against a cold prompt of the
-same length. Memory: the server's phys_footprint every 0.5 s, its lifetime maximum (proc_pid_rusage) and
-`footprint` snapshots after load and at the end. OUT/bench.json has everything; OUT/summary.json the numbers.
+The suite: prompts.json whole twice and streamed once with each prompt's expectations, whole = whole (determinism) and
+stream = whole (TensorFold's reasoning trailing-newline exception admitted, as qualify.py), and whole = the Mac
+reference baseline (baseline-macos.json, same TensorFold version); speed at a short code prompt and document prompts
+sized ~2k / ~8k / ~28k tokens at 4 characters a token (the server's prompt_tokens is the real count, 10 to 25% more),
+streamed, reasoning off, each cold (a unique prefix); cached follow-ups (a ~1.5k and an ~8k turn, then the same
+conversation plus one question) against a cold prompt of the same length. Memory: the server's phys_footprint every
+0.5 s, its lifetime maximum (proc_pid_rusage) and `footprint` snapshots after load and at the end. OUT/bench.json has
+everything; OUT/summary.json the numbers.
 """
 
 import argparse
@@ -36,6 +38,7 @@ from qualify import expectation, stream_reasoning_tail  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
+BASELINE = os.path.join(HERE, "baseline-macos.json")
 TENSORFOLD = read_json(os.path.join(HERE, "pins-macos.json"))["tensorfold"]["version"]
 GIB = 1 << 30
 CHARS_PER_TOKEN = 4  # English prose with this tokenizer; the server's prompt_tokens gives the real count
@@ -179,6 +182,8 @@ def follow_up(port, model, out_dir, timeout, salt):
 def features(port, model, out_dir, timeout):
     runs = {}
     run_prompts(port, model, ("whole1", "whole2", "stream"), timeout, out_dir, runs)
+    baseline = read_json(BASELINE) if os.path.exists(BASELINE) else {}
+    baseline = baseline.get("prompts") if baseline.get("tensorfold") == TENSORFOLD else None
     checks = []
     for p in read_json(PROMPTS)["prompts"]:
         r = runs[p["id"]]
@@ -193,6 +198,10 @@ def features(port, model, out_dir, timeout):
                 same = stream_reasoning_tail(r["stream"].get(f), r["whole1"].get(f), TENSORFOLD)
             checks.append({"check": f"{p['id']} stream = whole {f}", "pass": same})
         checks.append({"check": f"{p['id']} stream [DONE]", "pass": bool(r["stream"].get("done"))})
+        want = (baseline or {}).get(p["id"])
+        if want is not None:
+            for f in FIELDS:
+                checks.append({"check": f"{p['id']} whole1 = Mac baseline {f}", "pass": r["whole1"].get(f) == want[f]})
     failed = [c for c in checks if not c["pass"]]
     print(f"features: {len(checks) - len(failed)}/{len(checks)} checks pass", flush=True)
     for c in failed:

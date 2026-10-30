@@ -9,7 +9,7 @@
       "name": "Qwen3.8 27B (TensorFold 1.1.4 Metal, MLX 4-bit + DFlash2 drafter)",
       "engine": "openai_server",
       "weights": "/Users/USER/.cache/huggingface/hub",
-      "resident_bytes": 34359738368,
+      "resident_bytes": 32212254720,
       "working_bytes": 0,
       "keep_loaded": true,
       "priority": 100,
@@ -44,7 +44,7 @@
           "TF_DRAIN_S": "5"
         },
         "health": "/health",
-        "memory": "PLACEHOLDER"
+        "memory": "measured on an M5 Ultra (96 GiB), TensorFold 1.1.4 Metal, bench_macos.py, docs/dev/CHAT.md: phys_footprint 20.8 GiB loaded with the drafter, lifetime peak 25.6 GiB after a 31k-token prompt and the cached follow-ups at --parallel 1 --prompt-cache-gib 4; 30 GiB = that peak plus room for the rest of the 4 GiB prompt cache"
       }
     }
   ]
