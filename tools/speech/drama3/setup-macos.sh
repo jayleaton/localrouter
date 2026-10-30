@@ -6,14 +6,15 @@
 # with LocalRouter's pinned patch (patches/pilot-macos-external-admission.patch), beside the module it imports.
 # ROOT/voices-macos holds the six named voices converted to the Metal server's catalog (voices_macos.py), each by
 # sha256. The weights, plotarmordev/drama-3-NVFP4-Pruned at the pinned revision (22.3 GB), go into the Hugging Face
-# CLI's shared cache (`hf` on PATH, or HF=/path/to/hf), and ROOT/drama-3-NVFP4-Pruned links to that snapshot; each
-# file is checked by size and sha256 (--verify size: by size only, for a re-run). The engine is built by upstream's
-# scripts/build-engine.sh --weights nvfp4 in ROOT/build/tensorfold-nvfp4, its HEAD checked against the pinned
-# patched_head, and ROOT/engine-macos.json records the three binaries' sha256 (the qualification marker carries the
-# server's). The build needs Zig 0.17.0 and Xcode's Metal compiler (`xcrun -f metal`; DEVELOPER_DIR picks Xcode when
-# xcode-select names the Command Line Tools): a missing compiler, or an Xcode licence not yet accepted, stops here with
-# exit 3 after everything else is in place. Nothing is executed from the
-# downloads, and nothing here accepts the weights' licence. Spark/Linux hosts use fetch.sh and build.sh instead.
+# CLI's shared cache (`hf` on PATH, or HF=/path/to/hf), and ROOT/drama-3-NVFP4-Pruned links to that snapshot (without
+# the CLI, curl downloads each pinned file into ROOT/drama-3-NVFP4-Pruned itself); each file is checked by size and
+# sha256 (--verify size: by size only, for a re-run). The engine is built by upstream's scripts/build-engine.sh
+# --weights nvfp4 in ROOT/build/tensorfold-nvfp4, its HEAD checked against the pinned patched_head, and
+# ROOT/engine-macos.json records the three binaries' sha256 (the qualification marker carries the server's). The build
+# needs Zig 0.17.0 and Xcode's Metal compiler (`xcrun -f metal`; DEVELOPER_DIR picks Xcode when xcode-select names the
+# Command Line Tools): a missing compiler, or an Xcode licence not yet accepted, stops here with exit 3 after
+# everything else is in place. Nothing is executed from the downloads, and nothing here accepts the weights' licence.
+# Spark/Linux hosts use fetch.sh and build.sh instead.
 set -euo pipefail
 export LC_ALL=C
 here=$(cd "$(dirname "$0")" && pwd)
@@ -127,7 +128,8 @@ rm -rf "${root:?}/${vdir:?}"
 mv "$root/$vdir.tmp" "$root/$vdir"
 echo "setup-macos.sh: $(pinned voice | grep -c .) voices converted and verified in $root/$vdir"
 
-# The weights: the pinned revision through the Hugging Face CLI into its shared cache, ROOT/DIR a link to the snapshot.
+# The weights: with the Hugging Face CLI (`hf` on PATH, or HF), the pinned revision into its shared cache and ROOT/DIR a
+# link to the snapshot; without it, each pinned file straight into ROOT/DIR with curl (resumable .part, checked, moved).
 if [ "$weights" = 1 ]; then
   read -r repo rev ckdir <<< "$(pinned ckpt)"
   cat <<EOF
@@ -140,11 +142,27 @@ setup-macos.sh: the Drama 3 weights and codec are licensed under the Fish Audio 
   supply, for example through an API) without a separate written licence from Fish Audio: keep LocalRouter on
   loopback. Read the licence; downloading the files does not accept it on anyone's behalf.
 EOF
-  hf=$(command -v "${HF:-hf}") || die "the Hugging Face CLI (hf) is missing: install huggingface_hub in a venv and set HF"
-  snapshot=$("$hf" download "$repo" --revision "$rev" --quiet | tail -1)
-  [ -d "$snapshot" ] || die "hf download did not print a snapshot directory (got '$snapshot')"
-  if [ -L "$root/$ckdir" ] || [ ! -e "$root/$ckdir" ]; then
-    ln -sfn "$snapshot" "$root/$ckdir"
+  where=$root/$ckdir
+  if hf=$(command -v "${HF:-hf}"); then
+    snapshot=$("$hf" download "$repo" --revision "$rev" --quiet | tail -1)
+    [ -d "$snapshot" ] || die "hf download did not print a snapshot directory (got '$snapshot')"
+    if [ -L "$root/$ckdir" ] || [ ! -e "$root/$ckdir" ]; then
+      ln -sfn "$snapshot" "$root/$ckdir"
+    fi
+    where=$snapshot
+  else
+    echo "setup-macos.sh: no Hugging Face CLI; downloading the pinned files into $root/$ckdir with curl"
+    [ ! -L "$root/$ckdir" ] || die "$root/$ckdir is a link (an earlier hf download): set HF to its CLI"
+    while read -r path size digest; do
+      f=$root/$ckdir/$path
+      [ -f "$f" ] && [ "$(stat -f %z "$f")" = "$size" ] && continue
+      mkdir -p "$(dirname "$f")"
+      if [ ! -f "$f.part" ] || [ "$(stat -f %z "$f.part")" -lt "$size" ]; then
+        curl -fsSL --retry 3 -C - -o "$f.part" "https://huggingface.co/$repo/resolve/$rev/$path"
+      fi
+      [ "$(sha "$f.part")" = "$digest" ] || { rm -f "$f.part"; die "$repo/$path sha256 differs from the pin $digest"; }
+      mv "$f.part" "$f"
+    done <<< "$(pinned cfile)"
   fi
   n=0
   while read -r path size digest; do
@@ -155,7 +173,7 @@ EOF
     fi
     n=$((n + 1))
   done <<< "$(pinned cfile)"
-  echo "setup-macos.sh: $n checkpoint files verified by $verify in $root/$ckdir -> $snapshot"
+  echo "setup-macos.sh: $n checkpoint files verified by $verify in $root/$ckdir -> $where"
 fi
 [ "$build" = 1 ] || exit 0
 
