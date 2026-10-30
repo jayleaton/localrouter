@@ -72,5 +72,58 @@
    }
   ]
  },
- "models": []
+ "models": [
+  {
+   "key": "stt",
+   "id": "whisper-large-v3-turbo",
+   "warm": true,
+   "title": "Whisper large-v3-turbo speech to text (mlx-whisper, FP16 on Metal, Silero VAD on the CPU)",
+   "licence": {
+    "name": "MIT",
+    "url": "https://huggingface.co/openai/whisper-large-v3-turbo"
+   },
+   "pins": "tools/speech/whisper/macos/uv.lock",
+   "reuse": {
+    "paths": [
+     "models/whisper-mlx",
+     "models/vad"
+    ]
+   },
+   "download_bytes": 1876250000,
+   "disk_bytes": 2800000000,
+   "memory_bytes": 3489660928,
+   "working_bytes": 1342177280,
+   "steps": [
+    {
+     "id": "venv",
+     "download_bytes": 260000000,
+     "disk_bytes": 1200000000,
+     "title": "the Whisper venv from tools/speech/whisper/macos/uv.lock (Python 3.12, mlx 0.32.4, mlx-whisper 0.4.3, torch 2.13.0 for the gate; every wheel by its locked hash)",
+     "run": "UV_PROJECT_ENVIRONMENT=$J/venvs/whisper-mlx uv sync --locked --python 3.12 --project $REPO/tools/speech/whisper/macos && mkdir -p $J/install/state && shasum -a 256 $REPO/tools/speech/whisper/macos/uv.lock | cut -c1-64 > $J/install/state/whisper-mlx-venv",
+     "done": "[ -x $J/venvs/whisper-mlx/bin/python ] && [ \"$(cat $J/install/state/whisper-mlx-venv 2> /dev/null)\" = \"$(shasum -a 256 $REPO/tools/speech/whisper/macos/uv.lock | cut -c1-64)\" ]",
+     "fix": "uv on PATH (brew install uv); network (pypi.org): run again"
+    },
+    {
+     "id": "model",
+     "download_bytes": 1613977880,
+     "reused": true,
+     "disk_bytes": 1613977880,
+     "title": "mlx-community/whisper-large-v3-turbo at its pinned revision (FP16, 1.6 GB), every file by sha256",
+     "run": "python3 -I $REPO/tools/speech/whisper/macos/fetch_model.py --root $J/models/whisper-mlx",
+     "done": "python3 -I $REPO/tools/speech/whisper/macos/fetch_model.py --verify $J/models/whisper-mlx/whisper-large-v3-turbo-mlx/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb > /dev/null",
+     "fix": "network: run again (a file that failed its check is downloaded again)"
+    },
+    {
+     "id": "vad",
+     "download_bytes": 2272526,
+     "disk_bytes": 2272526,
+     "title": "the Silero VAD (silero_vad.jit at its pinned commit, by sha256)",
+     "run": "mkdir -p $J/models/vad && curl -fsSL -o $J/models/vad/silero_vad.jit.part https://raw.githubusercontent.com/snakers4/silero-vad/5cd7945676eb32225748052e2e6a0580e4686a08/src/silero_vad/data/silero_vad.jit && [ \"$(shasum -a 256 $J/models/vad/silero_vad.jit.part | cut -c1-64)\" = e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720 ] && mv $J/models/vad/silero_vad.jit.part $J/models/vad/silero_vad.jit",
+     "done": "[ \"$(shasum -a 256 $J/models/vad/silero_vad.jit 2> /dev/null | cut -c1-64)\" = e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720 ]",
+     "fix": "network (raw.githubusercontent.com): run again"
+    }
+   ],
+   "skip": "leave stt out of --models; the voice loop then cannot hear"
+  }
+ ]
 }
