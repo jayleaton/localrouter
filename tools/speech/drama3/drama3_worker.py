@@ -90,7 +90,8 @@ CODEBOOKS = 10
 ENCODE_REFUSALS = ("the voice file would not load", "reference audio lasts", "the clip ", "the WAV ",
                    "unsupported WAV", "malformed WAVE", "resampling ")
 PR_SET_PDEATHSIG = 1
-_prctl = ctypes.CDLL(None, use_errno=True).prctl  # resolved before any fork, so the child only calls it
+# resolved before any fork, so the child only calls it; Linux only (drama3_worker_macos.py imports this module)
+_prctl = ctypes.CDLL(None, use_errno=True).prctl if sys.platform.startswith("linux") else None
 
 
 class Cancelled(BaseException):

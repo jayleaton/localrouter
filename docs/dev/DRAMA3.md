@@ -8,6 +8,8 @@ which ports it to [TensorFold](https://github.com/ashhart/TensorFold)'s native Z
 worker, `tools/speech/drama3/drama3_worker.py`, runs that repository's own launcher and server, built from pinned,
 hash-checked sources; it does not reimplement the model.
 
+On Apple silicon it runs on drama-tensorfold's Metal path instead ([macOS](#macos-apple-silicon)).
+
 **Built with Fish Audio.** See [Licences](#licences): the weights' licence limits commercial use and forbids a Hosted
 Service without a separate licence, so this tool stays on loopback.
 
@@ -540,6 +542,175 @@ ones); the foreign job was present then too.
 **Back to the full model.** Its install, engine and marker are untouched by all of this (`pins.json` did not change):
 set the tool's `variant` to `full` with its own marker and `resident_bytes` (on the Jarvis box: `DRAMA_VARIANT=full`
 and `deploy/jarvis/install.sh`).
+
+## macOS (Apple silicon)
+
+On a Mac, Drama 3 runs on plotarmordev's drama-tensorfold **Mac path**: TensorFold's native Zig/Metal engine at that
+repository's own Mac NVFP4 pin and patches, serving the same NVFP4 pruned weights as the GB10 (JJ's decision,
+2026-10-30; not mlx-audio). The GB10 files (`pins.json`, `pins-nvfp4.json`, `fetch.sh`, `build.sh`, `qualify.sh`,
+`drama3_worker.py`) are not used on macOS and behave as before on Linux.
+
+```
+daemon ── guard ── drama3_worker_macos.py ── HTTP on 127.0.0.1:port ──> tensorfold-native serve (Metal)
+                         │                                                  ▲ own process group, holds the lock
+                         └── launcher/pilot_macos.py --external-admission --parent-pid WORKER ──┘
+```
+
+### Mac pins and setup
+
+`tools/speech/drama3/pins-macos.json`:
+
+| What | Pin |
+| --- | --- |
+| Upstream | plotarmordev/drama-tensorfold @ `db6ba7da314b24b42b02978ba4401f54f6738311`; sha256 of `recipe/pilot_macos.py`, `recipe/weight_selection.py`, `scripts/build-engine.sh`, `engine/nvfp4/macos/UPSTREAM` and its `patches/SHA256SUMS`, `recipe/checksums/nvfp4.sha256`, `recipe/sources.json`, `recipe/README-macos.md`, `results/macos-nvfp4.json`, `LICENSE`, `NOTICE` |
+| Engine | ashhart/TensorFold @ `3d219d2156d4c25dcfb74370c8703cd89e58aa49` (the 1.1.4 line, Metal) plus the five patches in `engine/nvfp4/macos/patches/` (Metal NVFP4 and CFG, a test fixture, the CLI extension point, sampling controls), each by sha256, applied by upstream's `scripts/build-engine.sh --weights nvfp4` with its fixed committer: HEAD `a2b8f03e2330e2eb974cfcaa15827a239dc6bef7`. No LocalRouter engine patch: the Metal base already keeps one reference-prefix snapshot (below) |
+| Launcher | upstream's `recipe/pilot_macos.py` with `patches/pilot-macos-external-admission.patch` (sha256 `a4e701a1…`), written to `ROOT/launcher/pilot_macos.py` (sha256 `24e617ab…`) beside the module it imports |
+| Voices | the six `voices/*.json` converted by `voices_macos.py` to `ROOT/voices-macos/`, each output by sha256 |
+| Checkpoint | plotarmordev/drama-3-NVFP4-Pruned @ `494db08481db952f834b2241bce63fb3dfa72554`: the same 17 files, sizes and sha256 as `pins-nvfp4.json` (upstream's `recipe/checksums/nvfp4.sha256` at the pinned commit, plus LICENSE and NOTICE) |
+| Toolchain | Zig 0.17.0, Xcode's Metal compiler; serve flags `--cfg-gamma 1.5 --cfg-batched`, as on the GB10 |
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer   # when xcode-select names the Command Line Tools
+tools/speech/drama3/setup-macos.sh ~/models/drama3                  # checkout, launcher, voices, weights, engine
+python3 -I tools/speech/drama3/qualify_macos.py CONFIG OUT --accept-native-numerics --first-audio-gate 0.55
+```
+
+`setup-macos.sh` verifies the checkout and every pinned file, writes the patched launcher, converts the voices, takes
+the weights with the Hugging Face CLI into its shared cache (`ROOT/drama-3-NVFP4-Pruned` links to the snapshot;
+without the CLI it downloads each pinned file with curl), checks every file's sha256, then builds the engine with
+upstream's script and records the server's, `drama3-generate`'s and `drama3-voice`'s sha256 in
+`ROOT/engine-macos.json` (2 min 21 s on the M5 Ultra). Without a usable Metal compiler (Xcode's licence not accepted,
+or the Metal Toolchain missing) it stops with exit 3 after everything else is in place. The tool is
+`config.example-macos.json`; `deploy/profiles/mac-apple-silicon.json` has it as `tts`.
+
+### What differs from the GB10
+
+| | GB10 (`drama3_worker.py`) | Mac (`drama3_worker_macos.py`) |
+| --- | --- | --- |
+| Launcher | `pilot.py` in a transient `systemd --user` unit, 54 GiB cgroup and allocator caps | `pilot_macos.py`: the server in its own process group holding the inherited lock, settled TERM then KILL; no memory cap exists on Metal |
+| Admission | `--external-admission` skips the 88 GiB / 34 GiB checks | `--external-admission` skips the free+inactive floor (weights + 30 GiB) and the 34 GiB abort, which would otherwise kill the server beside a warm chat model |
+| Worker killed | parent-death signal on the launcher; a stale unit is stopped by name | `--parent-pid`: the launcher stops the server once the worker is gone (the daemon's `guard` kills the worker's group; the launcher has its own session). A launcher killed outright leaves `runtime/localrouter-drama3.server` (the group), which the next load stops after checking that its leader is still the engine binary |
+| Voices | `--voices DIR` of `drama3-voice/1` files, and references in a request | only the `--voices` catalog (`drama3-http-voice/1`), read at start; references in a request are refused (`references: false`) |
+| Cloned voices | references inline in each request, no restart | a catalog voice: one server restart the first time a clone is spoken (below) |
+| Prefix cache | LocalRouter's patch: 2 voices, LRU | upstream's: one reference-prefix snapshot; a change of voice prefills the new voice's references |
+| Clone encode | `tensorfold-native voice encode` (BF16, CUDA) | `drama3-generate --encode` (Metal), beside the running server |
+| Long form | `--long-form` | none in the Metal server: `long_form` is refused; `max_frames` up to 8190 |
+
+### Voices on the Mac
+
+A `drama3-voice/1` file holds `vq_codes` codebook-major (10 rows of `frames` codes); the Metal catalog holds `codes`
+frame-major (`frames` rows of 10, the semantic code first), with an attested `source` (`synthetic`, `self` or
+`consented`) and a note. Both come from the same codec (`codec.pth`, one sha256 in both checkpoints) in the same
+codebook order, so `voices_macos.py` transposes the codes and does not re-encode. It first checks each file against
+its own `codes_sha256` and frame count and against the catalog's limits (1 to 4 references, 1 to 646 frames each,
+codebook 0 in 0..4095 and 1 to 9 in 0..1023, transcripts without the prompt's structural tokens, 256 KiB a file), and
+writes `source.kind: "synthetic"` (the voices are model-invented, `voices/SOURCES.md`) with the file's provenance in the
+note. The output is byte-stable, so its sha256 is pinned.
+
+Each converted voice spoke on the M5 Ultra; Whisper large-v3-turbo (MLX) heard every first reply word for word ("Good
+morning, the kettle is on and your first meeting starts in twenty minutes.", written "20"), and the median F0 of each
+reply matches the voice's pitch range in `voices/SOURCES.md`: Arlo 110, Ezra 102, Theo 113, Mae 188, Nora 215, Wren
+225 Hz.
+
+### Cloned voices on the Mac
+
+The Metal server takes no references in a request and reads its catalog only at start, so the worker publishes a
+clone to the catalog itself (the simplest route the server allows: offline encode, catalog, reload):
+
+1. **Encode** (`clone`): each prepared clip (canonical mono 16-bit 44.1 kHz WAV, at most 30 s; the worker refuses
+   others) through `drama3-generate --codec codec.pth --ref-audio CLIP --encode OUT`, on Metal beside the running
+   server, and written as the GB10's `voice.json` (`localrouter-voice-codes/1`, codebook-major), so a saved voice is
+   the same file on either host. A clone whose references cannot fit the catalog (below) is refused here.
+2. **Speak** (`voice_references`): the references become a catalog voice named for its content (`clone-` and 16 hex
+   digits of the file's sha256), `source.kind: "consented"` (the daemon accepted the clone only with `consent=true`
+   and keeps that statement). The clone's up to 8 references are packed into the catalog's 4 by joining the adjacent
+   pair with the fewest frames (transcripts with a space, codes end to end) while a joined reference stays within 30 s.
+3. **Reload**: a clone the running server has not loaded goes into `runtime/clones/` and the worker restarts the
+   server with it, inside that request. The 16 most recently spoken clones are kept and put into every later load's
+   catalog, so only a clone's first request after it falls out pays the restart.
+
+Limits against the GB10: the first request in a new clone waits for a reload (5.3 s on the M5 Ultra, plus the clone's
+first-sentence prefill: 11.45 s to its whole first reply); cloned references are capped at 4 of 30 s after packing;
+a request's own `references` are not offered; while the server restarts nothing else is spoken. Cloning through
+`POST /v1/voices` also needs the transcription model, so on the Mac it waits for the Whisper port; the measurement
+below drives the worker's `clone` op directly.
+
+### Qualification on the Mac
+
+`qualify_macos.py` runs everything through the real worker on this machine and writes `report.json` and, with
+`--accept-native-numerics`, the tool's marker: `{"qualified": true, "host", "platform", "chip", "pins_sha256" (of
+pins-macos.json), "native_sha256", "upstream_commit", "patched_head", "checkpoint_revision", "numerics", "bench",
+...}`. The worker refuses to load without it, on another host, with other pins or another engine binary. Steps:
+assets (launcher and checkpoint by sha256, binaries against `engine-macos.json`), a cold load, e2e (one sentence whole
+twice, byte-identical, and streamed, the same samples; an unknown voice and request references refused), each voice's
+first N lines of `compare-texts.txt` streamed straight from the server (first audio, RTF, level, 44.1 kHz, `stop`), a
+clone of a model-invented voice (an 11.4 s passage in the built-in voice, cloned with the worker's `clone`, spoken with
+its restart, then measured as a voice), and unload (the server's group gone, the lock free). It uses its own runtime
+directory, so the operator's clone cache is not touched.
+
+**Numerics.** The Metal build is a new baseline, not the GB10's: NVFP4 expert codes unpacked in Metal kernels with
+FP32 accumulation, CFG as two independent backbone states in one command buffer. It is deterministic on the Mac (the
+same text in the same voice is byte-identical; streamed equals whole) but not compared with the CUDA build or the
+reference; upstream's own M5 Ultra receipt (`results/macos-nvfp4.json`) is correctness-only.
+
+**First-audio gate.** The GB10's bar is warm streamed first audio p50 at most 0.5 s. With guidance (`--cfg-gamma 1.5
+--cfg-batched`, as on the GB10) the M5 Ultra measures 0.52 s: the server already sends its first chunk after 4 frames
+(186 ms of audio); the rest is resuming the voice's snapshot and prefilling the text for both CFG states. Decided
+2026-10-30: the Mac keeps guidance on, as the GB10 does, and qualifies at `--first-audio-gate 0.55` (the Mac profile's
+qualify step).
+
+**Unguided, for later.** `"guidance": false` (no CFG) measures 0.25 s warm first audio and RTF 0.54 on the M5 Ultra
+(below), but its effect on quality with the named and cloned voices has not been measured (no WER, similarity or
+listening comparison against guided). It is an option to evaluate, not a configuration to deploy.
+
+### Measured on the Mac Studio (M5 Ultra)
+
+Apple M5 Ultra, 96 GiB (103,079,215,104 bytes), macOS 27.2, Xcode 27.2 Metal Toolchain, Zig 0.17.0; 2026-10-30;
+engine `tensorfold-native` 1.1.4 sha256 `fd3618ed…` (HEAD `a2b8f03e`); checkpoint in the page cache. Five lines of
+`compare-texts.txt` per voice, streamed (the first fills the voice; warm figures are the other four); every reply
+44.1 kHz mono, `stop`, -14 to -27 dBFS. Each run held the development machine's GPU lock alone.
+
+| Voice | First sentence, first audio | Warm first audio p50 | Warm RTF p50 (range) |
+| --- | --- | --- | --- |
+| Mae (default; already filled by e2e) | 0.56 s | 0.522 s | 0.780 (0.771 to 0.790) |
+| Arlo | 4.29 s | 0.520 s | 0.776 (0.770 to 0.784) |
+| Ezra | 4.63 s | 0.518 s | 0.787 (0.785 to 0.796) |
+| Nora | 5.02 s | 0.519 s | 0.758 (0.748 to 0.763) |
+| Theo | 5.94 s | 0.524 s | 0.758 (0.744 to 0.763) |
+| Wren | 5.84 s | 0.523 s | 0.738 (0.724 to 0.756) |
+| Clone (11.4 s source, 1 reference) | 11.45 s with the restart | 0.516 s | 0.794 (0.789 to 0.802) |
+| **All named voices** | | **0.522 s** | **0.766** |
+| Unguided (`guidance: false`), all named voices | 4.0 to 5.7 s | 0.254 s | 0.536 |
+
+The same figures came out of four guided runs within 0.02 s and 0.02 RTF.
+
+- **Load:** 5.2 s to ready with the checkpoint in the page cache (the server reports 6.36 GB of BF16 and copied
+  weights and 13.04 GB of packed experts read in place); 12.8 s for the first load after setup.
+- **A change of voice** prefills the new voice's references (280 to 431 frames): 4.3 to 5.9 s to first audio, against
+  0.7 to 1.0 s on the GB10. One snapshot is kept, so a call that stays in one voice pays it once; alternating voices
+  pays it every time.
+- **Memory.** The server keeps 27.5 GiB wired between requests (its log), its `phys_footprint` peak is 9.75 GB (the
+  packed experts are file-backed and not counted there), its resident size 17.7 GB. What the machine loses is what
+  the scheduler must book: free+inactive fell by 31.15 to 32.76 GB (29.0 to 30.5 GiB) across three guided runs with the
+  server alone, and wired memory rose by 30.80 GB through the daemon. `resident_bytes` is therefore 33,285,996,544 (31.0
+  GiB: 500 MiB above the largest drop). Unguided: 31.72 GB. After unload, wired memory was back within 0.7 GB.
+- **Clone encode:** 3.43 s for one 11.4 s reference through the worker; `drama3-generate --encode` peaks at 3.29 GB
+  footprint (3.10 GB resident), so `clone_working_bytes` is 3,758,096,384 (3.5 GiB).
+- **Through the daemon** (`localrouter serve` from `feat/mac-foundation`, the tool from `config.example-macos.json`):
+  listed `qualified: true` with the six voices, `references: false`; kept loaded at start in 6.1 s; whole WAV and
+  streamed PCM (`x-sample-rate: 44100`, `x-channels: 1`, chunked) in Mae, Arlo and Theo, first byte of a warm stream
+  0.51 to 0.53 s, a voice's first request 4.5 to 5.9 s; `instructions` spoken as a bracketed direction; an unknown
+  voice and request references refused with 400. SIGKILL of the daemon took the worker, launcher and server down
+  within 1 s (the launcher's `--parent-pid`, its completion record `group_settled: true`).
+
+**Not verified on the Mac:** cloning through `POST /v1/voices` (needs the transcription model); a real person's
+clips; long inputs past 1024 frames; the silence guard on the real model; speaker similarity (only pitch and
+transcripts were checked); co-residence with the chat model; a cold load from disk rather than the page cache; Macs
+other than the M5 Ultra.
+
+**Licence.** Unchanged by the platform: the weights are FACL v1.0 ([Licences](#licences)), an unofficial community
+quant under it. No Hosted Service without a separate licence from Fish Audio: keep the Mac's LocalRouter on loopback
+for this model, as on the GB10. Built with Fish Audio.
 
 ## What was taken from upstream
 

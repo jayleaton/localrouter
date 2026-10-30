@@ -1,0 +1,104 @@
+LocalRouter's change to plotarmordev/drama-tensorfold's recipe/pilot_macos.py (Apache License 2.0, Copyright 2026
+plotarmordev), at db6ba7da314b24b42b02978ba4401f54f6738311. It adds --external-admission: when an outer scheduler
+(LocalRouter) admits the load from its own memory budget, the launcher skips its free+inactive admission
+(max(weights + 30 GiB, 34 GiB)) and its 34 GiB abort; the lock and the process-group cleanup are unchanged. It adds
+--parent-pid PID: macOS has no parent-death signal, so the launcher stops the server, as for SIGTERM, once PID is no
+longer its parent (the worker was killed). And it imports weight_selection from its own directory, so it runs under
+python3 -I (which leaves the script's directory off sys.path). TENSORFOLD_MEMORY_RESERVE_GIB is left alone: only the
+CUDA build reads it. This patch is licensed under the Apache License 2.0. setup-macos.sh applies it with `git apply`
+to a copy at ROOT/launcher/pilot_macos.py.
+
+diff --git a/recipe/pilot_macos.py b/recipe/pilot_macos.py
+index 9ffe160..016302b 100644
+--- a/recipe/pilot_macos.py
++++ b/recipe/pilot_macos.py
+@@ -11,6 +11,11 @@ This is not containment: a server must not daemonize, escape the group, or close
+ its inherited lock. Observation and TERM/KILL cleanup have bounded deadlines;
+ inability to confirm settlement is reported as failure, not successful cleanup.
+ """
++# Modified by LocalRouter (tools/speech/drama3/patches/pilot-macos-external-admission.patch): adds
++# --external-admission, which skips the free+inactive admission and the 34 GiB abort when an outer scheduler admits
++# the load, and --parent-pid, which stops the server when that process is gone (macOS has no parent-death signal);
++# weight_selection is imported from this file's own directory, so the launcher also runs under python3 -I. Original:
++# plotarmordev/drama-tensorfold@db6ba7da314b24b42b02978ba4401f54f6738311 recipe/pilot_macos.py, Apache License 2.0.
+ from __future__ import annotations
+ 
+ import argparse
+@@ -23,9 +28,11 @@ import re
+ import signal
+ import socket
+ import subprocess
++import sys
+ import time
+ 
+-import weight_selection
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import weight_selection  # noqa: E402
+ 
+ GIB = 1024**3
+ HEADROOM = 30 * GIB
+@@ -156,6 +163,11 @@ def main() -> int:
+                         help='Override admission, never below 34 GiB (default: weights + 30 GiB)')
+     parser.add_argument('--reserve-gib', type=float, default=34,
+                         help='TENSORFOLD_MEMORY_RESERVE_GIB passed to the server (not a hard cap)')
++    parser.add_argument('--external-admission', action='store_true',
++                        help='An outer scheduler (LocalRouter) admits this load from its own memory budget: skip the '
++                             'free+inactive admission and the 34 GiB abort; the lock and process-group cleanup stay')
++    parser.add_argument('--parent-pid', type=int, default=None,
++                        help='Stop the server, as for SIGTERM, once this process is no longer the parent')
+     parser.add_argument('serve_args', nargs='*', metavar='SERVE_ARG',
+                         help='Extra tensorfold-native serve flags, after --')
+     args = parser.parse_args()
+@@ -238,7 +250,9 @@ def main() -> int:
+             minimum_available = available
+             floor = (args.min_available_gib * GIB if args.min_available_gib is not None
+                      else max(weights + HEADROOM, ABORT_AVAILABLE))
+-            if available < floor:
++            if args.external_admission:
++                floor = None
++            elif available < floor:
+                 raise MemoryError(
+                     f'Need {floor/GIB:.2f} GiB available, have {available/GIB:.2f}; no model was started')
+             with socket.socket() as port_check:
+@@ -265,14 +279,18 @@ def main() -> int:
+             }
+             initial = {**provenance, 'backend': args.backend, 'weights_bytes': weights,
+                        'initial_memavailable_bytes': available,
+-                       'required_memavailable_bytes': int(floor),
+-                       'headroom_floor_bytes': HEADROOM, 'abort_threshold_bytes': ABORT_AVAILABLE,
++                       'required_memavailable_bytes': None if floor is None else int(floor),
++                       'headroom_floor_bytes': HEADROOM,
++                       'abort_threshold_bytes': None if args.external_admission else ABORT_AVAILABLE,
+                        'memory_source': 'vm_stat free+inactive',
+                        'min_available_override_gib': args.min_available_gib,
+                        'server_command': server_command, 'environment': environment,
+                        'started_at_epoch': started_at_epoch,
+-                       'admission': 'override' if args.min_available_gib is not None
+-                                    else 'max(weights + 30 GiB, 34 GiB)',
++                       'admission': ('external: the outer scheduler admits by its own memory budget'
++                                     if args.external_admission
++                                     else 'override' if args.min_available_gib is not None
++                                     else 'max(weights + 30 GiB, 34 GiB)'),
++                       'parent_pid': args.parent_pid,
+                        'engine_memory_reserve_gib': args.reserve_gib,
+                        'hard_memory_cap': False}
+             (evidence / 'session.json').write_text(json.dumps(initial, indent=2) + '\n')
+@@ -293,6 +311,9 @@ def main() -> int:
+                     initial['server_pgid'] = worker.pid
+                     (evidence / 'session.json').write_text(json.dumps(initial, indent=2) + '\n')
+                 while stop_signal is None and worker is not None:
++                    if args.parent_pid is not None and os.getppid() != args.parent_pid:
++                        stop_signal = signal.SIGTERM  # the parent is gone: a planned stop, not a failure
++                        break
+                     states = group_states(worker.pid)
+                     if states[worker.pid].startswith('Z'):
+                         unexpected_exit = True
+@@ -302,7 +323,7 @@ def main() -> int:
+                     memory_log.write(json.dumps({'elapsed_s': time.monotonic() - started,
+                                                  'memavailable_bytes': current}) + '\n')
+                     memory_log.flush()
+-                    if current < ABORT_AVAILABLE:
++                    if not args.external_admission and current < ABORT_AVAILABLE:
+                         raise MemoryError(
+                             f'available memory {current/GIB:.2f} GiB crossed the '
+                             f'{ABORT_AVAILABLE/GIB:.0f} GiB abort threshold')
