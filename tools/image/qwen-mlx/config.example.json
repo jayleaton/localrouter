@@ -14,7 +14,7 @@
                   "commercial": false},
       "resident_bytes": 17179869184,
       "working_bytes": 2147483648,
-      "keep_loaded": true,
+      "keep_loaded": false,
       "priority": 10,
       "idle_ttl_s": 60,
       "load_timeout_s": 600,

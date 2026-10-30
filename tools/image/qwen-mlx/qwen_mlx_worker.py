@@ -13,7 +13,8 @@ Speaks the worker protocol (docs/ARCHITECTURE.md): one JSON object a line on std
 The model runs in MLX-Serve (github.com/ddalcu/mlx-serve, a native Zig/MLX server; release and pack pinned in
 pins-macos.json, fetched by fetch.sh), which this worker starts on load on 127.0.0.1 and is the client of: it is the
 "models that wrap their own server" shape of docs/ARCHITECTURE.md. The pack is ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit
-(MLX affine 8-bit DiT and text-encoder linears, dense f32 VAE, the Qwen3-VL vision tower kept for edits). It runs the
+(MLX affine 8-bit DiT and text-encoder linears, dense f32 VAE, the Qwen3-VL vision tower kept for edits), or its 4-bit
+sibling ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit (option `pack`: q4; the same schedule, tower and VAE, pins-macos-q4.json). It runs the
 checkpoint's own eight-step `sample_sigmas` schedule (unshifted), which MLX-Serve reads from model_index.json since
 26.10.2; an older server ran the base model's schedule on it, so load refuses one.
 
@@ -39,7 +40,7 @@ What the worker owns, so the daemon's request means the same here as on the Spar
 - A server that dies takes the worker with it (no reply): the job fails with a 503 and the next request starts it again.
   The server is in the worker's process group, so the daemon's kill of the group stops it too.
 
-Options (the tool's `options`): `server` (the mlx-serve binary; default <weights>/../mlx-serve-macos-arm64/mlx-serve),
+Options (the tool's `options`): `pack` (q8 | q4: which pinned pack `weights` holds, default q8), `server` (the mlx-serve binary; default <weights>/../mlx-serve-macos-arm64/mlx-serve),
 `max_side`, `max_pixels`, `edit_refs`, `steps` (8), `alpha` (true), `w8a8` (false: MLX-Serve's lossy int8 x int8 DiT
 linears stay off, the documented Mac baseline), `warmup` (true: a 256x256 image at load, so the first request is
 not slower), `port` (0: a free one), `load_timeout_s` (600), `verify` (size: every pinned file present with its size;
@@ -66,13 +67,14 @@ import zlib
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PINS = os.path.join(HERE, "pins-macos.json")
+# each pack's pinned files (verify_assets.py form); the runtime's pin is in pins-macos.json
+PACKS = {"q8": os.path.join(HERE, "pins-macos.json"), "q4": os.path.join(HERE, "pins-macos-q4.json")}
 
 MAX_REFS = 5  # LocalRouter's API limit (request.Limits.max_references)
 REF_PIXELS = 1024 * 1024  # each input is conditioned at about this many pixels (the pipeline's calculate_dimensions)
 REF_SIDE = 2048  # the longest conditioned side: inputs past 4:1 are refused
 MIN_VERSION = (26, 10, 2)  # the first MLX-Serve that runs the pack's own sample_sigmas schedule
-OPTIONS = {"server", "max_side", "max_pixels", "edit_refs", "steps", "alpha", "w8a8", "warmup", "port",
+OPTIONS = {"server", "pack", "max_side", "max_pixels", "edit_refs", "steps", "alpha", "w8a8", "warmup", "port",
            "load_timeout_s", "verify"}
 
 
@@ -163,6 +165,9 @@ class Options:
         self.warmup = bool(o.get("warmup", True))
         self.port = int(o.get("port", 0))
         self.load_timeout_s = float(o.get("load_timeout_s", 600))
+        self.pack = o.get("pack", "q8")
+        if self.pack not in PACKS:
+            raise ValueError(f"pack must be one of {sorted(PACKS)}")
         self.verify = o.get("verify", "size")
         if self.verify not in ("size", "none"):
             raise ValueError("verify must be size or none")
@@ -205,7 +210,7 @@ class Worker:
         """The pinned files are there with their sizes (fetch.sh checked their digests), and the schedule has `steps` nodes."""
         w = self.opts.weights
         if self.opts.verify == "size":
-            pins = read_json(PINS)
+            pins = read_json(PACKS[self.opts.pack])
             for f in pins["selected_files"]:
                 p = os.path.join(w, f["path"])
                 if not os.path.isfile(p) or os.path.getsize(p) != f["size_bytes"]:
