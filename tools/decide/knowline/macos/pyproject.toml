@@ -1,0 +1,16 @@
+[project]
+name = "localrouter-decide-knowline-macos"
+version = "0.1.0"
+description = "KnowLine-4B typed-decision server (/v1/systemone) on Apple silicon: the authors' front end on MLX"
+requires-python = "==3.12.*"
+dependencies = [
+    "mlx==0.32.4",
+    "mlx-lm==0.32.2",
+    "transformers==5.19.0", # the tokenizer and chat template the front end renders with (the Spark venv's version)
+    "requests>=2.32,<3",
+]
+
+[tool.uv]
+package = false
+# macOS on Apple silicon only; the Spark's venv is ../pyproject.toml.
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
