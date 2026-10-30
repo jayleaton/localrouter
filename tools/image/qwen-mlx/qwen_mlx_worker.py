@@ -76,6 +76,8 @@ REF_SIDE = 2048  # the longest conditioned side: inputs past 4:1 are refused
 MIN_VERSION = (26, 10, 2)  # the first MLX-Serve that runs the pack's own sample_sigmas schedule
 OPTIONS = {"server", "pack", "max_side", "max_pixels", "edit_refs", "steps", "alpha", "w8a8", "warmup", "port",
            "load_timeout_s", "verify"}
+# options the daemon reads and the worker leaves alone: not reported as unused
+DAEMON_OPTIONS = {"reference_working_bytes"}  # the scheduler books it per input image of an edit (src/tool/process.zig)
 
 
 def log(msg):
@@ -147,7 +149,7 @@ def add_text(png, items):
 class Options:
     def __init__(self, tool):
         o = tool.get("options") or {}
-        unknown = sorted(set(o) - OPTIONS)
+        unknown = sorted(set(o) - OPTIONS - DAEMON_OPTIONS)
         if unknown:
             log(f"options not used by the worker: {unknown}")
         self.id = tool.get("id") or "qwen-image-2.1-turbo"

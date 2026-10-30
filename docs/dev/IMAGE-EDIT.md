@@ -230,10 +230,10 @@ Turbo, its own unshifted eight-node `sample_sigmas` schedule).
 | --- | --- |
 | Runtime | MLX-Serve 26.10.3 release binary `mlx-serve-bin-macos-arm64.tar.gz`, sha256 `d1781c89…652b` (source `046b6476`); 26.10.2 is the first that runs Turbo's own schedule, so the worker refuses older |
 | Weights | `ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit@214ca346`, 17.7 GB: MLX affine 8-bit (group 64) DiT and text-encoder linears, dense f32 VAE, the Qwen3-VL vision tower; every file's size and digest checked by `verify_assets.py` |
-| 4-bit alternative | `ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit@394f9477`, 10.5 GB (`pins-macos-q4.json`): 4-bit DiT and text-encoder linears, the same tower, VAE and schedule; `fetch.sh ROOT --pack q4`, option `pack: "q4"`. Pinned, not yet measured here: the card reports 8.8 s / 11.9 s / 12.8 GB peak on a 256 GB M5 Ultra |
+| 4-bit weights (the Mac profile's) | `ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit@394f9477`, 10.5 GB (`pins-macos-q4.json`): 4-bit DiT and text-encoder linears, the same tower, VAE and schedule; `fetch.sh ROOT --pack q4`, option `pack: "q4"`. The profile and `config.example.json` install and run this pack; its bookings are below |
 | Worker Python | Pillow 13.0.0 (`requirements-macos.txt`, hashes required) |
 
-Setup: `tools/image/qwen-mlx/fetch.sh ROOT` (binary, pack, venv), then a tool like
+Setup: `tools/image/qwen-mlx/fetch.sh ROOT --pack q4` (binary, pack, venv; without `--pack` the 8-bit one), then a tool like
 `tools/image/qwen-mlx/config.example.json`. Tests without a model: `ROOT/venv/bin/python -I
 tools/image/qwen-mlx/test_worker.py` (lifecycle, memory, refusals, cancellation, failures, outputs, against a fake
 MLX-Serve).
@@ -278,13 +278,24 @@ it; MLX's own `/props` peak agreed within 0.1 GB).
 | masked edit "give her a bright yellow sweater" | woman + mask | 11.39 / 11.40 | 16.7 GB |
 | exit | | 1.9 | |
 
-Peak over the run 17.33 GB; the tool books 16 GiB resident plus 2 GiB working. For comparison the Spark (GB10, FP8)
+Peak over the run 17.33 GB; an 8-bit tool books 16 GiB resident plus 2 GiB working. For comparison the Spark (GB10, FP8)
 makes the 1024x1024 image in 6.3 s and edits one input in 11 to 12.5 s.
 
+**Bookings (the 4-bit pack).** The scheduler books an image job at `resident_bytes + working_bytes`, and an edit at
+`working_bytes + reference_working_bytes × inputs` on top of the resident set (`reference_working_bytes` is an option
+the daemon reads; the worker leaves it alone). The integration run measured the 4-bit pack under load: 9.27 GiB
+resident after the load, a 15.1 GiB peak for a 1-megapixel image, 13.2 GiB for an edit of one input and 24.3 GiB for
+one of five. The profile and `config.example.json` book it at:
+
+| Field | Bytes | |
+| --- | --- | --- |
+| `resident_bytes` | 10200547328 | 9.5 GiB (9.27 measured at load) |
+| `working_bytes` | 6979321856 | 6.5 GiB (9.5 + 6.5 = 16 GiB against the 15.1 GiB peak of a 1 MP image) |
+| `options.reference_working_bytes` | 2147483648 | 2 GiB an input: 18 GiB booked for a 1-input edit (13.2 measured), 26 GiB for 5 inputs (24.3 measured) |
+
 On the Mac profile the image model loads on demand (`warm: false`, `keep_loaded: false`): chat, Drama 3 and Whisper
-stay warm (about 66 of the GPU's 77.8 GiB), and 18 GiB more does not fit beside them, so an image job unloads one of
-them, or the 4-bit pack (pinned above) takes its place. Which one is still open: the 4-bit pack against this
-baseline on quality, speed and peak.
+stay warm (about 66 of the GPU's 77.8 GiB), and the 8-bit pack's 18 GiB does not fit beside them, so the profile
+installs the 4-bit pack. Still to do: the 4-bit pack against the 8-bit baseline above on quality and speed.
 
 **Why MLX-Serve and not mflux.** Same Turbo checkpoint at 8 bits (`mflux-community/qwen-image-2-1-turbo-mflux-q8@19d2068a`,
 which also has the vision tower), mflux `5171ae15` `QwenImage21Edit`, the same prompts, inputs and seeds, one load:

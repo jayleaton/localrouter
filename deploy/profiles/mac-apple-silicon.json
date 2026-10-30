@@ -178,7 +178,7 @@
   {
    "id": "qwen-image-2.1-turbo",
    "key": "image",
-   "title": "Qwen-Image 2.1 Turbo text to image and edits of up to five images (MLX-Serve 8-bit, 8 steps; a cmd worker, loaded on demand)",
+   "title": "Qwen-Image 2.1 Turbo text to image and edits of up to five images (MLX-Serve 4-bit, 8 steps; a cmd worker, loaded on demand)",
    "licence": {
     "name": "Qwen Research License: non-commercial research or evaluation only",
     "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE"
@@ -186,26 +186,27 @@
    "accept": [
     "the Qwen-Image 2.1 Turbo licence (link below)"
    ],
-   "pins": "tools/image/qwen-mlx/pins-macos.json (8-bit, installed), tools/image/qwen-mlx/pins-macos-q4.json (4-bit alternative), tools/image/qwen-mlx/requirements-macos.txt",
-   "memory_bytes": 17179869184,
-   "working_bytes": 2147483648,
-   "download_bytes": 17810000000,
-   "disk_bytes": 18500000000,
+   "pins": "tools/image/qwen-mlx/pins-macos-q4.json (4-bit, installed), tools/image/qwen-mlx/pins-macos.json (the MLX-Serve binary; the 8-bit alternative), tools/image/qwen-mlx/requirements-macos.txt",
+   "memory_bytes": 10200547328,
+   "working_bytes": 6979321856,
+   "download_bytes": 10628459115,
+   "disk_bytes": 11500000000,
    "warm": false,
-   "tool": "tools/image/qwen-mlx/config.example.json: cmd $IMAGE_ROOT/venv/bin/python -I $REPO/tools/image/qwen-mlx/qwen_mlx_worker.py, weights $IMAGE_ROOT/qwen-image-2.1-turbo-mlx-q8",
+   "tool": "tools/image/qwen-mlx/config.example.json: cmd $IMAGE_ROOT/venv/bin/python -I $REPO/tools/image/qwen-mlx/qwen_mlx_worker.py, weights $IMAGE_ROOT/qwen-image-2.1-turbo-mlx-q4, options pack q4 and reference_working_bytes",
    "skip": "leave image out of --models; picture requests then fail with 'no image model'",
    "steps": [
     {
      "id": "fetch",
-     "title": "the MLX-Serve 26.10.3 binary, the 8-bit Qwen-Image 2.1 Turbo pack (17.7 GB, every file against its pin) and the worker's Python",
-     "download_bytes": 17810000000,
-     "disk_bytes": 18500000000,
+     "title": "the MLX-Serve 26.10.3 binary, the 4-bit Qwen-Image 2.1 Turbo pack (10.5 GB, every file against its pin) and the worker's Python",
+     "download_bytes": 10628459115,
+     "disk_bytes": 11500000000,
      "needs_accept": true,
-     "run": "bash $REPO/tools/image/qwen-mlx/fetch.sh $IMAGE_ROOT",
-     "done": "[ -x $IMAGE_ROOT/venv/bin/python ] && $IMAGE_ROOT/mlx-serve-macos-arm64/mlx-serve --version 2> /dev/null | grep -qx 'mlx-serve 26.10.3' && python3 -I $REPO/tools/package/verify_assets.py --quick $REPO/tools/image/qwen-mlx/pins-macos.json $IMAGE_ROOT/qwen-image-2.1-turbo-mlx-q8",
+     "run": "bash $REPO/tools/image/qwen-mlx/fetch.sh $IMAGE_ROOT --pack q4",
+     "done": "[ -x $IMAGE_ROOT/venv/bin/python ] && $IMAGE_ROOT/mlx-serve-macos-arm64/mlx-serve --version 2> /dev/null | grep -qx 'mlx-serve 26.10.3' && python3 -I $REPO/tools/package/verify_assets.py --quick $REPO/tools/image/qwen-mlx/pins-macos-q4.json $IMAGE_ROOT/qwen-image-2.1-turbo-mlx-q4",
      "fix": "network: run again (finished files are kept, a partial one resumes). 'sha256 … pinned' or 'differs from': delete the named file and run again"
     }
-   ]
+   ],
+   "reference_working_bytes": 2147483648
   }
  ]
 }

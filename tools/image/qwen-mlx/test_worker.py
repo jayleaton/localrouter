@@ -449,6 +449,15 @@ class LoadFailures(unittest.TestCase):
         self.assertIn("not the pinned size", r["error"])
         self.assertEqual(qw.PACKS["q4"], os.path.join(HERE, "pins-macos-q4.json"))
 
+    def test_the_daemons_own_options_are_not_reported_as_unused(self):
+        import contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            qw.Options({"weights": "/w", "options": {"reference_working_bytes": 2147483648}})
+            self.assertEqual(err.getvalue(), "")
+            qw.Options({"weights": "/w", "options": {"typo_bytes": 1}})
+        self.assertIn("options not used by the worker: ['typo_bytes']", err.getvalue())
+
     def test_an_unknown_pack_is_a_bad_config(self):
         r = self.load(Env({"pack": "q2"}))
         self.assertIn("bad tool config: pack must be one of ['q4', 'q8']", r["error"])
