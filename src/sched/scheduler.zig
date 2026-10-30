@@ -65,6 +65,20 @@ pub const Slot = struct {
     // back by itself once `hold_until_ns` has passed and it fits again; a load or a release clears it (under `gate`)
     held: bool = false, // the target of a reservation: kept reloads do not evict it until its next job is done
     pausing: bool = false, // a voice model displaced for a model of another kind: voice sessions wait for it (under `gate`)
+    // A speech tool's voice warm in this load: the voice of the last speech job it completed since it loaded (`said`
+    // bytes of `voice`), so a session knows whether its voice's first sentence is paid already (`speechWarm`). One voice:
+    // the Mac Drama server keeps one reference prefix and rebuilds it on a switch (4 to 6 s on the M5 Ultra); a server
+    // that keeps more only warms once more than it needs. Under `gate`.
+    voice: [64]u8 = undefined,
+    said: u8 = 0,
+    warm: bool = false, // a speech job completed since it loaded
+};
+
+/// Told after a kept speech tool is loaded (at start, and each time it comes back), outside `gate` on its lane's thread:
+/// it may queue a job, but must not wait for one.
+pub const Loaded = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, tool: usize) void,
 };
 
 /// Told before a voice model (speech or transcription) is unloaded to make room, and when every one of them is back,
@@ -153,11 +167,35 @@ pub const Scheduler = struct {
     lock_len: usize = 0,
     hold_until_ns: i96 = 0, // displaced tools wait until this (a reservation's job ends it early); under `gate`
     notify: ?Notify = null, // voice sessions, told of voice models leaving and coming back
+    loaded: ?Loaded = null, // a kept speech tool loaded: its voice is warmed (`api/voice_local.zig`)
     voice_paused: std.atomic.Value(bool) = .init(false), // a voice model is displaced: sessions wait for it
 
     /// True while a speech or transcription model is unloaded to make room; voice sessions wait instead of failing.
     pub fn voicePaused(s: *const Scheduler) bool {
         return s.voice_paused.load(.acquire);
+    }
+
+    /// Whether speech tool `i` is loaded and its last job since it loaded spoke `voice` (its resolved voice: the tool's
+    /// `default_voice` for an empty one), so that voice's next sentence starts at the warm speed.
+    pub fn speechWarm(s: *Scheduler, i: usize, voice: []const u8) bool {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        const slot = &s.slots[i];
+        return slot.tool.state() == .ready and slot.warm and std.mem.eql(u8, slot.voice[0..slot.said], voice);
+    }
+
+    /// Under `gate`: a finished speech job of `slot`: a completed sentence makes its voice the warm one; a clone or a
+    /// sentence spoken from a request's own references leaves no voice warm (the Mac worker restarts its server to add
+    /// a clone, and a request's references are their own prefix).
+    fn spoke(slot: *Slot, sp: *const @import("../tool/request.zig").Speech, completed: bool) void {
+        if (sp.clone.len > 0 or sp.references.len > 0 or sp.voice.len > slot.voice.len) {
+            slot.warm = false;
+            return;
+        }
+        if (!completed) return;
+        @memcpy(slot.voice[0..sp.voice.len], sp.voice);
+        slot.said = @intCast(sp.voice.len);
+        slot.warm = true;
     }
 
     /// Under `gate`: `slot` is about to be unloaded to make room for slot `for_tool`. A voice model's sessions are told
@@ -512,6 +550,7 @@ pub const Scheduler = struct {
             s.gate.lockUncancelable(s.io);
             s.checkResumed();
             s.gate.unlock(s.io);
+            if (c.kind == .speech) if (s.loaded) |l| l.f(l.ctx, i); // its first sentence now, not in a call's first reply
         }
     }
 
@@ -749,6 +788,7 @@ pub const Scheduler = struct {
         slot.released = false;
         slot.displaced = false;
         slot.pausing = false;
+        slot.warm = false; // a new instance: no voice is warm in it yet
         s.checkResumed();
     }
 
@@ -796,6 +836,11 @@ pub const Scheduler = struct {
         defer if (speaking) s.speech.leave(s.io);
         const out = slot.tool.generate(&job, .{ .ctx = &pctx, .progress = ProgressCtx.report }, arena.allocator()) catch |err| {
             if (slot.tool.state() == .unloaded) s.forget(slot);
+            if (speaking) {
+                s.gate.lockUncancelable(s.io);
+                spoke(slot, &j.request.speech, false);
+                s.gate.unlock(s.io);
+            }
             return s.finishError(j, slot, err);
         };
         if (slot.tool.config().idle_ttl_s == 0 and !slot.tool.config().keep_loaded) {
@@ -805,6 +850,11 @@ pub const Scheduler = struct {
         }
         // every image and video handed out carries the machine-generated label, whichever tool wrote it
         if (heavy) marker.outputs(s.io, s.gpa, j.dir, out.files, marker.forRequest(slot.tool.config().id, j.request));
+        if (speaking) {
+            s.gate.lockUncancelable(s.io);
+            spoke(slot, &j.request.speech, true);
+            s.gate.unlock(s.io);
+        }
         s.finish(j, .completed, 200, "", "", out);
     }
 
@@ -1120,4 +1170,22 @@ test "two sessions: one session's speech never pauses the chat model while anoth
     try t.expect(yielder.becomes(pid, true));
     s.chat_yield.release(t.io, a);
     try t.expect(yielder.becomes(pid, false));
+}
+
+test "a speech instance's warm voice: the last sentence it completed since it loaded; a clone or a request's own references leave none" {
+    const t = std.testing;
+    var slot: Slot = .{ .tool = undefined };
+    try t.expect(!slot.warm);
+    Scheduler.spoke(&slot, &.{ .input = "Hello.", .voice = "Mae" }, true);
+    try t.expect(slot.warm);
+    try t.expectEqualStrings("Mae", slot.voice[0..slot.said]);
+    Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo" }, false); // failed: the instance's prefix is unknown, Mae stays
+    try t.expectEqualStrings("Mae", slot.voice[0..slot.said]);
+    Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo" }, true);
+    try t.expectEqualStrings("Arlo", slot.voice[0..slot.said]);
+    Scheduler.spoke(&slot, &.{ .input = "", .voice = "", .clone = "clone.json" }, true);
+    try t.expect(!slot.warm);
+    Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo" }, true);
+    Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo", .references = "references.json" }, true);
+    try t.expect(!slot.warm);
 }
