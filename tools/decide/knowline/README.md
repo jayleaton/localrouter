@@ -70,3 +70,82 @@ at about ten times the latency on SideBud's 15-question tree. Good enough to wat
 ```sh
 tools/decide/knowline/fetch.sh    # weights at the pinned revision (SHA256SUMS checked) and the venv from uv.lock
 ```
+
+## macOS
+
+On a Mac (Apple silicon) the same `openai_server` decision tool runs [`macos/serve_mlx.py`](macos/serve_mlx.py), not
+`serve.py`. It uses the authors' unchanged front end, the same pinned revision and files, the same hashes and the same
+read-twice and label readout. The forward pass is mlx-lm's Qwen3.5 text model on Metal instead of transformers on CUDA,
+again with only the last position's logits and a float32 log-softmax. This is a deliberate numerical change
+([CONTRIBUTING](../../../CONTRIBUTING.md#engine-correctness)), so its reference baseline is recorded below; it does
+not claim parity with the Spark's bits. Text only, as on the Spark: a request with pictures gets a 422.
+
+- **Weights:** the shipped bf16. mlx-lm folds Qwen3.5's `1 + w` RMSNorm gains into bf16 weights, a step of 1/128
+  near 1. That doubled the probability error against float32, so the launcher keeps those gains in float32 and casts
+  the norm's output back, as transformers does.
+- **Setup:** `tools/decide/knowline/macos/fetch.sh` puts the weights in the Spark's directory (checked against
+  SHA256SUMS) and builds the venv `$J/venvs/decide-mlx` from [`macos/uv.lock`](macos/uv.lock) (mlx 0.32.4, mlx-lm
+  0.32.2, transformers 5.19.0 for the tokenizer, no torch). The pins are in [`macos/pins-macos.json`](macos/pins-macos.json).
+- **Load:** Python's `HTTPServer` looks up the name of 127.0.0.1 when it binds. On macOS that lookup goes to mDNS and
+  took 35 of the 37 seconds the load first measured, so the launcher skips it. One forward pass at load builds the
+  Metal kernels; without it the first decision took 2.4 s.
+
+### Baseline (M5 Ultra, 96 GiB, macOS 27.2, 2026-10-30)
+
+The corpus is [`macos/corpus.json`](macos/corpus.json): 50 fixed requests and 54 questions, with 53 expected answers.
+It covers voice routing over the Jarvis voice tools, follow-ups that need context, the smoke test's route,
+desktop-helper steps, nouls, scores, multi-question requests, a chat-turn state, 40 options, Chinese, and long states
+on each side of the 3,000-token read-twice cut. [`macos/bench.py`](macos/bench.py) runs it and compares two runs.
+
+No Spark output for this corpus is committed (the replay sets above never were), so the reference was built on the same
+Mac. It is the authors' **unmodified** `knowline_server.py --backend hf` on PyTorch 2.13 (MPS), in its default bf16
+and with the dtype set to float32 as a precision anchor. Every run answered identically on each pass (deterministic).
+
+| Compared with float32 (transformers) | Same top answer | max \|Δp\| median / p90 / max | KL mean / max | Expected answers right |
+| --- | --- | --- | --- | --- |
+| transformers bf16 (the Spark's stack, on MPS) | 54/54 | 0.0003 / 0.0022 / 0.0132 | 0.00004 / 0.00047 | 52/53 |
+| **MLX bf16 (served)** | **54/54** | **0.0002 / 0.0044 / 0.0132** | **0.00005 / 0.00047** | **52/53** |
+| MLX bf16, mlx-lm's bf16 norm fold | 54/54 | 0.0004 / 0.0044 / 0.0261 | 0.00009 / 0.00143 | 52/53 |
+| MLX 5-bit (`Liamariel/knowline-4b-gen5.5-mlx-q5@053081f7`) | 54/54 | 0.0017 / 0.0223 / 0.0902 | 0.00220 / 0.02238 | 52/53 |
+
+MLX bf16 against transformers bf16: 54/54 same answers, max |Δp| median 0.0002, p90 0.0026, max 0.0101. The 5-bit
+quant gives the same top answers, but its probabilities move up to 0.09 (a noul from 0.562 to 0.651, a score's top
+level from 0.578 to 0.509). That is about 20 times bf16's error, enough to cross a caller's threshold. It is no faster,
+and it saves 5 GiB that a 96 GiB Mac does not need. **bf16 is served; the quant is not.** The one wrong expected answer
+is the same in every run: "buy milk sometime this week" scores "somewhat urgent" (0.50) against "not urgent".
+
+| bf16 on Metal, warm (the third pass) | Median latency (a request, all its questions) |
+| --- | --- |
+| Voice route, 9 options, about 520 tokens read twice (22 requests) | 73 ms |
+| One noul / one score / one choice | 40 / 42 / 45 ms |
+| Three questions (choice, noul, score) | 119 ms |
+| 40 options | 64 ms |
+| A long state read twice (4,638 tokens) / read once (3,464 tokens) | 488 / 369 ms |
+| First request after load | 76 ms |
+| The 5-bit quant, same corpus | 74 ms voice route, 539 ms long read twice |
+| transformers bf16 on MPS (reference only, one pass) | 1,211 ms voice route, 9.9 s long read twice |
+
+| Memory and load (physical footprint, `proc_pid_rusage`) | bf16 | 5-bit |
+| --- | --- | --- |
+| Load to healthy (weights in the file cache) | 1.3 s | 1.2 s |
+| Loaded | 8.45 GiB | 3.36 GiB |
+| Peak over the corpus | 9.74 GiB | 4.60 GiB |
+| Peak on the longest prompt a request can make (5,990 tokens: a state just inside the read-twice cut) | 9.70 GiB | – |
+| **Booking (`resident_bytes`: peak + 256 MiB)** | **10,724,056,240 B (9.99 GiB)** | – |
+
+Across repeated requests the footprint stays flat (the test checks that it grows by less than 256 MiB). These are
+measurements on this Mac only. The Spark figures above come from different hardware and a different stack, so the two
+sets are not comparable.
+
+```sh
+tools/decide/knowline/macos/fetch.sh
+# the server's tests: model-free, plus the memory test on the real weights (KNOWLINE_WEIGHTS)
+KNOWLINE_WEIGHTS=~/jarvis/models/decide/knowline-4b-gen5.5 ~/jarvis/venvs/decide-mlx/bin/python -I -m unittest \
+  discover -s tools/decide/knowline/macos -p 'test_*.py'
+# the baseline: a run (starts and stops the server), then a comparison
+~/jarvis/venvs/decide-mlx/bin/python -I tools/decide/knowline/macos/bench.py run /tmp/bf16.json \
+  --front-end ~/jarvis/models/decide/knowline-4b-gen5.5
+python3 -I tools/decide/knowline/macos/bench.py compare REF.json /tmp/bf16.json
+# a Spark reference for the same corpus, from its running server:
+python3 -I tools/decide/knowline/macos/bench.py run /tmp/spark.json --url http://127.0.0.1:PORT --model knowline-4b
+```
