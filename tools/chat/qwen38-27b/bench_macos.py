@@ -3,11 +3,15 @@
 
     python3 -I bench_macos.py serve --config CONFIG --out OUT [--tool ID] [--no-drafter]
     python3 -I bench_macos.py port --port PORT --model ID --out OUT [--server-pid PID]
+    python3 -I bench_macos.py daemon --bin LOCALROUTER --config CONFIG --out OUT [--tool ID]
 
 serve  starts the tool's `options.server` argv itself (same env; --no-drafter drops `--drafter REPO`), times the load
        to its health path, runs the suite, then SIGTERMs it and checks it is gone. Wrap it in the host's GPU lock.
 port   runs the suite against an OpenAI-compatible endpoint already on 127.0.0.1:PORT (the LocalRouter daemon).
        Memory is read from PID (default: the one running tensorfold-native, if any).
+daemon starts `LOCALROUTER serve` with the tool alone (port 0, data under OUT), checks /v1/models, loads the tool with
+       MCP `load_model` (timed), asks MCP `chat`, runs the suite through /v1/chat/completions, then SIGTERMs the
+       daemon: the model server must be gone. Wrap it in the host's GPU lock.
 
 The suite: prompts.json whole twice and streamed once with each prompt's expectations, whole = whole (determinism) and
 stream = whole (TensorFold's reasoning trailing-newline exception admitted, as qualify.py), and whole = the Mac
@@ -22,6 +26,7 @@ everything; OUT/summary.json the numbers.
 import argparse
 import ctypes
 import glob
+import http.client
 import json
 import os
 import signal
@@ -32,8 +37,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's directory off sys.path
 from qualify_lib import (FIELDS, PROMPTS, STOP_GRACE_S, Fail, chat, free_port, get_json, load_tool,  # noqa: E402
-                         on_term, options, read_json, run_prompts, server_argv, server_env, tail, wait_health,
-                         write_json)
+                         on_term, options, read_json, run_prompts, server_argv, server_env, stop_process, tail,
+                         wait_health, write_json)
 from qualify import expectation, stream_reasoning_tail  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -323,6 +328,104 @@ def port_mode(args):
     return finish(args.out, res)
 
 
+def mcp_call(port, name, arguments, timeout):
+    """One MCP tools/call over POST /mcp; the JSON-RPC result, its text and how long it took."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    t0 = time.monotonic()
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        c.request("POST", "/mcp", body=json.dumps(body).encode(),
+                  headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+        r = c.getresponse()
+        status, data = r.status, r.read()
+    finally:
+        c.close()
+    rec = {"status": status, "wall_s": round(time.monotonic() - t0, 3)}
+    try:
+        text = data.decode()
+        if text.lstrip().startswith("event:") or text.lstrip().startswith("data:"):
+            text = next(ln[5:].strip() for ln in text.splitlines() if ln.startswith("data:"))
+        result = json.loads(text).get("result") or {}
+    except (ValueError, StopIteration) as e:
+        rec["error"] = f"{type(e).__name__}: {data[:512]!r}"
+        return rec
+    rec["is_error"] = bool(result.get("isError"))
+    rec["text"] = "".join(c.get("text", "") for c in result.get("content") or [])[:2000]
+    return rec
+
+
+def daemon(args):
+    """LOCALROUTER serve with the tool alone, the suite through it, MCP load_model and chat; then SIGTERM."""
+    cfg, tool = load_tool(args)
+    data = os.path.join(args.out, "daemon-data")
+    os.makedirs(data)
+    t = dict(tool)
+    t.pop("qualification", None)
+    dcfg = {"host": "127.0.0.1", "port": 0, "data_dir": data, "reserve_bytes": 8 * GIB,
+            "defaults": {"chat_completion": t["id"]}, "tools": [t]}
+    cpath = os.path.join(args.out, "daemon-config.json")
+    write_json(cpath, dcfg)
+    argv = [args.bin, "serve", "--config", cpath, "--host", "127.0.0.1", "--port", "0", "--data", data]
+    res = {"mode": "daemon", "argv": argv, "drafter": "--drafter" in server_argv(tool, 0), "error": None,
+           "system_before": system_memory()}
+    p = sampler = pid = None
+    timeout = int(t.get("load_timeout_s") or 900) + int(t.get("generate_timeout_s") or 600)
+    try:
+        if server_pids():
+            raise Fail(f"tensorfold-native serve already runs (pids {server_pids()})")
+        with open(os.path.join(args.out, "daemon.log"), "wb") as errf:
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf)
+        line = p.stdout.readline().decode(errors="replace").strip()
+        prefix = "localrouter listening on http://"
+        if not line.startswith(prefix):
+            raise Fail(f"unexpected first stdout line {line!r}; daemon.log tail:\n"
+                       f"{tail(os.path.join(args.out, 'daemon.log'))}")
+        port = int(line[len(prefix):].rsplit(":", 1)[1].rstrip("/"))
+        res["port"] = port
+        models = get_json(port, "/v1/models")
+        entry = next((m for m in models.get("data") or [] if m.get("id") == t["id"]), None)
+        res["models_entry"] = entry
+        if not (entry and entry.get("kind") == "chat" and "chat_completion" in (entry.get("capabilities") or [])):
+            raise Fail(f"/v1/models does not list {t['id']} as chat: {models}")
+        res["mcp_load_model"] = mcp_call(port, "load_model", {"model": t["id"]}, timeout)
+        res["load_s"] = res["mcp_load_model"]["wall_s"]
+        pid = (server_pids() or [None])[0]
+        if pid is None:
+            raise Fail(f"no tensorfold-native serve after load_model: {res['mcp_load_model']}")
+        res["server_pid"] = pid
+        res["footprint_loaded"], _ = footprint(pid)
+        sampler = Sampler(pid, os.path.join(args.out, "memory.log"))
+        sampler.start()
+        print(f"loaded through the daemon in {res['load_s']} s", flush=True)
+        res["mcp_chat"] = mcp_call(port, "chat", {"prompt": "Three facts about Canberra.", "reasoning": False,
+                                                  "max_tokens": 200}, timeout)
+        print(f"MCP chat: {json.dumps(res['mcp_chat'])[:400]}", flush=True)
+        if res["mcp_chat"].get("error") or res["mcp_chat"].get("is_error") or "Canberra" not in res["mcp_chat"]["text"]:
+            raise Fail(f"MCP chat failed: {res['mcp_chat']}")
+        suite(port, t["id"], args.out, timeout, res)
+        res["tools_end"] = get_json(port, "/v1/tools")
+    except SystemExit:
+        res["error"] = "terminated (SIGTERM)"
+        raise
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        if sampler is not None:
+            sampler.stop.set()
+            sampler.join()
+            _, life = footprint(pid)
+            res["footprint_peak"] = max(life or 0, sampler.peak)
+        if p is not None:
+            res["stop"] = stop_process(p, STOP_GRACE_S)
+        deadline = time.monotonic() + 10
+        while server_pids() and time.monotonic() < deadline:
+            time.sleep(0.5)
+        res["left_running"] = server_pids()
+        res["system_after"] = system_memory()
+        rc = finish(args.out, res)
+    return 1 if res["left_running"] else rc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -337,12 +440,17 @@ def main():
     q.add_argument("--out", required=True)
     q.add_argument("--server-pid", type=int)
     q.add_argument("--timeout", type=int, default=600)
+    d = sub.add_parser("daemon")
+    d.add_argument("--bin", required=True)
+    d.add_argument("--config", required=True)
+    d.add_argument("--tool", default="qwen3.8-27b")
+    d.add_argument("--out", required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if os.listdir(args.out):
         sys.exit(f"bench_macos.py: {args.out} is not empty: give each run a new OUT")
     signal.signal(signal.SIGTERM, on_term)
-    return serve(args) if args.mode == "serve" else port_mode(args)
+    return {"serve": serve, "port": port_mode, "daemon": daemon}[args.mode](args)
 
 
 if __name__ == "__main__":

@@ -301,8 +301,14 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
   room for the rest of the 4 GiB prompt cache; `working_bytes` 0 as on the Spark. Unified memory is counted once: the
   footprint includes the Metal buffers. The research estimate was 32 GiB; TensorFold's published Mac figure 26.5 GiB
   (M5 Max).
-- **Through LocalRouter** (`/v1/chat/completions`, MCP `chat`): `bench_macos.py port`, once the daemon runs on macOS
-  (MAC-PORT.md).
+- **Through LocalRouter** (`bench_macos.py daemon`: `localrouter serve` built on this Mac from `feat/mac-foundation`,
+  the tool alone): `/v1/models` lists it as chat; MCP `load_model` loads it in 3.9 s (warm page cache) and MCP `chat`
+  answers in 1.9 s; through `/v1/chat/completions` 188 of 188 checks, the same replies as the baseline; decode 198 /
+  153 / 127 / 105 tok/s (code; 2.5k / 9.5k / 31.2k prompts), TTFT 2.02 / 7.72 / 27.3 s, cached next turns 0.065 s
+  (2.1k) and 0.105 s (9.7k); peak `phys_footprint` 26.0 GiB. The daemon adds nothing measurable. After SIGTERM the
+  model server was gone, but the daemon itself did not exit within 15 s and was killed: on macOS, `shutdown()` of the
+  listening socket does not wake a blocked `accept()` (reproduced with no tools configured; one connection to the
+  port after the signal lets it exit 0 in 0.5 s). That fix belongs to the daemon (MAC-PORT.md), not to chat.
 
 ## Licences
 

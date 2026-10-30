@@ -15,7 +15,8 @@
   "LR_BIN": "$REPO/zig-out/bin/localrouter",
   "DEVELOPER_DIR": "${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}",
   "STEPS": "bash $REPO/tools/install/steps.sh",
-  "IMAGE_ROOT": "$J/image-mac"
+  "IMAGE_ROOT": "$J/image-mac",
+  "CHAT_ROOT": "$J/chat"
  },
  "prereqs": [
   {
@@ -207,6 +208,48 @@
     }
    ],
    "reference_working_bytes": 2147483648
+  },
+  {
+   "key": "chat",
+   "id": "qwen3.8-27b",
+   "warm": true,
+   "title": "Qwen3.8 27B chat: TensorFold 1.1.4 native Metal server, MLX 4-bit weights with the DFlash2 drafter",
+   "licence": {
+    "name": "Apache-2.0 (checkpoint, drafter and TensorFold)",
+    "url": "https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit"
+   },
+   "pins": "tools/chat/qwen38-27b/pins-macos.json",
+   "download_bytes": 19936084561,
+   "disk_bytes": 21000000000,
+   "memory_bytes": 32212254720,
+   "skip": "leave chat out of --models; the voice loop then has no model to answer with",
+   "steps": [
+    {
+     "id": "fetch",
+     "download_bytes": 19936084561,
+     "disk_bytes": 21000000000,
+     "title": "the TensorFold 1.1.4 macos-arm64 archive, the checkpoint and the drafter (~20 GB, into the shared Hugging Face cache), every file against pins-macos.json",
+     "run": "bash $REPO/tools/chat/qwen38-27b/fetch-macos.sh $CHAT_ROOT",
+     "done": "[ -x $CHAT_ROOT/tensorfold-1.1.4/bin/tensorfold-native ] && [ \"$(cat $CHAT_ROOT/tensorfold-1.1.4.archive-sha256)\" = \"$(jq -r '.tensorfold.archives[\"macos-arm64\"].sha256' $REPO/tools/chat/qwen38-27b/pins-macos.json)\" ]",
+     "fix": "network: run again (partial files resume). \"exists with another size or hash\": delete the named file and run again. HF_TOKEN, if huggingface.co asks for one"
+    },
+    {
+     "id": "setup",
+     "title": "the binary runs here, reports Metal and sees the checkpoint; the tool config",
+     "run": "bash $REPO/tools/chat/qwen38-27b/setup-macos.sh $CHAT_ROOT",
+     "done": "[ -f $CHAT_ROOT/config.json ] && [ $CHAT_ROOT/config.json -nt $REPO/tools/chat/qwen38-27b/config.macos.example.json ]",
+     "fix": "the log names the check that failed (backends not [\"metal\"]: the wrong archive or no Metal device; report it with the log)"
+    },
+    {
+     "id": "bench",
+     "title": "load, memory, speed and the prompts.json checks against the Mac baseline on this Mac (bench_macos.py, about 4 minutes)",
+     "gpu": true,
+     "min_free_gib": 32,
+     "run": "d=$CHAT_ROOT/bench-1.1.4; rm -rf \"$d\"; python3 -I $REPO/tools/chat/qwen38-27b/bench_macos.py serve --config $CHAT_ROOT/config.json --out \"$d\"",
+     "done": "jq -e '.error == null and .features_failed == []' $CHAT_ROOT/bench-1.1.4/summary.json > /dev/null 2>&1",
+     "fix": "$CHAT_ROOT/bench-1.1.4 has server.log, bench.json and summary.json: a failed check names the prompt and field; not enough memory: unload other models first; anything else: report it with those files"
+    }
+   ]
   }
  ]
 }
