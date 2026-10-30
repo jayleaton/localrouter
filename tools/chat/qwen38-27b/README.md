@@ -50,3 +50,32 @@ tools/chat/qwen38-27b/qualify.sh /opt/localrouter/chat /opt/localrouter/bin/loca
 
 MemAvailable is sampled every 0.5 s during direct and daemon; `report.json` gives the largest drop as the measured
 candidate for `resident_bytes`; the config's 24 GiB comes from the DGX-01 bring-up (docs/dev/JARVIS-BRINGUP.md).
+
+## macOS (Apple Silicon)
+
+The same tool on a Mac: TensorFold 1.1.4's `macos-arm64` release (native Zig/Metal, no Python or MLX install) serving
+the same checkpoint and drafter revisions, behind the same `openai_server` engine. The Linux files above are
+unchanged; the Mac has its own beside them.
+
+| File | Does |
+| --- | --- |
+| `pins-macos.json` | TensorFold v1.1.4 (tag, commit, the macos-arm64 archive by size and sha256, its published `.sha256` and `.sha256.sig` by sha256), and the same checkpoint and drafter files as `pins.json` |
+| `fetch-macos.sh ROOT [--hf DIR]` | `fetch.sh` for macOS: the archive (checked against the pin and the release's `.sha256`), extracted to `ROOT/tensorfold-1.1.4` and checked against its `SHA256SUMS`, then the checkpoint and drafter into DIR (default the shared `~/.cache/huggingface/hub`) |
+| `setup-macos.sh ROOT [--hf DIR]` | `--version`, `capabilities --json` (must list only the `metal` backend and every serve flag of the config), `models` and `info` offline, `lib/libtfgrammar.dylib`; writes and prints `ROOT/config.json` |
+| `config.macos.example.json` | the Mac tool config: no `qualification` marker (that gate is the GB10's), `resident_bytes` from this Mac's measurement (docs/dev/CHAT.md) |
+| `bench_macos.py serve\|port` | the Mac measurement and qualification: load time, footprint (rusage lifetime maximum and `footprint`), prompts.json's checks, speed with and without the drafter, cached follow-ups; `port` runs the same suite through the LocalRouter daemon |
+
+The `.sha256.sig` is pinned by hash only: no key that verifies it is published at the pinned commit (see the notes in
+`pins-macos.json`). The archive's sha256 and its `SHA256SUMS` are the trust inputs, as on Linux.
+
+```sh
+tools/chat/qwen38-27b/fetch-macos.sh ~/.local/share/localrouter/chat          # ~20 GB into ~/.cache/huggingface/hub
+tools/chat/qwen38-27b/setup-macos.sh ~/.local/share/localrouter/chat          # prints the tool config
+# each run loads the model: one at a time, nothing else large on the GPU
+python3 -I tools/chat/qwen38-27b/bench_macos.py serve --config ~/.local/share/localrouter/chat/config.json \
+  --out /tmp/qwen-mac-drafter
+python3 -I tools/chat/qwen38-27b/bench_macos.py serve --config ~/.local/share/localrouter/chat/config.json \
+  --out /tmp/qwen-mac-plain --no-drafter
+# through the daemon, once it serves the tool on PORT
+python3 -I tools/chat/qwen38-27b/bench_macos.py port --port PORT --model qwen3.8-27b --out /tmp/qwen-mac-daemon
+```
