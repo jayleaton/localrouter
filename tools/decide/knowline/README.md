@@ -85,7 +85,9 @@ not claim parity with the Spark's bits. Text only, as on the Spark: a request wi
   the norm's output back, as transformers does.
 - **Setup:** `tools/decide/knowline/macos/fetch.sh` puts the weights in the Spark's directory (checked against
   SHA256SUMS) and builds the venv `$J/venvs/decide-mlx` from [`macos/uv.lock`](macos/uv.lock) (mlx 0.32.4, mlx-lm
-  0.32.2, transformers 5.19.0 for the tokenizer, no torch). The pins are in [`macos/pins-macos.json`](macos/pins-macos.json).
+  0.32.2, transformers 5.19.0 for the tokenizer, no torch). The pins are in [`macos/pins-macos.json`](macos/pins-macos.json);
+  the tool entry is [`macos/config.example.json`](macos/config.example.json); `deploy/profiles/mac-apple-silicon.json`
+  lists it as the `decide` model.
 - **Load:** Python's `HTTPServer` looks up the name of 127.0.0.1 when it binds. On macOS that lookup goes to mDNS and
   took 35 of the 37 seconds the load first measured, so the launcher skips it. One forward pass at load builds the
   Metal kernels; without it the first decision took 2.4 s.

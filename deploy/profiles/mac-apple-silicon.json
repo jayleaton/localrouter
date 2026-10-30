@@ -147,6 +147,32 @@
     }
    ],
    "skip": "leave stt out of --models; the voice loop then cannot hear"
+  },
+  {
+   "key": "decide",
+   "id": "knowline-4b",
+   "warm": false,
+   "title": "KnowLine-4B Gen5.5 typed decisions (/v1/systemone, MCP decide): the authors' front end on MLX, bf16",
+   "licence": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5"
+   },
+   "pins": "tools/decide/knowline/macos/pins-macos.json",
+   "download_bytes": 9342902390,
+   "disk_bytes": 10000000000,
+   "memory_bytes": 10724056240,
+   "skip": "leave decide out of --models; /v1/systemone and MCP decide then answer that no decision model is configured",
+   "steps": [
+    {
+     "id": "fetch",
+     "download_bytes": 9342902390,
+     "disk_bytes": 10000000000,
+     "title": "the weights at the pinned revision (~9.3 GB, every file against SHA256SUMS) and the MLX venv from uv.lock",
+     "run": "JARVIS=$J bash $REPO/tools/decide/knowline/macos/fetch.sh && $STEPS stamp decide-fetch $REPO/tools/decide/knowline/macos/pins-macos.json $REPO/tools/decide/knowline/macos/uv.lock",
+     "done": "$STEPS stamped decide-fetch $REPO/tools/decide/knowline/macos/pins-macos.json $REPO/tools/decide/knowline/macos/uv.lock && [ -x $J/venvs/decide-mlx/bin/python ]",
+     "fix": "network: run again (the download resumes). \"do not match SHA256SUMS\": delete $J/models/decide/knowline-4b-gen5.5 and run again"
+    }
+   ]
   }
  ]
 }
