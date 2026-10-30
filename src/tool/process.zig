@@ -99,7 +99,14 @@ pub const ProcessTool = struct {
         if (engine.find(p.cfg.engine)) |e| return e.needs(p.cfg, req);
         // encoding a voice runs the model's encoder beside the loaded model: its measured peak, else the unmeasured rule
         if (req.* == .speech and req.speech.clone.len > 0) return .{ .resident = p.cfg.resident_bytes, .working = engine.optionInt(p.cfg, "clone_working_bytes", unmeasured_working) };
-        return .{ .resident = p.cfg.resident_bytes, .working = p.cfg.working_bytes };
+        return .{ .resident = p.cfg.resident_bytes, .working = p.cfg.working_bytes +| referenceWorking(p.cfg, req) };
+    }
+
+    /// An edit's reference images are encoded into the model's context: each adds its measured `reference_working_bytes`
+    /// (an image option, 0 when unset) to the job's `working_bytes`, so a one-image edit is not booked at five's peak.
+    fn referenceWorking(cfg: *const ToolConfig, req: *const Request) u64 {
+        if (req.* != .image) return 0;
+        return engine.optionInt(cfg, "reference_working_bytes", 0) *| req.image.references.len;
     }
 
     fn state(ptr: *anyopaque) tool.State {
@@ -518,4 +525,16 @@ test "a cancel before the generate reaches the worker is not lost: before the wr
     var never: std.atomic.Value(bool) = .init(false);
     const j3: tool.Job = .{ .id = "c", .dir = dir, .request = .{ .speech = .{ .input = "hi" } }, .cancelled = &never };
     _ = try t.generate(&j3, sink, arena.allocator());
+}
+
+test "an edit books reference_working_bytes for each reference image beside working_bytes" {
+    const gpa = std.testing.allocator;
+    const opts = try std.json.parseFromSlice(std.json.Value, gpa, "{\"reference_working_bytes\": 3}", .{});
+    defer opts.deinit();
+    const cfg: ToolConfig = .{ .id = "img", .kind = .image, .cmd = &.{"true"}, .working_bytes = 10, .options = opts.value };
+    const refs: []const []const u8 = &.{ "a.png", "b.png" };
+    try std.testing.expectEqual(@as(u64, 6), ProcessTool.referenceWorking(&cfg, &.{ .image = .{ .prompt = "p", .references = refs } }));
+    try std.testing.expectEqual(@as(u64, 0), ProcessTool.referenceWorking(&cfg, &.{ .image = .{ .prompt = "p" } }));
+    const plain: ToolConfig = .{ .id = "img", .kind = .image, .cmd = &.{"true"}, .working_bytes = 10 };
+    try std.testing.expectEqual(@as(u64, 0), ProcessTool.referenceWorking(&plain, &.{ .image = .{ .prompt = "p", .references = refs } }));
 }
