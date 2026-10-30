@@ -2,8 +2,9 @@
 
 This page consolidates the research of 2026-10-30 (base `fe24726`) for LocalRouter on macOS: what runs where, what is
 pinned, what is decided and what is still unmeasured. Target hardware: M5 Ultra, 96 GiB unified memory. Nothing here
-is a Mac measurement unless it says so; every size is a decimal-byte figure from HF metadata and every memory figure
-marked "estimate" is an admission starting point, not a peak.
+is a Mac measurement unless it says so (the measurements are in [Measured on the Mac](#measured-on-the-mac)); every
+size is a decimal-byte figure from HF metadata and every memory figure marked "estimate" is an admission starting
+point, not a peak.
 
 ## Purpose and scope
 
@@ -22,7 +23,7 @@ separate pins files (`pins-macos.json`), never a replacement.
 
 ## Per-model engines
 
-All rows are **planned**. "Seam" is either the `openai_server` wrapper (the daemon spawns a child HTTP server and
+The engines below are the ones the per-model ports use; their measured numbers are in the next section. "Seam" is either the `openai_server` wrapper (the daemon spawns a child HTTP server and
 proxies to it) or an external `cmd` worker (newline JSON, see [MODEL-DROPIN.md](MODEL-DROPIN.md)). `openai_server`
 declares chat and decision capabilities only, so it is not a media bridge.
 
@@ -31,22 +32,39 @@ declares chat and decision capabilities only, so it is not a media bridge.
 | Qwen3.8 27B chat | TensorFold native Zig/Metal, `qwen27` family, DFlash2 drafter; macos-arm64 release archive plus its `lib/` (grammar dylib) | `openai_server` | TensorFold [v1.1.4 `eab8582`](https://github.com/ashhart/TensorFold/tree/eab8582819688325e371907e4706e1c602b8a273) release archive; [`TensorFold/Qwen3.8-27B-MLX-4bit@22d8d53`](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit/tree/22d8d538154e0e5b6f8dcb1fcc74a60a0798104c); drafter [`z-lab/Qwen3.8-27B-DFlash2@50307d4`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/tree/50307d4c4cde6860d4eee73e2547cd786fe8e8a4) | MLX affine 4-bit/g64, 16,054,541,349 B (14.95 GiB); drafter bf16 3,848,817,896 B (packed to 4-bit by the loader). Apache-2.0 | chat |
 | Drama 3 speech | drama-tensorfold Mac stack: TensorFold base plus `engine/nvfp4/macos/patches/` (Metal NVFP4 + CFG), Metal DAC decoder and encoder | `cmd` worker around the native HTTP server (native server takes startup voice catalogs, not per-request references) | [drama-tensorfold `db6ba7d`](https://github.com/plotarmordev/drama-tensorfold/tree/db6ba7da314b24b42b02978ba4401f54f6738311), base TensorFold [`3d219d2`](https://github.com/ashhart/TensorFold/tree/3d219d2156d4c25dcfb74370c8703cd89e58aa49); weights [`plotarmordev/drama-3-NVFP4-Pruned@494db08`](https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/tree/494db08481db952f834b2241bce63fb3dfa72554) | NVFP4 (E2M1 experts, E4M3 block-16 scales), 22,294,649,076 B (20.76 GiB) weights+codec; repo 22,323,516,597 B. FACL v1.0 | drama3 |
 | KnowLine-4B decisions | `mlx-lm` Qwen3.5 text model plus the author's scoring front end (`knowline_server.py`, `knowline_layout.py`); no TensorFold engine fits | server wrapper replacing `tools/decide/knowline/serve.py` (it hardcodes CUDA); `/v1/systemone` stays proxied | [`PelaAI/KnowLine-4B-Gen5.5@779944d`](https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/779944d2cc8ffa19cef386aee83c83bcb967ade2); [`mlx-lm@736ab0d`](https://github.com/ml-explore/mlx-lm/tree/736ab0d8c1d0edc79c3d798044fe6904e2fa23be) | bf16 baseline 9,319,828,224 B (8.68 GiB). Q5 option [`Liamariel/...-mlx-q5@053081f`](https://huggingface.co/Liamariel/knowline-4b-gen5.5-mlx-q5/tree/053081f764ffeddf4b1278d4183db95b72180520), 2,892,837,529 B, only after a decision-quality comparison. Apache-2.0 | knowline |
-| Whisper large-v3-turbo STT | `mlx-whisper` persistent worker; WhisperKit/Core ML is the alternate. No TensorFold Whisper | `cmd` worker | [`mlx-community/whisper-large-v3-turbo@a4aaeec`](https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb); `mlx-whisper` (research linked `main`; **pin a revision before use**) | FP16, 1,613,977,612 B (1.50 GiB). Optional q4 [`@660c343`](https://huggingface.co/mlx-community/whisper-large-v3-turbo-q4/tree/660c343bbf4e52ac257f0b7d952e5388e6f93bef) 463,664,664 B needs its own qualification. MIT | whisper |
+| Whisper large-v3-turbo STT | `mlx-whisper` persistent worker; WhisperKit/Core ML is the alternate. No TensorFold Whisper | `cmd` worker | [`mlx-community/whisper-large-v3-turbo@a4aaeec`](https://huggingface.co/mlx-community/whisper-large-v3-turbo/tree/a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb); `mlx-whisper` 0.4.3, pinned in `tools/speech/whisper/macos/uv.lock` | FP16, 1,613,977,612 B (1.50 GiB). Optional q4 [`@660c343`](https://huggingface.co/mlx-community/whisper-large-v3-turbo-q4/tree/660c343bbf4e52ac257f0b7d952e5388e6f93bef) 463,664,664 B needs its own qualification. MIT | whisper |
 | Silero VAD | existing TorchScript JIT on CPU, beside the Whisper worker | in the Whisper `cmd` worker | [`snakers4/silero-vad@5cd7945`](https://github.com/snakers4/silero-vad/tree/5cd7945676eb32225748052e2e6a0580e4686a08) (v6.2.3), `silero_vad.jit` SHA-256 `e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720` | 2,272,526 B. MIT | whisper |
 | Qwen-Image 2.1 Turbo | MLX-Serve >= 26.10.2 (alternative: mflux) | `cmd` worker (load/generate/exit, progress, cancel, output files) | [`ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit@214ca34`](https://huggingface.co/ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit/tree/214ca346520a59597b89bd77408afa49d526bde5); runtime [`ddalcu/mlx-serve@1fa96c6`](https://github.com/ddalcu/mlx-serve/tree/1fa96c6d212866f7c2d57f5d7fc80d28cfa08d76); upstream [`Qwen/Qwen-Image-2.1-Turbo@fc13ba1`](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | q8/g64 pack, 17.73 GB repo, vision tower included. Qwen Research License (non-commercial) | qwen-image |
 | Qwen-Image 2.1 edit | mflux `QwenImage21Edit` (`mflux-generate-qwen-2.1-edit`) | `cmd` worker (same as Turbo) | [`Qwen/Qwen-Image-2.1@d26bb61`](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/d26bb61231c349cf6b7896fa83353113880e1ba3) via [`mflux@5171ae1`](https://github.com/mflux-community/mflux/tree/5171ae15e84f81046f9685fd77bf0bafa3187b61) | 33.12 GB BF16 source, quantised to q8 at load/export; edit VAE stays FP32 | qwen-image |
 
-Unverified or open, per the research:
+## Measured on the Mac
+
+From the merged per-model ports and the integration run on the reference M5 Ultra (96 GiB). Memory is the process
+footprint as macOS reports it; GB figures are decimal as reported, GiB binary.
+
+| Model | Memory | Speed |
+| --- | --- | --- |
+| Qwen3.8 27B chat | 26 GiB peak, 30 GiB booked | ~196 tok/s with DFlash2 |
+| Drama 3 | 31 GiB | 0.52 s to first audio, RTF 0.77; switching voice adds 4 s |
+| KnowLine-4B | 10 GiB | 137 ms a decision |
+| Whisper large-v3-turbo (`mlx-whisper` 0.4.3) | 3.2 GB resident, 4.35 GB peak | |
+| Qwen-Image 2.1 Turbo | 17 GB | 8.5 s an image |
+
+**Memory policy (JJ).** Chat, Drama 3 and Whisper stay warm (`keep_loaded`). KnowLine and Qwen-Image load on demand,
+one at a time. The GPU's wired ceiling is about 77.8 GiB, so the three warm models (about 65 GiB booked) leave room
+for one on-demand model, not both.
+
+**Eviction, as the integration run saw it.** An image request evicts, in order, KnowLine, then Whisper, then Drama 3.
+Chat is never evicted. Speech is down for about 25 s an image: the image job, then Whisper and Drama 3 loading again.
+
+Unverified or open, per the research (the table above supersedes its memory and speed estimates):
 
 - **Chat pin.** The reviewed Mac baseline is TensorFold v1.1.4. The chat archive deployed on the Spark is v1.1.1
   (`b10231b`), rolled back for a GB10 cache-latency regression. Whether Metal shows it is unknown. v1.1.9 exists
   (`465e48b`); it is not qualified. Do not carry the GB10 qualification marker or booking across.
-- **Memory.** Chat: upstream footprint at 32,768 context with drafter is 26.5 GiB (M5 Max) / 21.8 GiB (M3 Ultra); the
-  32 GiB admission figure is an estimate. Drama NVFP4: no Mac peak exists (the only receipt is correctness-only on a
-  256 GiB M5 Ultra, no speed, WER or memory claim); the GB10 20.56 GiB booking is not a Mac figure. KnowLine 12-16 GiB
-  (bf16) and Whisper 4-6 GiB are estimates. Qwen-Image q8: 19.3 GB MLX peak is publisher-reported on a 256 GB M5 Ultra.
-- **Speed.** Upstream chat numbers (M5 Ultra, 100 greedy tokens: plain 46-52 tok/s, DFlash2 102-226 tok/s) are not
-  ours. No primary-source KnowLine or Whisper-MLX M5 numbers exist. Drama native Mac RTF/TTFA is unverified.
+- **Memory and speed** are measured now (above). The research's estimates (chat 32 GiB, KnowLine 12-16 GiB, Whisper
+  4-6 GiB, Qwen-Image 19.3 GB publisher peak) and upstream chat speeds are superseded. Whisper's speed and the
+  Qwen-Image edit path are not measured yet.
 - **Qwen-Image edit** at five references: latency, peak and quality are unverified; the Turbo pack's vision tower is
   card-stated. Text-only exports cannot serve `image_edit`. Verify keys before advertising it.
 - **Licences travel with the weights.** Drama: FACL v1.0 (no Hosted Service without a separate licence; $500,000
@@ -63,7 +81,7 @@ Unverified or open, per the research:
 - **No CUDA translation.** CUDA pointers, fatbins, NVFP4 `mma.sync` assembly, memcap and the vendor loader do not map to
   Metal. Mac builds exclude them or provide a separate Mac scheme.
 - **One unified-memory budget.** Count each backing once; no "96 GiB VRAM plus 96 GiB RAM". Admission needs measured
-  resident/working bookings per model on this class of machine. Estimates above are placeholders. Servers' allocations
+  resident/working bookings per model on this class of machine ([measured](#measured-on-the-mac)). Servers' allocations
   are invisible to the daemon, so trust only measured receipts and observed process footprint.
 - **Shared GPU, co-tenancy.** The scheduler still runs one job at a time and unloads idle tools by priority. During
   development, every command that loads weights goes through the machine-wide GPU lock. Upstream reports of idle GPU
@@ -139,6 +157,13 @@ macOS returns ENOTCONN for that call and `accept` stays blocked, so there the da
 once (`serve.zig` `watchStop`). It then exits 0 and its workers follow. `tests/orphans.zig` covers both this and
 SIGKILL.
 
+**Cancel reaches the worker.** A `cmd` worker that takes soft cancel gets SIGUSR1. The daemon used to send it at
+once, so a cancel that came between "job running" and the `generate` line reaching the worker was lost (the worker
+was not busy yet and ignored it). Now the job carries its cancel flag: a cancel before the write ends the job without
+sending it, and after the write the daemon signals, then repeats every 200 ms until the reply arrives. A worker must
+therefore ignore a SIGUSR1 that comes while no `generate` is running ([wire.zig](../../src/tool/wire.zig)).
+`src/tool/process.zig` tests both windows. This is not Mac-specific; the Whisper port found it.
+
 **Installer** (`tools/install`). It runs on macOS's bash 3.2 and BSD tools, and on a Spark it runs exactly the
 commands it ran before. `lib.sh` holds the portable helpers:
 
@@ -167,7 +192,9 @@ Linux, the `jarvis-gb10` plan is byte-identical before and after this change.
 **CI.** No macOS job was added, because macOS runners are billed. The PR proposes one.
 
 The Mac deploy profile is `deploy/profiles/mac-apple-silicon.json`. It lists the host prerequisites (Zig 0.17.0, the
-Xcode Metal toolchain, python3) and an empty `models` list, which each model's port fills in.
+Xcode Metal toolchain, python3) and an empty `models` list, which each model's port fills in. Its first host step
+installs `uv` (0.13.4, `uv-aarch64-apple-darwin`, pinned by sha256 in `host.tools`) into `$J/bin`, because the Python
+workers' venv steps (Whisper's `uv sync`) need it and macOS does not ship it.
 
 ## Proposed Metal engine contract
 

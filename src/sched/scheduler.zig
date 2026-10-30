@@ -330,14 +330,15 @@ pub const Scheduler = struct {
     /// Cancels a queued job at once, or ends the running one: early with the tool kept loaded when it offers that
     /// (`Tool.cancel`), else by aborting it (its worker is killed).
     pub fn cancel(s: *Scheduler, j: *jobs.Job) void {
-        j.cancel.store(true, .release);
+        j.cancel.store(true, .seq_cst); // seq_cst: `ProcessTool.generate` reads it after publishing its write
+
         if (s.isRunning(j)) s.end(j, true);
     }
 
     /// Cancels a queued job, and ends a running one early only if its tool can stay loaded; otherwise the running job
     /// finishes and its result is ignored (the voice loop: never a reload).
     pub fn drop(s: *Scheduler, j: *jobs.Job) void {
-        j.cancel.store(true, .release);
+        j.cancel.store(true, .seq_cst);
         if (s.isRunning(j)) s.end(j, false);
     }
 
@@ -789,7 +790,7 @@ pub const Scheduler = struct {
         }
         var arena: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena.deinit();
-        const job: tool_mod.Job = .{ .id = j.id, .dir = j.dir, .request = j.request };
+        const job: tool_mod.Job = .{ .id = j.id, .dir = j.dir, .request = j.request, .cancelled = &j.cancel };
         var pctx: ProgressCtx = .{ .s = s, .j = j };
         const speaking = j.request == .speech;
         if (speaking) s.speech.enter(s.io);
