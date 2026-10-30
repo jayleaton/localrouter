@@ -1,27 +1,39 @@
 #!/usr/bin/env bash
 # setup.sh for macOS on Apple Silicon: checks that the TensorFold binary fetch-macos.sh installed runs here, reports
 # Metal, and sees the checkpoint, then writes and prints the daemon config for the qwen3.8-27b tool.
-#   tools/chat/qwen38-27b/setup-macos.sh ROOT [--hf DIR]
-# ROOT and DIR as for fetch-macos.sh (DIR default the shared Hugging Face cache). Writes ROOT/tensorfold-version.txt,
+#   tools/chat/qwen38-27b/setup-macos.sh ROOT [--hf DIR] [--prompt-cache-gib 4|1]
+# ROOT and DIR as for fetch-macos.sh (DIR default the shared Hugging Face cache). --prompt-cache-gib (default 4, the
+# measured configuration) sets the server's --prompt-cache-gib and the matching resident_bytes: 4 GiB books 30 GiB
+# (measured, docs/dev/CHAT.md); 1 GiB books 27 GiB (an estimate until bench_macos.py measures it) for a Mac that
+# keeps chat, speech and transcription warm beside each other. Writes ROOT/tensorfold-version.txt,
 # ROOT/tensorfold-capabilities.json, ROOT/tensorfold-models.txt, ROOT/tensorfold-info.txt and ROOT/config.json
 # (config.macos.example.json with these paths). No root; touches nothing outside ROOT. Needs jq. The model only
 # loads (and uses the GPU) in bench_macos.py, not here.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 pins=$here/pins-macos.json
-usage="usage: setup-macos.sh ROOT [--hf DIR]"
+usage="usage: setup-macos.sh ROOT [--hf DIR] [--prompt-cache-gib 4|1]"
 root=${1:?$usage}
 shift
-hf=
+hf=""
+cache_gib=4
 while [ $# -gt 0 ]; do
   case $1 in
     --hf) hf=${2:?$usage}; shift 2 ;;
+    --prompt-cache-gib) cache_gib=${2:?$usage}; shift 2 ;;
     *) echo "setup-macos.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 die() { echo "setup-macos.sh: $*" >&2; exit 1; }
 [ "$(uname -s) $(uname -m)" = "Darwin arm64" ] || die "this is $(uname -s) $(uname -m); on Linux use setup.sh"
 command -v jq >/dev/null || die "needs jq"
+# The booking for each prompt cache size: the loaded footprint, the long-prompt working peak and the cache itself.
+case $cache_gib in
+  4) resident=32212254720 memory_note="" ;;  # 30 GiB, measured: 25.6 GiB peak plus the rest of the cache
+  1) resident=28991029248  # 27 GiB, estimated: the 4 GiB run's 25.6 GiB peak held at most 4 GiB of cache
+     memory_note="--prompt-cache-gib 1: 27 GiB is an estimate (the 4 GiB configuration's measured 25.6 GiB peak with a smaller cache, plus margin); measure it with bench_macos.py serve before relying on it" ;;
+  *) die "--prompt-cache-gib takes 4 or 1 (the sizes with a booking), not $cache_gib" ;;
+esac
 root=$(cd "$root" && pwd)
 [ -n "$hf" ] || hf=${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}
 hf=$(cd "$hf" && pwd)
@@ -73,8 +85,11 @@ env HF_HUB_CACHE="$hf" HF_HUB_OFFLINE=1 TENSORFOLD_NO_UPDATE_CHECK=1 timeout 300
 echo "setup-macos.sh: tensorfold info $repo:"
 cat "$root/tensorfold-info.txt"
 
-jq --arg hf "$hf" --arg bin "$bin" \
-  '.tools[0].weights = $hf | .tools[0].options.env.HF_HUB_CACHE = $hf | .tools[0].options.server[0] = $bin' \
+jq --arg hf "$hf" --arg bin "$bin" --arg gib "$cache_gib" --argjson resident "$resident" --arg note "$memory_note" \
+  '.tools[0].weights = $hf | .tools[0].options.env.HF_HUB_CACHE = $hf | .tools[0].options.server[0] = $bin
+   | .tools[0].resident_bytes = $resident
+   | .tools[0].options.server |= (index("--prompt-cache-gib") as $i | .[$i + 1] = $gib)
+   | if $note != "" then .tools[0].options.memory = $note else . end' \
   "$here/config.macos.example.json" > "$root/config.json.tmp"
 mv "$root/config.json.tmp" "$root/config.json"
 cat <<EOF
