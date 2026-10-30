@@ -135,6 +135,13 @@ is the same in every run: "buy milk sometime this week" scores "somewhat urgent"
 | Peak on the longest prompt a request can make (5,990 tokens: a state just inside the read-twice cut) | 9.70 GiB | – |
 | **Booking (`resident_bytes`: peak + 256 MiB)** | **10,724,056,240 B (9.99 GiB)** | – |
 
+Through the daemon (`localrouter serve` built on this Mac from `feat/mac-foundation`, with the tool from
+`macos/config.example.json`): `/v1/systemone` with the `jev-latest` model name reached `knowline-4b` and answered a
+choice, a noul and a score. The first request took 2,170 ms, the on-demand load included; the next took 137 ms. MCP
+`decide` answered `route: video (0.988)` in 38 ms. A one-option choice was refused before anything loaded. The
+daemon booked 10,227 MiB, and the server's peak was 9.53 GiB. On SIGTERM the daemon exited 0 and took the model
+server with it.
+
 Across repeated requests the footprint stays flat (the test checks that it grows by less than 256 MiB). These are
 measurements on this Mac only. The Spark figures above come from different hardware and a different stack, so the two
 sets are not comparable.
