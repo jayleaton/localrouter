@@ -1,0 +1,25 @@
+{
+  "host": "127.0.0.1",
+  "defaults": {"text_to_image": "qwen-image-2.1-turbo", "image_edit": "qwen-image-2.1-turbo"},
+  "tools": [
+    {
+      "id": "qwen-image-2.1-turbo",
+      "kind": "image",
+      "name": "Qwen-Image 2.1 Turbo (macOS, MLX-Serve 8-bit, 8 steps)",
+      "capabilities": ["text_to_image", "image_edit"],
+      "cmd": ["/opt/localrouter-mac/image/venv/bin/python", "-I", "/opt/localrouter/tools/image/qwen-mlx/qwen_mlx_worker.py"],
+      "weights": "/opt/localrouter-mac/image/qwen-image-2.1-turbo-mlx-q8",
+      "license": {"name": "Qwen Research License Agreement", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+                  "use": "non-commercial: research or evaluation only; commercial use needs a separate licence from Qwen",
+                  "commercial": false},
+      "resident_bytes": 18253611008,
+      "working_bytes": 4294967296,
+      "keep_loaded": true,
+      "priority": 10,
+      "idle_ttl_s": 60,
+      "load_timeout_s": 600,
+      "generate_timeout_s": 600,
+      "options": {"max_side": 1360, "max_pixels": 1048576, "edit_refs": 5}
+    }
+  ]
+}
