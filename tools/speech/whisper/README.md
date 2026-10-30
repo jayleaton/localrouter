@@ -14,6 +14,7 @@ benchmark.
 | `wheel_tags_selftest.py` | wheel_tags.py on scratch copies of the real wheel, authenticated and validated before anything is unpacked, then laid out by real pip (`--target`, so RECORD is pip's own form): the positive case and each refusal (wrong pin, changed metadata or library, duplicate, unsafe or extra RECORD rows, orphan or hashed bytecode rows, symlinked library, unexpected tag or version, already corrected) and an injected failure between the two writes (UNPROVEN); each copy is removed after its case and a cleanup failure fails the self-test |
 | `bench.py` | cold load, first and warm generate, RTF, peak RSS / CUDA memory, SIGKILL cancellation and memory reclaim |
 | `fetch_model.py` | downloads the pinned model files and checks their sha256 (stdlib only) |
+| `hearing.py` | the voice loop's hearing path alone on a running daemon: fixtures streamed over `/v1/realtime` as a levelled microphone (server VAD, no chat or speech model), speech end to final transcript, WER, partials, silence starts no turn (stdlib only) |
 
 On macOS (Apple Silicon) use [`macos/`](macos/README.md) instead: the same protocol, transcript and Silero gate on
 mlx-whisper, with its own uv project and lock. Nothing in this directory's files or `uv.lock` serves the Mac.
