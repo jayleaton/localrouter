@@ -1,0 +1,1361 @@
+{
+ "cases": [
+  {
+   "id": "voice-00",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "draw me a red fox in the snow"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "generate_image"
+   }
+  },
+  {
+   "id": "voice-01",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "can you make a picture of a lighthouse at night"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "generate_image"
+   }
+  },
+  {
+   "id": "voice-02",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "make a ten second clip of waves crashing on rocks"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "generate_video"
+   }
+  },
+  {
+   "id": "voice-03",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "animate a paper plane flying over a city"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "generate_video"
+   }
+  },
+  {
+   "id": "voice-04",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "what time is it"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "get_time"
+   }
+  },
+  {
+   "id": "voice-05",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "what's the date today"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "get_time"
+   }
+  },
+  {
+   "id": "voice-06",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "is it going to rain in Seattle tomorrow"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "get_weather"
+   }
+  },
+  {
+   "id": "voice-07",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "how cold is it outside in Oslo right now"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "get_weather"
+   }
+  },
+  {
+   "id": "voice-08",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "who won the football match last night"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "lookup"
+   }
+  },
+  {
+   "id": "voice-09",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "what's the price of bitcoin today"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "lookup"
+   }
+  },
+  {
+   "id": "voice-10",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "open Safari and go to my calendar"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "computer_use"
+   }
+  },
+  {
+   "id": "voice-11",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "click the send button in Mail"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "computer_use"
+   }
+  },
+  {
+   "id": "voice-12",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "which models can you run"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "list_models"
+   }
+  },
+  {
+   "id": "voice-13",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "thanks, that's all for now"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "reply"
+   }
+  },
+  {
+   "id": "voice-14",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "tell me a joke about penguins"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "reply"
+   }
+  },
+  {
+   "id": "voice-15",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "what is the capital of France"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "reply"
+   }
+  },
+  {
+   "id": "voice-16",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "explain how a rainbow forms"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "reply"
+   }
+  },
+  {
+   "id": "voice-17",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "make the sky in that photo look like sunset"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "edit_image"
+   }
+  },
+  {
+   "id": "voice-18",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "remove the person in the background of my picture"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "edit_image"
+   }
+  },
+  {
+   "id": "voice-19",
+   "kind": "voice route",
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "hmm, never mind"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   },
+   "expect": {
+    "route": "reply"
+   }
+  },
+  {
+   "id": "voice-ctx-0",
+   "kind": "voice route, context",
+   "expect": {
+    "route": "generate_image"
+   },
+   "request": {
+    "state": {
+     "assistant_said_before": "Here is your picture of a red fox in the snow.",
+     "user_said": "now do the same but with a wolf"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "voice-ctx-1",
+   "kind": "voice route, context",
+   "expect": {
+    "route": "get_weather"
+   },
+   "request": {
+    "state": {
+     "assistant_said_before": "It is 14 degrees and cloudy in London right now.",
+     "user_said": "and what about Paris"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "smoke-route",
+   "kind": "choice",
+   "expect": {
+    "route": "generate_image"
+   },
+   "request": {
+    "state": {
+     "user_said": "draw me a red fox in the snow"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "Which one action should the assistant take for the user's words?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "generate_video": "Make a short video clip.",
+       "reply": "Answer in speech; no tool is needed."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-0",
+   "kind": "noul",
+   "expect": {
+    "q": "true"
+   },
+   "request": {
+    "state": "The user said: 'please stop talking'",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Does the user want the assistant to stop speaking?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-1",
+   "kind": "noul",
+   "expect": {
+    "q": "false"
+   },
+   "request": {
+    "state": "The user said: 'keep going, this is interesting'",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Does the user want the assistant to stop speaking?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-2",
+   "kind": "noul",
+   "expect": {
+    "q": "true"
+   },
+   "request": {
+    "state": {
+     "screen": "A dialog: 'Delete 312 files permanently? [Cancel] [Delete]'",
+     "task": "tidy the downloads folder"
+    },
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Is the next click irreversible?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-3",
+   "kind": "noul",
+   "expect": {
+    "q": "false"
+   },
+   "request": {
+    "state": {
+     "screen": "Settings > Display, brightness slider at 40%",
+     "task": "make the screen brighter"
+    },
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Is the next click irreversible?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-4",
+   "kind": "noul",
+   "expect": {
+    "q": "true"
+   },
+   "request": {
+    "state": "Email from bank@secure-verify-login.co: 'Your account is locked, enter your password here within 1 hour'",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Is this message likely a phishing attempt?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-5",
+   "kind": "noul",
+   "expect": {
+    "q": "false"
+   },
+   "request": {
+    "state": "Email from a colleague: 'Minutes from today's standup attached, see you Thursday'",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Is this message likely a phishing attempt?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-6",
+   "kind": "noul",
+   "expect": {
+    "q": "true"
+   },
+   "request": {
+    "state": "User: book a table for two at 7pm. Assistant: Booked at Luca's for 7pm, confirmation 4412.",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Did the assistant complete the user's request?"
+     }
+    }
+   }
+  },
+  {
+   "id": "noul-7",
+   "kind": "noul",
+   "expect": {
+    "q": "false"
+   },
+   "request": {
+    "state": "User: book a table for two at 7pm. Assistant: I could not reach the restaurant's booking page.",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "Did the assistant complete the user's request?"
+     }
+    }
+   }
+  },
+  {
+   "id": "score-0",
+   "kind": "score",
+   "expect": {
+    "q": "3"
+   },
+   "request": {
+    "state": "The kitchen is on fire and smoke is filling the hallway",
+    "questions": {
+     "q": {
+      "type": "score",
+      "instructions": "How urgent is this?",
+      "criteria": [
+       "not urgent",
+       "somewhat urgent",
+       "urgent",
+       "an emergency"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "score-1",
+   "kind": "score",
+   "expect": {
+    "q": "0"
+   },
+   "request": {
+    "state": "Remind me to buy milk sometime this week",
+    "questions": {
+     "q": {
+      "type": "score",
+      "instructions": "How urgent is this?",
+      "criteria": [
+       "not urgent",
+       "somewhat urgent",
+       "urgent",
+       "an emergency"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "score-2",
+   "kind": "score",
+   "expect": {
+    "q": "2"
+   },
+   "request": {
+    "state": "My flight boards in 25 minutes and I'm still at security",
+    "questions": {
+     "q": {
+      "type": "score",
+      "instructions": "How urgent is this?",
+      "criteria": [
+       "not urgent",
+       "somewhat urgent",
+       "urgent",
+       "an emergency"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "score-sentiment",
+   "kind": "score",
+   "expect": {
+    "q": "0"
+   },
+   "request": {
+    "state": "This is the worst service I have ever had. I want a refund now.",
+    "questions": {
+     "q": {
+      "type": "score",
+      "instructions": "The customer's sentiment",
+      "criteria": [
+       "very negative",
+       "negative",
+       "neutral",
+       "positive",
+       "very positive"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "multi-0",
+   "kind": "multi",
+   "expect": {
+    "route": "video",
+    "two": "false",
+    "urgency": "0"
+   },
+   "request": {
+    "state": {
+     "user_said": "make a short video of a cat chasing a laser"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "Which action?",
+      "criteria": {
+       "image": "make a picture",
+       "video": "make a clip",
+       "reply": null
+      }
+     },
+     "two": {
+      "type": "noul",
+      "instructions": "Did the user ask for two separate things?"
+     },
+     "urgency": {
+      "type": "score",
+      "instructions": "How urgent is it?",
+      "criteria": [
+       "low",
+       "mid",
+       "high"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "multi-1",
+   "kind": "multi",
+   "expect": {
+    "intent": "cancel",
+    "angry": "true"
+   },
+   "request": {
+    "state": [
+     {
+      "role": "user",
+      "content": "I've been charged twice this month. Cancel my subscription right now."
+     }
+    ],
+    "questions": {
+     "intent": {
+      "type": "choice",
+      "instructions": "What does the customer want?",
+      "criteria": {
+       "cancel": "end the subscription",
+       "upgrade": "a bigger plan",
+       "info": "information only",
+       "refund_only": "a refund but keep the plan"
+      }
+     },
+     "angry": {
+      "type": "noul",
+      "instructions": "Is the customer upset?"
+     },
+     "lang": {
+      "type": "choice",
+      "instructions": "Language of the message",
+      "criteria": {
+       "en": "English",
+       "fr": "French",
+       "de": "German"
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-0",
+   "kind": "computer step",
+   "expect": {
+    "next": "type_text"
+   },
+   "request": {
+    "state": {
+     "task": "search the web for 'weather Berlin'",
+     "screen": "Safari, the search field focused and empty"
+    },
+    "questions": {
+     "next": {
+      "type": "choice",
+      "instructions": "What is the next step toward the task?",
+      "criteria": {
+       "click_ok": "Click the OK button.",
+       "type_text": "Type into the focused field.",
+       "scroll_down": "Scroll down the page.",
+       "ask_user": "Stop and ask the user what to do.",
+       "done": "The task is complete; do nothing."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-1",
+   "kind": "computer step",
+   "expect": {
+    "next": "click_ok"
+   },
+   "request": {
+    "state": {
+     "task": "accept the software licence",
+     "screen": "Installer: licence text, buttons [Disagree] [OK]"
+    },
+    "questions": {
+     "next": {
+      "type": "choice",
+      "instructions": "What is the next step toward the task?",
+      "criteria": {
+       "click_ok": "Click the OK button.",
+       "type_text": "Type into the focused field.",
+       "scroll_down": "Scroll down the page.",
+       "ask_user": "Stop and ask the user what to do.",
+       "done": "The task is complete; do nothing."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-2",
+   "kind": "computer step",
+   "expect": {
+    "next": "scroll_down"
+   },
+   "request": {
+    "state": {
+     "task": "read the last paragraph of the article",
+     "screen": "An article, its first section shown; a scroll bar near the top"
+    },
+    "questions": {
+     "next": {
+      "type": "choice",
+      "instructions": "What is the next step toward the task?",
+      "criteria": {
+       "click_ok": "Click the OK button.",
+       "type_text": "Type into the focused field.",
+       "scroll_down": "Scroll down the page.",
+       "ask_user": "Stop and ask the user what to do.",
+       "done": "The task is complete; do nothing."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-3",
+   "kind": "computer step",
+   "expect": {
+    "next": "ask_user"
+   },
+   "request": {
+    "state": {
+     "task": "pay the electricity bill",
+     "screen": "Bank site: 'Choose the account to pay from: [Checking] [Savings]'"
+    },
+    "questions": {
+     "next": {
+      "type": "choice",
+      "instructions": "What is the next step toward the task?",
+      "criteria": {
+       "click_ok": "Click the OK button.",
+       "type_text": "Type into the focused field.",
+       "scroll_down": "Scroll down the page.",
+       "ask_user": "Stop and ask the user what to do.",
+       "done": "The task is complete; do nothing."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-4",
+   "kind": "computer step",
+   "expect": {
+    "next": "done"
+   },
+   "request": {
+    "state": {
+     "task": "open the Downloads folder",
+     "screen": "Finder, the Downloads folder open and listed"
+    },
+    "questions": {
+     "next": {
+      "type": "choice",
+      "instructions": "What is the next step toward the task?",
+      "criteria": {
+       "click_ok": "Click the OK button.",
+       "type_text": "Type into the focused field.",
+       "scroll_down": "Scroll down the page.",
+       "ask_user": "Stop and ask the user what to do.",
+       "done": "The task is complete; do nothing."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "computer-safe",
+   "kind": "noul",
+   "expect": {
+    "safe": "false"
+   },
+   "request": {
+    "state": {
+     "task": "clean up my desktop",
+     "screen": "Terminal with 'sudo rm -rf ~/' typed, not yet run"
+    },
+    "questions": {
+     "safe": {
+      "type": "noul",
+      "instructions": "Is it safe to press Return without asking the user?"
+     }
+    }
+   }
+  },
+  {
+   "id": "chat-0",
+   "kind": "chat state",
+   "expect": {
+    "done": "false"
+   },
+   "request": {
+    "state": [
+     {
+      "role": "user",
+      "content": "Write me a haiku about autumn."
+     },
+     {
+      "role": "assistant",
+      "content": "Sure! Here is a limerick about a cat from Peru..."
+     }
+    ],
+    "questions": {
+     "done": {
+      "type": "noul",
+      "instructions": "Did the assistant do what the user asked?"
+     }
+    }
+   }
+  },
+  {
+   "id": "many-0",
+   "kind": "40 options",
+   "expect": {
+    "country": "Japan"
+   },
+   "request": {
+    "state": "I'm flying to Tokyo next week to see Mount Fuji",
+    "questions": {
+     "country": {
+      "type": "choice",
+      "instructions": "Which country is the trip to?",
+      "criteria": {
+       "Argentina": null,
+       "Australia": null,
+       "Austria": null,
+       "Belgium": null,
+       "Brazil": null,
+       "Canada": null,
+       "Chile": null,
+       "China": null,
+       "Colombia": null,
+       "Denmark": null,
+       "Egypt": null,
+       "Finland": null,
+       "France": null,
+       "Germany": null,
+       "Greece": null,
+       "India": null,
+       "Indonesia": null,
+       "Ireland": null,
+       "Italy": null,
+       "Japan": null,
+       "Kenya": null,
+       "Mexico": null,
+       "Morocco": null,
+       "Netherlands": null,
+       "New Zealand": null,
+       "Nigeria": null,
+       "Norway": null,
+       "Peru": null,
+       "Poland": null,
+       "Portugal": null,
+       "South Korea": null,
+       "Spain": null,
+       "Sweden": null,
+       "Switzerland": null,
+       "Thailand": null,
+       "Turkey": null,
+       "Ukraine": null,
+       "United Kingdom": null,
+       "United States": null,
+       "Vietnam": null
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "many-1",
+   "kind": "40 options",
+   "expect": {
+    "country": "Norway"
+   },
+   "request": {
+    "state": "Booked a trip to see the fjords around Bergen",
+    "questions": {
+     "country": {
+      "type": "choice",
+      "instructions": "Which country is the trip to?",
+      "criteria": {
+       "Argentina": null,
+       "Australia": null,
+       "Austria": null,
+       "Belgium": null,
+       "Brazil": null,
+       "Canada": null,
+       "Chile": null,
+       "China": null,
+       "Colombia": null,
+       "Denmark": null,
+       "Egypt": null,
+       "Finland": null,
+       "France": null,
+       "Germany": null,
+       "Greece": null,
+       "India": null,
+       "Indonesia": null,
+       "Ireland": null,
+       "Italy": null,
+       "Japan": null,
+       "Kenya": null,
+       "Mexico": null,
+       "Morocco": null,
+       "Netherlands": null,
+       "New Zealand": null,
+       "Nigeria": null,
+       "Norway": null,
+       "Peru": null,
+       "Poland": null,
+       "Portugal": null,
+       "South Korea": null,
+       "Spain": null,
+       "Sweden": null,
+       "Switzerland": null,
+       "Thailand": null,
+       "Turkey": null,
+       "Ukraine": null,
+       "United Kingdom": null,
+       "United States": null,
+       "Vietnam": null
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "zh-0",
+   "kind": "Chinese",
+   "expect": {
+    "route": "get_weather"
+   },
+   "request": {
+    "state": {
+     "assistant_said_before": "",
+     "user_said": "明天北京会下雨吗？"
+    },
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "The user just spoke to their voice assistant (user_said). Which one action should the assistant take for these words: the tool the request needs, or reply when no tool is needed?",
+      "criteria": {
+       "generate_image": "Make a picture from a text description.",
+       "edit_image": "Change a picture the user already has, as they describe.",
+       "generate_video": "Make a short video clip from a description.",
+       "get_time": "The current time and date.",
+       "get_weather": "The weather now or the forecast for a place.",
+       "lookup": "Search the web for current facts, news or prices.",
+       "computer_use": "Operate the user's computer: open apps, click, type.",
+       "list_models": "List the models this machine can run.",
+       "reply": "Answer in speech; no tool is needed for this."
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "zh-1",
+   "kind": "Chinese",
+   "expect": {
+    "q": "true"
+   },
+   "request": {
+    "state": "用户说：请把音乐关掉，我要睡觉了。",
+    "questions": {
+     "q": {
+      "type": "noul",
+      "instructions": "用户是否想停止播放音乐？"
+     }
+    }
+   }
+  },
+  {
+   "id": "long-twice",
+   "kind": "long, read twice",
+   "expect": {
+    "alarm": "true"
+   },
+   "request": {
+    "state": {
+     "log": "[08:00] sensor 480: temperature nominal, door closed\n[08:05] sensor 485: temperature nominal, door closed\n[08:10] sensor 490: temperature nominal, door closed\n[08:15] sensor 495: temperature nominal, door closed\n[08:20] sensor 500: temperature nominal, door closed\n[08:25] sensor 505: temperature nominal, door closed\n[08:30] sensor 510: temperature nominal, door closed\n[08:35] sensor 515: temperature nominal, door closed\n[08:40] sensor 520: temperature nominal, door closed\n[08:45] sensor 525: temperature nominal, door closed\n[08:50] sensor 530: temperature nominal, door closed\n[08:55] sensor 535: temperature nominal, door closed\n[09:00] sensor 540: temperature nominal, door closed\n[09:05] sensor 545: temperature nominal, door closed\n[09:10] sensor 550: temperature nominal, door closed\n[09:15] sensor 555: temperature nominal, door closed\n[09:20] sensor 560: temperature nominal, door closed\n[09:25] sensor 565: temperature nominal, door closed\n[09:30] sensor 570: temperature nominal, door closed\n[09:35] sensor 575: temperature nominal, door closed\n[09:40] sensor 580: temperature nominal, door closed\n[09:45] sensor 585: temperature nominal, door closed\n[09:50] sensor 590: temperature nominal, door closed\n[09:55] sensor 595: temperature nominal, door closed\n[10:00] sensor 600: temperature nominal, door closed\n[10:05] sensor 605: temperature nominal, door closed\n[10:10] sensor 610: temperature nominal, door closed\n[10:15] sensor 615: temperature nominal, door closed\n[10:20] sensor 620: temperature nominal, door closed\n[10:25] sensor 625: temperature nominal, door closed\n[10:30] sensor 630: temperature nominal, door closed\n[10:35] sensor 635: temperature nominal, door closed\n[10:40] sensor 640: temperature nominal, door closed\n[10:45] sensor 645: temperature nominal, door closed\n[10:50] sensor 650: temperature nominal, door closed\n[10:55] sensor 655: temperature nominal, door closed\n[11:00] sensor 660: temperature nominal, door closed\n[11:05] sensor 665: temperature nominal, door closed\n[11:10] sensor 670: temperature nominal, door closed\n[11:15] sensor 675: temperature nominal, door closed\n[11:20] sensor 680: temperature nominal, door closed\n[11:25] sensor 685: temperature nominal, door closed\n[11:30] sensor 690: temperature nominal, door closed\n[11:35] sensor 695: temperature nominal, door closed\n[11:40] sensor 700: temperature nominal, door closed\n[11:45] sensor 705: temperature nominal, door closed\n[11:50] sensor 710: temperature nominal, door closed\n[11:55] sensor 715: temperature nominal, door closed\n[12:00] sensor 720: temperature nominal, door closed\n[12:05] sensor 725: temperature nominal, door closed\n[12:10] sensor 730: temperature nominal, door closed\n[12:15] sensor 735: temperature nominal, door closed\n[12:20] sensor 740: temperature nominal, door closed\n[12:25] sensor 745: temperature nominal, door closed\n[12:30] sensor 750: temperature nominal, door closed\n[12:35] sensor 755: temperature nominal, door closed\n[12:40] sensor 760: temperature nominal, door closed\n[12:45] sensor 765: temperature nominal, door closed\n[12:50] sensor 770: temperature nominal, door closed\n[12:55] sensor 775: temperature nominal, door closed\n[13:01] sensor 781: SMOKE DETECTED in kitchen, alarm raised\n[13:00] sensor 780: temperature nominal, door closed\n[13:05] sensor 785: temperature nominal, door closed\n[13:10] sensor 790: temperature nominal, door closed\n[13:15] sensor 795: temperature nominal, door closed\n[13:20] sensor 800: temperature nominal, door closed\n[13:25] sensor 805: temperature nominal, door closed\n[13:30] sensor 810: temperature nominal, door closed\n[13:35] sensor 815: temperature nominal, door closed\n[13:40] sensor 820: temperature nominal, door closed\n[13:45] sensor 825: temperature nominal, door closed\n[13:50] sensor 830: temperature nominal, door closed\n[13:55] sensor 835: temperature nominal, door closed\n[14:00] sensor 840: temperature nominal, door closed\n[14:05] sensor 845: temperature nominal, door closed\n[14:10] sensor 850: temperature nominal, door closed\n[14:15] sensor 855: temperature nominal, door closed\n[14:20] sensor 860: temperature nominal, door closed\n[14:25] sensor 865: temperature nominal, door closed\n[14:30] sensor 870: temperature nominal, door closed\n[14:35] sensor 875: temperature nominal, door closed\n[14:40] sensor 880: temperature nominal, door closed\n[14:45] sensor 885: temperature nominal, door closed\n[14:50] sensor 890: temperature nominal, door closed\n[14:55] sensor 895: temperature nominal, door closed\n[15:00] sensor 900: temperature nominal, door closed\n[15:05] sensor 905: temperature nominal, door closed\n[15:10] sensor 910: temperature nominal, door closed\n[15:15] sensor 915: temperature nominal, door closed\n[15:20] sensor 920: temperature nominal, door closed\n[15:25] sensor 925: temperature nominal, door closed\n[15:30] sensor 930: temperature nominal, door closed\n[15:35] sensor 935: temperature nominal, door closed\n[15:40] sensor 940: temperature nominal, door closed\n[15:45] sensor 945: temperature nominal, door closed\n[15:50] sensor 950: temperature nominal, door closed\n[15:55] sensor 955: temperature nominal, door closed\n[16:00] sensor 960: temperature nominal, door closed\n[16:05] sensor 965: temperature nominal, door closed\n[16:10] sensor 970: temperature nominal, door closed\n[16:15] sensor 975: temperature nominal, door closed\n[16:20] sensor 980: temperature nominal, door closed\n[16:25] sensor 985: temperature nominal, door closed\n[16:30] sensor 990: temperature nominal, door closed\n[16:35] sensor 995: temperature nominal, door closed\n[16:40] sensor 1000: temperature nominal, door closed\n[16:45] sensor 1005: temperature nominal, door closed\n[16:50] sensor 1010: temperature nominal, door closed\n[16:55] sensor 1015: temperature nominal, door closed\n[17:00] sensor 1020: temperature nominal, door closed\n[17:05] sensor 1025: temperature nominal, door closed"
+    },
+    "questions": {
+     "alarm": {
+      "type": "noul",
+      "instructions": "Did any sensor raise an alarm in this log?"
+     }
+    }
+   }
+  },
+  {
+   "id": "long-once",
+   "kind": "long, read once",
+   "expect": {
+    "alarm": "false"
+   },
+   "request": {
+    "state": {
+     "log": "[08:00] sensor 480: temperature nominal, door closed\n[08:05] sensor 485: temperature nominal, door closed\n[08:10] sensor 490: temperature nominal, door closed\n[08:15] sensor 495: temperature nominal, door closed\n[08:20] sensor 500: temperature nominal, door closed\n[08:25] sensor 505: temperature nominal, door closed\n[08:30] sensor 510: temperature nominal, door closed\n[08:35] sensor 515: temperature nominal, door closed\n[08:40] sensor 520: temperature nominal, door closed\n[08:45] sensor 525: temperature nominal, door closed\n[08:50] sensor 530: temperature nominal, door closed\n[08:55] sensor 535: temperature nominal, door closed\n[09:00] sensor 540: temperature nominal, door closed\n[09:05] sensor 545: temperature nominal, door closed\n[09:10] sensor 550: temperature nominal, door closed\n[09:15] sensor 555: temperature nominal, door closed\n[09:20] sensor 560: temperature nominal, door closed\n[09:25] sensor 565: temperature nominal, door closed\n[09:30] sensor 570: temperature nominal, door closed\n[09:35] sensor 575: temperature nominal, door closed\n[09:40] sensor 580: temperature nominal, door closed\n[09:45] sensor 585: temperature nominal, door closed\n[09:50] sensor 590: temperature nominal, door closed\n[09:55] sensor 595: temperature nominal, door closed\n[10:00] sensor 600: temperature nominal, door closed\n[10:05] sensor 605: temperature nominal, door closed\n[10:10] sensor 610: temperature nominal, door closed\n[10:15] sensor 615: temperature nominal, door closed\n[10:20] sensor 620: temperature nominal, door closed\n[10:25] sensor 625: temperature nominal, door closed\n[10:30] sensor 630: temperature nominal, door closed\n[10:35] sensor 635: temperature nominal, door closed\n[10:40] sensor 640: temperature nominal, door closed\n[10:45] sensor 645: temperature nominal, door closed\n[10:50] sensor 650: temperature nominal, door closed\n[10:55] sensor 655: temperature nominal, door closed\n[11:00] sensor 660: temperature nominal, door closed\n[11:05] sensor 665: temperature nominal, door closed\n[11:10] sensor 670: temperature nominal, door closed\n[11:15] sensor 675: temperature nominal, door closed\n[11:20] sensor 680: temperature nominal, door closed\n[11:25] sensor 685: temperature nominal, door closed\n[11:30] sensor 690: temperature nominal, door closed\n[11:35] sensor 695: temperature nominal, door closed\n[11:40] sensor 700: temperature nominal, door closed\n[11:45] sensor 705: temperature nominal, door closed\n[11:50] sensor 710: temperature nominal, door closed\n[11:55] sensor 715: temperature nominal, door closed\n[12:00] sensor 720: temperature nominal, door closed\n[12:05] sensor 725: temperature nominal, door closed\n[12:10] sensor 730: temperature nominal, door closed\n[12:15] sensor 735: temperature nominal, door closed\n[12:20] sensor 740: temperature nominal, door closed\n[12:25] sensor 745: temperature nominal, door closed\n[12:30] sensor 750: temperature nominal, door closed\n[12:35] sensor 755: temperature nominal, door closed\n[12:40] sensor 760: temperature nominal, door closed\n[12:45] sensor 765: temperature nominal, door closed\n[12:50] sensor 770: temperature nominal, door closed\n[12:55] sensor 775: temperature nominal, door closed\n[13:00] sensor 780: temperature nominal, door closed\n[13:05] sensor 785: temperature nominal, door closed\n[13:10] sensor 790: temperature nominal, door closed\n[13:15] sensor 795: temperature nominal, door closed\n[13:20] sensor 800: temperature nominal, door closed\n[13:25] sensor 805: temperature nominal, door closed\n[13:30] sensor 810: temperature nominal, door closed\n[13:35] sensor 815: temperature nominal, door closed\n[13:40] sensor 820: temperature nominal, door closed\n[13:45] sensor 825: temperature nominal, door closed\n[13:50] sensor 830: temperature nominal, door closed\n[13:55] sensor 835: temperature nominal, door closed\n[14:00] sensor 840: temperature nominal, door closed\n[14:05] sensor 845: temperature nominal, door closed\n[14:10] sensor 850: temperature nominal, door closed\n[14:15] sensor 855: temperature nominal, door closed\n[14:20] sensor 860: temperature nominal, door closed\n[14:25] sensor 865: temperature nominal, door closed\n[14:30] sensor 870: temperature nominal, door closed\n[14:35] sensor 875: temperature nominal, door closed\n[14:40] sensor 880: temperature nominal, door closed\n[14:45] sensor 885: temperature nominal, door closed\n[14:50] sensor 890: temperature nominal, door closed\n[14:55] sensor 895: temperature nominal, door closed\n[15:00] sensor 900: temperature nominal, door closed\n[15:05] sensor 905: temperature nominal, door closed\n[15:10] sensor 910: temperature nominal, door closed\n[15:15] sensor 915: temperature nominal, door closed\n[15:20] sensor 920: temperature nominal, door closed\n[15:25] sensor 925: temperature nominal, door closed\n[15:30] sensor 930: temperature nominal, door closed\n[15:35] sensor 935: temperature nominal, door closed\n[15:40] sensor 940: temperature nominal, door closed\n[15:45] sensor 945: temperature nominal, door closed\n[15:50] sensor 950: temperature nominal, door closed\n[15:55] sensor 955: temperature nominal, door closed\n[16:00] sensor 960: temperature nominal, door closed\n[16:05] sensor 965: temperature nominal, door closed\n[16:10] sensor 970: temperature nominal, door closed\n[16:15] sensor 975: temperature nominal, door closed\n[16:20] sensor 980: temperature nominal, door closed\n[16:25] sensor 985: temperature nominal, door closed\n[16:30] sensor 990: temperature nominal, door closed\n[16:35] sensor 995: temperature nominal, door closed\n[16:40] sensor 1000: temperature nominal, door closed\n[16:45] sensor 1005: temperature nominal, door closed\n[16:50] sensor 1010: temperature nominal, door closed\n[16:55] sensor 1015: temperature nominal, door closed\n[17:00] sensor 1020: temperature nominal, door closed\n[17:05] sensor 1025: temperature nominal, door closed\n[17:10] sensor 1030: temperature nominal, door closed\n[17:15] sensor 1035: temperature nominal, door closed\n[17:20] sensor 1040: temperature nominal, door closed\n[17:25] sensor 1045: temperature nominal, door closed\n[17:30] sensor 1050: temperature nominal, door closed\n[17:35] sensor 1055: temperature nominal, door closed\n[17:40] sensor 1060: temperature nominal, door closed\n[17:45] sensor 1065: temperature nominal, door closed\n[17:50] sensor 1070: temperature nominal, door closed\n[17:55] sensor 1075: temperature nominal, door closed\n[18:00] sensor 1080: temperature nominal, door closed\n[18:05] sensor 1085: temperature nominal, door closed\n[18:10] sensor 1090: temperature nominal, door closed\n[18:15] sensor 1095: temperature nominal, door closed\n[18:20] sensor 1100: temperature nominal, door closed\n[18:25] sensor 1105: temperature nominal, door closed\n[18:30] sensor 1110: temperature nominal, door closed\n[18:35] sensor 1115: temperature nominal, door closed\n[18:40] sensor 1120: temperature nominal, door closed\n[18:45] sensor 1125: temperature nominal, door closed\n[18:50] sensor 1130: temperature nominal, door closed\n[18:55] sensor 1135: temperature nominal, door closed\n[19:00] sensor 1140: temperature nominal, door closed\n[19:05] sensor 1145: temperature nominal, door closed\n[19:10] sensor 1150: temperature nominal, door closed\n[19:15] sensor 1155: temperature nominal, door closed\n[19:20] sensor 1160: temperature nominal, door closed\n[19:25] sensor 1165: temperature nominal, door closed\n[19:30] sensor 1170: temperature nominal, door closed\n[19:35] sensor 1175: temperature nominal, door closed\n[19:40] sensor 1180: temperature nominal, door closed\n[19:45] sensor 1185: temperature nominal, door closed\n[19:50] sensor 1190: temperature nominal, door closed\n[19:55] sensor 1195: temperature nominal, door closed\n[08:00] sensor 480: temperature nominal, door closed\n[08:05] sensor 485: temperature nominal, door closed\n[08:10] sensor 490: temperature nominal, door closed\n[08:15] sensor 495: temperature nominal, door closed\n[08:20] sensor 500: temperature nominal, door closed\n[08:25] sensor 505: temperature nominal, door closed\n[08:30] sensor 510: temperature nominal, door closed\n[08:35] sensor 515: temperature nominal, door closed\n[08:40] sensor 520: temperature nominal, door closed\n[08:45] sensor 525: temperature nominal, door closed\n[08:50] sensor 530: temperature nominal, door closed\n[08:55] sensor 535: temperature nominal, door closed\n[09:00] sensor 540: temperature nominal, door closed\n[09:05] sensor 545: temperature nominal, door closed\n[09:10] sensor 550: temperature nominal, door closed\n[09:15] sensor 555: temperature nominal, door closed\n[09:20] sensor 560: temperature nominal, door closed\n[09:25] sensor 565: temperature nominal, door closed\n[09:30] sensor 570: temperature nominal, door closed\n[09:35] sensor 575: temperature nominal, door closed\n[09:40] sensor 580: temperature nominal, door closed\n[09:45] sensor 585: temperature nominal, door closed\n[09:50] sensor 590: temperature no"
+    },
+    "questions": {
+     "alarm": {
+      "type": "noul",
+      "instructions": "Did any sensor raise an alarm in this log?"
+     }
+    }
+   }
+  }
+ ]
+}
