@@ -217,7 +217,12 @@ const Rec = struct {
 
     /// The index of the `nth` (0-based) event of `typ`, waiting up to 5 s for it.
     fn wait(r: *Rec, typ: []const u8, nth: usize) !usize {
-        for (0..1000) |_| {
+        return r.waitFor(typ, nth, 5000);
+    }
+
+    /// `wait` with its own limit, for a scene that takes long by design.
+    fn waitFor(r: *Rec, typ: []const u8, nth: usize, ms: usize) !usize {
+        for (0..ms / 5) |_| {
             r.mutex.lockUncancelable(r.io);
             var seen: usize = 0;
             for (0..r.list.items.len) |i| if (std.mem.eql(u8, r.typeAt(i), typ)) {
@@ -460,7 +465,8 @@ test "speech first: the chat model yields while speech is behind; each sentence 
     rig.heard("tell me something slow"); // 20 sentences, written over about 1.2 s
     try rig.audio(600, true);
     try rig.audio(700, false);
-    _ = try rig.rec.wait("response.done", 0);
+    // each sentence takes two 200 ms naps to speak: 8 s at least, and more on a busy machine (5 s failed on a Mac)
+    _ = try rig.rec.waitFor("response.done", 0, 30_000);
     const first = try rig.rec.wait("localrouter.response.speech_first", 0);
     const first_audio = try rig.rec.wait("response.audio.delta", 0);
     try testing.expect(first < first_audio); // told before any audio, so a client can start on it

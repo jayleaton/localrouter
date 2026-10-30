@@ -164,7 +164,8 @@ test "parse meminfo and read the real one" {
     try std.testing.expect(s.available > 0 and s.available <= s.total);
     try std.testing.expect(s.gpu_ceiling > 0 and s.gpu_ceiling <= s.total);
     try std.testing.expectEqual(total().?, s.total);
-    try std.testing.expect(available().? <= s.available);
+    try std.testing.expect(s.budget() <= s.available); // one reading: the machine's memory moves between two
+    _ = available().?;
 }
 
 test "one budget: the smaller of free memory and the GPU's headroom, none under critical pressure" {

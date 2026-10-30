@@ -152,6 +152,8 @@ the model: input decoding, response encodings, and the limits checked before a t
   rate; `clone_codebooks` is the number of `vq_codes` rows the daemon expects (absent: any, the same for every
   reference). The scheduler books such a job at the tool's `clone_working_bytes`
   (the encoder's measured peak; 8 GiB when the config gives none) beside the loaded model.
+  An image edit of a `cmd` worker is booked at `working_bytes` plus `reference_working_bytes` (an option, measured, 0
+  unset) for each reference image, so a one-image edit is not booked at the peak of the most it takes.
 - `speech.wav` is the only text to speech output. `/v1/audio/speech` returns it as `wav` or raw `pcm` (with
   `x-sample-rate`, `x-channels` and `x-sample-format: s16le` headers), or encodes `flac`, `mp3`, `opus` or `aac`.
 - Fields a segment or word carries beyond the ones above (`avg_logprob`, `no_speech_prob`, …) are passed through

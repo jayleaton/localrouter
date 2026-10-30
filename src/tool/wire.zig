@@ -5,7 +5,9 @@
 //! refusal's `type` is invalid_request_error (400), service_unavailable (503: the model's own server is busy) or
 //! anything else (500).
 //! A worker whose load reply says `"cancel":"signal"` ends a generate early on SIGUSR1 with `{"ok":false,"type":"cancelled"}`
-//! and stays loaded; any other worker is cancelled by killing it.
+//! and stays loaded; any other worker is cancelled by killing it. The daemon signals only once the generate is written,
+//! and repeats the signal until the reply (one may land before the worker has read the line), so a worker ignores a
+//! SIGUSR1 that comes while it runs no generate.
 
 const std = @import("std");
 const posix = std.posix;
