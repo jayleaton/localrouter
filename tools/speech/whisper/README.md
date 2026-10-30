@@ -15,6 +15,9 @@ benchmark.
 | `bench.py` | cold load, first and warm generate, RTF, peak RSS / CUDA memory, SIGKILL cancellation and memory reclaim |
 | `fetch_model.py` | downloads the pinned model files and checks their sha256 (stdlib only) |
 
+On macOS (Apple Silicon) use [`macos/`](macos/README.md) instead: the same protocol, transcript and Silero gate on
+mlx-whisper, with its own uv project and lock. Nothing in this directory's files or `uv.lock` serves the Mac.
+
 ## Setup
 
 ```sh

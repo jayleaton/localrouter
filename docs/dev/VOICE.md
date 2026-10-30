@@ -260,6 +260,27 @@ speech or silence, including the codec variants, and on the 8 e2e prompts, each 
 TTS alone: request start to the first streamed codec frame, warm (`bench/drama_bench.py --stream`). Here that stage
 is `TTS first samples`, about 130 ms.
 
+## macOS (Apple Silicon): hearing
+
+On a Mac the transcription tool is `tools/speech/whisper/macos`
+([README](../../tools/speech/whisper/macos/README.md)). It is the same model, large-v3-turbo, through mlx-whisper on
+Metal (the FP16 MLX conversion, `mlx-community/whisper-large-v3-turbo@a4aaeec0`). It speaks the same worker protocol
+and returns the same `transcript.json`, with the same Silero gate on the CPU. The session's side is unchanged:
+`decode: "greedy"` for voice turns, the session's language or `auto`, the silence prime and optional partials all
+work as above. Two differences matter to the voice loop:
+
+- **A dropped transcription frees the realtime lane at once.** The worker offers soft cancel (`"cancel": "signal"`).
+  A job the session drops, such as a superseded partial or an early transcript that the turn outgrew, ends within
+  milliseconds and the model stays loaded. The Linux worker has no soft cancel, so it finishes that decode and its
+  result is ignored (`Scheduler.drop`). A hard cancel also keeps this worker loaded instead of killing it.
+- **It is faster than the turn-end budget above assumes.** Measured on an M5 Ultra, warm, greedy: a 5.9 s turn takes
+  0.09 s from request to transcript (0.13 s with the HTTP API's recipe). Cold start, the warm-up included, is 1.5 s.
+  The worker is resident at 3.2 GB and peaks at 4.35 GB on long-form audio with word timestamps.
+
+Its transcripts are a Mac reference of their own, not the Spark's bit for bit. On the qualification fixtures, 15 of
+18 are identical to the transformers recipe, and greedy equals the recipe on all 17 speech fixtures. The README lists
+the rest.
+
 ## The web client
 
 `src/voice/voice.html` is the page at `/voice`. It is one file, with no build step and no libraries, embedded in the
