@@ -41,7 +41,7 @@ needs instead (`--scopes LIST` on `token` or `add`; `pair scopes` changes it lat
 | `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
 | `decisions` | `POST /v1/systemone` | `decide` | |
 | `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager`, `/v1/voices` | `list_models`, `list_voices` | `list_models` |
-| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice); `PATCH /v1/assistant` (its name; `GET` needs only a paired device) | `load_model`, `unload_model`, `reserve_for`, `release_models` | the model tools |
+| `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/settings`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice); `PATCH /v1/assistant` (its name; `GET` needs only a paired device) | `load_model`, `unload_model`, `reserve_for`, `release_models`, `set_model_residency` | the model tools |
 
 Any of these opens `/mcp`, whose `tools/list` then shows only the tools the token may call; a tool outside its scopes
 is a tool error naming the scope. Changing which models are loaded always needs `manage`: no other scope implies it.
@@ -126,7 +126,7 @@ full machine says `insufficient_memory`.
 
 | Tool | Arguments (required in bold) | Returns |
 | --- | --- | --- |
-| `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes`, `lane`, priority, `keep_loaded`, `qualified`; speech models' voices; the machine's `memory` |
+| `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes`, `lane`, priority, `keep_loaded`, `residency`, `idle_ttl_s`, `disabled`, `qualified`; speech models' voices; the machine's `memory` |
 | `list_voices` | | each speech model's `voices` (voices cloned for it on this machine included), `default_voice`, `state` and whether it is the default |
 | `reserve_for` | **`model`**, `seconds`, `size`, `dry_run`, `hold_s` (180), `wait_s` | what it unloads (or would) to fit the model's job, the bytes needed and free; the model loaded and held for its job. What it unloads comes back by itself after the job. Never a chat model |
 | `unload_model` | **`model`**, `hold_s` (120) | one model unloaded now, back by itself after `hold_s`. A chat model is refused |
@@ -141,6 +141,7 @@ full machine says `insufficient_memory`.
 | `get_job` | **`id`**, `wait_s` | status, progress, output URLs; a transcript's text |
 | `cancel_job` | **`id`** | the job, cancelled |
 | `release_models` | | unloads every model now |
+| `set_model_residency` | **`model`**, `residency` (`always`, `call`, `on_demand`, `disabled`), `idle_ttl_s`, `reset` | `POST /v1/tools/{id}/settings`: applied now and saved to `residency.json`; the model's `/v1/tools` entry. `call` is for chat, speech and transcription models only; an `always` set past the budget is refused with the numbers |
 | `computer_control` | **`control`** (`{"kind":"open_app","app":"Safari"}`, `quit_app`, `volume`, `media`, `dark_mode`, `lock_screen`), `computer` | the paired computer's sentence ("Opened Safari"); locking waits for a tap in the web UI |
 | `computer_use` | **`goal`**, `text` (exact text to type), `computer`, `wait_s` (120, at most 600) | the outcome (`done`, `stuck`, `blocked`, `unavailable`, `stopped`, `failed`) with its steps, or the task id while it runs |
 | `computer_status` | `task_id`, `wait_s` | a task's state (and the approval it waits for), or the paired computers and recent tasks |
