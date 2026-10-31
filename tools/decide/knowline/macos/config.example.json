@@ -1,0 +1,29 @@
+{
+  "defaults": {"typed_decision": "knowline-4b"},
+  "tools": [
+    {
+      "id": "knowline-4b",
+      "kind": "decision",
+      "name": "KnowLine-4B Gen5.5 (typed decisions, System One shape; bf16, MLX on Metal)",
+      "engine": "openai_server",
+      "weights": "/Users/me/jarvis/models/decide/knowline-4b-gen5.5",
+      "resident_bytes": 10724056240,
+      "working_bytes": 0,
+      "keep_loaded": true,
+      "spare_room_only": true,
+      "priority": 15,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 120,
+      "generate_timeout_s": 60,
+      "license": {"name": "Apache-2.0", "url": "https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5", "commercial": true},
+      "options": {
+        "server": ["/Users/me/jarvis/venvs/decide-mlx/bin/python", "-I",
+                   "/Users/me/localrouter/tools/decide/knowline/macos/serve_mlx.py", "{weights}",
+                   "--port", "{port}", "--served-model-name", "{id}"],
+        "env": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+        "health": "/health",
+        "memory": "measured on an M5 Ultra (96 GiB), ../README.md#macos: 8.45 GiB loaded, 9.74 GiB peak over the corpus, 9.70 GiB on the longest prompt (5,990 tokens); booked peak + 256 MiB"
+      }
+    }
+  ]
+}
