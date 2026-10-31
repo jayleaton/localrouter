@@ -68,7 +68,12 @@ The same facts by hand, if the doctor cannot run:
 | The box | Profile | Status |
 | --- | --- | --- |
 | `aarch64`, NVIDIA GB10 (DGX Spark and its OEM versions), at least 110 GiB | `jarvis-gb10` | tested: the full stack, end to end |
+| Apple Silicon Mac (`arm64`, macOS 27), at least 64 GiB | `mac-apple-silicon` | preview: every model installs and qualifies, tested on one M5 Ultra; no service yet |
 | anything else | none | untested; no profile yet |
+
+On a Mac, follow [docs/dev/MAC-PORT.md, Installing on a Mac](docs/dev/MAC-PORT.md#installing-on-a-mac) instead of
+this page: step 2's checks and the service steps here are the GB10's. Tell the user it is a preview, and that the run
+ends after the models are installed, so they start the daemon themselves.
 
 On any other box, stop. Tell the user what step 2 found, and that no profile has been tested for it. The chat and
 Drama 3 engines here are aarch64 GB10 builds, and their qualification refuses other GPUs. Do not `--force` unless
