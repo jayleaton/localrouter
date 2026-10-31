@@ -7,7 +7,8 @@ The kind is `asset3d` and the capability is `image_to_3d`.
 
 On a Mac it has a second backend, `tensorfold` ([below](#native-backend-tensorfold-metal)): background removal stays
 in PyTorch, and everything after it runs in TensorFold's native Metal `tf-idol-generate`. It takes about 30 s an asset
-instead of about 100 s, and books 7.5 GiB instead of 12.5 GiB. The PyTorch backend stays as the fallback.
+instead of about 100 s, and books 7.5 GiB instead of 12.5 GiB. It is opt-in until a TensorFold release ships
+`tf-idol-generate`; PyTorch stays the default.
 
 | File | Does |
 | --- | --- |
@@ -16,7 +17,7 @@ instead of about 100 s, and books 7.5 GiB instead of 12.5 GiB. The PyTorch backe
 | `pins.json` | each file's repo, revision, size and digest (`tools/package/verify_assets.py` form) |
 | `pyproject.toml`, `uv.lock` | the environment: macOS arm64 (PyPI torch, MPS) and Linux aarch64 (PyTorch cu130 wheels) |
 | `test_worker.py` | protocol and unit tests against a fake engine (no weights, no GPU) |
-| `config.example.json` | `idol` (the native backend, the `image_to_3d` default) and `idol-pytorch` (the fallback, disabled), each with its measured bookings |
+| `config.example.json` | `idol` (PyTorch, the `image_to_3d` default) and `idol-native` (the native backend, disabled: opt-in), each with its measured bookings |
 
 ## Sources and licences
 
@@ -168,7 +169,7 @@ The worst 262,144 peak, seen in a cancel run, is 12.69 GB, or 7.61 GB working.
 - **Load** takes 3.6 s. The footprint settles at 4.5–5.1 GB once the device cache is emptied.
 - **The peak is the denoiser**, not the decoders. That is why it is flat across counts: the 24-block DiT over
   12,294 tokens runs twice per step. 1,048,576 Gaussians is qualified. Only the decode phase grows with the count.
-- **Bookings in `config.example.json` (`idol-pytorch`):** `resident_bytes` is 5 GiB (5.08 GB measured, plus 5%). `working_bytes` is
+- **Bookings in `config.example.json` (`idol`):** `resident_bytes` is 5 GiB (5.08 GB measured, plus 5%). `working_bytes` is
   7.5 GiB at every count (7.61 GB worst, plus 5.8%).
 - **Unload:** `exit` ends the process in under 0.1 s, and its footprint goes to 0.
 
@@ -213,16 +214,18 @@ PyTorch version used for preprocessing, the child's stage times and its peak foo
   (`zig build tf-idol-generate -Dcpu=apple_m1 -Doptimize=ReleaseFast`). The Mac install (`deploy/mac/config.json.in`)
   keeps the PyTorch `idol` until a release ships it.
 
-**Switching.** `config.example.json` lists both. `idol` is native and is the `image_to_3d` default. `idol-pytorch` has
-`residency` `disabled`. To fall back, turn the native one off and the PyTorch one on, either in the config or live:
+**Switching.** `config.example.json` lists both. `idol` (PyTorch) is the `image_to_3d` default. `idol-native` has
+`residency` `disabled`, because no TensorFold release ships `tf-idol-generate` yet; set its `tf_idol_generate` to a
+built binary first. To opt in, turn the native one on and the PyTorch one off, either in the config or live:
 
 ```sh
+curl -s localhost:8190/v1/tools/idol-native/settings -d '{"residency":"on_demand"}'
 curl -s localhost:8190/v1/tools/idol/settings -d '{"residency":"disabled"}'
-curl -s localhost:8190/v1/tools/idol-pytorch/settings -d '{"residency":"on_demand"}'
 ```
 
 A request that names no model goes to the next enabled `image_to_3d` model. `{"residency":"on_demand"}` alone, without
-disabling `idol`, lets a request pick `idol-pytorch` by name.
+disabling `idol`, lets a request pick `idol-native` by name. To go back, reverse the two (or send `{"reset":true}` to
+each). Once a release ships the binary, a follow-up makes the native backend the default.
 
 ### Measured (native, M5 Ultra, 96 GiB)
 
@@ -240,8 +243,8 @@ avocado (`synthetic`) and a real photo (`real`), seed 42, 50 steps, guidance 3.
 - **Load** takes 1.4–1.9 s (BiRefNet only). The child loads its weights in each job, in about 0.7 s.
 - **The peak is BiRefNet**, not the child. It peaks highest on the first job after load. The child peaks at 2.71 GB
   at every count. Before the worker emptied the MPS cache ahead of the child, the two peaks stacked to 9.41 GB.
-- **Bookings in `config.example.json` (`idol`):** `resident_bytes` is 3 GiB (2.77 GB measured, plus 16%). `working_bytes` is
-  4.5 GiB at every count (4.35 GB worst, plus 11%). The total is 7.5 GiB, against 12.5 GiB for `idol-pytorch`.
+- **Bookings in `config.example.json` (`idol-native`):** `resident_bytes` is 3 GiB (2.77 GB measured, plus 16%). `working_bytes` is
+  4.5 GiB at every count (4.35 GB worst, plus 11%). The total is 7.5 GiB, against 12.5 GiB for the PyTorch `idol`.
 
 ## Spark (GB10, sm_121, aarch64)
 

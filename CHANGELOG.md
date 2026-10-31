@@ -17,8 +17,9 @@
 - Idol on TensorFold Metal: the asset3d worker's `backend: tensorfold` keeps only BiRefNet background removal in
   PyTorch and runs the rest in TensorFold's native `tf-idol-generate`, one child process a job (phase progress,
   SIGUSR1 ends the child). On the M5 Ultra it takes about 30 s an asset instead of about 100 s, and its measured peak
-  is 7.12 GB instead of 12.64 GB. It books 3 + 4.5 GiB instead of 5 + 7.5 GiB. `config.example.json` makes it the
-  `image_to_3d` default and keeps `idol-pytorch` as a disabled fallback. `pins.json` adds the timm `dinov3/config.json`
+  is 7.12 GB instead of 12.64 GB. It books 3 + 4.5 GiB instead of 5 + 7.5 GiB. It is opt-in: `config.example.json`
+  keeps the PyTorch `idol` as the `image_to_3d` default and adds `idol-native`, disabled, switched on live with
+  `POST /v1/tools/idol-native/settings`. `pins.json` adds the timm `dinov3/config.json`
   that the native loader reads. The Mac install keeps the PyTorch worker until a TensorFold release ships
   `tf-idol-generate`.
 - `/voice`'s 3D view shows a perspective camera more than 20 bounds-radii away as an orthographic one with the same

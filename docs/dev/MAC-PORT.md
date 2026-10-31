@@ -98,7 +98,7 @@ footprint as macOS reports it; GB figures are decimal as reported, GiB binary.
 | Whisper large-v3-turbo (`mlx-whisper` 0.4.3) | 3.2 GB resident, 4.35 GB peak; 3.25 GiB booked + 1.25 GiB working | |
 | Qwen-Image 2.1 Turbo (q4) | 9.5 GiB resident + 6.5 GiB working + 2 GiB per reference image | 8.5 s a 1024² image |
 | Idol (PyTorch MPS, eager) | 5.03 GB resident loaded, 12.64 GB peak footprint at 32,768, 262,144 and 1,048,576 Gaussians alike (the denoiser's peak); 5 GiB + 7.5 GiB booked | 97.6 / 98.7 / 102.8 s an asset at 50 steps, 96 s of it denoising |
-| Idol native (`backend: tensorfold`: TensorFold Metal `tf-idol-generate`, background removal in PyTorch MPS; not installed yet) | 2.77 GB resident loaded (BiRefNet), 7.12 GB peak footprint, worker and child together (BiRefNet's peak; the child peaks at 2.71 GB at every count); 3 GiB + 4.5 GiB booked | 29.4 / 29.7 / 31.4 s an asset at 32,768 / 262,144 / 1,048,576 Gaussians, 50 steps |
+| Idol native (`idol-native`, opt-in, `backend: tensorfold`: TensorFold Metal `tf-idol-generate`, background removal in PyTorch MPS; not installed yet) | 2.77 GB resident loaded (BiRefNet), 7.12 GB peak footprint, worker and child together (BiRefNet's peak; the child peaks at 2.71 GB at every count); 3 GiB + 4.5 GiB booked | 29.4 / 29.7 / 31.4 s an asset at 32,768 / 262,144 / 1,048,576 Gaussians, 50 steps |
 
 Start times. "Cache warm" means the weights are still in the page cache from a recent read; "cold" means after a purge.
 
