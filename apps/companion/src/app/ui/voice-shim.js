@@ -25,10 +25,7 @@
           loading(data);
           if (this.readyState === CompanionSocket.OPEN && this.onmessage) this.onmessage({ type: 'message', data });
         },
-        onClose: (code, reason) => {
-          loading(null);
-          this.closed(code, reason);
-        },
+        onClose: (code, reason) => this.closed(code, reason),
       }).then((id) => {
         this.id = id;
         if (this.readyState === CompanionSocket.CLOSING) bridge.close(id);
@@ -47,6 +44,8 @@
     closed(code, reason) {
       if (this.readyState === CompanionSocket.CLOSED) return;
       this.readyState = CompanionSocket.CLOSED;
+      // However the call ends (the page, the app or the server), its loading banner goes with it.
+      loading(null);
       if (code !== 1000 && this.onerror) this.onerror({ type: 'error' });
       if (this.onclose) this.onclose({ type: 'close', code, reason: reason || '', wasClean: code === 1000 });
     }
@@ -76,7 +75,8 @@
     }
   }
   // A call whose voice models load when it starts: the app sends its banner (src/app/models.ts `callLoading`) with
-  // each `localrouter.session.loading`, and `localrouter.session.ready` ends it. Null (the call closed) removes it.
+  // each `localrouter.session.loading`, and `localrouter.session.ready` ends it. A disabled voice model stops it with
+  // what to do. Null (the call closed) removes it.
   let banner = null;
   let bannerTimer = 0;
   function loading(data) {
@@ -104,6 +104,9 @@
     banner.querySelector('b').textContent = view.text;
     banner.querySelector('span').textContent = view.detail;
     const bar = banner.querySelector('i');
+    // Stopped (a voice model is disabled): the message stays until the call closes, with no bar to wait on.
+    bar.hidden = Boolean(view.stopped);
+    banner.dataset.stopped = String(Boolean(view.stopped));
     bar.dataset.indeterminate = String(view.progress === null);
     bar.querySelector('em').style.width = view.progress === null ? '' : `${Math.round(view.progress * 100)}%`;
     banner.dataset.done = String(view.done);
@@ -135,6 +138,7 @@
       'padding:10px 14px;border-radius:14px;border:1px solid var(--amber);background:var(--surface);color:var(--text);' +
       'box-shadow:0 6px 24px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:4px;font-size:13px}' +
       '.lr-loading span{color:var(--muted);font-size:12px}.lr-loading[data-done=true]{border-color:var(--green)}' +
+      '.lr-loading[data-stopped=true]{border-color:var(--red)}.lr-loading i[hidden]{display:none}' +
       '.lr-loading i{display:block;height:4px;border-radius:999px;background:var(--raised);overflow:hidden}' +
       '.lr-loading em{display:block;height:100%;background:var(--amber);transition:width .8s}' +
       '.lr-loading[data-done=true] em{background:var(--green)}' +

@@ -168,26 +168,26 @@ describe('the voice models come back after a video', () => {
     const calls: Array<{ url: string; body: string | null }> = []
     const f = (async (url: string, init?: { body?: string }) => {
       calls.push({ url, body: init?.body ?? null })
-      if (url.endsWith('/v1/tools')) return new Response(JSON.stringify({ data: [{ id: 'drama', kind: 'speech', state: 'unloaded', keep_loaded: true }, { id: 'whisper', kind: 'transcription', state: 'ready', keep_loaded: true }, { id: 'video', kind: 'video', state: 'ready' }] }))
+      if (url.endsWith('/v1/tools')) return new Response(JSON.stringify({ data: [{ id: 'fishaudio/drama-3', kind: 'speech', state: 'unloaded', keep_loaded: true }, { id: 'whisper-large-v3-turbo', kind: 'transcription', state: 'ready', keep_loaded: true }, { id: 'qwen-image-2.1-turbo', kind: 'image', state: 'ready' }] }))
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: '{"message":"loaded"}' }] } }))
     }) as unknown as typeof fetch
     const r = await restoreVoice(new Spark('http://127.0.0.1:8190', '', f))
-    expect(r).toEqual({ ok: true, text: 'loaded again (drama)' })
+    expect(r).toEqual({ ok: true, text: 'loaded again (fishaudio/drama-3)' })
     const loads = calls.filter((c) => c.body?.includes('load_model'))
     expect(loads).toHaveLength(1)
-    expect(loads[0].body).toContain('"model":"drama"')
+    expect(loads[0].body).toContain('"model":"fishaudio/drama-3"')
   })
 
   it('on a box with residency, only always-loaded voice models come back; a per-call one waits for the next call', async () => {
     const bodies: string[] = []
     const f = (async (url: string, init?: { body?: string }) => {
       if (init?.body) bodies.push(init.body)
-      if (url.endsWith('/v1/tools')) return new Response(JSON.stringify({ data: [{ id: 'drama', kind: 'speech', state: 'unloaded', keep_loaded: true, residency: 'call' }, { id: 'whisper', kind: 'transcription', state: 'unloaded', keep_loaded: false, residency: 'always' }] }))
+      if (url.endsWith('/v1/tools')) return new Response(JSON.stringify({ data: [{ id: 'fishaudio/drama-3', kind: 'speech', state: 'unloaded', keep_loaded: true, residency: 'call' }, { id: 'whisper-large-v3-turbo', kind: 'transcription', state: 'unloaded', keep_loaded: false, residency: 'always' }] }))
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'loaded' }] } }))
     }) as unknown as typeof fetch
-    expect(await restoreVoice(new Spark('http://127.0.0.1:8190', '', f))).toEqual({ ok: true, text: 'loaded again (whisper)' })
+    expect(await restoreVoice(new Spark('http://127.0.0.1:8190', '', f))).toEqual({ ok: true, text: 'loaded again (whisper-large-v3-turbo)' })
     expect(bodies).toHaveLength(1)
-    expect(bodies[0]).toContain('"model":"whisper"')
+    expect(bodies[0]).toContain('"model":"whisper-large-v3-turbo"')
   })
 })
 

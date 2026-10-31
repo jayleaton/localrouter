@@ -153,7 +153,8 @@ export class Spark {
    * throws a SparkError with the box's message.
    */
   toolSettings(id: string, change: { residency?: string; idle_ttl_s?: number; reset?: true }): Promise<unknown> {
-    return this.json(`/v1/tools/${encodeURIComponent(id)}/settings`, change)
+    // An id may hold a slash (`fishaudio/drama-3`): kept as a slash, as the box's routes read the id up to the verb.
+    return this.json(`/v1/tools/${id.split('/').map(encodeURIComponent).join('/')}/settings`, change)
   }
 
   /** One Chat Completions request (not streamed): the whole completion. */

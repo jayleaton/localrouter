@@ -58,6 +58,72 @@ function chip(text, small) {
   return c;
 }
 
+// ------------------------------------------------ tabs (WAI-ARIA tabs: arrows, Home and End move and open; the last opened is remembered)
+const TAB_KEY = 'lr.settings.tab';
+const tabs = [...document.querySelectorAll('[role=tab]')];
+const tabOf = (el) => (el.closest('[role=tabpanel]') || { id: 'panel-general' }).id.replace(/^panel-/, '');
+let currentTab = 'general';
+
+function selectTab(id, focus) {
+  const tab = $(`tab-${id}`) ? id : 'general';
+  currentTab = tab;
+  for (const t of tabs) {
+    const on = t.id === `tab-${tab}`;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute('aria-controls')).hidden = !on;
+    if (on && focus) t.focus();
+  }
+  try {
+    localStorage.setItem(TAB_KEY, tab);
+  } catch { /* storage off: the tab is not remembered */ }
+  if (tab === 'models') pollModels();
+}
+
+for (const t of tabs) {
+  const id = t.id.replace(/^tab-/, '');
+  t.onclick = () => selectTab(id);
+  t.addEventListener('keydown', (e) => {
+    const i = tabs.indexOf(t);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    selectTab(tabs[(next + tabs.length) % tabs.length].id.replace(/^tab-/, ''), true);
+  });
+}
+// The tab bar sticks under the header, whose height depends on the window's width.
+new window.ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${document.querySelector('.top').offsetHeight}px`)).observe(document.querySelector('.top'));
+
+let lastCurrent = null;
+/**
+ * Which tab shows: the remembered one, General until this computer is paired, and the tab of the next setup step when
+ * setup moves on (pairing done: the permissions). A tab with a step waiting or failing carries a dot.
+ */
+function followSteps(s) {
+  const c = s.connect;
+  if (lastCurrent === null) {
+    let saved = null;
+    try {
+      saved = localStorage.getItem(TAB_KEY);
+    } catch { /* no storage */ }
+    selectTab(s.paired ? saved || 'general' : 'general');
+  } else if (c.current !== lastCurrent && c.current !== 'done' && $(`step-${c.current}`)) {
+    selectTab(tabOf($(`step-${c.current}`)));
+  }
+  lastCurrent = c.current;
+  const attn = {};
+  for (const st of c.steps) {
+    const level = st.status === 'error' ? 'error' : st.status === 'active' ? 'active' : null;
+    const tab = $(`step-${st.id}`) && tabOf($(`step-${st.id}`));
+    if (level && tab && attn[tab] !== 'error') attn[tab] = level;
+  }
+  for (const t of tabs) {
+    const id = t.id.replace(/^tab-/, '');
+    if (attn[id]) t.dataset.attn = attn[id];
+    else delete t.dataset.attn;
+  }
+}
+
 function renderSteps(s) {
   const c = s.connect;
   const byId = Object.fromEntries(c.steps.map((st) => [st.id, st]));
@@ -223,6 +289,7 @@ function render(s) {
   if (!$('grantControl').classList.contains('busy')) $('grantControl').textContent = `Let ${s.assistant.name} use this computer`;
   renderAssistant(s);
   renderSteps(s);
+  followSteps(s);
   renderPermissions(s);
   renderFound();
   $('control').checked = s.control;
@@ -416,7 +483,8 @@ function modelRow(id) {
   pill.append(el('span', 'dot'), state);
   const name = el('span', 'mname');
   const meta = el('span', 'mmeta');
-  head.append(name, meta, pill);
+  const off = el('span', 'off-badge', 'Disabled');
+  head.append(name, off, meta, pill);
   const ctl = el('div', 'mctl');
   const select = el('select');
   select.setAttribute('aria-label', 'How the server keeps this model');
@@ -427,11 +495,12 @@ function modelRow(id) {
   const reset = el('button', 'btn', 'Reset to default');
   ctl.append(select, idle, reset);
   const hint = el('p', 'note');
+  const warn = el('div', 'alert warn');
   const err = el('div', 'alert');
   err.setAttribute('role', 'alert');
   const failure = el('p', 'note');
-  root.append(head, ctl, hint, err, failure);
-  const r = { root, pill, state, name, meta, select, idle, ttl, reset, hint, err, failure, pending: false };
+  root.append(head, ctl, hint, warn, err, failure);
+  const r = { root, pill, state, name, meta, off, select, idle, ttl, reset, hint, warn, err, failure, pending: false };
   const change = (body, control) => saveModel(id, body, r, control);
   select.onchange = () => change({ residency: select.value }, select);
   ttl.onchange = () => change({ idle_ttl_s: ttl.value }, ttl);
@@ -499,6 +568,10 @@ function renderModels(v) {
     r.select.disabled = r.ttl.disabled = !editable;
     r.reset.disabled = !editable || row.is_default;
     r.idle.hidden = !row.idle_shown;
+    r.root.dataset.disabled = String(row.disabled);
+    r.off.hidden = !row.disabled;
+    r.warn.hidden = !row.warning;
+    r.warn.textContent = row.warning;
     r.hint.textContent = row.idle_shown ? `0 unloads it right after each use. ${row.default_text}.` : `${row.default_text}.`;
     alertCard(r.err, modelErrors[row.id] ? { title: modelErrors[row.id] } : null);
     r.failure.hidden = !row.error;
@@ -507,12 +580,23 @@ function renderModels(v) {
   });
   for (const id of [...modelRows.keys()]) if (!seen.has(id)) modelRows.delete(id);
   if ($('models').children.length !== nodes.length || nodes.some((n, i) => $('models').children[i] !== n)) $('models').replaceChildren(...nodes);
+  // The models the server cannot run: counted, and listed with its reasons on request (read-only).
+  $('unsupported').hidden = !v.unsupported_text;
+  $('unsupportedText').textContent = v.unsupported_text;
+  $('unsupportedList').replaceChildren(...v.unsupported.map((m) => {
+    const li = document.createElement('li');
+    const b = Object.assign(document.createElement('b'), { textContent: m.name, title: m.id });
+    const kind = Object.assign(document.createElement('small'), { textContent: ` ${m.kind}` });
+    const why = Object.assign(document.createElement('span'), { className: 'note', textContent: m.reason });
+    li.append(b, kind, why);
+    return li;
+  }));
   $('modelsAt').textContent = v.available ? `Read ${new Date(v.at).toLocaleTimeString()}` : '';
 }
 
-/** While the window shows, the models' state is read every few seconds (one read at a time). */
+/** While the Models tab shows, the models' state is read every few seconds (one read at a time). */
 async function pollModels() {
-  if (document.hidden || modelsBusy) return;
+  if (document.hidden || modelsBusy || currentTab !== 'models') return;
   modelsBusy = true;
   try {
     renderModels(await api.models());

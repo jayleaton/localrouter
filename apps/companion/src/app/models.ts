@@ -1,21 +1,26 @@
 /**
  * Settings › Models: which models the LocalRouter server keeps loaded and which it shuts down, read from its
  * `/v1/tools` and changed with `POST /v1/tools/{id}/settings` (the server decides and keeps the setting; this app only
- * shows and asks). Also
+ * shows and asks). Only the models the server can run are listed; the rest are counted, with the server's reason. Also
  * the banner a call shows while its voice models load (`localrouter.session.loading`). Pure: main.ts does the I/O.
  */
 import { SparkError } from '../harness/spark.ts'
 
-export type Residency = 'always' | 'call' | 'on_demand'
-export const RESIDENCIES: readonly Residency[] = ['always', 'call', 'on_demand']
+export type Residency = 'always' | 'call' | 'on_demand' | 'disabled'
+export const RESIDENCIES: readonly Residency[] = ['always', 'call', 'on_demand', 'disabled']
 
 export const RESIDENCY_LABEL: Readonly<Record<Residency, string>> = {
   always: 'Always loaded',
   call: 'Load when a call starts',
   on_demand: 'Load when needed',
+  disabled: 'Disabled (never runs)',
 }
 
-const KIND_LABEL: Readonly<Record<string, string>> = { chat: 'Chat', speech: 'Speech', transcription: 'Transcription', image: 'Pictures', video: 'Video' }
+/** The kinds a voice call runs on: it listens (transcription), thinks (chat) and speaks (speech). */
+const VOICE_KINDS = new Set(['chat', 'speech', 'transcription'])
+export const VOICE_WARNING = 'Voice calls that rely on this model won’t work while it’s disabled.'
+
+const KIND_LABEL: Readonly<Record<string, string>> = { chat: 'Chat', speech: 'Speech', transcription: 'Transcription', image: 'Pictures', video: 'Video', decision: 'Decisions' }
 const STATE_LABEL: Readonly<Record<string, string>> = { ready: 'ready', busy: 'working', loading: 'loading', unloaded: 'not loaded', failed: 'failed' }
 
 export type ToolEntry = {
@@ -32,6 +37,9 @@ export type ToolEntry = {
   last_load_ms: number | null
   loaded_since: string | null
   last_error: string
+  /** False: the server cannot run it on its hardware (`unsupported_reason` says why); it is not listed for settings. */
+  supported: boolean
+  unsupported_reason: string
 }
 export type Budget = { ceiling_bytes: number; booked_bytes: number; always_bytes: number }
 /** `/v1/tools` as read. `residency`: false on a box from before model settings (no `residency` on its entries). */
@@ -47,7 +55,9 @@ export function toolEntryOf(raw: unknown): ToolEntry | null {
   const r = raw as Record<string, unknown>
   if (typeof r.id !== 'string' || !r.id) return null
   const residency = residencyOf(r.residency, r.keep_loaded === true ? 'always' : 'on_demand')
-  const allowed = Array.isArray(r.allowed_residency) ? RESIDENCIES.filter((x) => (r.allowed_residency as unknown[]).includes(x)) : ['always', 'on_demand']
+  // Disabled is offered for every model, whether or not the server lists it.
+  const listed = Array.isArray(r.allowed_residency) ? RESIDENCIES.filter((x) => (r.allowed_residency as unknown[]).includes(x)) : ['always', 'on_demand']
+  const allowed = listed.includes('disabled') ? listed : [...listed, 'disabled']
   return {
     id: r.id,
     kind: str(r.kind),
@@ -62,6 +72,8 @@ export function toolEntryOf(raw: unknown): ToolEntry | null {
     last_load_ms: typeof r.last_load_ms === 'number' && r.last_load_ms >= 0 ? r.last_load_ms : null,
     loaded_since: typeof r.loaded_since === 'string' ? r.loaded_since : null,
     last_error: str(r.last_error),
+    supported: r.supported !== false,
+    unsupported_reason: str(r.unsupported_reason),
   }
 }
 
@@ -102,15 +114,18 @@ export type ModelRow = {
   id: string
   name: string
   kind: string
-  dot: 'ready' | 'busy' | 'loading' | 'failed' | 'offline'
+  dot: 'ready' | 'busy' | 'loading' | 'failed' | 'offline' | 'disabled'
   state: string
   memory: string
   loads: string
   residency: Residency
   choices: Array<{ value: Residency; label: string }>
   idle_ttl_s: number
-  /** The idle field shows for a model that is not always loaded. */
+  /** The idle field shows for a model that is loaded and unloaded (not always loaded, not disabled). */
   idle_shown: boolean
+  disabled: boolean
+  /** A disabled model a voice call needs: calls that rely on it fail until it is enabled again. */
+  warning: string
   is_default: boolean
   default_text: string
   error: string
@@ -125,6 +140,10 @@ export type ModelsView = {
   /** Why nothing is listed (not paired, not reachable, an older box); empty when the list is there. */
   problem: string
   rows: ModelRow[]
+  /** The models the server cannot run, with its reason: shown on request, never changed here. */
+  unsupported: Array<{ id: string; name: string; kind: string; reason: string }>
+  /** "2 models not available on studio", or empty when every model is. */
+  unsupported_text: string
   budget: BudgetView | null
   /** Why the pickers are off (no `manage` scope); empty when they may be changed. */
   read_only: string
@@ -148,23 +167,28 @@ export function budgetView(b: Budget | null): BudgetView | null {
 const ttlText = (s: number) => (s === 0 ? 'right after each use' : `after ${s} s idle`)
 
 export function modelRow(e: ToolEntry, names: Record<string, string>): ModelRow {
-  const failed = e.state === 'failed' || (e.state === 'unloaded' && e.last_error !== '')
-  const dot = failed ? 'failed' : e.state === 'ready' ? 'ready' : e.state === 'busy' ? 'busy' : e.state === 'loading' ? 'loading' : 'offline'
+  const disabled = e.residency === 'disabled'
+  const failed = !disabled && (e.state === 'failed' || (e.state === 'unloaded' && e.last_error !== ''))
+  const dot = disabled ? 'disabled' : failed ? 'failed' : e.state === 'ready' ? 'ready' : e.state === 'busy' ? 'busy' : e.state === 'loading' ? 'loading' : 'offline'
   const name = names[e.id] ?? e.id
+  // Disabled or always loaded: the idle time does not apply, so it does not count against the default either.
+  const noIdle = (r: Residency) => r === 'always' || r === 'disabled'
   return {
     id: e.id,
     name,
     kind: KIND_LABEL[e.kind] ?? e.kind,
     dot,
-    state: failed ? 'failed' : (STATE_LABEL[e.state] ?? e.state),
+    state: disabled ? 'disabled' : failed ? 'failed' : (STATE_LABEL[e.state] ?? e.state),
     memory: gib(e.resident_bytes),
     loads: loadsIn(e.last_load_ms),
     residency: e.residency,
     choices: e.allowed_residency.map((value) => ({ value, label: RESIDENCY_LABEL[value] })),
     idle_ttl_s: e.idle_ttl_s,
-    idle_shown: e.residency !== 'always',
-    is_default: e.residency === e.residency_default && (e.residency === 'always' || e.idle_ttl_s === e.idle_ttl_s_default),
-    default_text: `Default: ${RESIDENCY_LABEL[e.residency_default].toLowerCase()}${e.residency_default === 'always' ? '' : `, unloads ${ttlText(e.idle_ttl_s_default)}`}`,
+    idle_shown: !noIdle(e.residency),
+    disabled,
+    warning: disabled && VOICE_KINDS.has(e.kind) ? VOICE_WARNING : '',
+    is_default: e.residency === e.residency_default && (noIdle(e.residency) || e.idle_ttl_s === e.idle_ttl_s_default),
+    default_text: `Default: ${RESIDENCY_LABEL[e.residency_default].toLowerCase()}${noIdle(e.residency_default) ? '' : `, unloads ${ttlText(e.idle_ttl_s_default)}`}`,
     error: e.last_error,
   }
 }
@@ -184,13 +208,16 @@ export const modelsIntro = (server: string) => `Which models stay loaded on ${se
 /** The Models card: the rows, the memory bar and whether they may be changed. */
 export function modelsView(o: { tools: Tools | null; names: Record<string, string>; manage: boolean; server: string; problem?: string; at: number }): ModelsView {
   const intro = modelsIntro(o.server)
-  if (!o.tools) return { available: false, intro, problem: o.problem || 'Not read yet', rows: [], budget: null, read_only: '', at: o.at }
+  if (!o.tools) return { available: false, intro, problem: o.problem || 'Not read yet', rows: [], unsupported: [], unsupported_text: '', budget: null, read_only: '', at: o.at }
   const supported = o.tools.residency || o.tools.entries.length === 0
+  const away = o.tools.entries.filter((e) => !e.supported)
   return {
     available: true,
     intro,
     problem: o.problem ?? '',
-    rows: o.tools.entries.map((e) => modelRow(e, o.names)),
+    rows: o.tools.entries.filter((e) => e.supported).map((e) => modelRow(e, o.names)),
+    unsupported: away.map((e) => ({ id: e.id, name: o.names[e.id] ?? e.id, kind: KIND_LABEL[e.kind] ?? e.kind, reason: e.unsupported_reason || `${o.server} cannot run it` })),
+    unsupported_text: away.length ? `${away.length} ${away.length === 1 ? 'model' : 'models'} not available on ${o.server}` : '',
     budget: budgetView(o.tools.budget),
     read_only: !supported ? oldBoxModels(o.server) : o.manage ? '' : NO_MANAGE,
     at: o.at,
@@ -234,20 +261,26 @@ export function settingsRefusal(error: unknown, server: string): { message: stri
 
 // ------------------------------------------------------------------ a call's voice models loading
 
-export type CallLoading = { done: boolean; text: string; detail: string; progress: number | null }
+export type CallLoading = { done: boolean; text: string; detail: string; progress: number | null; stopped?: true }
 
 /**
  * The banner for a call whose models load when it starts: from `localrouter.session.loading` (`models`: each one's id,
- * state and time so far) and the box's last load time of each, a rough fraction done; `localrouter.session.ready`
- * ends it. Null for any other event.
+ * state and time so far) and the server's last load time of each, a rough fraction done; `localrouter.session.ready`
+ * ends it. A model in either that is "disabled" never loads, so the banner says so and stops (no progress, no spin).
+ * Null for any other event.
  */
-export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string, number | null>, names: Record<string, string>): CallLoading | null {
+export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string, number | null>, names: Record<string, string>, server = serverName(null)): CallLoading | null {
+  if (ev.type !== 'localrouter.session.ready' && ev.type !== 'localrouter.session.loading') return null
+  const models = (Array.isArray(ev.models) ? ev.models : []).filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && typeof (m as { id?: unknown }).id === 'string')
+  const off = models.filter((m) => m.state === 'disabled').map((m) => names[m.id as string] ?? (m.id as string))
+  if (off.length) {
+    const list = off.length === 1 ? off[0] : `${off.slice(0, -1).join(', ')} and ${off[off.length - 1]}`
+    return { done: false, stopped: true, text: 'Voice calls can’t start', detail: `${list} ${off.length === 1 ? 'is' : 'are'} disabled on ${server}. Enable ${off.length === 1 ? 'it' : 'them'} in Settings › Models to use voice calls.`, progress: null }
+  }
   if (ev.type === 'localrouter.session.ready') {
     const ms = num(ev.loaded_ms, -1)
     return { done: true, text: 'Voice models ready', detail: ms >= 0 ? `loaded in ${(ms / 1000).toFixed(1)} s` : '', progress: 1 }
   }
-  if (ev.type !== 'localrouter.session.loading') return null
-  const models = (Array.isArray(ev.models) ? ev.models : []).filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && typeof (m as { id?: unknown }).id === 'string')
   let known = 0
   let sum = 0
   const parts = models.map((m) => {

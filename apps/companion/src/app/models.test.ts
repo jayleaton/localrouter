@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { Spark, SparkError } from '../harness/spark.ts'
-import { budgetView, callLoading, loadsIn, modelNames, modelsIntro, modelsView, NO_MANAGE, oldBoxModels, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import { budgetView, callLoading, loadsIn, toolEntryOf, modelNames, modelsIntro, modelsView, NO_MANAGE, oldBoxModels, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
 
 const server = serverName('studio')
 
-const GiB = 2 ** 30
-const qwen = { id: 'qwen', kind: 'chat', state: 'ready', resident_bytes: 20 * GiB, priority: 0, residency: 'on_demand', residency_default: 'always', idle_ttl_s: 300, idle_ttl_s_default: 600, allowed_residency: ['always', 'call', 'on_demand'], last_load_ms: 8400, loaded_since: '2026-10-31T10:00:00Z', last_error: '' }
-const tts = { ...qwen, id: 'tts', kind: 'speech', state: 'unloaded', resident_bytes: 3 * GiB, residency: 'call', residency_default: 'call', idle_ttl_s: 0, idle_ttl_s_default: 0, last_load_ms: null, loaded_since: null }
-const img = { ...qwen, id: 'img', kind: 'image', state: 'unloaded', residency: 'on_demand', residency_default: 'on_demand', idle_ttl_s: 60, idle_ttl_s_default: 60, allowed_residency: ['always', 'on_demand'], last_error: 'out of memory' }
-const body = { object: 'list', data: [qwen, tts, img], budget: { ceiling_bytes: 100 * GiB, booked_bytes: 30 * GiB, always_bytes: 20 * GiB } }
+// The Mac Studio's lineup (its config's ids, kinds and resident bytes; load times as measured there).
+const chat = { id: 'qwen3.8-27b', kind: 'chat', state: 'ready', resident_bytes: 28723101696, priority: 100, residency: 'on_demand', residency_default: 'always', idle_ttl_s: 300, idle_ttl_s_default: 600, allowed_residency: ['always', 'call', 'on_demand'], last_load_ms: 4900, loaded_since: '2026-10-31T10:00:00Z', last_error: '' }
+const speech = { ...chat, id: 'fishaudio/drama-3', kind: 'speech', state: 'unloaded', resident_bytes: 30870077440, priority: 95, residency: 'call', residency_default: 'call', idle_ttl_s: 0, idle_ttl_s_default: 0, last_load_ms: null, loaded_since: null }
+const image = { ...chat, id: 'qwen-image-2.1-turbo', kind: 'image', state: 'unloaded', resident_bytes: 10200547328, priority: 10, residency: 'on_demand', residency_default: 'on_demand', idle_ttl_s: 60, idle_ttl_s_default: 60, allowed_residency: ['always', 'on_demand'], last_load_ms: 2000, last_error: 'out of memory' }
+/** 77.8 GiB ceiling; the chat model always loaded, KnowLine (10.0 GiB) loaded on demand. */
+const body = { object: 'list', data: [chat, speech, image], budget: { ceiling_bytes: 83493421056, booked_bytes: 28723101696 + 10724056240, always_bytes: 28723101696 } }
 
 /** A box answering on a fake fetch: what was asked, and a reply per route. */
 function box(reply: (method: string, path: string, body: unknown) => { status: number; json: unknown }) {
@@ -26,19 +27,20 @@ function box(reply: (method: string, path: string, body: unknown) => { status: n
 
 describe('the Spark client for model settings', () => {
   it('reads /v1/tools and posts one model’s settings with the token', async () => {
-    const { spark, asked } = box((m, _p, b) => (m === 'GET' ? { status: 200, json: body } : { status: 200, json: { ...tts, ...(b as object) } }))
-    expect(toolsOf(await spark.tools()).entries.map((e) => e.id)).toEqual(['qwen', 'tts', 'img'])
-    const out = await spark.toolSettings('a b/c', { idle_ttl_s: 0 })
+    const { spark, asked } = box((m, _p, b) => (m === 'GET' ? { status: 200, json: body } : { status: 200, json: { ...speech, ...(b as object) } }))
+    expect(toolsOf(await spark.tools()).entries.map((e) => e.id)).toEqual(['qwen3.8-27b', 'fishaudio/drama-3', 'qwen-image-2.1-turbo'])
+    // The id's slash stays a slash: the box's routes read the id up to the verb, without decoding.
+    const out = await spark.toolSettings('fishaudio/drama-3', { idle_ttl_s: 0 })
     expect((out as { idle_ttl_s: number }).idle_ttl_s).toBe(0)
-    expect(asked[1]).toEqual({ method: 'POST', path: '/v1/tools/a%20b%2Fc/settings', body: { idle_ttl_s: 0 }, auth: 'Bearer tok' })
+    expect(asked[1]).toEqual({ method: 'POST', path: '/v1/tools/fishaudio/drama-3/settings', body: { idle_ttl_s: 0 }, auth: 'Bearer tok' })
   })
 
   it('a 409 is a SparkError with the box’s message, shown as it is', async () => {
-    const { spark } = box(() => ({ status: 409, json: { error: { message: 'always-loaded models would need 120.0 GiB of a 100.0 GiB budget' } } }))
-    const error = await spark.toolSettings('qwen', { residency: 'always' }).catch((e: unknown) => e)
+    const { spark } = box(() => ({ status: 409, json: { error: { message: 'always-loaded models would need 136.5 GiB of a 77.8 GiB budget' } } }))
+    const error = await spark.toolSettings('fishaudio/drama-3', { residency: 'always' }).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(SparkError)
     expect((error as SparkError).status).toBe(409)
-    expect(settingsRefusal(error, server)).toEqual({ message: 'always-loaded models would need 120.0 GiB of a 100.0 GiB budget', denied: false })
+    expect(settingsRefusal(error, server)).toEqual({ message: 'always-loaded models would need 136.5 GiB of a 77.8 GiB budget', denied: false })
   })
 
   it('a refusal for the scope makes the card read-only; an older box and a bad value say so', () => {
@@ -50,37 +52,59 @@ describe('the Spark client for model settings', () => {
 })
 
 describe('the Models card', () => {
-  const names = modelNames([{ id: 'qwen', name: 'Qwen3 32B (NVFP4, 4-bit)' }, { id: 'tts' }, 7])
+  const names = modelNames([{ id: 'qwen3.8-27b', name: 'Qwen3.8 27B (TensorFold 1.1.4 Metal, MLX 4-bit + DFlash2 drafter)' }, { id: 'fishaudio/drama-3', name: 'Fish Audio Drama 3 (TensorFold native on Metal, 44.1 kHz). Built with Fish Audio' }, { id: 'qwen-image-2.1-turbo' }, 7])
 
   it('one row per model: name, kind, state, memory, load time, and only the residencies it allows', () => {
     const v = modelsView({ tools: toolsOf(body), names, manage: true, server, at: 1 })
     expect(v.read_only).toBe('')
     const [q, t, i] = v.rows
-    expect(q).toMatchObject({ name: 'Qwen3 32B', kind: 'Chat', dot: 'ready', state: 'ready', memory: '20.0 GiB', loads: 'loads in ~8 s', residency: 'on_demand', idle_shown: true, idle_ttl_s: 300, is_default: false })
-    expect(q.choices.map((c) => c.label)).toEqual(['Always loaded', 'Load when a call starts', 'Load when needed'])
+    expect(q).toMatchObject({ name: 'Qwen3.8 27B', kind: 'Chat', dot: 'ready', state: 'ready', memory: '26.8 GiB', loads: 'loads in ~5 s', residency: 'on_demand', idle_shown: true, idle_ttl_s: 300, is_default: false })
+    expect(q.choices.map((c) => c.label)).toEqual(['Always loaded', 'Load when a call starts', 'Load when needed', 'Disabled (never runs)'])
     expect(q.default_text).toBe('Default: always loaded')
-    expect(t).toMatchObject({ name: 'tts', kind: 'Speech', dot: 'offline', state: 'not loaded', loads: 'load time not measured yet', is_default: true })
+    expect(t).toMatchObject({ name: 'Fish Audio Drama 3', kind: 'Speech', dot: 'offline', state: 'not loaded', memory: '28.8 GiB', loads: 'load time not measured yet', is_default: true })
     expect(t.default_text).toBe('Default: load when a call starts, unloads right after each use')
-    expect(i).toMatchObject({ dot: 'failed', state: 'failed', error: 'out of memory' })
-    expect(i.choices.map((c) => c.value)).toEqual(['always', 'on_demand'])
+    expect(i).toMatchObject({ name: 'qwen-image-2.1-turbo', kind: 'Pictures', memory: '9.5 GiB', dot: 'failed', state: 'failed', error: 'out of memory' })
+    expect(i.choices.map((c) => c.value)).toEqual(['always', 'on_demand', 'disabled'])
+  })
+
+  it('disabled: offered for every model, dimmed with no idle field; a voice-loop model warns that calls need it', () => {
+    const tools = toolsOf({ data: [{ ...chat, residency: 'disabled', allowed_residency: ['always', 'call', 'on_demand', 'disabled'] }, { ...image, residency: 'disabled', residency_default: 'disabled' }, { ...speech, residency: 'disabled' }] })
+    const [c, pic, sp] = modelsView({ tools, names, manage: true, server, at: 1 }).rows
+    expect(c).toMatchObject({ disabled: true, dot: 'disabled', state: 'disabled', idle_shown: false, warning: 'Voice calls that rely on this model won’t work while it’s disabled.', is_default: false })
+    expect(c.choices.filter((x) => x.value === 'disabled')).toHaveLength(1)
+    expect(pic).toMatchObject({ disabled: true, warning: '', is_default: true, default_text: 'Default: disabled (never runs)' })
+    expect(sp.warning).not.toBe('')
+    expect(toolEntryOf({ id: 'x', residency: 'disabled', allowed_residency: [] })?.allowed_residency).toEqual(['disabled'])
+  })
+
+  it('only the models the server can run are listed; the rest are counted, with its reasons', () => {
+    // The Spark's video model is CUDA-only; a second one without a reason is named as one the server cannot run.
+    const video = { ...image, id: 'minimax-h3', kind: 'video', supported: false, unsupported_reason: 'needs NVIDIA CUDA' }
+    const tools = toolsOf({ data: [chat, video, { ...chat, id: 'knowline-4b', kind: 'decision', supported: false }] })
+    const v = modelsView({ tools, names, manage: true, server, at: 1 })
+    expect(v.rows.map((r) => r.id)).toEqual(['qwen3.8-27b'])
+    expect(v.unsupported_text).toBe('2 models not available on studio')
+    expect(v.unsupported).toEqual([{ id: 'minimax-h3', name: 'minimax-h3', kind: 'Video', reason: 'needs NVIDIA CUDA' }, { id: 'knowline-4b', name: 'knowline-4b', kind: 'Decisions', reason: 'studio cannot run it' }])
+    expect(modelsView({ tools: toolsOf({ data: [chat, video] }), names, manage: true, server, at: 1 }).unsupported_text).toBe('1 model not available on studio')
+    expect(modelsView({ tools: toolsOf(body), names, manage: true, server, at: 1 }).unsupported_text).toBe('')
   })
 
   it('an always-loaded model has no idle field and is default whatever its idle time', () => {
-    const v = modelsView({ tools: toolsOf({ data: [{ ...qwen, residency: 'always', idle_ttl_s: 5 }] }), names, manage: true, server, at: 1 })
+    const v = modelsView({ tools: toolsOf({ data: [{ ...chat, residency: 'always', idle_ttl_s: 5 }] }), names, manage: true, server, at: 1 })
     expect(v.rows[0]).toMatchObject({ idle_shown: false, is_default: true })
   })
 
   it('the memory bar: always loaded, then what is loaded on demand, of the ceiling', () => {
-    expect(budgetView(toolsOf(body).budget)).toEqual({ always_pct: 20, booked_pct: 10, text: 'Always loaded 20.0 GiB · in use now 30.0 GiB · ceiling 100.0 GiB', over: false })
+    expect(budgetView(toolsOf(body).budget)).toEqual({ always_pct: 34.4, booked_pct: 12.8, text: 'Always loaded 26.8 GiB · in use now 36.7 GiB · ceiling 77.8 GiB', over: false })
     expect(budgetView({ ceiling_bytes: 10, booked_bytes: 12, always_bytes: 4 })).toMatchObject({ always_pct: 40, booked_pct: 60, over: true })
     expect(toolsOf({ data: [], budget: { ceiling_bytes: 0 } }).budget).toBeNull()
   })
 
   it('read-only without manage; an older box (keep_loaded, no residency) reads as always/on demand and says to update', () => {
     expect(modelsView({ tools: toolsOf(body), names, manage: false, server, at: 1 }).read_only).toBe(NO_MANAGE)
-    const old = toolsOf({ data: [{ id: 'q', kind: 'chat', state: 'ready', keep_loaded: true, idle_ttl_s: 0 }, { id: 'v', kind: 'video', state: 'unloaded', keep_loaded: false }] })
+    const old = toolsOf({ data: [{ id: 'qwen3.8-27b', kind: 'chat', state: 'ready', keep_loaded: true, idle_ttl_s: 600 }, { id: 'qwen-image-2.1-turbo', kind: 'image', state: 'unloaded', keep_loaded: false }] })
     expect(old.residency).toBe(false)
-    expect(old.entries.map((e) => [e.residency, e.allowed_residency])).toEqual([['always', ['always', 'on_demand']], ['on_demand', ['always', 'on_demand']]])
+    expect(old.entries.map((e) => [e.residency, e.allowed_residency])).toEqual([['always', ['always', 'on_demand', 'disabled']], ['on_demand', ['always', 'on_demand', 'disabled']]])
     expect(modelsView({ tools: old, names, manage: true, server, at: 1 }).read_only).toBe(oldBoxModels('studio'))
     expect(modelsView({ tools: null, names, manage: true, server, problem: 'offline', at: 1 })).toMatchObject({ available: false, problem: 'offline', rows: [] })
   })
@@ -98,6 +122,7 @@ describe('the Models card', () => {
 
   it('what may be sent: a residency, whole seconds from 0, or a reset', () => {
     expect(settingsChange({ residency: 'call' })).toEqual({ residency: 'call' })
+    expect(settingsChange({ residency: 'disabled' })).toEqual({ residency: 'disabled' })
     expect(settingsChange({ idle_ttl_s: ' 0 ' })).toEqual({ idle_ttl_s: 0 })
     expect(settingsChange({ idle_ttl_s: 90, residency: 'on_demand' })).toEqual({ residency: 'on_demand', idle_ttl_s: 90 })
     expect(settingsChange({ reset: true, residency: 'call' })).toEqual({ reset: true })
@@ -106,16 +131,24 @@ describe('the Models card', () => {
 })
 
 describe('a call’s voice models loading', () => {
-  const names = { tts: 'Voice', stt: 'Ears' }
+  const names = { 'fishaudio/drama-3': 'Fish Audio Drama 3', 'whisper-large-v3-turbo': 'Whisper large-v3-turbo' }
+  const D = 'fishaudio/drama-3'
+  const W = 'whisper-large-v3-turbo'
 
   it('a bar when every model has a last load time; ready ones count as done', () => {
-    const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: 'tts', state: 'loading', elapsed_ms: 2000 }, { id: 'stt', state: 'ready', elapsed_ms: 900 }] }, { tts: 8000, stt: null }, names)
-    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Voice 2 s of ~8 s · Ears ready', progress: 0.63 })
+    const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 5000 }, { id: W, state: 'ready', elapsed_ms: 2300 }] }, { [D]: 12500, [W]: null }, names)
+    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3 5 s of ~13 s · Whisper large-v3-turbo ready', progress: 0.7 })
   })
 
   it('a model never measured: no bar, the seconds so far; a slow load never shows full', () => {
-    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: 'tts', state: 'loading', elapsed_ms: 3000 }] }, {}, names)).toMatchObject({ progress: null, detail: 'Voice 3 s' })
-    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: 'tts', state: 'loading', elapsed_ms: 30_000 }] }, { tts: 1000 }, names)?.progress).toBe(0.95)
+    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 3000 }] }, {}, names)).toMatchObject({ progress: null, detail: 'Fish Audio Drama 3 3 s' })
+    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 30_000 }] }, { [D]: 12500 }, names)?.progress).toBe(0.95)
+  })
+
+  it('a disabled voice model stops the banner with what to do, in loading or ready', () => {
+    const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'disabled', elapsed_ms: 0 }, { id: W, state: 'loading', elapsed_ms: 900 }] }, { [D]: 12500 }, names, 'studio')
+    expect(v).toEqual({ done: false, stopped: true, progress: null, text: 'Voice calls can’t start', detail: 'Fish Audio Drama 3 is disabled on studio. Enable it in Settings › Models to use voice calls.' })
+    expect(callLoading({ type: 'localrouter.session.ready', models: [{ id: D, state: 'disabled' }, { id: W, state: 'disabled' }] }, {}, names)?.detail).toBe('Fish Audio Drama 3 and Whisper large-v3-turbo are disabled on this LocalRouter server. Enable them in Settings › Models to use voice calls.')
   })
 
   it('ready ends it; other events are not its business', () => {

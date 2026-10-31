@@ -552,7 +552,7 @@ function registerIpc() {
         // A call whose voice models load when it starts: the shim's banner, estimated from each model's last load.
         if (ev.type === 'localrouter.session.loading' || ev.type === 'localrouter.session.ready') {
           if (!lastTools) void readModels()
-          ev.lr_loading = callLoading(ev, Object.fromEntries((lastTools?.entries ?? []).map((t) => [t.id, t.last_load_ms])), names)
+          ev.lr_loading = callLoading(ev, Object.fromEntries((lastTools?.entries ?? []).map((t) => [t.id, t.last_load_ms])), names, modelsServer())
         }
         owner.send('rt:event', id, JSON.stringify(ev))
       },
@@ -1332,17 +1332,19 @@ async function smoke() {
         srv.close(() => resolve(port))
       })
     })
-    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind }))`)
+    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind, tabs: [...document.querySelectorAll("[role=tab]")].map((t) => { t.click(); return t.id.slice(4) + ":" + [...document.querySelectorAll("[role=tabpanel]")].filter((p) => !p.hidden).map((p) => p.id.slice(6)).join("+") }).join(",") }))`)
     const page = result.page as { shim: boolean; bridge: boolean; beta: string }
     const icons = result.icons as { tray: { width: number }; window: { width: number } }
     const status = result.status as { computers: number; placement: string }
-    const setupPage = result.setup as { version: string; error: string }
+    const setupPage = result.setup as { version: string; error: string; tabs: string }
+    // Each settings tab shows its own panel and only it.
+    const tabsOk = setupPage.tabs === 'general:general,models:models,voice:voice,computer:computer,integrations:integrations'
     type Echo = { method: string; url: string; type: string; bytes: number; clip: boolean; auth: string }
     const v = result.voices as { post: Echo; patch: Echo; del: Echo; list: Echo }
     const voices = v.post.method === 'POST' && v.post.url === '/v1/voices' && v.post.type.startsWith('multipart/form-data; boundary=') && v.post.clip && v.post.bytes > 4104 &&
       v.patch.method === 'PATCH' && v.patch.bytes === 13 && v.del.method === 'DELETE' && v.del.bytes === 0 && v.list.url === '/v1/voices?model=m' && v.list.auth === 'Bearer smoke-token'
     const unpaired = result.unpaired as { answered: boolean; computer_use: boolean | null; says: string }
-    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused' &&
+    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused' && tabsOk &&
       page.beta === 'Beta' && icons.tray.width === 32 && icons.window.width === 1024
     // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
     const native = await createPlatform('native', { dataDir: dir })
