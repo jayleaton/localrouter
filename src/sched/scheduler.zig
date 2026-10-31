@@ -9,21 +9,29 @@
 //! running job) is held back from MemAvailable, less what MemAvailable has dropped since it was admitted (that part has
 //! landed and is already counted there).
 //!
+//! Residency (`config.Residency`, changed live through `setResidency`): an `always` tool is what `keep_loaded` was, a
+//! `call` tool is kept the same way while a realtime voice session is open (`callOpened` asks for it as a call
+//! connects) and counts its idle TTL from the end of the last call as well as from its last job, and an `on_demand`
+//! tool loads with its first request. Below, "kept" means `always`, or `call` during a call (`keepOf`).
+//!
 //! Eviction: when a request needs room, idle tools are unloaded lowest `priority` first, least recently used among
 //! equals, until it fits. Priority only orders the victims: a request is never refused while unloading idle tools
-//! (whatever their priority) would make room; a loading or busy tool (on any lane) is never a victim. `keep_loaded`
+//! (whatever their priority) would make room; a loading or busy tool (on any lane) is never a victim. Kept
 //! tools are loaded at start when they fit, skip the idle TTL, and come back by themselves once their lane has been
 //! idle for a moment: a kept tool that does not fit unloads idle tools of lower priority, as a request would (never one
 //! of its own priority or above, so two kept tools cannot unload each other), unless it was unloaded through the API.
 //! A `spare_room_only` tool (an on-demand model nothing waits on) is the exception to "never refused while unloading
 //! would make room": it never unloads a kept tool, and loads only with room left for the kept tools' working bytes.
 //! So is a call: while a realtime voice session is open, a request (or an API load) for a tool outside the voice loop
-//! never unloads a voice-loop model (chat, speech, transcription) of a higher priority. It is refused instead, with a
+//! never unloads a voice-loop model (chat, speech, transcription) of a higher priority, nor a `call` tool of any; and
+//! `call` tools never unload each other. It is refused instead, with a
 //! message the chat model can say, rather than cut the call's speech mid-sentence (DGX-01, 2026-10-24: a picture asked
 //! for in a call loaded the cold image model and unloaded Whisper, then Drama 3; the call went silent for two minutes).
 //! The cooperative `reserve_for`, which tells the session first and brings the voice back after the job, is unchanged.
 //! Kept tools come back highest priority first across lanes: one waits while a higher one is due to load, and comes back
 //! only with room to spare for the working bytes of the kept tools above it (else their next job evicts it again).
+//! A `call` tool loads beside higher ones still due when all of them fit (a call's models load at once, not in turn),
+//! and may unload idle tools that are not kept, of any priority, as a request would.
 //!
 //! The host's GPU lock (`Config.gpu_lock`) guards the machine against GPU users outside LocalRouter. The scheduler is
 //! the one admission authority inside it: it holds the lock once, shared and without waiting, while any tool is loaded,
@@ -46,25 +54,48 @@ const config = @import("../config.zig");
 const Config = config.Config;
 
 pub const Lane = config.Lane;
+pub const Residency = config.Residency;
+
+/// Why a tool stays loaded now: its residency is `always`, or `call` while a call is open; else it is `no`t kept.
+pub const Keep = enum { no, always, call };
+
+/// A `call` tool's load for an open call, as voice sessions show it (`backend.CallModel`).
+pub const CallLoad = struct {
+    tool: usize,
+    state: enum { queued, loading, warming, ready, failed, no_room, disabled }, // warming: loaded, its voice's warm-up runs
+    elapsed_ms: u64,
+};
+
+/// The residency budget (`GET /v1/tools`): the most the scheduler may book, what it has booked now (loaded and
+/// admitted), and what the `always` tools take (their resident bytes and one job's working bytes each).
+pub const Budget = struct { ceiling_bytes: u64, booked_bytes: u64, always_bytes: u64 };
 
 pub const Slot = struct {
     tool: Tool,
     resident: u64 = 0, // measured while loaded (the estimate while it loads)
     last_used_ns: i96 = 0,
-    released: bool = false, // unloaded through the API: `keep_loaded` does not bring it back until it is loaded again
+    released: bool = false, // unloaded through the API: not kept (`keepOf`) until it is loaded again
     visited: bool = false, // scratch of `loadKept`
-    retry_ns: i96 = 0, // a failed `keep_loaded` load is not retried before this time
+    retry_ns: i96 = 0, // a failed kept load is not retried before this time
     backoff_ns: i96 = reload_backoff_min_ns, // the next wait after a failed load: doubles to the maximum, reset by a load
     in_use: bool = false, // its lane is loading or running it: never a victim (under `gate`)
     pending: u64 = 0, // admitted bytes that MemAvailable may not show yet (under `gate`)
     pending_ns: i96 = 0, // when `pending` was admitted (under `gate`)
     pending_avail: u64 = 0, // MemAvailable then: what has landed since shows as its drop, not counted twice
-    unfit: bool = false, // a `keep_loaded` reload last found no room: lower priorities stop deferring to it
+    unfit: bool = false, // a kept reload last found no room: lower priorities stop deferring to it
     unload_after: bool = false, // unloaded on request while in use: its lane unloads it when done
     displaced: bool = false, // unloaded to make room (reserve_for, unload_model, or an eviction of a kept tool): it comes
     // back by itself once `hold_until_ns` has passed and it fits again; a load or a release clears it (under `gate`)
     held: bool = false, // the target of a reservation: kept reloads do not evict it until its next job is done
     pausing: bool = false, // a voice model displaced for a model of another kind: voice sessions wait for it (under `gate`)
+    // Set through the API (`setResidency`, `<data_dir>/residency.json`); null: the config's. Under `gate`.
+    residency: ?config.Residency = null,
+    ttl_s: ?u32 = null,
+    armed_ns: i96 = 0, // its residency or TTL last changed: its idle TTL counts from here at the earliest
+    call_ns: i96 = 0, // a call last asked for it (a `call` tool connecting while it was down)
+    called: bool = false, // in a call's set (a `call` tool at a connect): disabled since, a call reports it as such
+    loaded_since_s: i64 = 0, // unix seconds of its current load; 0: not loaded
+    last_load_ms: ?u64 = null, // how long its last load took
     // A speech tool's voice warm in this load: the voice of the last speech job it completed since it loaded (`said`
     // bytes of `voice`), so a session knows whether its voice's first sentence is paid already (`speechWarm`). One voice:
     // the Mac Drama server keeps one reference prefix and rebuilds it on a switch (4 to 6 s on the M5 Ultra); a server
@@ -72,13 +103,14 @@ pub const Slot = struct {
     voice: [64]u8 = undefined,
     said: u8 = 0,
     warm: bool = false, // a speech job completed since it loaded
+    warm_job: ?*const jobs.Job = null, // the warm-up `Loaded` queued after its load, until it ends (compared, never read)
 };
 
-/// Told after a kept speech tool is loaded (at start, and each time it comes back), outside `gate` on its lane's thread:
-/// it may queue a job, but must not wait for one.
+/// Told after every load of a speech tool (at start, a kept tool coming back, an API load, a call's, a request's), outside
+/// `gate` on its lane's thread: it may queue a job (the voice's warm-up, returned), but must not wait for one.
 pub const Loaded = struct {
     ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque, tool: usize) void,
+    f: *const fn (ctx: *anyopaque, tool: usize) ?*const jobs.Job,
 };
 
 /// Told before a voice model (speech or transcription) is unloaded to make room, and when every one of them is back,
@@ -94,7 +126,7 @@ pub const Notify = struct {
 /// The most models one reservation unloads (a box has a handful).
 pub const max_victims = 16;
 
-/// How long a lane must be idle before a `keep_loaded` tool is reloaded, and how often it checks the memory.
+/// How long a lane must be idle before a kept tool is reloaded, and how often it checks the memory.
 const reload_grace_ns: i96 = 2 * std.time.ns_per_s;
 const reload_poll_ns: i96 = 2 * std.time.ns_per_s;
 const reload_backoff_min_ns: i96 = 5 * std.time.ns_per_s; // a model refused by its own launcher (memory held elsewhere)
@@ -135,6 +167,7 @@ const LaneState = struct {
     cond: Io.Condition = .init,
     running: ?*jobs.Job = null,
     idle_since_ns: i96 = 0, // when the executor last finished an item
+    woken: bool = false, // `wakeAll` since it last looked: it looks again before it waits (under `mutex`)
 };
 
 const lane_count = 5;
@@ -169,6 +202,8 @@ pub const Scheduler = struct {
     notify: ?Notify = null, // voice sessions, told of voice models leaving and coming back
     loaded: ?Loaded = null, // a kept speech tool loaded: its voice is warmed (`api/voice_local.zig`)
     voice_paused: std.atomic.Value(bool) = .init(false), // a voice model is displaced: sessions wait for it
+    settings: Io.Mutex = .init, // a residency change and its write to residency.json, one at a time (`api/routes.zig`)
+    call_end_ns: i96 = 0, // the last open call ended: `call` tools count their idle TTL from here too; under `gate`
 
     /// True while a speech or transcription model is unloaded to make room; voice sessions wait instead of failing.
     pub fn voicePaused(s: *const Scheduler) bool {
@@ -218,6 +253,178 @@ pub const Scheduler = struct {
     fn inCall(s: *const Scheduler) bool {
         const n = s.notify orelse return false;
         return n.sessions(n.ctx) > 0;
+    }
+
+    /// A tool's residency now: set through the API, else its config's.
+    pub fn ruleOf(slot: *const Slot) Residency {
+        return slot.residency orelse config.residencyOf(slot.tool.config());
+    }
+
+    /// A tool's idle TTL now: set through the API, else its config's.
+    pub fn ttlOf(slot: *const Slot) u32 {
+        return slot.ttl_s orelse slot.tool.config().idle_ttl_s;
+    }
+
+    /// Why `slot` stays loaded now (`in_call`: a call is open). One unloaded through the API is not kept until it loads
+    /// again (or, a `call` tool, until the next call connects).
+    fn keepOf(slot: *const Slot, in_call: bool) Keep {
+        if (slot.released) return .no;
+        return switch (ruleOf(slot)) {
+            .always => .always,
+            .call => if (in_call) .call else .no,
+            .on_demand, .disabled => .no,
+        };
+    }
+
+    /// When `slot`'s idle TTL starts counting: its last job, a change of its settings, and for a `call` tool the end of
+    /// the last call.
+    fn idleFrom(s: *const Scheduler, slot: *const Slot) i96 {
+        const t = @max(slot.last_used_ns, slot.armed_ns);
+        return if (ruleOf(slot) == .call) @max(t, s.call_end_ns) else t;
+    }
+
+    /// A realtime voice session connected (it counts in `Notify.sessions` already): the `call` tools that are down load
+    /// now, on their lanes, kept until the last call ends. One unloaded through the API, or that failed or found no room
+    /// before, is tried again for this call.
+    pub fn callOpened(s: *Scheduler) void {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        const now = nowNs(s.io);
+        for (s.slots) |*slot| {
+            if (ruleOf(slot) != .call) continue;
+            slot.called = true;
+            slot.released = false;
+            if (slot.tool.state() == .ready or slot.tool.state() == .busy) continue;
+            slot.call_ns = now;
+            slot.unfit = false;
+            slot.retry_ns = 0;
+            slot.backoff_ns = reload_backoff_min_ns;
+        }
+        s.wakeAll();
+    }
+
+    /// A realtime voice session ended: once none is open, the `call` tools' idle TTL counts from now.
+    pub fn callClosed(s: *Scheduler) void {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        if (s.inCall()) return;
+        s.call_end_ns = nowNs(s.io);
+        s.wakeAll(); // their lanes may sleep until a far TTL: they count the new one
+    }
+
+    /// The `call` tools and how far their loads for the open calls are, in `out` (at most its length); a tool of a call's
+    /// set that was disabled since is listed as such, so a session says so rather than waiting for it.
+    pub fn callLoads(s: *Scheduler, out: []CallLoad) []CallLoad {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        const now = nowNs(s.io);
+        var n: usize = 0;
+        for (s.slots, 0..) |*slot, i| {
+            const rule = ruleOf(slot);
+            if (!(rule == .call or (rule == .disabled and slot.called)) or n == out.len) continue;
+            const st = slot.tool.state();
+            if (rule == .disabled) {
+                out[n] = .{ .tool = i, .state = .disabled, .elapsed_ms = 0 };
+                n += 1;
+                continue;
+            }
+            out[n] = .{ .tool = i, .elapsed_ms = if (slot.call_ns > 0) @intCast(@divTrunc(@max(now - slot.call_ns, 0), std.time.ns_per_ms)) else 0, .state = switch (st) {
+                .ready, .busy => if (slot.warm_job != null) .warming else .ready,
+                .loading => .loading,
+                .unloaded, .failed => if (slot.in_use) .loading else if (slot.unfit) .no_room else if (now < slot.retry_ns or st == .failed) .failed else .queued,
+            } };
+            n += 1;
+        }
+        return out[0..n];
+    }
+
+    /// Under `gate`: what the scheduler may book at most: `budget_bytes`, else the machine's memory less the reserve.
+    fn ceiling(s: *const Scheduler) u64 {
+        if (s.cfg.budget_bytes > 0) return s.cfg.budget_bytes;
+        return (memory.total() orelse 0) -| s.cfg.reserve_bytes;
+    }
+
+    /// Under `gate`: what tool `i` takes kept loaded: its measured bytes (its estimate when not loaded) and a job's
+    /// working bytes.
+    fn keptBytes(s: *Scheduler, i: usize) u64 {
+        const slot = &s.slots[i];
+        const n = slot.tool.needs(&placeholder(slot.tool.config().kind));
+        return (if (slot.resident > 0) slot.resident else n.resident) +| n.working;
+    }
+
+    /// Under `gate`: what the `always` tools take (`keptBytes`), with tool `with` counted as one too.
+    fn alwaysBytes(s: *Scheduler, with: ?usize) u64 {
+        var bytes: u64 = 0;
+        for (s.slots, 0..) |*slot, i| {
+            if (!slot.tool.local()) continue; // its node holds it
+            if (ruleOf(slot) == .always or i == with) bytes +|= s.keptBytes(i);
+        }
+        return bytes;
+    }
+
+    pub fn budget(s: *Scheduler) Budget {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        var booked: u64 = 0;
+        for (s.slots) |slot| booked +|= slot.resident +| slot.pending;
+        return .{ .ceiling_bytes = s.ceiling(), .booked_bytes = booked, .always_bytes = s.alwaysBytes(null) };
+    }
+
+    /// Why `setResidency` refused: `call` for a tool outside the voice loop, or an `always` set past the ceiling.
+    pub const Refusal = union(enum) {
+        not_voice: @import("../tool/request.zig").Kind,
+        over_budget: struct { needs: u64, always: u64, ceiling: u64 }, // the tool's bytes, the always set's with it
+    };
+
+    /// Sets tool `i`'s residency and idle TTL overrides (null: the config's) and applies them now: a tool that becomes
+    /// `always` loads when it fits (its lane's next kept load, at once if the lane is idle), and one that leaves it, or
+    /// whose TTL changed, counts its idle TTL from now. Null when done, else why not (nothing changed).
+    pub fn setResidency(s: *Scheduler, i: usize, rule: ?Residency, ttl_s: ?u32) ?Refusal {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        const slot = &s.slots[i];
+        const c = slot.tool.config();
+        const after = rule orelse config.residencyOf(c);
+        if (after == .call and !config.callAllowed(c.kind)) return .{ .not_voice = c.kind };
+        if (after == .always and ruleOf(slot) != .always and slot.tool.local()) {
+            const total = s.alwaysBytes(i);
+            if (total > s.ceiling()) return .{ .over_budget = .{ .needs = s.keptBytes(i), .always = total, .ceiling = s.ceiling() } };
+        }
+        const before = ruleOf(slot);
+        const before_ttl = ttlOf(slot);
+        slot.residency = rule;
+        slot.ttl_s = ttl_s;
+        if (before != after or before_ttl != ttlOf(slot)) slot.armed_ns = nowNs(s.io);
+        if (after != .call and after != .disabled) slot.called = false;
+        if (after == .disabled and before != .disabled) { // gone now, or as soon as its running job ends; never back
+            slot.displaced = false;
+            slot.held = false;
+            if (slot.in_use) slot.unload_after = true else s.unloadSlot(slot);
+            if (slot.pausing) { // a voice session waiting for it would wait forever
+                slot.pausing = false;
+                s.checkResumed();
+            }
+            s.releaseIdleGpuLock();
+        }
+        if (after == .always and before != .always) { // a fresh start: not released, no backoff from an earlier failure
+            slot.released = false;
+            slot.unfit = false;
+            slot.retry_ns = 0;
+            slot.backoff_ns = reload_backoff_min_ns;
+        }
+        std.log.info("residency {s}: {s}, idle_ttl_s {d} (was {s}, {d})", .{ c.id, @tagName(after), ttlOf(slot), @tagName(before), before_ttl });
+        s.wakeAll();
+        return null;
+    }
+
+    /// Wakes every lane: each looks at its TTLs and kept tools again. Under `gate` or not; never under `mutex`.
+    fn wakeAll(s: *Scheduler) void {
+        s.mutex.lockUncancelable(s.io); // lock order: gate, then mutex
+        defer s.mutex.unlock(s.io);
+        for (&s.lanes) |*l| {
+            l.woken = true; // a lane between its look and its wait would miss the signal
+            l.cond.signal(s.io);
+        }
     }
 
     /// Under `gate`: once no voice model that paused voice is down, sessions are told voice is back.
@@ -464,7 +671,8 @@ pub const Scheduler = struct {
                 return null;
             }
             const wait_ns = s.nextExpiryNs(lane);
-            l.cond.waitTimeout(s.io, &s.mutex, .{ .duration = .{ .raw = .fromNanoseconds(wait_ns), .clock = .awake } }) catch {};
+            if (!l.woken) l.cond.waitTimeout(s.io, &s.mutex, .{ .duration = .{ .raw = .fromNanoseconds(wait_ns), .clock = .awake } }) catch {};
+            l.woken = false;
             s.mutex.unlock(s.io);
             s.unloadIdle(lane);
             s.loadKept(lane, true);
@@ -476,14 +684,15 @@ pub const Scheduler = struct {
     /// Nanoseconds until the earliest idle TTL of the lane's tools ends (capped at 60 s, the output expiry tick).
     fn nextExpiryNs(s: *Scheduler, lane: Lane) i96 {
         const now = nowNs(s.io);
+        const in_call = s.inCall();
         var wait: i96 = 60 * std.time.ns_per_s;
-        for (s.slots, 0..) |slot, i| {
+        for (s.slots, 0..) |*slot, i| {
             if (s.laneOfTool(i) != lane) continue;
-            const c = slot.tool.config();
-            if (((c.keep_loaded and !slot.released) or slot.displaced) and slot.tool.state() == .unloaded) wait = @min(wait, reload_poll_ns);
-            if (c.keep_loaded) continue;
+            const keep = keepOf(slot, in_call);
+            if ((keep != .no or slot.displaced) and slot.tool.state() == .unloaded) wait = @min(wait, reload_poll_ns);
+            if (keep != .no) continue;
             if (slot.resident == 0 and slot.tool.state() != .ready) continue;
-            const ttl_end = slot.last_used_ns + @as(i96, c.idle_ttl_s) * std.time.ns_per_s;
+            const ttl_end = s.idleFrom(slot) + @as(i96, ttlOf(slot)) * std.time.ns_per_s;
             wait = @min(wait, @max(ttl_end - now, 1));
         }
         return wait;
@@ -493,16 +702,20 @@ pub const Scheduler = struct {
         const now = nowNs(s.io);
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
+        const in_call = s.inCall();
         for (s.slots, 0..) |*slot, i| {
             if (s.laneOfTool(i) != lane or slot.in_use) continue;
-            if (slot.tool.state() != .ready or slot.tool.config().keep_loaded) continue;
-            if (now - slot.last_used_ns >= @as(i96, slot.tool.config().idle_ttl_s) * std.time.ns_per_s) s.unloadSlot(slot);
+            if (slot.tool.state() != .ready or keepOf(slot, in_call) != .no) continue;
+            if (now - s.idleFrom(slot) >= @as(i96, ttlOf(slot)) * std.time.ns_per_s) {
+                std.log.info("{s}: idle for {d} s, unloaded ({s})", .{ slot.tool.config().id, ttlOf(slot), @tagName(ruleOf(slot)) });
+                s.unloadSlot(slot);
+            }
         }
     }
 
-    /// Loads the lane's `keep_loaded` tools that are down, highest priority first, each if it fits once idle tools of
-    /// lower priority (on any lane) are unloaded. At start (`wait_idle` false) it logs the outcome; later it waits for
-    /// `reload_grace_ns` of the lane's idleness.
+    /// Loads the lane's kept tools (`keepOf`) that are down, highest priority first, each if it fits once idle tools of
+    /// lower priority (on any lane; for a `call` tool also idle ones not kept) are unloaded. At start (`wait_idle` false)
+    /// it logs the outcome; later it waits for `reload_grace_ns` of the lane's idleness.
     fn loadKept(s: *Scheduler, lane: Lane, wait_idle: bool) void {
         if (wait_idle and nowNs(s.io) - s.lanes[index(lane)].idle_since_ns < reload_grace_ns) return;
         for (s.slots, 0..) |*slot, i| if (s.laneOfTool(i) == lane) {
@@ -510,11 +723,12 @@ pub const Scheduler = struct {
         };
         while (true) {
             s.gate.lockUncancelable(s.io);
+            const in_call = s.inCall();
             var best: ?usize = null;
             for (s.slots, 0..) |*slot, i| {
                 const c = slot.tool.config();
                 if (s.laneOfTool(i) != lane or slot.visited or slot.tool.state() != .unloaded) continue;
-                if (!((c.keep_loaded and !slot.released) or slot.displaced)) continue;
+                if ((keepOf(slot, in_call) == .no and !slot.displaced) or ruleOf(slot) == .disabled) continue;
                 if (slot.displaced and nowNs(s.io) < s.hold_until_ns) continue; // the job it made room for has not run yet
                 if (best == null or c.priority > s.slots[best.?].tool.config().priority) best = i;
             }
@@ -525,63 +739,71 @@ pub const Scheduler = struct {
             const slot = &s.slots[i];
             slot.visited = true;
             const c = slot.tool.config();
+            const keep = keepOf(slot, in_call);
+            const why = if (keep == .call) "call" else if (keep == .always) "keep_loaded" else "restored";
             const estimate = slot.tool.needs(&placeholder(c.kind)).resident;
-            if (s.higherKeptDue(i)) { // it takes its room first; this one comes back on a later poll
+            if (s.higherKeptDue(i, in_call, if (keep == .call) estimate +| s.keptHeadroom(i, in_call) else null)) { // it takes its room first; this one comes back on a later poll
                 s.gate.unlock(s.io);
                 continue;
             }
-            if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate +| s.keptHeadroom(i), c.priority)) {
-                if (nowNs(s.io) >= slot.retry_ns) slot.unfit = true;
+            if (nowNs(s.io) < slot.retry_ns or !s.admit(i, estimate +| s.keptHeadroom(i, in_call), c.priority)) {
+                const now = nowNs(s.io);
+                const first = !slot.unfit;
+                if (now >= slot.retry_ns) slot.unfit = true;
                 s.gate.unlock(s.io);
-                if (!wait_idle and nowNs(s.io) >= slot.retry_ns) std.log.warn("keep_loaded {s}: not loaded at start, it does not fit", .{c.id});
+                if (now >= slot.retry_ns and (!wait_idle or (keep == .call and first))) std.log.warn("{s} {s}: not loaded, it does not fit", .{ why, c.id });
                 continue;
             }
             s.reserve(slot, estimate);
             s.gate.unlock(s.io);
             s.loadSlot(slot) catch |err| {
                 s.done(slot);
-                std.log.warn("keep_loaded {s}: load failed: {s}", .{ c.id, if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message });
+                std.log.warn("{s} {s}: load failed: {s}", .{ why, c.id, if (err == error.GpuLockHeld) s.lockMessage() else slot.tool.failure().message });
                 slot.retry_ns = nowNs(s.io) + slot.backoff_ns;
                 slot.backoff_ns = @min(slot.backoff_ns * 2, reload_backoff_max_ns);
                 continue;
             };
             slot.backoff_ns = reload_backoff_min_ns;
             s.done(slot);
-            std.log.info("{s} {s}: loaded ({d} MiB)", .{ if (c.keep_loaded) "keep_loaded" else "restored", c.id, slot.resident >> 20 });
+            std.log.info("{s} {s}: loaded ({d} MiB in {d} ms)", .{ why, c.id, slot.resident >> 20, slot.last_load_ms orelse 0 });
             s.gate.lockUncancelable(s.io);
             s.checkResumed();
             s.gate.unlock(s.io);
-            if (c.kind == .speech) if (s.loaded) |l| l.f(l.ctx, i); // its first sentence now, not in a call's first reply
         }
     }
 
-    /// Under `gate`: a `keep_loaded` tool of a higher priority than slot `i` is down and due to load (not released, not
-    /// backing off, not just found not to fit). Kept tools come back highest priority first across lanes, so a lower
-    /// one never takes the room a higher one is about to need (DGX-01: the image model loaded before chat at a restart,
-    /// and chat then unloaded Drama 3 and Whisper to fit).
-    fn higherKeptDue(s: *Scheduler, i: usize) bool {
+    /// Under `gate`: a kept tool of a higher priority than slot `i` is down and due to load (not released, not backing
+    /// off, not just found not to fit). Kept tools come back highest priority first across lanes, so a lower one never
+    /// takes the room a higher one is about to need (DGX-01: the image model loaded before chat at a restart, and chat
+    /// then unloaded Drama 3 and Whisper to fit). With `alongside` (a `call` tool's bytes) slot `i` waits only when it
+    /// and the higher ones still down do not all fit: a call's models then load together.
+    fn higherKeptDue(s: *Scheduler, i: usize, in_call: bool, alongside: ?u64) bool {
         const p = s.slots[i].tool.config().priority;
         const now = nowNs(s.io);
+        var due = false;
+        var bytes: u64 = alongside orelse 0;
         for (s.slots, 0..) |*slot, j| {
             const c = slot.tool.config();
-            if (j == i or !c.keep_loaded or c.priority <= p or slot.released or slot.unfit or now < slot.retry_ns) continue;
+            if (j == i or keepOf(slot, in_call) == .no or c.priority <= p or slot.unfit or now < slot.retry_ns) continue;
             const st = slot.tool.state();
-            if (st == .unloaded or st == .loading) return true;
+            if (st == .unloaded) bytes +|= slot.tool.needs(&placeholder(c.kind)).resident; // a loading one is admitted already
+            if (st == .unloaded or st == .loading) due = true;
         }
-        return false;
+        if (!due) return false;
+        return alongside == null or !s.fits(bytes);
     }
 
-    /// The working bytes of the loaded `keep_loaded` tools of a higher priority than slot `i`: a kept tool comes back only
+    /// The working bytes of the loaded kept tools of a higher priority than slot `i`: a kept tool comes back only
     /// with that much to spare, or their next job unloads it again (DGX-01: every voice turn's transcription evicted the
     /// kept image model, which reloaded as soon as the turn ended).
     /// A `spare_room_only` tool leaves room for every loaded kept tool's working bytes, whatever their priority.
-    fn keptHeadroom(s: *Scheduler, i: usize) u64 {
+    fn keptHeadroom(s: *Scheduler, i: usize, in_call: bool) u64 {
         const p = s.slots[i].tool.config().priority;
         const every = s.slots[i].tool.config().spare_room_only;
         var bytes: u64 = 0;
         for (s.slots, 0..) |*slot, j| {
             const c = slot.tool.config();
-            if (j == i or !c.keep_loaded or (c.priority <= p and !every) or slot.tool.state() == .unloaded) continue;
+            if (j == i or keepOf(slot, in_call) == .no or (c.priority <= p and !every) or slot.tool.state() == .unloaded) continue;
             bytes +|= slot.tool.needs(&placeholder(c.kind)).working;
         }
         return bytes;
@@ -616,9 +838,9 @@ pub const Scheduler = struct {
         if (slot.tool.state() == .unloaded and slot.resident == 0) return;
         slot.tool.unload();
         slot.resident = 0;
-        s.mutex.lockUncancelable(s.io); // lock order: gate, then mutex (nothing takes them the other way)
-        defer s.mutex.unlock(s.io);
-        for (&s.lanes) |*l| l.cond.signal(s.io);
+        slot.loaded_since_s = 0;
+        slot.warm_job = null; // a warm-up of the gone instance warms nothing
+        s.wakeAll(); // lock order: gate, then mutex (nothing takes them the other way)
     }
 
     /// Unloads `slot` now, or when its lane is done with it.
@@ -658,6 +880,12 @@ pub const Scheduler = struct {
                 if (slot.tool.state() == .ready) return;
                 const n = slot.tool.needs(&placeholder(slot.tool.config().kind));
                 s.gate.lockUncancelable(s.io);
+                if (ruleOf(slot) == .disabled) {
+                    s.gate.unlock(s.io);
+                    c.failed = true;
+                    c.message = "the model is disabled in settings";
+                    return;
+                }
                 if (!s.admit(c.tool, n.resident, null)) {
                     const call = s.guardsCall(slot.tool.config());
                     s.gate.unlock(s.io);
@@ -713,11 +941,13 @@ pub const Scheduler = struct {
         return s.slots[i].tool.needs(&r);
     }
 
-    /// From any thread: whether tool `i` is waiting to come back (displaced) or held for a reservation's job.
-    pub fn residency(s: *Scheduler, i: usize) struct { displaced: bool, held: bool } {
+    /// From any thread: tool `i`'s residency and idle TTL now (and what was set through the API, null for the config's),
+    /// its load times, and whether it is waiting to come back (displaced) or held for a reservation's job.
+    pub fn residency(s: *Scheduler, i: usize) struct { displaced: bool, held: bool, rule: Residency, idle_ttl_s: u32, rule_override: ?Residency, ttl_override: ?u32, last_load_ms: ?u64, loaded_since_s: i64 } {
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
-        return .{ .displaced = s.slots[i].displaced, .held = s.slots[i].held };
+        const slot = &s.slots[i];
+        return .{ .displaced = slot.displaced, .held = slot.held, .rule = ruleOf(slot), .idle_ttl_s = ttlOf(slot), .rule_override = slot.residency, .ttl_override = slot.ttl_s, .last_load_ms = slot.last_load_ms, .loaded_since_s = slot.loaded_since_s };
     }
 
     /// On the target's lane: unloads what `planFor` names (voice sessions told first), loads the target and holds it
@@ -726,6 +956,12 @@ pub const Scheduler = struct {
         const slot = &s.slots[c.tool];
         const req = c.request orelse placeholder(slot.tool.config().kind);
         s.gate.lockUncancelable(s.io);
+        if (ruleOf(slot) == .disabled) {
+            s.gate.unlock(s.io);
+            c.failed = true;
+            c.message = "the model is disabled in settings";
+            return;
+        }
         c.plan = s.planFor(c.tool, &req);
         if (!c.plan.fits) {
             s.gate.unlock(s.io);
@@ -768,9 +1004,29 @@ pub const Scheduler = struct {
         for (&s.lanes) |*l| l.cond.signal(s.io);
     }
 
+    /// `loadInstance`, then a speech tool's warm-up (`Loaded`), whatever asked for the load: its first sentence is paid
+    /// now, not in a call's first reply (4.4 s for the Mac's Drama 3 to build its voice prefix).
+    fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
+        try s.loadInstance(slot);
+        if (slot.tool.config().kind != .speech) return;
+        const l = s.loaded orelse return;
+        const i = (@intFromPtr(slot) - @intFromPtr(s.slots.ptr)) / @sizeOf(Slot);
+        const j = l.f(l.ctx, i);
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        slot.warm_job = j;
+    }
+
+    /// Under `gate`: `j` ended; if it was `slot`'s warm-up, the slot is warm (or as warm as it gets).
+    fn warmEnded(s: *Scheduler, slot: *Slot, j: *const jobs.Job) void {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        if (slot.warm_job == j) slot.warm_job = null;
+    }
+
     /// Loads outside `gate` (the reservation holds the memory) while LocalRouter holds the host's GPU lock, then records
     /// the measured bytes; `error.GpuLockHeld` (why: `lockMessage`) when a GPU user outside LocalRouter holds it.
-    fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
+    fn loadInstance(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
         const estimate = slot.tool.needs(&placeholder(slot.tool.config().kind)).resident;
         if (slot.tool.local()) { // a remote tool's node holds its own lock
             s.gate.lockUncancelable(s.io);
@@ -778,9 +1034,12 @@ pub const Scheduler = struct {
             s.gate.unlock(s.io);
             if (!locked) return error.GpuLockHeld;
         }
+        const began = nowNs(s.io);
         const measured = try slot.tool.load();
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
+        slot.last_load_ms = @intCast(@divTrunc(@max(nowNs(s.io) - began, 0), std.time.ns_per_ms));
+        slot.loaded_since_s = nowUnix(s.io);
         slot.resident = if (measured > 0) measured else estimate;
         slot.pending -|= estimate; // now visible in MemAvailable
         slot.pending_ns = nowNs(s.io); // what is left (a job's working bytes) lands from here
@@ -795,14 +1054,20 @@ pub const Scheduler = struct {
 
     fn runJob(s: *Scheduler, j: *jobs.Job) void {
         const slot = &s.slots[j.tool];
+        defer s.warmEnded(slot, j);
         s.setStatus(j, .in_progress);
         const n = slot.tool.needs(&j.request);
         s.gate.lockUncancelable(s.io);
+        if (ruleOf(slot) == .disabled) { // queued before it was disabled
+            s.gate.unlock(s.io);
+            var buf: [160]u8 = undefined;
+            return s.finish(j, .failed, 409, "model_disabled", std.fmt.bufPrint(&buf, "{s} is disabled in settings", .{slot.tool.config().id}) catch "the model is disabled in settings", null);
+        }
         const cold = slot.tool.state() != .ready;
         const extra = n.working + if (cold) n.resident else 0;
         const spare = slot.tool.config().spare_room_only;
         // A spare-room tool's load must also leave the kept tools room for their jobs (else their next job evicts it).
-        const room = extra +| if (spare and cold) s.keptHeadroom(j.tool) else 0;
+        const room = extra +| if (spare and cold) s.keptHeadroom(j.tool, s.inCall()) else 0;
         if (!s.admit(j.tool, room, null)) {
             const call = s.guardsCall(slot.tool.config());
             s.gate.unlock(s.io);
@@ -844,11 +1109,9 @@ pub const Scheduler = struct {
             }
             return s.finishError(j, slot, err);
         };
-        if (slot.tool.config().idle_ttl_s == 0 and !slot.tool.config().keep_loaded) {
-            s.gate.lockUncancelable(s.io);
-            slot.unload_after = true;
-            s.gate.unlock(s.io);
-        }
+        s.gate.lockUncancelable(s.io);
+        if (ttlOf(slot) == 0 and keepOf(slot, s.inCall()) == .no) slot.unload_after = true;
+        s.gate.unlock(s.io);
         // every image and video handed out carries the machine-generated label, whichever tool wrote it
         if (heavy) marker.outputs(s.io, s.gpa, j.dir, out.files, marker.forRequest(slot.tool.config().id, j.request));
         if (speaking) {
@@ -864,21 +1127,23 @@ pub const Scheduler = struct {
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
         slot.resident = 0;
+        slot.loaded_since_s = 0;
     }
 
     /// Under `gate`: true when `extra` more bytes fit; unloads idle tools, lowest priority then least recently used
     /// first, until they do. A tool in use by any lane is never a victim. With `below`, only tools of a lower priority
-    /// than it are victims (a `keep_loaded` tool coming back); a `spare_room_only` target never unloads a kept tool
-    /// (`mayEvict`). Either way nothing is unloaded unless unloading all of those would make room: a load that cannot
-    /// happen costs no one their model.
+    /// than it are victims (a kept tool coming back; a `call` one also takes idle tools that are not kept); a
+    /// `spare_room_only` target never unloads a kept tool (`mayEvict`). Either way nothing is unloaded unless unloading
+    /// all of those would make room: a load that cannot happen costs no one their model.
     fn admit(s: *Scheduler, target: usize, extra: u64, below: ?i32) bool {
         const want = s.slots[target].tool.config();
-        const call = s.guardsCall(want);
-        if (below != null or want.spare_room_only or call) {
+        const in_call = s.inCall();
+        const take: Take = .{ .below = below, .call = !voiceLoop(want.kind) and in_call, .for_call = keepOf(&s.slots[target], in_call) == .call };
+        if (below != null or want.spare_room_only or take.call or take.for_call) {
             var freeable: u64 = 0;
-            for (s.slots, 0..) |slot, i| {
+            for (s.slots, 0..) |*slot, i| {
                 if (i != target and !slot.in_use and slot.tool.state() == .ready and slot.tool.local() and (below == null or !slot.held) and
-                    mayEvict(want, slot.tool.config(), below, call)) freeable += slot.resident;
+                    mayEvict(want, slot.tool.config(), keepOf(slot, in_call), take)) freeable += slot.resident;
             }
             if (!s.fits(extra -| freeable)) return false;
         }
@@ -888,11 +1153,11 @@ pub const Scheduler = struct {
             for (s.slots, 0..) |*slot, i| {
                 if (i == target or slot.in_use or slot.tool.state() != .ready or !slot.tool.local()) continue; // a remote tool frees nothing here
                 if (below != null and slot.held) continue; // a reservation's target waits for its job
-                if (!mayEvict(want, slot.tool.config(), below, call)) continue;
+                if (!mayEvict(want, slot.tool.config(), keepOf(slot, in_call), take)) continue;
                 if (victim == null or evictsBefore(slot, victim.?)) victim = slot;
             }
             const v = victim orelse return false;
-            if (v.tool.config().keep_loaded and !v.released) s.displace(v, target); // it comes back after this job
+            if (keepOf(v, in_call) != .no) s.displace(v, target); // it comes back after this job
             // the journal says what evicted what: on a box that keeps models warm an unload is never silent
             std.log.info("evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB available of which {d} MiB is the reserve", .{
                 v.tool.config().id,
@@ -916,14 +1181,19 @@ pub const Scheduler = struct {
         return kind == .chat or kind == .speech or kind == .transcription;
     }
 
-    /// Whether an idle tool (`victim`) may be unloaded to make room for `target`: with `below` (a kept tool coming back)
-    /// only one of a lower priority; for a `spare_room_only` target never a `keep_loaded` one; with `call` (a voice
-    /// session open, `target` outside the voice loop) never a voice-loop model of a higher priority than `target`.
-    /// Otherwise any: priority only orders the victims.
-    fn mayEvict(target: *const config.ToolConfig, victim: *const config.ToolConfig, below: ?i32, call: bool) bool {
-        if (below) |p| if (victim.priority >= p) return false;
-        if (target.spare_room_only and victim.keep_loaded) return false;
-        if (call and voiceLoop(victim.kind) and victim.priority > target.priority) return false;
+    /// What a load may unload: `below`, a kept tool coming back (only lower priorities); `call`, a voice session is open
+    /// and the target is outside the voice loop; `for_call`, the target is a `call` tool kept by an open call.
+    const Take = struct { below: ?i32 = null, call: bool = false, for_call: bool = false };
+
+    /// Whether an idle tool (`victim`, kept now as `keep` says) may be unloaded to make room for `target`: with `below`
+    /// only one of a lower priority (or, for a call's tool, one that is not kept); for a `spare_room_only` target never a
+    /// kept one; with `call` never a voice-loop model of a higher priority than `target`, nor a call's; and a call's
+    /// tools never one another. Otherwise any: priority only orders the victims.
+    fn mayEvict(target: *const config.ToolConfig, victim: *const config.ToolConfig, keep: Keep, t: Take) bool {
+        if (t.for_call and keep == .call) return false;
+        if (t.below) |p| if (victim.priority >= p and !(t.for_call and keep == .no)) return false;
+        if (target.spare_room_only and keep != .no) return false;
+        if (t.call and voiceLoop(victim.kind) and (victim.priority > target.priority or keep == .call)) return false;
         return true;
     }
 
@@ -1066,14 +1336,14 @@ test "victims: priority orders them, a kept tool coming back takes only lower on
     const t = std.testing;
     const may = Scheduler.mayEvict;
     // A request (a video) may unload anything idle, the kept image model included: priority only orders the victims.
-    try t.expect(may(&video, &kept, null, false));
+    try t.expect(may(&video, &kept, .always, .{}));
     // A spare-room model never unloads a kept one, of any priority, but may take an idle tool that is not kept...
-    try t.expect(!may(&decision, &kept, null, false));
-    try t.expect(!may(&decision, &.{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true }, null, false));
-    try t.expect(may(&decision, &idle, null, false));
+    try t.expect(!may(&decision, &kept, .always, .{}));
+    try t.expect(!may(&decision, &.{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true }, .always, .{}));
+    try t.expect(may(&decision, &idle, .no, .{}));
     // A kept tool coming back (below its priority) takes only lower priorities, the spare-room model among them.
-    try t.expect(may(&kept, &decision, kept.priority, false));
-    try t.expect(!may(&kept, &.{ .id = "voice", .kind = .speech, .priority = 95, .keep_loaded = true }, kept.priority, false));
+    try t.expect(may(&kept, &decision, .no, .{ .below = kept.priority }));
+    try t.expect(!may(&kept, &.{ .id = "voice", .kind = .speech, .priority = 95, .keep_loaded = true }, .always, .{ .below = kept.priority }));
 }
 
 test "victims during a call: a request outside the voice loop never takes a voice-loop model of a higher priority" {
@@ -1087,14 +1357,14 @@ test "victims during a call: a request outside the voice loop never takes a voic
     const may = Scheduler.mayEvict;
     // DGX-01, 2026-10-24: the image model loading for a picture asked for in a call unloaded Whisper, then Drama 3.
     for ([_]*const T{ &tts, &stt, &chat }) |voice| {
-        try t.expect(may(&image, voice, null, false)); // no call: priority only orders the victims
-        try t.expect(!may(&image, voice, null, true));
-        try t.expect(!may(&video, voice, null, true));
+        try t.expect(may(&image, voice, .always, .{})); // no call: priority only orders the victims
+        try t.expect(!may(&image, voice, .always, .{ .call = true }));
+        try t.expect(!may(&video, voice, .always, .{ .call = true }));
     }
     // What is not the voice loop's still makes room during a call: a video unloads the image model.
-    try t.expect(may(&video, &image, null, true));
+    try t.expect(may(&video, &image, .always, .{ .call = true }));
     // A voice-loop model making room for another (speech for transcription) is not guarded against itself.
-    try t.expect(may(&stt, &tts, null, false));
+    try t.expect(may(&stt, &tts, .always, .{}));
 }
 
 /// A chat model whose server is `pid`: only what `yieldChat` and `submit` ask of a tool.
@@ -1189,4 +1459,460 @@ test "a speech instance's warm voice: the last sentence it completed since it lo
     Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo" }, true);
     Scheduler.spoke(&slot, &.{ .input = "Hi.", .voice = "Arlo", .references = "references.json" }, true);
     try t.expect(!slot.warm);
+}
+
+/// Tests (here and `api/routes.zig`): a tool that holds `bytes` once loaded; its load takes `load_ms` (and fails with `fail`): what residency asks of a tool.
+pub const FakeTool = struct {
+    cfg: config.ToolConfig,
+    bytes: u64 = 1 << 20,
+    load_ms: u32 = 0,
+    fail: bool = false,
+    st: std.atomic.Value(tool_mod.State) = .init(.unloaded),
+
+    const vtable: Tool.VTable = .{ .config = cfgOf, .needs = needsOf, .load = load, .generate = generate, .unload = unload, .abort = unload, .cancel = cancel, .state = state, .failure = failure };
+    fn tool(f: *FakeTool) Tool {
+        return .{ .ptr = f, .vtable = &vtable };
+    }
+    fn me(p: *anyopaque) *FakeTool {
+        return @ptrCast(@alignCast(p));
+    }
+    fn cfgOf(p: *anyopaque) *const config.ToolConfig {
+        return &me(p).cfg;
+    }
+    fn needsOf(p: *anyopaque, _: *const Request) tool_mod.Needs {
+        return .{ .resident = me(p).bytes, .working = 0 };
+    }
+    fn load(p: *anyopaque) tool_mod.Error!u64 {
+        const f = me(p);
+        f.st.store(.loading, .release);
+        if (f.load_ms > 0) Io.sleep(std.testing.io, .fromMilliseconds(f.load_ms), .awake) catch {};
+        if (f.fail) {
+            f.st.store(.unloaded, .release);
+            return error.LoadFailed;
+        }
+        f.st.store(.ready, .release);
+        return f.bytes;
+    }
+    fn generate(_: *anyopaque, _: *const tool_mod.Job, _: tool_mod.Sink, _: std.mem.Allocator) tool_mod.Error!tool_mod.Output {
+        return error.GenerateFailed;
+    }
+    fn unload(p: *anyopaque) void {
+        me(p).st.store(.unloaded, .release);
+    }
+    fn cancel(_: *anyopaque) bool {
+        return false;
+    }
+    fn state(p: *anyopaque) tool_mod.State {
+        return me(p).st.load(.acquire);
+    }
+    fn failure(p: *anyopaque) tool_mod.Failure {
+        return if (me(p).fail) .{ .message = "the fake failed to load" } else .{};
+    }
+};
+
+/// Open realtime voice sessions, as the registry would count them.
+const FakeCalls = struct {
+    n: std.atomic.Value(usize) = .init(0),
+
+    fn notify(c: *FakeCalls) Notify {
+        return .{ .ctx = c, .paused = paused, .resumed = resumed, .sessions = sessions };
+    }
+    fn paused(_: *anyopaque, _: []const u8, _: []const u8) void {}
+    fn resumed(_: *anyopaque) void {}
+    fn sessions(p: *anyopaque) usize {
+        const c: *FakeCalls = @ptrCast(@alignCast(p));
+        return c.n.load(.acquire);
+    }
+};
+
+/// A scheduler over `fakes`, with a budget of `budget_mib` and no reserve (the machine's own memory never decides).
+pub const Bench = struct {
+    slots: []Slot,
+    table: jobs.Table,
+    cfg: Config,
+    calls: FakeCalls = .{},
+    s: Scheduler = undefined,
+
+    pub fn init(b: *Bench, fakes: []FakeTool, budget_mib: u64) !void {
+        const t = std.testing;
+        b.slots = try t.allocator.alloc(Slot, fakes.len);
+        for (b.slots, fakes) |*slot, *f| slot.* = .{ .tool = f.tool() };
+        b.table = .{ .gpa = t.allocator };
+        b.cfg = .{ .budget_bytes = budget_mib << 20, .reserve_bytes = 0 };
+        b.s = .{ .io = t.io, .gpa = t.allocator, .cfg = &b.cfg, .slots = b.slots, .table = &b.table };
+        b.s.notify = b.calls.notify();
+    }
+    pub fn deinit(b: *Bench) void {
+        b.s.deinit();
+        b.table.deinit();
+        std.testing.allocator.free(b.slots);
+    }
+    /// Every clock the idle TTLs read moves `s` seconds into the past.
+    fn age(b: *Bench, s: i96) void {
+        const d = s * std.time.ns_per_s;
+        for (b.slots) |*slot| {
+            slot.last_used_ns -= d;
+            slot.armed_ns -= d;
+        }
+        b.s.call_end_ns -= d;
+    }
+    fn state(b: *Bench, i: usize) tool_mod.State {
+        return b.slots[i].tool.state();
+    }
+};
+
+test "residency at start: always loads, call and on_demand wait for a call or a request; keep_loaded is always" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100, .keep_loaded = true } },
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .priority = 95, .residency = .call } },
+        .{ .cfg = .{ .id = "img", .kind = .image } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    for ([_]Lane{ .chat, .realtime, .main }) |l| b.s.loadKept(l, false);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    try t.expectEqual(tool_mod.State.unloaded, b.state(1));
+    try t.expectEqual(tool_mod.State.unloaded, b.state(2));
+    try t.expect(b.slots[0].loaded_since_s > 0 and b.slots[0].last_load_ms != null);
+    try t.expectEqual(Residency.always, Scheduler.ruleOf(&b.slots[0]));
+    // An always tool is never unloaded for its idle TTL.
+    b.age(100_000);
+    b.s.unloadIdle(.chat);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+}
+
+test "a call loads its call tools together, keeps them while it is open, and unloads them idle_ttl_s after the last one" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .priority = 95, .residency = .call, .idle_ttl_s = 60 } },
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .priority = 90, .residency = .call, .idle_ttl_s = 60 } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    var buf: [4]CallLoad = undefined;
+    for (b.s.callLoads(&buf)) |l| try t.expectEqual(.queued, l.state);
+    // Whisper loads beside Drama 3, higher and still down: both fit, so neither waits for the other.
+    b.s.loadKept(.listen, true);
+    try t.expectEqual(tool_mod.State.ready, b.state(1));
+    b.s.loadKept(.realtime, true);
+    for (b.s.callLoads(&buf)) |l| try t.expectEqual(.ready, l.state);
+    // Kept while the call is open, however long they are idle.
+    b.age(1000);
+    b.s.unloadIdle(.realtime);
+    b.s.unloadIdle(.listen);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    // The call ends: their TTL counts from its end, not from their last job long before.
+    b.calls.n.store(0, .release);
+    b.s.callClosed();
+    b.s.unloadIdle(.realtime);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.age(61);
+    b.s.unloadIdle(.realtime);
+    b.s.unloadIdle(.listen);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    try t.expectEqual(tool_mod.State.unloaded, b.state(1));
+    try t.expectEqual(@as(i64, 0), b.slots[0].loaded_since_s);
+    // Outside a call a call tool is not kept: nothing brings it back until a request or the next call.
+    b.s.loadKept(.realtime, true);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+}
+
+test "a call's load that fails or finds no room is reported, and tried again at the next call" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .residency = .call }, .fail = true },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .residency = .call }, .bytes = 200 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    b.s.loadKept(.realtime, true);
+    b.s.loadKept(.chat, true);
+    var buf: [4]CallLoad = undefined;
+    const loads = b.s.callLoads(&buf);
+    try t.expectEqual(.failed, loads[0].state);
+    try t.expectEqual(.no_room, loads[1].state);
+    fakes[0].fail = false;
+    b.calls.n.store(2, .release);
+    b.s.callOpened(); // a second call: the failed load's backoff does not hold it back
+    try t.expectEqual(.queued, b.s.callLoads(&buf)[0].state);
+    b.s.loadKept(.realtime, true);
+    try t.expectEqual(.ready, b.s.callLoads(&buf)[0].state);
+}
+
+test "on_demand unloads idle_ttl_s after its last job; a TTL change re-arms the timer from now" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{.{ .cfg = .{ .id = "img", .kind = .image, .idle_ttl_s = 60 } }};
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    try b.s.loadSlot(&b.slots[0]);
+    b.age(59);
+    b.s.unloadIdle(.main);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.age(2);
+    try t.expect(b.s.setResidency(0, null, 30) == null); // idle 61 s, TTL now 30: it counts from the change
+    b.s.unloadIdle(.main);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.age(31);
+    b.s.unloadIdle(.main);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+}
+
+test "always to on_demand: no longer kept, it unloads idle_ttl_s after the switch; back to always, it loads" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{.{ .cfg = .{ .id = "img", .kind = .image, .keep_loaded = true, .idle_ttl_s = 60 } }};
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.s.loadKept(.main, false);
+    b.age(1000);
+    try t.expect(b.s.setResidency(0, .on_demand, null) == null);
+    try t.expectEqual(Residency.on_demand, b.s.residency(0).rule);
+    b.s.unloadIdle(.main);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.age(61);
+    b.s.unloadIdle(.main);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    try t.expect(b.s.setResidency(0, .always, null) == null);
+    b.s.loadKept(.main, true);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+}
+
+test "an always set over the budget is refused with its numbers, and nothing changes; call is for the voice loop only" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .keep_loaded = true } },
+        .{ .cfg = .{ .id = "img", .kind = .image }, .bytes = 2 << 20 },
+        .{ .cfg = .{ .id = "video", .kind = .video } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 3);
+    defer b.deinit();
+    try t.expectEqual(@as(u64, 1 << 20), b.s.budget().always_bytes);
+    try t.expect(b.s.setResidency(1, .always, null) == null); // 1 + 2 MiB: exactly the budget
+    const why = b.s.setResidency(2, .always, 10).?;
+    try t.expectEqual(@as(u64, 1 << 20), why.over_budget.needs);
+    try t.expectEqual(@as(u64, 4 << 20), why.over_budget.always);
+    try t.expectEqual(@as(u64, 3 << 20), why.over_budget.ceiling);
+    try t.expectEqual(Residency.on_demand, b.s.residency(2).rule);
+    try t.expect(b.s.residency(2).ttl_override == null);
+    try t.expectEqual(.not_voice, std.meta.activeTag(b.s.setResidency(1, .call, null).?));
+    try t.expect(b.s.setResidency(0, .call, null) == null); // chat may
+}
+
+test "residency.json: overrides survive a restart; reset drops a tool's entry so its config applies" {
+    const t = std.testing;
+    const persist = @import("residency.zig");
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .keep_loaded = true, .idle_ttl_s = 600 } },
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .keep_loaded = true } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    try t.expect(b.s.setResidency(0, .call, 30) == null);
+    try t.expect(b.s.setResidency(1, .disabled, null) == null);
+    try persist.save(t.io, t.allocator, dir, &b.s);
+    // A restart: fresh slots over the same config read the file.
+    var again: Bench = undefined;
+    try again.init(&fakes, 100);
+    defer again.deinit();
+    persist.apply(t.io, t.allocator, dir, again.slots, null);
+    try t.expectEqual(Residency.call, again.s.residency(0).rule);
+    try t.expectEqual(@as(u32, 30), again.s.residency(0).idle_ttl_s);
+    try t.expectEqual(Residency.disabled, again.s.residency(1).rule);
+    try t.expectEqual(@as(u32, 120), again.s.residency(1).idle_ttl_s); // not set: the config's
+    // Reset the chat model: its entry goes, and the next start uses its config.
+    try t.expect(b.s.setResidency(0, null, null) == null);
+    try persist.save(t.io, t.allocator, dir, &b.s);
+    var third: Bench = undefined;
+    try third.init(&fakes, 100);
+    defer third.deinit();
+    persist.apply(t.io, t.allocator, dir, third.slots, null);
+    try t.expectEqual(Residency.always, third.s.residency(0).rule);
+    try t.expectEqual(@as(u32, 600), third.s.residency(0).idle_ttl_s);
+    try t.expect(third.s.residency(0).rule_override == null);
+    try t.expectEqual(Residency.disabled, third.s.residency(1).rule);
+    // Reset the disabled one: its config's always again.
+    try t.expect(b.s.setResidency(1, null, null) == null);
+    try persist.save(t.io, t.allocator, dir, &b.s);
+    var fourth: Bench = undefined;
+    try fourth.init(&fakes, 100);
+    defer fourth.deinit();
+    persist.apply(t.io, t.allocator, dir, fourth.slots, null);
+    try t.expectEqual(Residency.always, fourth.s.residency(1).rule);
+}
+
+test "victims during a call: a call's tools are never taken by a tool outside the voice loop, nor by one another" {
+    const T = config.ToolConfig;
+    const image: T = .{ .id = "image", .kind = .image, .priority = 50 };
+    const stt: T = .{ .id = "stt", .kind = .transcription, .priority = 0, .residency = .call };
+    const tts: T = .{ .id = "tts", .kind = .speech, .priority = 95, .residency = .call };
+    const kept: T = .{ .id = "kept", .kind = .image, .priority = 99, .keep_loaded = true };
+    const t = std.testing;
+    const may = Scheduler.mayEvict;
+    // Whisper at priority 0 is safe from the image model at 50 while a call keeps it...
+    try t.expect(!may(&image, &stt, .call, .{ .call = true }));
+    // ...and not once no call is open.
+    try t.expect(may(&image, &stt, .no, .{}));
+    // A call's tools never unload one another, whatever their priorities.
+    try t.expect(!may(&tts, &stt, .call, .{ .below = tts.priority, .for_call = true }));
+    // Coming up for a call, Drama 3 may unload an idle on_demand model of any priority, but a kept one only below it.
+    try t.expect(may(&tts, &.{ .id = "big", .kind = .image, .priority = 99 }, .no, .{ .below = tts.priority, .for_call = true }));
+    try t.expect(!may(&tts, &kept, .always, .{ .below = tts.priority, .for_call = true }));
+}
+
+test "lanes load a call's tools as it connects: queued, loading, then ready" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .residency = .call }, .load_ms = 300 },
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .residency = .call }, .load_ms = 300 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var threads: [2]std.Thread = undefined;
+    for (&threads, [_]Lane{ .realtime, .listen }) |*th, l| th.* = try std.Thread.spawn(.{}, Scheduler.run, .{ &b.s, l });
+    defer for (threads) |th| th.join();
+    defer b.s.stop();
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    var buf: [4]CallLoad = undefined;
+    var saw_loading = false;
+    const began = nowNs(t.io);
+    while (nowNs(t.io) - began < 5 * std.time.ns_per_s) : (Io.sleep(t.io, .fromMilliseconds(20), .awake) catch {}) {
+        var ready: usize = 0;
+        for (b.s.callLoads(&buf)) |l| {
+            if (l.state == .loading) saw_loading = true;
+            if (l.state == .ready) ready += 1;
+            try t.expect(l.state != .failed and l.state != .no_room);
+        }
+        if (ready == 2) break;
+    } else return error.TestUnexpectedResult;
+    try t.expect(saw_loading);
+    // Both loaded at once, not one after the other: well under twice a load.
+    try t.expect(nowNs(t.io) - began < 2 * 300 * std.time.ns_per_ms + 500 * std.time.ns_per_ms);
+}
+
+/// `Loaded` in a test: counts the warm-ups it was asked for and hands back `job` as the one it queued.
+const FakeWarm = struct {
+    n: usize = 0,
+    job: jobs.Job = .{ .arena = undefined, .id = "warm", .tool = 0, .request = .{ .speech = .{ .input = "Hello." } }, .dir = "", .created_at = 0 },
+
+    fn hook(w: *FakeWarm) Loaded {
+        return .{ .ctx = w, .f = f };
+    }
+    fn f(ctx: *anyopaque, _: usize) ?*const jobs.Job {
+        const w: *FakeWarm = @ptrCast(@alignCast(ctx));
+        w.n += 1;
+        return &w.job;
+    }
+};
+
+test "every load of a speech tool is warmed, whatever asked for it; a call's tool is ready only once its warm-up ends" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .residency = .call } },
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .residency = .call } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var warm: FakeWarm = .{};
+    b.s.loaded = warm.hook();
+    // A call's load: the speech tool reports warming until its warm-up job ends; transcription has none.
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    b.s.loadKept(.realtime, true);
+    b.s.loadKept(.listen, true);
+    try t.expectEqual(@as(usize, 1), warm.n);
+    var buf: [4]CallLoad = undefined;
+    try t.expectEqual(.warming, b.s.callLoads(&buf)[0].state);
+    try t.expectEqual(.ready, b.s.callLoads(&buf)[1].state);
+    b.s.warmEnded(&b.slots[0], &warm.job);
+    try t.expectEqual(.ready, b.s.callLoads(&buf)[0].state);
+    // An API load, or a request's, warms it as well; an unload forgets a warm-up still queued.
+    b.s.unloadSlot(&b.slots[0]);
+    try b.s.loadSlot(&b.slots[0]);
+    try t.expectEqual(@as(usize, 2), warm.n);
+    b.s.unloadSlot(&b.slots[0]);
+    try t.expect(b.slots[0].warm_job == null);
+}
+
+test "disabled: never loads (start, call, kept reload), refuses its jobs with 409, and unloads only after its running job" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "img", .kind = .image, .keep_loaded = true } },
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .residency = .disabled } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.s.loadKept(.listen, false);
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    b.s.loadKept(.listen, true);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(1)); // configured disabled: not at start, not for a call
+    // The kept image model is running a job when it is disabled: it stays until the job is done, then goes.
+    b.s.loadKept(.main, false);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.slots[0].in_use = true;
+    try t.expect(b.s.setResidency(0, .disabled, null) == null);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.s.done(&b.slots[0]);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    b.s.loadKept(.main, true); // was always: not brought back
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    // A job queued for it before it was disabled is refused, not loaded.
+    var job: jobs.Job = .{ .arena = .init(t.allocator), .id = "j", .tool = 0, .request = .{ .image = .{ .prompt = "x" } }, .dir = "", .created_at = 0 };
+    defer job.arena.deinit();
+    b.s.runJob(&job);
+    try t.expectEqual(@as(u16, 409), job.http_status);
+    try t.expectEqualStrings("model_disabled", job.error_type);
+    try t.expectEqualStrings("img is disabled in settings", job.error_message);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    // An API load is refused too.
+    var c: Control = .{ .op = .load, .tool = 0 };
+    b.s.runControl(&c);
+    try t.expect(c.failed);
+    // Reset: back to its config (always), and it loads again.
+    try t.expect(b.s.setResidency(0, null, null) == null);
+    b.s.loadKept(.main, true);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+}
+
+test "disabled during a call: a call's model is unloaded and reported disabled, not waited for" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "tts", .kind = .speech, .residency = .call } },
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .residency = .call } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.calls.n.store(1, .release);
+    b.s.callOpened();
+    b.s.loadKept(.realtime, true);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    try t.expect(b.s.setResidency(0, .disabled, null) == null); // a voice-loop model, mid-call
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    var buf: [4]CallLoad = undefined;
+    const loads = b.s.callLoads(&buf);
+    try t.expectEqual(@as(usize, 2), loads.len);
+    try t.expectEqual(.disabled, loads[0].state);
+    try t.expectEqual(.queued, loads[1].state);
+    b.s.loadKept(.realtime, true); // kept by the call no more
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
 }
