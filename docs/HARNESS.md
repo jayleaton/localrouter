@@ -261,6 +261,11 @@ it), or `none` and 0 when nothing had to load. A model that fails to load or doe
 `failed`, the warm-up and prime skipped, each model's `state` and `error` in `models`, and `message` saying which
 models are missing and why, for the client to show. Later checks (a voice change, voice back) report `load` `none`.
 A speech model's state is `warming` after its load until its voice's warm-up has spoken, so ready includes the warm-up.
+A model loaded for a call warms in that call's voice. At connect a session warms nothing when its voice (an empty one
+being the speech model's default) is already warm in the loaded instance; otherwise it waits up to 300 ms for the
+client's first `session.update`, so send the voice there, right after `session.created`, to have only that voice
+warmed. A voice change drops a stale voice's warm-up. `speech` in ready is `warmed` whenever the check spoke, `warm`
+only when it found the voice warm.
 Every chat, speech or transcription model disabled in settings (before the call or during its load) is listed in
 `localrouter.session.loading` and `localrouter.session.ready` with `state` `disabled` and `error` "disabled in
 settings", even when nothing had to load: it is not waited for and is not a failure, and the session's requests go to
