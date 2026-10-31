@@ -26,7 +26,7 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 9 | Chat pinned to 1.1.1 on GB10 (1.1.4 resumes only at 4,096-row chunks) | ashhart/TensorFold | none: a pin choice, no code carried | re-measure on each new release |
 | 10 | cuBLASLt with a recorded algorithm; driver identity check | ashhart/TensorFold | not upstreamable: LocalRouter's attestation policy | keep |
 | 11 | NVFP4 kernels copied from TensorFold v0.6.1 | ashhart/TensorFold v0.6.x | not upstreamable: unmodified copies of a frozen line | keep |
-| 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | not opened yet: an outward-facing PR waits on JJ's OK | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
+| 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -171,7 +171,10 @@ Not ours, and not listed above:
   checkpoint and its features bit-identical; the klein `vae/` gives the same latents (worker README).
 - **Upstream today:** no option to pass encoder paths or modules, at the pinned commit and on `main`.
 - **General?** Yes: anyone running offline or without the gated repos needs it.
-- **PR:** not opened. The change would let `from_pretrained` take local paths (or loaded modules) for the DINOv3 and
-  FLUX.2 encoders. Opening it is outward-facing, so it waits on JJ's OK.
-- **Next:** with the option upstream, repin idol-sdk and replace the hand-built pipeline with a `from_pretrained`
-  call; `test_worker.py` covers the loaded graph.
+- **PR:** [#3](https://github.com/speridlabs/idol-sdk/pull/3): `image_encoders` on `IdolPipeline` /
+  `from_pretrained` takes each encoder from a Hub repo id, a local folder or a loaded model, and checks only repo ids
+  for gated access. Checked on MPS offline with no token: the timm-remapped DINOv3 and klein's `vae/` give the avocado
+  byte-identical to the stock gated pipeline (sha256 `b6e814f5…`). A loaded model is not cast: casting it to bf16 also
+  cast DINOv3's fp32 RoPE `inv_freq` and changed the PLY. No review yet.
+- **Next:** once #3 merges, repin idol-sdk and replace the hand-built pipeline with a `from_pretrained` call
+  (`image_encoders` with the remapped DINOv3 and the local klein folder); `test_worker.py` covers the loaded graph.
