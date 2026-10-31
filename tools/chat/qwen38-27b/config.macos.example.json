@@ -1,0 +1,51 @@
+{
+  "defaults": {
+    "chat_completion": "qwen3.8-27b"
+  },
+  "tools": [
+    {
+      "id": "qwen3.8-27b",
+      "kind": "chat",
+      "name": "Qwen3.8 27B (TensorFold 1.1.4 Metal, MLX 4-bit + DFlash2 drafter)",
+      "engine": "openai_server",
+      "weights": "/Users/USER/.cache/huggingface/hub",
+      "resident_bytes": 28723101696,
+      "working_bytes": 0,
+      "keep_loaded": true,
+      "priority": 100,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 900,
+      "generate_timeout_s": 600,
+      "options": {
+        "server": [
+          "/Users/USER/.local/share/localrouter/chat/tensorfold-1.1.4/bin/tensorfold-native",
+          "serve",
+          "TensorFold/Qwen3.8-27B-MLX-4bit",
+          "--drafter",
+          "z-lab/Qwen3.8-27B-DFlash2",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--name",
+          "{id}",
+          "--context",
+          "32768",
+          "--prompt-cache-gib",
+          "4",
+          "--parallel",
+          "1",
+          "--no-update-check"
+        ],
+        "env": {
+          "HF_HUB_CACHE": "/Users/USER/.cache/huggingface/hub",
+          "HF_HUB_OFFLINE": "1",
+          "TENSORFOLD_NO_UPDATE_CHECK": "1",
+          "TF_DRAIN_S": "5"
+        },
+        "health": "/health",
+        "memory": "measured on an M5 Ultra (96 GiB), TensorFold 1.1.4 Metal, docs/dev/CHAT.md: phys_footprint 20.8 GiB loaded with the drafter; peak 26.06 GiB on the live Mac stack after four 16-31k-token prompts at --parallel 1 --prompt-cache-gib 4 (25.6-26.0 GiB in bench_macos.py); 26.75 GiB = that peak plus margin"
+      }
+    }
+  ]
+}

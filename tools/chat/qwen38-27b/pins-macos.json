@@ -1,0 +1,132 @@
+{
+  "notes": [
+    "macOS (Apple Silicon) pins for the qwen3.8-27b chat tool; pins.json stays the Spark/Linux source of truth (TensorFold 1.1.1). The Mac uses 1.1.4, the first 1.1.x release LocalRouter reviewed for native Metal Qwen27 + DFlash2 (research: TensorFold docs/recipes/qwen3.8-27b.md at the pinned commit qualifies M5 Max and M3 Ultra and measures M5 Ultra).",
+    "The archive is pinned by size and sha256, and every file of the extracted tree is checked against the archive's own SHA256SUMS, as pins.json does on Linux. The release also publishes a companion .sha256 (pinned below; fetch-macos.sh checks it names the same digest) and a 64-byte .sha256.sig. No public key for that .sig is published at the pinned commit (the Ed25519 key in app/build/release-trust.json is the desktop app update root and does not verify it), so the .sig is recorded by hash only and is not a trust input.",
+    "The checkpoint and drafter are the same revisions and files as pins.json, so the Spark and the Mac load identical weights. The Metal arithmetic differs from CUDA: outputs are not bit-identical to the Spark and docs/dev/CHAT.md records the Mac reference baseline separately.",
+    "grammar_lib is the dylib for tool_choice required/named and response_format json_schema."
+  ],
+  "tensorfold": {
+    "version": "1.1.4",
+    "repo": "https://github.com/ashhart/TensorFold",
+    "licence": "Apache-2.0",
+    "tag": "v1.1.4",
+    "tag_object": "585df8ba3e307d9e4bcea1d6c28a58c8dc1b5682",
+    "commit": "eab8582819688325e371907e4706e1c602b8a273",
+    "dir": "tensorfold-1.1.4",
+    "binary": "bin/tensorfold-native",
+    "grammar_lib": "lib/libtfgrammar.dylib",
+    "archives": {
+      "macos-arm64": {
+        "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.4/tensorfold-1.1.4-macos-arm64.tar.gz",
+        "size": 5764985,
+        "sha256": "e60096c8af989f26eb622bde3099ff6ed3ecc37cdd46ade0397b3afd16145c6f",
+        "top_dir": "tensorfold-1.1.4-macos-arm64",
+        "checksum_file": {
+          "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.4/tensorfold-1.1.4-macos-arm64.tar.gz.sha256",
+          "size": 102,
+          "sha256": "a2ac6cd817ad829c8de8593d1a7142b6f88c4f2fc973b4e7ba408db2bda3e910"
+        },
+        "signature_file": {
+          "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.4/tensorfold-1.1.4-macos-arm64.tar.gz.sha256.sig",
+          "size": 64,
+          "sha256": "da4f31af0c42db4f0f5937ead38785c9e84a87a8011e993685d5f2a17fba9817",
+          "verified": false
+        }
+      }
+    }
+  },
+  "checkpoint": {
+    "repo": "TensorFold/Qwen3.8-27B-MLX-4bit",
+    "revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+    "licence": "apache-2.0",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 11544,
+        "git_sha1": "f938136e3adacfd92be087f6e113b5d6d97f678f"
+      },
+      {
+        "path": "chat_template.jinja",
+        "size": 8952,
+        "git_sha1": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3"
+      },
+      {
+        "path": "config.json",
+        "size": 4932,
+        "git_sha1": "3fb03e916f494e6745aa23df751da26f79e06470"
+      },
+      {
+        "path": "generation_config.json",
+        "size": 202,
+        "git_sha1": "023756cfadf88e5bf69eefeee3e172f38c448d64"
+      },
+      {
+        "path": "model-00001-of-00003.safetensors",
+        "size": 5343268662,
+        "sha256": "6cc1508e96fb5d0865dfd5753a79f4ec60651bf3e2a82844a7e8ae9c60528c0d"
+      },
+      {
+        "path": "model-00002-of-00003.safetensors",
+        "size": 5354185130,
+        "sha256": "83f2a20ca8058f486a3634a27faf99587f4cd3c156a83dee34fb99e6ac178670"
+      },
+      {
+        "path": "model-00003-of-00003.safetensors",
+        "size": 5357087557,
+        "sha256": "31b8c91ef899f79efaaa69e3d2c096f6e2ebeb2ff20e29222abbd9ebc79e560a"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size": 218281,
+        "git_sha1": "05a3a3a17368d54d2887783e96b3a8191e9655f0"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size": 390,
+        "git_sha1": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64"
+      },
+      {
+        "path": "processor_config.json",
+        "size": 991,
+        "git_sha1": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40"
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 19989325,
+        "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 1165,
+        "git_sha1": "1d134cd298be1e3be25db393d93a1cefe80e3214"
+      },
+      {
+        "path": "video_preprocessor_config.json",
+        "size": 385,
+        "git_sha1": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe"
+      },
+      {
+        "path": "vocab.json",
+        "size": 6722759,
+        "git_sha1": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"
+      }
+    ]
+  },
+  "drafter": {
+    "repo": "z-lab/Qwen3.8-27B-DFlash2",
+    "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "licence": "apache-2.0",
+    "files": [
+      {
+        "path": "config.json",
+        "size": 1239,
+        "git_sha1": "79279cc5665bced6f3cdaa2095a2ffe819497b2e"
+      },
+      {
+        "path": "model.safetensors",
+        "size": 3848817896,
+        "sha256": "67fc76d68dc5a9415511a4f394ef744d67510cd20e93b37cc2cc7d28e4bab65c"
+      }
+    ]
+  }
+}

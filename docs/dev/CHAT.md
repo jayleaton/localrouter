@@ -254,6 +254,73 @@ other mismatch, including any difference inside the reasoning text, fails the ru
 - **One request at a time.** Chat requests queue behind image, video and speech jobs like any other job, and vice
   versa; a long reply holds the queue for its length (`max_tokens`, 4096 by default).
 
+## macOS (Apple Silicon)
+
+The same tool on a Mac: TensorFold **1.1.4**'s `macos-arm64` release (native Zig/Metal server, no Python or MLX
+install) serving the same checkpoint and drafter revisions as the Spark, behind the same `openai_server` engine, with
+the same flags (`--context 32768 --parallel 1 --prompt-cache-gib 4`, drafter on). Files:
+`tools/chat/qwen38-27b/{pins-macos.json, fetch-macos.sh, setup-macos.sh, config.macos.example.json, bench_macos.py,
+baseline-macos.json}`; the Spark files are unchanged and the Spark stays on 1.1.1. The Mac config has no
+`qualification` marker: that gate and its receipts are the GB10's, and `bench_macos.py` is the Mac's qualification.
+
+**Mac reference baseline.** Metal arithmetic is not CUDA arithmetic, so the Mac is a deliberate numerical change
+(CONTRIBUTING.md): no bit parity with the Spark is claimed. `baseline-macos.json` holds this Mac's greedy replies to
+prompts.json (temperature 0, seed 7: content, reasoning, tool calls, finish reason, token count), and every
+`bench_macos.py` run on 1.1.4 compares against it. The replies with and without the drafter are identical, 8 of 8.
+They also equal DGX-01's qualification replies (`direct.json` of run2 on 1.1.1 and of the 1.1.4 run), 8 of 8 on
+every compared field: agreement on these short greedy replies, not a bit-parity claim for logits or longer outputs.
+
+Measured 2026-10-30 on a Mac Studio, Apple M5 Ultra, 96 GiB, macOS 27.2, `bench_macos.py serve` (one server under
+the host's GPU lock, nothing else loaded), greedy, reasoning off for speed, every speed prompt cold (a unique prefix).
+Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (wall - TTFT) of a stream.
+
+| | Drafter (DFlash2) | No drafter |
+| --- | --- | --- |
+| Load to `/health` | 15.2 s (first load after download); 3.0 s warm | 3.0 s |
+| `phys_footprint` loaded | 20.8 GiB | 19.0 GiB |
+| Peak `phys_footprint` (rusage lifetime maximum) | **25.6 GiB** | 24.1 GiB |
+| Decode, code, 512 tokens | **196 tok/s** | 47.3 tok/s |
+| Decode, document summary, 256 tokens at 2.5k / 9.5k / 31.2k-token prompts | 148 / 127 / 104 tok/s | 47.0 / 45.0 / 42.4 tok/s |
+| TTFT at 2.5k / 9.5k / 31.2k tokens (prefill) | 2.05 / 7.75 / 27.3 s (1,222 / 1,226 / 1,143 tok/s) | 1.96 / 7.63 / 26.9 s (1,274 / 1,246 / 1,160 tok/s) |
+| TTFT, short prompt (74 tokens) | 0.08 s | 0.08 s |
+| Next turn of a 2.1k-token conversation | **0.066 s**, `cached_tokens` 2,086 of 2,115 (cold 2.6k: 2.06 s) | 0.065 s, the same |
+| Next turn of a 9.7k-token conversation | 0.071 s, 9,627 of 9,656 cached (cold 11.4k: 9.35 s) | 0.069 s, the same |
+| SIGTERM to exit | 0.69 s | 0.71 s |
+
+- **Features:** prompts.json whole twice and streamed once: required tool call (`get_weather` with JSON arguments),
+  tool result, `response_format` JSON schema (via `lib/libtfgrammar.dylib`), reasoning on and off, stop and
+  `max_tokens`, SSE ending in `data: [DONE]`; whole = whole, stream = whole and = the baseline: 188 of 188 checks
+  (the drafter run, before the baseline existed, 148 of 148). The `tensorfold-stream-reasoning-trailing-newline`
+  exception is used on Metal by the same checks with the same bytes as on the GB10 (P1 599 vs 598 B, P2 352 vs 351 B).
+- **The cached next turn works on Metal.** The 4,096-row resume of 1.1.4 on CUDA ([Why not 1.1.4](#why-not-114-yet))
+  does not show here: a 2k-token conversation's next turn takes all but its last 29 tokens from the cache.
+- **Speed against upstream.** TensorFold's recipe (M5 Ultra, macOS 27, 100 greedy tokens) reports plain decode 51.6 /
+  49.4 / 46.2 tok/s at 2k / 8k / 32k and prefill 1,325 / 1,269 / 1,171 tok/s; this host is within 10%. The drafter is
+  2.5 to 4.1 times plain decode here (4.1 on code, 2.5 at a 31k-token prompt), against about 3 on the GB10 (prose 35–39 against 13 tok/s).
+- **Memory.** `resident_bytes` is **26.75 GiB** (28,723,101,696) at the 4 GiB prompt cache, in
+  `config.macos.example.json` and the Mac profile; `working_bytes` 0 as on the Spark. It covers the largest measured
+  peak: **26.06 GiB** on the live Mac stack (the integration run: the whole LocalRouter Mac configuration, chat
+  measured after four 16–31k-token prompts), against 25.6 GiB direct and 26.0 GiB through the daemon in
+  `bench_macos.py`. On that stack chat loaded in 4.9 s (5.1 s after `sudo purge`, so with a cold file cache), answered
+  its first token 0.09–0.12 s after the load, and a 30k-token prompt took 28 s cold and 1–2 s when cached. Unified
+  memory is counted once: the footprint includes the Metal buffers. The research estimate was 32 GiB; TensorFold's
+  published Mac figure 26.5 GiB (M5 Max).
+- **Through LocalRouter** (`bench_macos.py daemon`: `localrouter serve` built on this Mac from `feat/mac-foundation`,
+  the tool alone): `/v1/models` lists it as chat; MCP `load_model` loads it in 3.9 s (warm page cache) and MCP `chat`
+  answers in 1.9 s; through `/v1/chat/completions` 188 of 188 checks, the same replies as the baseline; decode 198 /
+  153 / 127 / 105 tok/s (code; 2.5k / 9.5k / 31.2k prompts), TTFT 2.02 / 7.72 / 27.3 s, cached next turns 0.065 s
+  (2.1k) and 0.105 s (9.7k); peak `phys_footprint` 26.0 GiB. The daemon adds nothing measurable. After SIGTERM the
+  model server was gone, but that run's daemon did not exit within 15 s and was killed: on macOS, `shutdown()` of the
+  listening socket does not wake a blocked `accept()`. The daemon now connects to itself on macOS instead
+  (`feat/mac-foundation` 64bcb59, checked by `tests/orphans.zig`); the chat daemon run has not been repeated with it.
+- **A smaller prompt cache (an option, not the default).** `setup-macos.sh ROOT --prompt-cache-gib 1` writes the same
+  tool with `--prompt-cache-gib 1` and `resident_bytes` **about 23.75 GiB** (25,501,876,224): the 4 GiB booking less
+  the 3 GiB of cache this size cannot hold. It is an **estimate**, not a measurement, assuming the four long prompts
+  behind the 26.06 GiB peak filled the 4 GiB cache. A 30k-token conversation needs about 2 GiB of cache (above), so 1
+  GiB keeps short and mid-length conversations warm but not a long one, whose next turn may be prefilled again (28 s
+  instead of 1–2 s at 30k). The default stays 4 GiB / 26.75 GiB; measure the 1 GiB footprint and cached-turn latency
+  with `bench_macos.py serve` before booking it.
+
 ## Licences
 
 | Part | Licence |
