@@ -1,0 +1,44 @@
+{
+  "host": "127.0.0.1",
+  "data_dir": "/Users/Shared/localrouter/data",
+  "defaults": {"text_to_speech": "fishaudio/drama-3"},
+  "tools": [
+    {
+      "id": "fishaudio/drama-3",
+      "kind": "speech",
+      "capabilities": ["text_to_speech", "voice_clone"],
+      "name": "Fish Audio Drama 3 (TensorFold native on Metal, 44.1 kHz). Built with Fish Audio",
+      "cmd": ["/opt/homebrew/bin/python3", "-I", "/Users/Shared/localrouter/src/tools/speech/drama3/drama3_worker_macos.py"],
+      "weights": "/Users/Shared/localrouter/models/drama3",
+      "qualification": "/Users/Shared/localrouter/models/drama3/macos-qualification.json",
+      "resident_bytes": 30870077440,
+      "working_bytes": 0,
+      "keep_loaded": true,
+      "priority": 95,
+      "lane": "realtime",
+      "idle_ttl_s": 600,
+      "load_timeout_s": 1200,
+      "generate_timeout_s": 900,
+      "license": {"name": "Fish Audio Community License v1.0",
+                  "url": "https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/blob/494db08481db952f834b2241bce63fb3dfa72554/LICENSE",
+                  "use": "research and non-commercial use; commercial use only under USD 500,000 annual revenue; no Hosted Service (third parties generating speech, e.g. through an API) without a separate licence from Fish Audio",
+                  "commercial": true, "notice": "Built with Fish Audio"},
+      "options": {
+        "variant": "nvfp4",
+        "voices": ["Mae", "Arlo", "Ezra", "Nora", "Theo", "Wren"],
+        "default_voice": "Mae",
+        "min_speed": 1,
+        "max_speed": 1,
+        "max_input_chars": 4096,
+        "stream": true,
+        "references": false,
+        "instructions": "[{s}] ",
+        "port": 18793,
+        "max_frames": 1024,
+        "long_form": false,
+        "verify": "size",
+        "clone_working_bytes": 3758096384
+      }
+    }
+  ]
+}

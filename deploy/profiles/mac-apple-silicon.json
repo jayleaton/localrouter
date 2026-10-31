@@ -16,7 +16,11 @@
   "DEVELOPER_DIR": "${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}",
   "STEPS": "bash $REPO/tools/install/steps.sh",
   "IMAGE_ROOT": "$J/image-mac",
-  "CHAT_ROOT": "$J/chat"
+  "CHAT_ROOT": "$J/chat",
+  "DRAMA_ROOT": "$J/qualify-drama3/root",
+  "DRAMA_MARKER": "$J/qualify-drama3/drama3-macos-qualification.json",
+  "DRAMA_RESIDENT": "30870077440",
+  "DRAMA_PORT": "$((PORT + 10603))"
  },
  "prereqs": [
   {
@@ -248,6 +252,54 @@
      "run": "d=$CHAT_ROOT/bench-1.1.4; rm -rf \"$d\"; python3 -I $REPO/tools/chat/qwen38-27b/bench_macos.py serve --config $CHAT_ROOT/config.json --out \"$d\"",
      "done": "jq -e '.error == null and .features_failed == []' $CHAT_ROOT/bench-1.1.4/summary.json > /dev/null 2>&1",
      "fix": "$CHAT_ROOT/bench-1.1.4 has server.log, bench.json and summary.json: a failed check names the prompt and field; not enough memory: unload other models first; anything else: report it with those files"
+    }
+   ]
+  },
+  {
+   "key": "tts",
+   "id": "fishaudio/drama-3",
+   "warm": true,
+   "title": "Fish Audio Drama 3 text to speech, NVFP4 pruned weights (drama-tensorfold's native TensorFold engine on Metal, six named voices, streamed 44.1 kHz)",
+   "licence": {
+    "name": "Fish Audio Community License v1.0 (no hosted service: keep the service on loopback or your tailnet)",
+    "url": "https://huggingface.co/plotarmordev/drama-3-NVFP4-Pruned/blob/494db08481db952f834b2241bce63fb3dfa72554/LICENSE"
+   },
+   "accept": [
+    "the Drama 3 weights' licence (FACL v1.0; link below): plotarmordev/drama-3-NVFP4-Pruned is an unofficial community quant of fishaudio/drama-3 under it",
+    "the native Metal engine's numerics as this Mac's Drama 3 baseline: not bit-exact with the GB10's CUDA build or the SGLang-Omni reference (qualify_macos.py --accept-native-numerics)",
+    "lossy weights: routed experts in NVFP4 and pruned to 7,369 of 10,240 (docs/dev/DRAMA3.md has their measured quality against the full model)"
+   ],
+   "pins": "tools/speech/drama3/pins-macos.json",
+   "download_bytes": 22600000000,
+   "disk_bytes": 24500000000,
+   "memory_bytes": 30870077440,
+   "skip": "leave tts out of --models; the Mac then has no speech model and the voice loop cannot speak",
+   "steps": [
+    {
+     "id": "setup",
+     "download_bytes": 22500000000,
+     "disk_bytes": 24000000000,
+     "title": "the drama-tensorfold checkout, the patched Mac launcher, the six voices converted to the Metal catalog, the NVFP4 checkpoint (22.3 GB) and the Metal engine (Zig and Xcode's Metal compiler; about 3 minutes), every file against its pins",
+     "run": "ZIG=$(command -v zig) bash $REPO/tools/speech/drama3/setup-macos.sh $DRAMA_ROOT && shasum -a 256 $REPO/tools/speech/drama3/pins-macos.json > $DRAMA_ROOT/setup.stamp",
+     "done": "[ -f $DRAMA_ROOT/engine-macos.json ] && shasum -a 256 -c --status $DRAMA_ROOT/setup.stamp",
+     "fix": "exit 3: Xcode's Metal compiler is missing or its licence not accepted (the xcode-metal prereq); network: run again (partial files resume); anything else: the last lines say which pin differs"
+    },
+    {
+     "id": "config",
+     "title": "the qualify config: the Drama 3 tool from tools/speech/drama3/config.example-macos.json with this Mac's paths",
+     "run": "mkdir -p $J/qualify-drama3 && jq --arg src $REPO --arg root $DRAMA_ROOT --arg marker $DRAMA_MARKER --arg py $(command -v python3) --argjson port $DRAMA_PORT --arg data $J/qualify-drama3/data '.data_dir = $data | .tools[0].cmd = [$py, \"-I\", ($src + \"/tools/speech/drama3/drama3_worker_macos.py\")] | .tools[0].weights = $root | .tools[0].qualification = $marker | .tools[0].options.port = $port' $REPO/tools/speech/drama3/config.example-macos.json > $J/qualify-drama3/config.json",
+     "done": "[ -f $J/qualify-drama3/config.json ]",
+     "fix": "report it with the log"
+    },
+    {
+     "id": "qualify",
+     "title": "the Metal qualification (assets, load, e2e, the six voices and a clone, memory; about 4 minutes), which writes the marker the service needs. Its first-audio gate is 0.55 s, not the GB10's 0.5 (guided warm first audio measures 0.52 s on an M5 Ultra; docs/dev/DRAMA3.md)",
+     "gpu": true,
+     "min_free_gib": 34,
+     "needs_accept": true,
+     "run": "python3 -I $REPO/tools/speech/drama3/qualify_macos.py $J/qualify-drama3/config.json $J/qualify-drama3/run-$(date -u +%Y%m%dT%H%M%SZ) --accept-native-numerics --first-audio-gate 0.55",
+     "done": "[ -f $DRAMA_MARKER ] && jq -e --arg p \"$(shasum -a 256 $REPO/tools/speech/drama3/pins-macos.json | cut -c1-64)\" '.qualified == true and .pins_sha256 == $p' $DRAMA_MARKER > /dev/null",
+     "fix": "the run directory named on the last line (under $J/qualify-drama3/) has report.json, which says which step failed: not enough free memory: stop what holds the GPU; anything else: report it with that file"
     }
    ]
   }
