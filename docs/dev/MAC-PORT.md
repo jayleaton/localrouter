@@ -44,15 +44,28 @@ footprint as macOS reports it; GB figures are decimal as reported, GiB binary.
 
 | Model | Memory | Speed |
 | --- | --- | --- |
-| Qwen3.8 27B chat | 26 GiB peak, 30 GiB booked | ~196 tok/s with DFlash2 |
-| Drama 3 | 31 GiB | 0.52 s to first audio, RTF 0.77; switching voice adds 4 s |
+| Qwen3.8 27B chat | 26 GiB peak; 26.75 GiB booked (28,723,101,696 B) with the default 4 GiB cache | ~196 tok/s with DFlash2 |
+| Drama 3 | 28.75 GiB booked (30,870,077,440 B) | 0.52 s to first audio, RTF 0.77; switching voice adds 4 s |
 | KnowLine-4B | 10 GiB | 137 ms a decision |
-| Whisper large-v3-turbo (`mlx-whisper` 0.4.3) | 3.2 GB resident, 4.35 GB peak | |
-| Qwen-Image 2.1 Turbo | 17 GB | 8.5 s an image |
+| Whisper large-v3-turbo (`mlx-whisper` 0.4.3) | 3.2 GB resident, 4.35 GB peak; 3.25 GiB booked + 1.25 GiB working | |
+| Qwen-Image 2.1 Turbo (q4) | 9.5 GiB resident + 6.5 GiB working + 2 GiB per reference image | 8.5 s a 1024² image |
+
+Start times. "Cache warm" means the weights are still in the page cache from a recent read; "cold" means after a purge.
+
+| Model | Load, cache warm | Load, cache cold | First request |
+| --- | --- | --- | --- |
+| Qwen3.8 27B chat | 4.9 s | 5.1 s | 0.1 s |
+| Drama 3 | 12.5 s | 13.0 s | first audio 4.3-4.8 s (it builds the voice prefix) |
+| Whisper large-v3-turbo | 2.3 s | 2.4 s | |
+| KnowLine-4B | 2.1 s | 2.3 s | |
+| Qwen-Image 2.1 Turbo (q4) | 2.0 s | 2.3 s | 8.5 s a 1024² image |
+
+From daemon start to the warm set loaded takes 22 s. After that, a fresh call hears first audio in 0.65 s.
 
 **Memory policy (JJ).** Chat, Drama 3 and Whisper stay warm (`keep_loaded`). KnowLine and Qwen-Image load on demand,
-one at a time. The GPU's wired ceiling is about 77.8 GiB, so the three warm models (about 65 GiB booked) leave room
-for one on-demand model, not both.
+one at a time. The GPU's wired ceiling is about 77.8 GiB (79,626 MiB). The three warm models book 60 GiB (chat 26.75,
+Drama 3 28.75, Whisper 3.25 + 1.25 working), which leaves about 17.8 GiB: room for KnowLine (10 GiB) or a text-to-image
+job (16 GiB), not both. An image edit needs 2 GiB more for each reference image, so even one reference goes over.
 
 **Eviction, as the integration run saw it.** An image request evicts, in order, KnowLine, then Whisper, then Drama 3.
 Chat is never evicted. Speech is down for about 25 s an image: the image job, then Whisper and Drama 3 loading again.
