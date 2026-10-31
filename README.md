@@ -37,6 +37,11 @@ every download against its pin and qualifies chat and Drama 3 on the GPU. It lea
 a failure, do what it says and run it again. Models already on the box are reused, not downloaded again.
 `tools/install/doctor.sh --profile jarvis-gb10` lists anything missing, with its fix.
 
+**On an Apple Silicon Mac (preview).** `tools/install/bootstrap.sh --profile mac-apple-silicon --dry-run`, then
+`--accept`, installs and qualifies chat, Drama 3, Whisper, KnowLine and Qwen-Image on Metal. It writes no service yet,
+so you start the daemon yourself. [docs/dev/MAC-PORT.md](docs/dev/MAC-PORT.md#installing-on-a-mac) has the steps and
+the measured memory and speed.
+
 **A fresh install on DGX-01** (measured 2026-10-22):
 
 | Part | Measured |
@@ -94,8 +99,9 @@ Whisper are never unloaded for an image or a video.
 | Disk | about 250 GiB free for a fresh install (216 GiB plus a 30 GiB margin). `--dry-run` prints the exact figure |
 | Network | HTTPS to huggingface.co, github.com, ziglang.org, pypi.org, download.pytorch.org and nvcr.io during the install |
 
-No other profile is tested yet. The chat and Drama 3 engines here are GB10 builds, and their qualification refuses
-other GPUs.
+No other profile is tested yet. `mac-apple-silicon` is a preview: an Apple Silicon Mac with at least 64 GiB,
+[docs/dev/MAC-PORT.md](docs/dev/MAC-PORT.md#installing-on-a-mac). The GB10 profile's chat and Drama 3 engines are GB10
+builds, and their qualification refuses other GPUs.
 
 ## How it works
 

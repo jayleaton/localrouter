@@ -21,6 +21,38 @@ Out of scope and **absent on macOS** (not ported, listed as disabled): Kandinsky
 Spark/Linux behaviour does not change. Mac paths are added beside the Linux ones: comptime OS switches in Zig and
 separate pins files (`pins-macos.json`), never a replacement.
 
+## Installing on a Mac
+
+The `mac-apple-silicon` profile ([deploy/profiles/mac-apple-silicon.json](../../deploy/profiles/mac-apple-silicon.json))
+is a **preview**. Every model installs, qualifies and serves through the daemon on the reference M5 Ultra (96 GiB,
+macOS 27). It has not run on other Macs yet, and there is no service. You need an Apple Silicon Mac with at least
+64 GiB, Xcode with its Metal Toolchain, Zig 0.17.0 and python3 3.11 or newer. The plan checks each of these and says
+how to fix what is missing.
+
+```bash
+git clone https://github.com/jayleaton/localrouter && cd localrouter
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer     # if xcode-select points at the Command Line Tools
+tools/install/bootstrap.sh --profile mac-apple-silicon --dry-run    # the plan: steps, downloads, disk, memory, licences
+tools/install/bootstrap.sh --profile mac-apple-silicon --accept     # after reading the licences the plan lists
+```
+
+The run builds LocalRouter and downloads every model, about 60 GiB, each file checked against its pin. It then benches
+chat and runs Drama 3's Metal qualification, which writes the marker the daemon needs. `--models` picks a subset.
+
+The run then ends: no launchd service is written yet. To serve, build one daemon config whose `tools` list has each
+model's entry. `$J` is the `--prefix`, `~/jarvis` by default.
+
+| Model | Its tool entry |
+| --- | --- |
+| Qwen3.8 27B chat | `$J/chat/config.json`, written by the `chat/setup` step |
+| Drama 3 | `$J/qualify-drama3/config.json`, written by the `tts/config` step |
+| Whisper | the entry in [tools/speech/whisper/macos/README.md](../../tools/speech/whisper/macos/README.md), with your paths |
+| KnowLine-4B | [tools/decide/knowline/macos/config.example.json](../../tools/decide/knowline/macos/config.example.json) |
+| Qwen-Image 2.1 Turbo | [tools/image/qwen-mlx/config.example.json](../../tools/image/qwen-mlx/config.example.json) |
+
+Then run `zig-out/bin/localrouter serve --config FILE`. `tools/install/doctor.sh` still checks for the systemd
+service, so its service checks do not apply on a Mac.
+
 ## Per-model engines
 
 The engines below are the ones the per-model ports use; their measured numbers are in the next section. "Seam" is either the `openai_server` wrapper (the daemon spawns a child HTTP server and
@@ -63,9 +95,38 @@ Start times. "Cache warm" means the weights are still in the page cache from a r
 From daemon start to the warm set loaded takes 22 s. After that, a fresh call hears first audio in 0.65 s.
 
 **Memory policy (JJ).** Chat, Drama 3 and Whisper stay warm (`keep_loaded`). KnowLine and Qwen-Image load on demand,
-one at a time. The GPU's wired ceiling is about 77.8 GiB (79,626 MiB). The three warm models book 60 GiB (chat 26.75,
-Drama 3 28.75, Whisper 3.25 + 1.25 working), which leaves about 17.8 GiB: room for KnowLine (10 GiB) or a text-to-image
-job (16 GiB), not both. An image edit needs 2 GiB more for each reference image, so even one reference goes over.
+one at a time. The GPU's wired ceiling is about 77.8 GiB (79,626 MiB).
+
+**How the scheduler counts it** (`runJob` and `fits` in `src/sched/scheduler.zig`):
+
+- A loaded model holds its resident booking for as long as it is loaded.
+- Working bytes are booked per job. They count only while that model runs a request, and are released when the request
+  ends. Whisper's 1.25 GiB therefore counts only while it transcribes.
+- A request to a cold model books its resident and its working bytes. An image edit adds 2 GiB for each reference
+  image.
+- One exception: when a `spare_room_only` tool loads cold, it also leaves room for the working bytes of every loaded
+  kept tool. KnowLine's example config is `spare_room_only`, so its load also books Whisper's 1.25 GiB.
+
+By the bookings, the idle warm set holds 58.75 GiB: chat 26.75, Drama 3 28.75, Whisper 3.25.
+
+| On demand, beside the idle warm set | Booked | Total |
+| --- | --- | --- |
+| KnowLine | 10 + 1.25 Whisper headroom | 70.0 GiB: fits |
+| Text to image | 9.5 + 6.5 = 16 | 74.75 GiB: fits |
+| Image edit, 1 reference image | 18 | 76.75 GiB: fits |
+| Image edit, 2 reference images | 20 | 78.75 GiB: over |
+
+A transcription running at the same moment adds 1.25 GiB, and then a 1-reference edit does not fit. KnowLine and an
+image job together never fit. `bootstrap.sh --dry-run` prints 60.0 GiB for the warm models, because it counts
+Whisper's working bytes as always booked. That is more cautious than the scheduler.
+
+Bookings are only the plan. To admit a request, the scheduler checks live memory: `memory.available()` less
+`reserve_bytes` must cover the request, plus whatever earlier admissions have not allocated yet. `memory.available()`
+is the GPU ceiling less what is wired now, or the VM's available memory if that is smaller. When `budget_bytes` is set,
+the bookings must also stay under it. Loaded models count in the live check by what they actually wire, not by their
+bookings. `reserve_bytes` defaults to 8 GiB, so with the default a 1-reference edit needs 26 GiB available, which means
+the warm set may wire at most about 51.8 GiB. With a smaller reserve, the edit fits beside the voice set as long as
+what the warm set wires still leaves the reserve plus 18 GiB.
 
 **Eviction, as the integration run saw it.** An image request evicts, in order, KnowLine, then Whisper, then Drama 3.
 Chat is never evicted. Speech is down for about 25 s an image: the image job, then Whisper and Drama 3 loading again.
@@ -209,8 +270,9 @@ Linux, the `jarvis-gb10` plan is byte-identical before and after this change.
 
 **CI.** No macOS job was added, because macOS runners are billed. The PR proposes one.
 
-The Mac deploy profile is `deploy/profiles/mac-apple-silicon.json`. It lists the host prerequisites (Zig 0.17.0, the
-Xcode Metal toolchain, python3) and an empty `models` list, which each model's port fills in. Its first host step
+The Mac deploy profile is `deploy/profiles/mac-apple-silicon.json`, status `preview` ([Installing on a
+Mac](#installing-on-a-mac)). It lists the host prerequisites (Zig 0.17.0, the Xcode Metal toolchain, python3) and the
+five models. Its first host step
 installs `uv` (0.13.4, `uv-aarch64-apple-darwin`, pinned by sha256 in `host.tools`) into `$J/bin`, because the Python
 workers' venv steps (Whisper's `uv sync`) need it and macOS does not ship it.
 
