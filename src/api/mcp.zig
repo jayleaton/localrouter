@@ -16,6 +16,7 @@
 //!   get_job          a job's status, progress and output URLs; `wait_s` waits for it to finish
 //!   cancel_job       cancels a queued or running job
 //!   release_models   unloads every tool now (memory back to the machine before the idle TTL)
+//!   set_model_residency when a model stays loaded (always, call or on_demand) and its idle TTL, live and saved
 //!   computer_control a fixed control on a paired computer (open/quit an app, volume, media, dark mode, lock)
 //!   computer_use     a bounded task on a paired computer's screen; consequential steps wait for the user's tap
 //!   computer_status  a computer task's state, or the paired computers; computer_stop stops a task
@@ -180,6 +181,8 @@ fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, a
         cancelJob(app, a, host, args, out)
     else if (eql(name, "release_models"))
         release(app, a, out)
+    else if (eql(name, "set_model_residency"))
+        setResidency(app, a, args, out)
     else if (eql(name, "computer_control"))
         computerControl(app, a, args, out)
     else if (eql(name, "computer_use"))
@@ -220,7 +223,7 @@ fn toolNeed(name: []const u8) ?Need {
         .{ "chat", .inference },         .{ "decide", .decisions },
         .{ "load_model", .manage },      .{ "unload_model", .manage },
         .{ "reserve_for", .manage },     .{ "release_models", .manage },
-        .{ "edit_image", .media },
+        .{ "edit_image", .media },       .{ "set_model_residency", .manage },
     };
     for (needs) |x| if (eql(x[0], name)) return x[1];
     return null;
@@ -301,12 +304,12 @@ fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wai
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, booked_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, residency: []const u8, idle_ttl_s: u32, disabled: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
         const st = slot.tool.state();
-        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = c.keep_loaded, .license = engine.license(c), .min_thinking_tokens = if (c.kind == .chat) c.min_thinking_tokens else null };
+        e.* = .{ .id = c.id, .name = if (c.name.len > 0) c.name else c.id, .kind = @tagName(c.kind), .state = @tagName(st), .running = st == .ready or st == .busy, .resident_bytes = slot.resident, .booked_bytes = app.scheduler.bookedBytes(i), .needs_bytes = app.scheduler.defaultNeeds(i).total(), .displaced = app.scheduler.residency(i).displaced, .held = app.scheduler.residency(i).held, .lane = @tagName(config.laneOf(c)), .capabilities = try engine.capabilityList(a, c), .default_for = try routes.defaultFor(app, a, i), .priority = c.priority, .keep_loaded = app.scheduler.residency(i).rule == .always, .residency = @tagName(app.scheduler.residency(i).rule), .idle_ttl_s = app.scheduler.residency(i).idle_ttl_s, .disabled = app.scheduler.residency(i).rule == .disabled, .license = engine.license(c), .min_thinking_tokens = if (c.kind == .chat) c.min_thinking_tokens else null };
         var info = engine.audioInfo(c);
         if (c.kind == .speech) info.voices = try routes.speechVoices(app, a, c);
         inline for (@typeInfo(engine.AudioInfo).@"struct".field_names) |f| @field(e.*, f) = @field(info, f);
@@ -391,6 +394,7 @@ fn modelIndex(app: *App, a: std.mem.Allocator, name: []const u8, out: *std.Array
 fn loadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(struct { model: []const u8, wait_s: u32 = 300 }, a, args, out);
     const i = try modelIndex(app, a, b.model, out);
+    if (routes.disabled(app, i)) return fail(a, out, "{s} is disabled in settings", .{b.model});
     if (app.scheduler.slots[i].tool.state() == .ready) return done(a, out, .{ .model = b.model, .state = "ready", .message = "already loaded" });
     const plan = app.scheduler.plan(i, null);
     if (!plan.fits) return fail(a, out, "{s} does not fit without unloading the chat model: it needs {d} MiB, {d} MiB is free beyond the reserve", .{ b.model, plan.needed >> 20, plan.available >> 20 });
@@ -399,6 +403,17 @@ fn loadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(C
     if (r.failed) return fail(a, out, "{s} did not load: {s}", .{ b.model, r.message });
     const st = @tagName(app.scheduler.slots[i].tool.state());
     return done(a, out, .{ .model = b.model, .state = st, .message = if (r.finished) "loaded" else "still loading: call list_models or load_model again later" });
+}
+
+/// set_model_residency: `POST /v1/tools/{id}/settings` (`routes.applySettings`) for `model`; the updated entry.
+fn setResidency(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const b = try parseArgs(struct { model: []const u8, residency: ?[]const u8 = null, idle_ttl_s: ?i64 = null, reset: bool = false }, a, args, out);
+    const i = try modelIndex(app, a, b.model, out);
+    switch (routes.applySettings(app, a, i, args) catch return error.OutOfMemory) {
+        .ok => return done(a, out, routes.toolEntry(app, a, i) catch return error.OutOfMemory),
+        .bad, .not_saved => |m| return fail(a, out, "{s}", .{m}),
+        .over_budget => |o| return fail(a, out, "{s}", .{o.message}),
+    }
 }
 
 fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -828,6 +843,14 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["model"],"properties":{
     \\"model":{"type":"string","description":"A model id from list_models."},
     \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":120,"description":"It comes back by itself after this."}},
+    \\"additionalProperties":false}
+    } },
+    .{ .name = "set_model_residency", .title = "Set when a model stays loaded", .description = "Sets when a model is loaded, live and kept across restarts: residency always (loaded now if it fits and kept loaded; refused when the always-loaded models would exceed the memory budget), call (chat, speech and transcription models only: loaded when a voice call connects, kept while any call is open, unloaded idle_ttl_s after the last one) or on_demand (loaded by its first request, unloaded idle_ttl_s after its last job), or disabled (never loaded, its requests refused; requests that name no model go to the next enabled one). idle_ttl_s: seconds idle before an unload (0: right after each job). reset: true goes back to the config's settings. Returns the model's entry as GET /v1/tools lists it.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["model"],"properties":{
+    \\"model":{"type":"string","description":"A model id from list_models."},
+    \\"residency":{"type":"string","enum":["always","call","on_demand","disabled"]},
+    \\"idle_ttl_s":{"type":"integer","minimum":0},
+    \\"reset":{"type":"boolean","description":"true: drop what was set before, so the config's residency and idle_ttl_s apply (then apply any given here)."}},
     \\"additionalProperties":false}
     } },
     .{ .name = "load_model", .title = "Load a model", .description = "Loads a model now (unloading idle models of any priority if it needs the room, as a request would) and waits up to wait_s. Use it to bring back what you unloaded, or to warm a model before using it.", .inputSchema = .{ .text =

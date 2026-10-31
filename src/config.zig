@@ -20,7 +20,8 @@ pub const ToolConfig = struct {
     working_bytes: u64 = 0, // per request, for `cmd` tools
     idle_ttl_s: u32 = 120, // 0: unload right after each job
     priority: i32 = 0, // higher is kept longer: memory pressure unloads lower priorities first (then least recently used)
-    keep_loaded: bool = false, // load at start if it fits, skip the idle TTL, reload when memory frees; still evictable
+    keep_loaded: bool = false, // the legacy spelling of `residency: "always"` (used when `residency` is unset)
+    residency: ?Residency = null, // when it is loaded (`residencyOf`); `<data_dir>/residency.json` overrides it (sched/residency.zig)
     // An on-demand model that may only use spare room: it never unloads a `keep_loaded` tool to load (idle tools that are
     // not kept may still go) and loads only with room left for the kept tools' working bytes; a request it cannot serve
     // so is refused (503 insufficient_memory) before anything is unloaded. For models nothing waits on, such as the
@@ -41,6 +42,25 @@ pub const ToolConfig = struct {
     license: ?License = null, // the weights' licence, listed by /v1/models; null: the engine's (`engine.license`), if any
     lane: ?Lane = null, // the scheduler executor it runs on; null: realtime for speech, listen for transcription, chat for chat, decide for decisions, else main
 };
+
+/// When a tool is loaded. `always`: at start if it fits, never unloaded for its idle TTL, back by itself once memory
+/// frees after an eviction (still evictable, as before). `call` (chat, speech and transcription only): loaded when a
+/// realtime voice session connects and kept like `always` while any call is open; unloaded `idle_ttl_s` after the last
+/// call ends and its last job is done. `on_demand`: loaded by its first request, unloaded `idle_ttl_s` after its last
+/// job. Outside a call, a `call` tool loads for a request as an `on_demand` one does. `disabled`: never loaded (not at
+/// start, for a call, a request or a shadow decision); its requests are refused (409 `model_disabled`), and a request
+/// that names no model goes to the next enabled tool of its kind.
+pub const Residency = enum { always, call, on_demand, disabled };
+
+/// A tool's residency as its config says: `residency` when set, else `always` for `keep_loaded`, else `on_demand`.
+pub fn residencyOf(t: *const ToolConfig) Residency {
+    return t.residency orelse if (t.keep_loaded) .always else .on_demand;
+}
+
+/// Whether a tool of `kind` may be loaded for calls: the voice loop's models only.
+pub fn callAllowed(kind: Kind) bool {
+    return kind == .chat or kind == .speech or kind == .transcription;
+}
 
 /// A model's licence as its publisher states it, for clients to read: LocalRouter lists it and enforces none of it.
 pub const License = struct {
@@ -251,6 +271,10 @@ fn loopbackHost(host: []const u8) bool {
 pub fn parse(arena: std.mem.Allocator, text: []const u8) !Config {
     var c = try std.json.parseFromSliceLeaky(Config, arena, text, .{ .ignore_unknown_fields = false, .allocate = .alloc_always });
     try chatDefaults(arena, text, &c);
+    for (c.tools) |t| if (t.residency == .call and !callAllowed(t.kind)) {
+        std.log.warn("tool {s}: residency \"call\" is for chat, speech and transcription models, not {s}", .{ t.id, @tagName(t.kind) });
+        return error.InvalidResidency;
+    };
     return c;
 }
 
@@ -266,7 +290,7 @@ fn chatDefaults(arena: std.mem.Allocator, text: []const u8, c: *Config) !void {
     for (tools, list) |*t, v| {
         if (t.kind != .chat) continue;
         if (v.object.get("priority") == null) t.priority = chat_priority;
-        if (v.object.get("keep_loaded") == null) t.keep_loaded = true;
+        if (v.object.get("keep_loaded") == null and v.object.get("residency") == null) t.keep_loaded = true;
     }
     c.tools = tools;
 }
@@ -303,6 +327,28 @@ test "a chat tool is kept loaded at the highest default priority unless its conf
     try std.testing.expectEqual(@as(i32, 0), c.tool("img").?.priority);
     try std.testing.expect(!c.tool("img").?.keep_loaded);
     try std.testing.expectEqualStrings("qwen", c.defaults.get(.chat_completion).?);
+}
+
+test "residency: keep_loaded is the legacy spelling of always; residency wins when set; call is for the voice loop only" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try parse(arena.allocator(),
+        \\{"tools": [
+        \\  {"id": "img", "kind": "image", "engine": "testpattern"},
+        \\  {"id": "kept", "kind": "image", "engine": "testpattern", "keep_loaded": true},
+        \\  {"id": "qwen", "kind": "chat", "engine": "openai_server"},
+        \\  {"id": "qwen-call", "kind": "chat", "engine": "openai_server", "residency": "call"},
+        \\  {"id": "tts", "kind": "speech", "cmd": ["x"], "keep_loaded": true, "residency": "on_demand"}]}
+    );
+    try std.testing.expectEqual(Residency.on_demand, residencyOf(c.tool("img").?));
+    try std.testing.expectEqual(Residency.always, residencyOf(c.tool("kept").?));
+    try std.testing.expectEqual(Residency.always, residencyOf(c.tool("qwen").?)); // a chat model is kept by default
+    try std.testing.expectEqual(Residency.call, residencyOf(c.tool("qwen-call").?));
+    try std.testing.expect(!c.tool("qwen-call").?.keep_loaded); // residency set: the chat default does not add keep_loaded
+    try std.testing.expectEqual(Residency.on_demand, residencyOf(c.tool("tts").?));
+    try std.testing.expectError(error.InvalidResidency, parse(arena.allocator(),
+        \\{"tools": [{"id": "img", "kind": "image", "engine": "testpattern", "residency": "call"}]}
+    ));
 }
 
 test "parse a config with an external tool" {

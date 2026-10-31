@@ -128,6 +128,17 @@ bookings. `reserve_bytes` defaults to 8 GiB, so with the default a 1-reference e
 the warm set may wire at most about 51.8 GiB. With a smaller reserve, the edit fits beside the voice set as long as
 what the warm set wires still leaves the reserve plus 18 GiB.
 
+**Residency (`call`, docs/AGENTS.md).** Instead of keeping chat, Drama 3 and Whisper warm, an operator may set them
+to `call` (`POST /v1/tools/{id}/settings`): they load as a voice call connects, in parallel, and unload `idle_ttl_s`
+after the last call. Measured on the M5 Ultra (2026-10-31): with all three unloaded, connect to `session.ready` is
+12.5 s with a warm file cache to 19.1 s cold (14.6 to 24.2 s when loaded one after another, so the call's set loads
+in parallel); a call into a warm set is ready 4.7 to 10.4 s after connect; first audio in steady state is about 0.65 s.
+Single loads: chat 4.9 s, Drama 3 12.5 to 13 s, Whisper 2.3 s, KnowLine 2.1 s, Qwen-Image q4 2.0 s. Every Drama 3 load
+is followed by its voice's warm-up (4.4 s of prefix build otherwise paid by the first sentence), and a call's ready
+includes it. Beside the live stack (which holds about 59 GiB), a call set of KnowLine-4B, Whisper and a test speech
+model was ready 2.3 to 5.4 s after connect (KnowLine 1.6 to 1.8 s, Whisper 1.7 to 5.1 s, loaded together), and all
+three unloaded 20.3 to 22.3 s after the call with `idle_ttl_s` 20.
+
 **Eviction, as the integration run saw it.** An image request evicts, in order, KnowLine, then Whisper, then Drama 3.
 Chat is never evicted. Speech is down for about 25 s an image: the image job, then Whisper and Drama 3 loading again.
 

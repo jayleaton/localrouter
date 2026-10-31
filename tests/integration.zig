@@ -98,7 +98,7 @@ test "mcp: initialize, tools, an image inline and a video by URL, a job polled t
     try testing.expectEqual(std.http.Status.accepted, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")).status);
     try testing.expectEqual(std.http.Status.method_not_allowed, (try d.call(a, .GET, "/mcp", null)).status);
     const list = try std.json.parseFromSliceLeaky(std.json.Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")).body, .{});
-    try testing.expectEqual(@as(usize, 19), list.object.get("result").?.object.get("tools").?.array.items.len);
+    try testing.expectEqual(@as(usize, 20), list.object.get("result").?.object.get("tools").?.array.items.len);
 
     // an image: the PNG inline, and its URL serves the same bytes
     const img = try mcpCall(&d, a, "generate_image", "{\"prompt\":\"bars\",\"size\":\"256x256\",\"seed\":7}");

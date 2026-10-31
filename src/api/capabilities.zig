@@ -56,6 +56,7 @@ pub const realtime_extension_events = [_][]const u8{
     "localrouter.transcription.partial", "localrouter.response.timing", "localrouter.response.text_done",
     "localrouter.response.speech_done",  "localrouter.job.created",     "localrouter.job.done",
     "localrouter.voice.paused",          "localrouter.voice.resumed",   "localrouter.function_call.cancelled",
+    "localrouter.session.loading",       "localrouter.session.ready",
 };
 
 /// A route that needs a paired device's token with `scope`: `always`, or only `when` pairing is required.
@@ -255,7 +256,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .jobs = "/v1/jobs/{id}",
             .files = "/v1/files/{job}/{name}",
         },
-        .model_management = .{ .status = "/v1/tools", .load = "/v1/tools/{id}/load", .unload = "/v1/tools/{id}/unload", .release = "/v1/tools/release", .mcp_tools = [_][]const u8{ "list_models", "reserve_for", "load_model", "unload_model", "release_models" } },
+        .model_management = .{ .status = "/v1/tools", .load = "/v1/tools/{id}/load", .unload = "/v1/tools/{id}/unload", .settings = "/v1/tools/{id}/settings", .release = "/v1/tools/release", .residency = [_][]const u8{ "always", "call", "on_demand", "disabled" }, .mcp_tools = [_][]const u8{ "list_models", "reserve_for", "load_model", "unload_model", "release_models", "set_model_residency" } },
         .computer = .{ .enabled = computer, .helper = "/v1/desktop", .approvals = "/v1/computer/approvals", .placement = "box_policy" },
         .unsupported = gaps,
     });

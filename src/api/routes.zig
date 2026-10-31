@@ -135,23 +135,23 @@ test "every route class needs its scope; only the open routes need none; an unna
     for (open) |p| try t.expect(need(.GET, p) == null);
     const Case = struct { std.http.Method, []const u8, Need };
     const cases = [_]Case{
-        .{ .POST, "/mcp", .mcp },                    .{ .GET, "/v1/realtime", .realtime },
-        .{ .GET, "/v1/models", .read },              .{ .GET, "/models", .read },
-        .{ .GET, "/v1/tools", .read },               .{ .GET, "/v1/skills/model-manager", .read },
-        .{ .POST, "/v1/tools/release", .manage },    .{ .POST, "/v1/tools/x/load", .manage },
-        .{ .POST, "/v1/tools/x/unload", .manage },   .{ .POST, "/v1/chat/completions", .inference },
-        .{ .POST, "/v1/responses", .inference },     .{ .GET, "/v1/responses/resp_1", .inference },
-        .{ .POST, "/v1/systemone", .decisions },     .{ .POST, "/v1/images/generations", .media },
-        .{ .POST, "/v1/images/edits", .media },      .{ .POST, "/v1/videos", .media },
-        .{ .POST, "/v1/audio/speech", .media },      .{ .POST, "/v1/audio/transcriptions", .media },
-        .{ .GET, "/v1/videos/v_1/content", .owned }, .{ .DELETE, "/v1/videos/v_1", .owned },
-        .{ .GET, "/v1/jobs/img_1", .owned },         .{ .GET, "/v1/files/img_1/0.png", .owned },
-        .{ .POST, "/v1/models", .manage },           .{ .GET, "/v1/something-new", .manage },
-        .{ .GET, "/v1/voices", .read },              .{ .GET, "/v1/voices/JJ", .read },
-        .{ .POST, "/v1/voices", .manage },           .{ .PATCH, "/v1/voices/draft-1", .manage },
-        .{ .DELETE, "/v1/voices/JJ", .manage },      .{ .GET, "/v1/assistant", .paired },
-        .{ .PATCH, "/v1/assistant", .manage },       .{ .GET, "/v1/node/status", .manage },
-        .{ .POST, "/v1/node/jobs", .manage },
+        .{ .POST, "/mcp", .mcp },                       .{ .GET, "/v1/realtime", .realtime },
+        .{ .GET, "/v1/models", .read },                 .{ .GET, "/models", .read },
+        .{ .GET, "/v1/tools", .read },                  .{ .GET, "/v1/skills/model-manager", .read },
+        .{ .POST, "/v1/tools/release", .manage },       .{ .POST, "/v1/tools/x/load", .manage },
+        .{ .POST, "/v1/tools/x/unload", .manage },      .{ .POST, "/v1/chat/completions", .inference },
+        .{ .POST, "/v1/tools/x/settings", .manage },    .{ .POST, "/v1/responses", .inference },
+        .{ .GET, "/v1/responses/resp_1", .inference },  .{ .POST, "/v1/systemone", .decisions },
+        .{ .POST, "/v1/images/generations", .media },   .{ .POST, "/v1/images/edits", .media },
+        .{ .POST, "/v1/videos", .media },               .{ .POST, "/v1/audio/speech", .media },
+        .{ .POST, "/v1/audio/transcriptions", .media }, .{ .GET, "/v1/videos/v_1/content", .owned },
+        .{ .DELETE, "/v1/videos/v_1", .owned },         .{ .GET, "/v1/jobs/img_1", .owned },
+        .{ .GET, "/v1/files/img_1/0.png", .owned },     .{ .POST, "/v1/models", .manage },
+        .{ .GET, "/v1/something-new", .manage },        .{ .GET, "/v1/voices", .read },
+        .{ .GET, "/v1/voices/JJ", .read },              .{ .POST, "/v1/voices", .manage },
+        .{ .PATCH, "/v1/voices/draft-1", .manage },     .{ .DELETE, "/v1/voices/JJ", .manage },
+        .{ .GET, "/v1/assistant", .paired },            .{ .PATCH, "/v1/assistant", .manage },
+        .{ .GET, "/v1/node/status", .manage },          .{ .POST, "/v1/node/jobs", .manage },
     };
     for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));
 }
@@ -198,30 +198,232 @@ pub fn hasVoice(app: *App, c: *const @import("../config.zig").ToolConfig, voice:
     return engine.hasVoice(c, voice) or app.cloned.has(app.io, c.id, voice);
 }
 
-fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, kind: []const u8, state: []const u8, resident_bytes: u64, idle_ttl_s: u32, priority: i32, keep_loaded: bool, spare_room_only: bool, lane: []const u8, capabilities: []const engine.Capability, last_error: []const u8, license: ?@import("../config.zig").License, node: ?[]const u8 = null, local: bool = true };
-    const list = try a.alloc(Entry, app.scheduler.slots.len);
-    for (list, app.scheduler.slots) |*e, slot| {
-        const c = slot.tool.config();
-        const n = app.nodeOf(c.id);
-        e.* = .{ .node = if (n.len > 0) n else null, .local = slot.tool.local(), .id = c.id, .kind = @tagName(c.kind), .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .idle_ttl_s = c.idle_ttl_s, .priority = c.priority, .keep_loaded = c.keep_loaded, .spare_room_only = c.spare_room_only, .lane = @tagName(@import("../config.zig").laneOf(c)), .capabilities = try engine.capabilityList(a, c), .last_error = slot.tool.failure().message, .license = engine.license(c) };
-    }
-    const mem = @import("../sched/memory.zig").available() orelse 0;
-    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .voice_sessions = app.voice.count(app.io) });
+/// One tool as `GET /v1/tools` lists it. `residency` and `idle_ttl_s` are what applies now (set through
+/// `POST /v1/tools/{id}/settings`, else the config's: `residency_default`, `idle_ttl_s_default`); `keep_loaded` is
+/// `residency` "always". `last_load_ms` (how long its last load took) and `loaded_since` (unix seconds) are null until
+/// it loads, and `loaded_since` while it is not loaded.
+pub const ToolEntry = struct {
+    id: []const u8,
+    kind: []const u8,
+    state: []const u8,
+    resident_bytes: u64, // held now: 0 while not loaded
+    booked_bytes: u64, // what it books when loaded, loaded or not: measured bytes (else its estimate) and a job's working bytes
+    idle_ttl_s: u32,
+    idle_ttl_s_default: u32,
+    residency: []const u8,
+    residency_default: []const u8,
+    allowed_residency: []const []const u8,
+    last_load_ms: std.json.Value,
+    loaded_since: std.json.Value,
+    supported: bool, // false: it cannot run on this host (`unsupported_reason` says why); listed for diagnosis, settings refused
+    unsupported_reason: std.json.Value, // a string, or null when supported
+    priority: i32,
+    keep_loaded: bool,
+    spare_room_only: bool,
+    lane: []const u8,
+    capabilities: []const engine.Capability,
+    last_error: []const u8,
+    license: ?@import("../config.zig").License,
+    node: ?[]const u8 = null,
+    local: bool = true,
+};
+
+const voice_residency = [_][]const u8{ "always", "call", "on_demand", "disabled" };
+const plain_residency = [_][]const u8{ "always", "on_demand", "disabled" };
+
+pub fn toolEntry(app: *App, a: std.mem.Allocator, i: usize) !ToolEntry {
+    const config = @import("../config.zig");
+    const slot = &app.scheduler.slots[i];
+    const c = slot.tool.config();
+    const n = app.nodeOf(c.id);
+    const r = app.scheduler.residency(i);
+    const st = slot.tool.state();
+    const loaded = st == .ready or st == .busy;
+    const why_not = try unsupported(app, a, i);
+    return .{
+        .supported = why_not == null,
+        .unsupported_reason = if (why_not) |w| .{ .string = w } else .null,
+        .node = if (n.len > 0) n else null,
+        .local = slot.tool.local(),
+        .id = c.id,
+        .kind = @tagName(c.kind),
+        .state = @tagName(st),
+        .resident_bytes = slot.resident,
+        .booked_bytes = app.scheduler.bookedBytes(i),
+        .idle_ttl_s = r.idle_ttl_s,
+        .idle_ttl_s_default = c.idle_ttl_s,
+        .residency = @tagName(r.rule),
+        .residency_default = @tagName(config.residencyOf(c)),
+        .allowed_residency = if (config.callAllowed(c.kind)) &voice_residency else &plain_residency,
+        .last_load_ms = if (r.last_load_ms) |ms| .{ .integer = @intCast(ms) } else .null,
+        .loaded_since = if (loaded and r.loaded_since_s > 0) .{ .integer = r.loaded_since_s } else .null,
+        .priority = c.priority,
+        .keep_loaded = r.rule == .always,
+        .spare_room_only = c.spare_room_only,
+        .lane = @tagName(config.laneOf(c)),
+        .capabilities = try engine.capabilityList(a, c),
+        .last_error = slot.tool.failure().message,
+        .license = engine.license(c),
+    };
 }
 
-/// POST /v1/tools/{id}/load, /v1/tools/{id}/unload, /v1/tools/release.
+fn tools(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
+    const list = try a.alloc(ToolEntry, app.scheduler.slots.len);
+    for (list, 0..) |*e, i| e.* = try toolEntry(app, a, i);
+    const mem = @import("../sched/memory.zig").available() orelse 0;
+    try h.jsonValue(req, a, .ok, .{ .object = "list", .data = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .budget_bytes = app.cfg.budget_bytes, .budget = app.scheduler.budget(), .voice_sessions = app.voice.count(app.io) });
+}
+
+/// POST /v1/tools/{id}/load, /v1/tools/{id}/unload, /v1/tools/{id}/settings, /v1/tools/release.
 fn toolControl(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8) !void {
     var c: sched.Control = .{ .op = .release };
     if (!eql(rest, "release")) {
-        const slash = std.mem.lastIndexOfScalar(u8, rest, '/') orelse return h.fail(req, a, 404, "invalid_request_error", "no such route");
-        const verb = rest[slash + 1 ..];
+        const p = try toolPath(a, rest) orelse return h.fail(req, a, 404, "invalid_request_error", "no such route");
+        const verb = p.verb;
+        c.tool = toolIndex(app, p.id) orelse return h.fail(req, a, 404, "invalid_request_error", "unknown model");
+        if (eql(verb, "settings")) return toolSettings(app, req, a, c.tool);
+        if (eql(verb, "load") and disabled(app, c.tool)) {
+            var why: Refusal = .{};
+            refuseDisabled(app, c.tool, &why);
+            return h.fail(req, a, why.status, why.typ, why.message);
+        }
         c.op = if (eql(verb, "load")) .load else if (eql(verb, "unload")) .unload else return h.fail(req, a, 404, "invalid_request_error", "no such route");
-        c.tool = toolIndex(app, rest[0..slash]) orelse return h.fail(req, a, 404, "invalid_request_error", "unknown model");
     }
     app.scheduler.control(&c) catch |err| return h.fail(req, a, 503, "server_error", @errorName(err));
     if (c.failed) return h.fail(req, a, 503, "server_error", c.message);
     return tools(app, req, a);
+}
+
+/// `{id}/{verb}` after /v1/tools/: the id percent-decoded (`fishaudio%2Fdrama-3`, as a client escapes a path segment, is
+/// `fishaudio/drama-3`; an id with a raw slash works too, the verb being the last segment), in `a`.
+fn toolPath(a: std.mem.Allocator, rest: []const u8) !?struct { id: []const u8, verb: []const u8 } {
+    const q = std.mem.indexOfScalar(u8, rest, '?') orelse rest.len;
+    const path = rest[0..q];
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    if (slash == 0) return null;
+    return .{ .id = std.Uri.percentDecodeInPlace(try a.dupe(u8, path[0..slash])), .verb = path[slash + 1 ..] };
+}
+
+test "a tool's id in /v1/tools/{id}/... is percent-decoded; a raw slash works too" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "fishaudio%2Fdrama-3/load", "fishaudio%2fdrama-3/load", "fishaudio/drama-3/load" }) |rest| {
+        const p = (try toolPath(a, rest)).?;
+        try t.expectEqualStrings("fishaudio/drama-3", p.id);
+        try t.expectEqualStrings("load", p.verb);
+    }
+    const s = (try toolPath(a, "qwen3.8-27b/settings")).?;
+    try t.expectEqualStrings("qwen3.8-27b", s.id);
+    try t.expectEqualStrings("settings", s.verb);
+    try t.expectEqualStrings("unload", (try toolPath(a, "whisper%20large/unload")).?.verb);
+    try t.expectEqualStrings("whisper large", (try toolPath(a, "whisper%20large/unload")).?.id);
+    try t.expect(try toolPath(a, "load") == null);
+    try t.expect(try toolPath(a, "/load") == null);
+}
+
+/// POST /v1/tools/{id}/settings: `{"residency"?, "idle_ttl_s"?, "reset"?}`; the updated entry.
+fn toolSettings(app: *App, req: *h.Request, a: std.mem.Allocator, i: usize) !void {
+    const text = try h.body(req, a);
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, if (std.mem.trim(u8, text, " \t\r\n").len > 0) text else "{}", .{}) catch
+        return h.fail(req, a, 400, "invalid_request_error", "the body is not JSON");
+    switch (try applySettings(app, a, i, v)) {
+        .ok => return h.jsonValue(req, a, .ok, try toolEntry(app, a, i)),
+        .bad => |m| return h.fail(req, a, 400, "invalid_request_error", m),
+        .over_budget => |o| {
+            const Env = struct { @"error": struct { message: []const u8, type: []const u8 = "insufficient_memory", code: []const u8 = "over_budget", needs_bytes: u64, always_bytes: u64, ceiling_bytes: u64 } };
+            return h.jsonValue(req, a, .conflict, Env{ .@"error" = .{ .message = o.message, .needs_bytes = o.needs, .always_bytes = o.always, .ceiling_bytes = o.ceiling } });
+        },
+        .not_saved => |m| return h.fail(req, a, 500, "server_error", m),
+    }
+}
+
+/// What `applySettings` did: applied (and saved), refused (400, 409: nothing changed), or applied but not saved.
+pub const Settings = union(enum) {
+    ok,
+    bad: []const u8,
+    over_budget: struct { message: []const u8, needs: u64, always: u64, ceiling: u64 },
+    not_saved: []const u8,
+};
+
+/// Sets tool `i`'s residency and idle TTL from `v` (`{"residency"?: "always"|"call"|"on_demand", "idle_ttl_s"?: int
+/// >= 0, "reset"?: true}`; reset first drops what was set before, so the config's applies) and saves every override to
+/// `<data_dir>/residency.json`. Shared by the route and MCP's `set_model_residency` (which also passes `model`).
+pub fn applySettings(app: *App, a: std.mem.Allocator, i: usize, v: std.json.Value) !Settings {
+    const config = @import("../config.zig");
+    if (v != .object) return .{ .bad = "the body must be a JSON object: {\"residency\"?, \"idle_ttl_s\"?, \"reset\"?}" };
+    var rule: ?config.Residency = null;
+    var ttl: ?u32 = null;
+    var reset = false;
+    var it = v.object.iterator();
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        const x = e.value_ptr.*;
+        if (eql(k, "residency")) {
+            if (x != .string) return .{ .bad = "residency must be a string: always, call, on_demand or disabled" };
+            rule = std.meta.stringToEnum(config.Residency, x.string) orelse
+                return .{ .bad = try std.fmt.allocPrint(a, "unknown residency '{s}': always, call, on_demand or disabled", .{x.string}) };
+        } else if (eql(k, "idle_ttl_s")) {
+            if (x != .integer or x.integer < 0 or x.integer > std.math.maxInt(u32)) return .{ .bad = "idle_ttl_s must be a whole number of seconds, 0 or more (0: unload right after each job)" };
+            ttl = @intCast(x.integer);
+        } else if (eql(k, "reset")) {
+            if (x != .bool) return .{ .bad = "reset must be true or false" };
+            reset = x.bool;
+        } else if (!eql(k, "model")) {
+            return .{ .bad = try std.fmt.allocPrint(a, "unknown field '{s}': the settings are residency, idle_ttl_s and reset", .{k}) };
+        }
+    }
+    const s = app.scheduler;
+    const c = s.slots[i].tool.config();
+    if (try unsupported(app, a, i)) |why| return .{ .bad = try std.fmt.allocPrint(a, "{s} cannot run on this host, so it has no settings: {s}", .{ c.id, why }) };
+    s.settings.lockUncancelable(app.io);
+    defer s.settings.unlock(app.io);
+    const now = s.residency(i);
+    const next_rule = rule orelse if (reset) null else now.rule_override;
+    const next_ttl = ttl orelse if (reset) null else now.ttl_override;
+    if (s.setResidency(i, next_rule, next_ttl)) |why| switch (why) {
+        .not_voice => |k| return .{ .bad = try std.fmt.allocPrint(a, "residency 'call' is for chat, speech and transcription models; {s} is {s} model (allowed: always, on_demand, disabled)", .{ c.id, article(k) }) },
+        .over_budget => |o| return .{ .over_budget = .{
+            .message = try std.fmt.allocPrint(a, "{s} cannot be always loaded: it needs {d:.1} GiB, which brings the always-loaded models to {d:.1} GiB, over the {d:.1} GiB budget. Set another model to call or on_demand first.", .{ c.id, gibs(o.needs), gibs(o.always), gibs(o.ceiling) }),
+            .needs = o.needs,
+            .always = o.always,
+            .ceiling = o.ceiling,
+        } },
+    };
+    @import("../sched/residency.zig").save(app.io, app.gpa, app.cfg.data_dir, s) catch |err| {
+        std.log.warn("residency: saving {s}/residency.json failed: {s}", .{ app.cfg.data_dir, @errorName(err) });
+        return .{ .not_saved = try std.fmt.allocPrint(a, "applied now, but {s}/residency.json could not be written ({s}): the change will not survive a restart", .{ app.cfg.data_dir, @errorName(err) }) };
+    };
+    return .ok;
+}
+
+/// Why tool `i` cannot run on this host, in `a`; null when it can (or it runs on another node, which decides). Its
+/// engine not built here (the CUDA engines off Linux), its program or weights not installed, its qualification not
+/// passed, or no capability left with its weights (`engine.resolve`).
+pub fn unsupported(app: *App, a: std.mem.Allocator, i: usize) !?[]const u8 {
+    const builtin = @import("builtin");
+    const slot = &app.scheduler.slots[i];
+    if (!slot.tool.local()) return null;
+    const c = slot.tool.config();
+    const host = @tagName(builtin.os.tag) ++ "-" ++ @tagName(builtin.cpu.arch);
+    if (c.engine.len > 0 and engine.find(c.engine) == null) return try std.fmt.allocPrint(a, "its engine '{s}' is not built for {s}", .{ c.engine, host });
+    if (c.engine.len == 0 and c.cmd.len == 0) return "it names neither an engine nor a cmd";
+    const cwd = Io.Dir.cwd();
+    if (c.cmd.len > 0 and std.fs.path.isAbsolute(c.cmd[0])) {
+        cwd.access(app.io, c.cmd[0], .{}) catch return try std.fmt.allocPrint(a, "its program {s} is not installed", .{c.cmd[0]});
+    }
+    if (c.weights.len > 0 and std.fs.path.isAbsolute(c.weights)) {
+        cwd.access(app.io, c.weights, .{}) catch return try std.fmt.allocPrint(a, "its weights are not installed at {s}", .{c.weights});
+    }
+    const buf = try a.alloc(u8, 384);
+    if (app.unqualified(a, c, buf)) |why| return why;
+    if ((try engine.capabilityList(a, c)).len == 0) return "none of its capabilities is available with its weights";
+    return null;
+}
+
+fn gibs(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
 pub fn toolIndex(app: *App, id: []const u8) ?usize {
@@ -230,11 +432,13 @@ pub fn toolIndex(app: *App, id: []const u8) ?usize {
 }
 
 /// The model for a request that needs `cap`: the one named, else the configured default for `cap` (`Config.defaults`),
-/// else the first tool that can do it, else the first of its kind (so `enqueue`'s refusal names a model). Null with
-/// `why` set when the named model is unknown (404) or of another kind (400), or no model of the kind exists (404).
+/// else the first tool that can do it, else the first of its kind (so `enqueue`'s refusal names a model); a disabled
+/// tool is skipped unless named (a disabled default: the next enabled tool of its kind). Null with `why` set when the
+/// named model is unknown (404), of another kind (400) or disabled (409), or no enabled model of the kind exists (404,
+/// or 409 when the only ones are disabled).
 pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Refusal) ?usize {
     const kind = @tagName(cap.kind());
-    if (model orelse app.cfg.defaults.get(cap)) |m| {
+    if (model orelse app.cfg.defaults.get(cap)) |m| named: {
         const i = toolIndex(app, m) orelse {
             why.* = .{ .status = 404 };
             why.message = std.fmt.bufPrint(why.buf[0..384], "unknown model '{s}'; models that can do {s}: {s}", .{ m, @tagName(cap), able(app, cap, &why.buf) }) catch "unknown model";
@@ -245,20 +449,43 @@ pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Ref
             why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' is {s} model, not {s}; models that can do {s}: {s}", .{ m, article(c.kind), kind, @tagName(cap), able(app, cap, &why.buf) }) catch "the model is of another kind";
             return null;
         }
-        return i;
+        if (!disabled(app, i)) return i;
+        if (model == null) break :named; // the configured default is disabled: the next enabled tool of its kind
+        refuseDisabled(app, i, why);
+        return null;
     }
     var first: ?usize = null;
+    var off: ?usize = null;
     for (app.scheduler.slots, 0..) |slot, i| {
         const c = slot.tool.config();
         if (c.kind != cap.kind()) continue;
+        if (disabled(app, i)) {
+            if (off == null) off = i;
+            continue;
+        }
         if (engine.supports(c, cap)) return i;
         if (first == null) first = i;
     }
+    if (first == null) if (off) |i| {
+        refuseDisabled(app, i, why);
+        return null;
+    };
     if (first == null) {
         why.* = .{ .status = 404 };
         why.message = std.fmt.bufPrint(why.buf[0..384], "no {s} model is configured", .{kind}) catch "no model of this kind";
     }
     return first;
+}
+
+/// Whether tool `i` is disabled in settings (residency `disabled`): it never loads, and its requests are refused.
+pub fn disabled(app: *App, i: usize) bool {
+    return app.scheduler.residency(i).rule == .disabled;
+}
+
+/// 409 `model_disabled`, as every refusal of a disabled tool reads.
+fn refuseDisabled(app: *App, i: usize, why: *Refusal) void {
+    why.* = .{ .status = 409, .typ = "model_disabled" };
+    why.message = std.fmt.bufPrint(why.buf[0..384], "{s} is disabled in settings", .{app.scheduler.slots[i].tool.config().id}) catch "the model is disabled in settings";
 }
 
 /// The speech model for a request: the one it names, else the text_to_speech default; but when it names no model and
@@ -269,7 +496,7 @@ pub fn resolveSpeech(app: *App, model: ?[]const u8, voice: []const u8, why: *Ref
     if (model != null or voice.len == 0 or hasVoice(app, app.scheduler.slots[i].tool.config(), voice)) return i;
     for (app.scheduler.slots, 0..) |slot, k| {
         const c = slot.tool.config();
-        if (engine.supports(c, .text_to_speech) and hasVoice(app, c, voice)) return k;
+        if (engine.supports(c, .text_to_speech) and hasVoice(app, c, voice) and !disabled(app, k)) return k;
     }
     return i;
 }
@@ -399,6 +626,10 @@ pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const in
         why.message = std.fmt.bufPrint(why.buf[0..384], "this node runs rank {d} of '{s}', which serves no requests: send them to rank 0's node, {s} (or the front)", .{ p.places[tool].follower.rank, cfg.id, p.nodes[p.places[tool].follower.nodes[0]].id }) catch "this node runs another rank of the model: send requests to its rank 0";
         return null;
     };
+    if (disabled(app, tool)) {
+        refuseDisabled(app, tool, why);
+        return null;
+    }
     var r = asked;
     engine.fill(cfg, &r); // what the request left to the model (a video's size)
     if (!engine.supports(cfg, r.capability())) {
@@ -584,4 +815,47 @@ fn file(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8, call
         return h.bytes(req, contentType(f), data);
     }
     return h.fail(req, a, 404, "invalid_request_error", "no such file");
+}
+
+test "disabled tools: refused by name with 409 model_disabled, skipped for a default; unsupported tools say why" {
+    const t = std.testing;
+    var fakes = [_]sched.FakeTool{
+        .{ .cfg = .{ .id = "a", .kind = .chat, .cmd = &.{"x"} } },
+        .{ .cfg = .{ .id = "b", .kind = .chat, .cmd = &.{"x"} } },
+        .{ .cfg = .{ .id = "img", .kind = .image, .engine = "no_such_engine" } },
+        .{ .cfg = .{ .id = "img2", .kind = .image, .cmd = &.{"x"}, .weights = "/nonexistent/localrouter-weights" } },
+    };
+    var b: sched.Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    b.cfg.defaults.chat_completion = "a";
+    var app: App = .{ .gpa = t.allocator, .io = t.io, .cfg = &b.cfg, .scheduler = &b.s, .table = &b.table, .jobs_dir = "" };
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: Refusal = .{};
+    try t.expectEqual(@as(?usize, 0), resolve(&app, null, .chat_completion, &why));
+    try t.expect(b.s.setResidency(0, .disabled, null) == null);
+    // The configured default is disabled: a request that names no model goes to the next enabled chat model.
+    try t.expectEqual(@as(?usize, 1), resolve(&app, null, .chat_completion, &why));
+    // Named, it is refused.
+    try t.expect(resolve(&app, "a", .chat_completion, &why) == null);
+    try t.expectEqual(@as(u16, 409), why.status);
+    try t.expectEqualStrings("model_disabled", why.typ);
+    try t.expectEqualStrings("a is disabled in settings", why.message);
+    why = .{};
+    try t.expect(enqueue(&app, 0, .{ .chat = .{ .body = "{}" } }, &.{}, "", &why) == null);
+    try t.expectEqual(@as(u16, 409), why.status);
+    // None of its kind enabled: refused as disabled, not as missing.
+    try t.expect(b.s.setResidency(1, .disabled, null) == null);
+    why = .{};
+    try t.expect(resolve(&app, null, .chat_completion, &why) == null);
+    try t.expectEqualStrings("model_disabled", why.typ);
+    // What can run here, and why the others cannot; their settings are refused.
+    try t.expect(try unsupported(&app, a, 0) == null);
+    try t.expect(std.mem.indexOf(u8, (try unsupported(&app, a, 2)).?, "engine 'no_such_engine' is not built for") != null);
+    try t.expect(std.mem.indexOf(u8, (try unsupported(&app, a, 3)).?, "weights are not installed") != null);
+    try t.expect(!(try toolEntry(&app, a, 2)).supported);
+    const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"residency\": \"disabled\"}", .{});
+    try t.expect(try applySettings(&app, a, 2, body) == .bad);
 }

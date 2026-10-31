@@ -44,6 +44,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | `get_job` | `id`, `wait_s`: status, progress, output URLs |
 | `cancel_job` | `id` |
 | `release_models` | unloads every model now |
+| `set_model_residency` | when a model stays loaded: `residency` (always, call, on_demand, disabled), `idle_ttl_s`, `reset`; live and saved |
 | `computer_control`, `computer_use` | the user's paired computer (the desktop helper): a fixed control, or a bounded task on its screen whose consequential steps wait for the user's tap; `computer_status`, `computer_stop`. Needs a paired device token ([dev/COMPUTER.md](dev/COMPUTER.md)) |
 
 Clients that only speak MCP over stdio use the bridge: `localrouter mcp-stdio --url http://<host>:8190` (below).
@@ -464,13 +465,48 @@ the response as one line on stdout (notifications produce none; if the daemon ca
 JSON-RPC error). It keeps no state. In a client's config: `{"command": "localrouter", "args": ["mcp-stdio", "--url", "http://<host>:8190"]}`.
 The URL defaults to `$LOCALROUTER_URL`, else `http://127.0.0.1:8190`.
 
-## Priority and keep_loaded (operators)
+## Priority and residency (operators)
+
+**Residency** says when a tool is loaded, per tool: `always` (loaded at start, never unloaded for its idle TTL, back by
+itself after an eviction: what `keep_loaded: true` means, which stays accepted), `call` (chat, speech and
+transcription models only: loaded as a realtime voice session connects, kept like `always` while any call is open, and
+unloaded `idle_ttl_s` after the last call ends and its last job is done; outside a call a request still loads it, as an
+`on_demand` one) or `on_demand` (loaded by its first request, unloaded `idle_ttl_s` after its last job; `idle_ttl_s`
+0 unloads it right after each job), or `disabled` (any kind: never loaded, not at start, for a call, a request or a
+shadow decision; one loaded is unloaded at once, after its running job if any; a request naming it gets a 409
+`{"error": {"type": "model_disabled", "message": "<id> is disabled in settings"}}`, and a request that names no model,
+or a configured default that is disabled, goes to the next enabled tool of its kind). The config sets `residency` (else `keep_loaded` picks `always` or `on_demand`).
+`POST /v1/tools/{id}/settings` (scope `manage`; MCP `set_model_residency`) changes it live, with
+`{"residency"?: "always"|"call"|"on_demand"|"disabled", "idle_ttl_s"?: int >= 0, "reset"?: true}`:
+
+- A tool switched to `always` loads at once if it fits; one switched away, or whose TTL changed, counts its idle TTL
+  from the change.
+- It answers with the tool's updated `GET /v1/tools` entry. A bad value, or `call` for an image, video or decision
+  model, gets a 400. An `always` set past the budget gets a 409 whose `error` carries `needs_bytes`, `always_bytes` and
+  `ceiling_bytes`, and nothing changes.
+- The settings are saved to `<data_dir>/residency.json`, which overrides the config at every start. `reset: true`
+  drops the tool's entry, so its config applies again.
+- A `{id}` with a slash may be sent percent-encoded (`fishaudio%2Fdrama-3`) on every `/v1/tools/{id}/...` route.
+
+`GET /v1/tools` lists per tool `resident_bytes` (held now, 0 while not loaded), `booked_bytes` (what it books when
+loaded, loaded or not: its measured bytes, else its estimate, plus one job's working bytes; MCP `list_models` shows the
+same), `residency` and `idle_ttl_s` (in effect now), `residency_default` and
+`idle_ttl_s_default` (the config's), `allowed_residency`, `last_load_ms` (how long its last load took) and
+`loaded_since` (unix seconds; both null when unknown), `supported` and `unsupported_reason` (false with a reason when
+the tool cannot run on this host: its engine is not built for this OS, its program or weights are not installed, it
+has not passed its qualification, or no capability is left with its weights; it stays listed for diagnosis, and its
+settings are refused with a 400), and at the top `budget`: `ceiling_bytes` (`budget_bytes`, else
+the machine's memory less `reserve_bytes`), `booked_bytes` (loaded and admitted now) and `always_bytes` (what the
+`always` tools take: their resident bytes, measured once loaded, plus one job's working bytes each). A call's models
+load in parallel when they fit together, and every load of a speech model (at start, a reload, an API load, a call's,
+a request's) is followed by its voice's warm-up, so the first sentence after it is not the slow one. While they load
+and warm, a call's session says so (docs/HARNESS.md, `localrouter.session.loading`).
 
 Per tool in the config: `priority` (integer, default 0, a chat model 100; higher is kept longer) and `keep_loaded`
 (default false, a chat model true).
 When a request needs memory, idle tools are unloaded lowest priority first, then least recently used, until it fits;
 a tool that is loading or running is never unloaded. Priority only orders the victims: a request is never refused while
-unloading idle tools, of any priority, would make room. A `keep_loaded` tool is loaded when the daemon starts if it
+unloading idle tools, of any priority, would make room. An `always` (`keep_loaded`) tool is loaded when the daemon starts if it
 fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again as soon as the scheduler has been
 idle for a couple of seconds: if it does not fit, it unloads idle tools of lower priority, as a request would (never one
 of its own priority or above), so a video job's model gives the room back right after the job rather than at its idle
@@ -482,11 +518,11 @@ with a 503 `insufficient_memory` naming `spare_room_only`, before anything is un
 the turns. An operator can still make room for it on purpose with MCP `reserve_for`.
 While a realtime voice session is open (`voice_sessions` in `GET /v1/tools`), a request or a load for a tool outside
 the voice loop (an image, a video, a decision) never unloads a voice-loop model (chat, speech, transcription) of a
-higher priority: it is refused with a 503 `insufficient_memory` whose message starts "busy: a voice call is open",
+higher priority, nor a `call` tool of any priority (and a call's tools never unload one another): it is refused with a 503 `insufficient_memory` whose message starts "busy: a voice call is open",
 before anything is unloaded, and the call keeps its voice. The chat model sees that message as the tool's result and
 says the machine is busy. Without a call, priority only orders the victims, as above. MCP `reserve_for` (which tells
 the session first and brings the voice back after the job) is unchanged.
-`GET /v1/tools` shows `priority`, `keep_loaded`, `spare_room_only` and `capabilities`.
+`GET /v1/tools` shows `priority`, `keep_loaded`, `residency`, `spare_room_only` and `capabilities`.
 
 ## Licences
 

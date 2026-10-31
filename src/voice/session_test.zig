@@ -38,9 +38,13 @@ const Fake = struct {
     instance_warm: bool = false,
     voice_paused: std.atomic.Value(bool) = .init(false),
     warm_ms: u32 = 0, // how long the warm-up word takes (a cold instance's first job)
+    // The models loaded for calls: the nth `call_models` poll reports call_script[n] (the last one from then on); none
+    // when empty. The session polls once at connect, then about once a second while any is unsettled.
+    call_script: []const []const backend.CallModel = &.{},
+    call_polls: u32 = 0,
 
     fn b(f: *Fake) backend.Backend {
-        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools, .yield_chat = yieldChat, .speech_warm = speechWarm, .paused = pausedFn } };
+        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools, .yield_chat = yieldChat, .speech_warm = speechWarm, .paused = pausedFn, .call_models = callModels } };
     }
 
     fn self(p: *anyopaque) *Fake {
@@ -196,6 +200,16 @@ const Fake = struct {
         f.mutex.lockUncancelable(f.io);
         defer f.mutex.unlock(f.io);
         return f.knows_warm and f.instance_warm and std.mem.eql(u8, f.instance_voice, o.voice);
+    }
+
+    fn callModels(p: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const backend.CallModel {
+        const f = self(p);
+        f.mutex.lockUncancelable(f.io);
+        defer f.mutex.unlock(f.io);
+        if (f.call_script.len == 0) return &.{};
+        const now = f.call_script[@min(f.call_polls, f.call_script.len - 1)];
+        f.call_polls += 1;
+        return a.dupe(backend.CallModel, now);
     }
 
     fn pausedFn(p: *anyopaque) bool {
@@ -1011,6 +1025,9 @@ test "a call is ready when it connects: its voice is warmed first, localrouter.s
     const ready = try readyOf(a, &rig.rec, 0);
     try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
     try testing.expectEqualStrings("off", ready.get("chat").?.string);
+    try testing.expectEqualStrings("none", ready.get("load").?.string); // no call models: nothing waited for
+    try testing.expectEqual(@as(i64, 0), ready.get("loaded_ms").?.integer);
+    try testing.expect(ready.get("models").? == .null);
     try testing.expect(ready.get("ms").?.integer >= 150); // after the slow first job, not before it
     try testing.expect(try rig.rec.wait("session.created", 0) < try rig.rec.wait("localrouter.session.ready", 0));
     try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
@@ -1095,4 +1112,158 @@ test "ready waits for the chat prime, and a session.update during it primes agai
     const last = rig.fake.requests.items[rig.fake.requests.items.len - 1];
     try testing.expect(contains(last, "\"max_tokens\":1"));
     try testing.expect(contains(last, "Speak like a pirate.")); // the prime the first turn finds is the one it will send
+}
+
+test "a call waits for its call models: loading events while they load, then the warm-up, and ready says what loaded" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // the connect's poll and the loader's first find them loading; its second, a second later, ready
+    const loading = [_]backend.CallModel{ .{ .id = "drama-3", .state = "loading", .elapsed_ms = 400 }, .{ .id = "parakeet", .state = "queued" } };
+    const ready_now = [_]backend.CallModel{ .{ .id = "drama-3", .state = "ready", .elapsed_ms = 1400 }, .{ .id = "parakeet", .state = "ready", .elapsed_ms = 900 } };
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{ &loading, &loading, &ready_now } });
+    defer rig.stop();
+    const first = try rig.rec.wait("localrouter.session.loading", 0);
+    const shown = (try rig.rec.get(a, first)).object.get("models").?.array.items;
+    try testing.expectEqual(@as(usize, 2), shown.len);
+    try testing.expectEqualStrings("drama-3", shown[0].object.get("id").?.string);
+    try testing.expectEqualStrings("loading", shown[0].object.get("state").?.string);
+    try testing.expectEqual(@as(i64, 400), shown[0].object.get("elapsed_ms").?.integer);
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello.")); // no warm-up behind the load
+
+    const at = try rig.rec.wait("localrouter.session.ready", 0);
+    try testing.expect(first < at);
+    const ready = (try rig.rec.get(a, at)).object;
+    try testing.expectEqualStrings("loaded", ready.get("load").?.string);
+    try testing.expect(ready.get("loaded_ms").?.integer > 0);
+    try testing.expect(ready.get("ms").?.integer >= ready.get("loaded_ms").?.integer); // ms counts from the connect
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string); // warmed once the models were in
+    try testing.expect(ready.get("message").? == .null);
+    const models = ready.get("models").?.array.items;
+    try testing.expectEqual(@as(usize, 2), models.len);
+    try testing.expectEqualStrings("drama-3", models[0].object.get("id").?.string);
+    try testing.expectEqualStrings("parakeet", models[1].object.get("id").?.string);
+    try testing.expectEqualStrings("ready", models[1].object.get("state").?.string);
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+
+    // A later check (another voice) loaded nothing.
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}");
+    const again = try readyOf(a, &rig.rec, 1);
+    try testing.expectEqualStrings("none", again.get("load").?.string);
+    try testing.expectEqual(@as(i64, 0), again.get("loaded_ms").?.integer);
+}
+
+test "a call model that does not fit: ready at once with load failed and a message, no warm-up waiting on it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loading = [_]backend.CallModel{ .{ .id = "drama-3", .state = "loading" }, .{ .id = "parakeet", .state = "queued" } };
+    const settled = [_]backend.CallModel{ .{ .id = "drama-3", .state = "ready" }, .{ .id = "parakeet", .state = "no_room" } };
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{ &loading, &settled } });
+    defer rig.stop();
+    const ready = (try rig.rec.get(a, try rig.rec.waitFor("localrouter.session.ready", 0, 1000))).object;
+    try testing.expectEqualStrings("failed", ready.get("load").?.string);
+    try testing.expect(contains(ready.get("message").?.string, "parakeet"));
+    try testing.expect(contains(ready.get("message").?.string, "does not fit"));
+    const models = ready.get("models").?.array.items;
+    try testing.expectEqualStrings("no_room", models[1].object.get("state").?.string);
+    try testing.expectEqualStrings("off", ready.get("speech").?.string); // the warm-up was skipped
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
+}
+
+test "a call model disabled while it loads: ready comes once the rest are warm, listing it disabled, not as a failure" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loading = [_]backend.CallModel{ .{ .id = "drama-3", .state = "warming" }, .{ .id = "whisper", .state = "loading" } };
+    const settled = [_]backend.CallModel{ .{ .id = "drama-3", .state = "ready" }, .{ .id = "whisper", .state = "disabled" } };
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{ &loading, &loading, &settled } }); // the connect reads the first
+    defer rig.stop();
+    const ready = (try rig.rec.get(a, try rig.rec.waitFor("localrouter.session.ready", 0, 3000))).object;
+    try testing.expect(rig.rec.count("localrouter.session.loading", 0) >= 1); // warming is not settled: it was waited for
+    try testing.expectEqualStrings("loaded", ready.get("load").?.string);
+    try testing.expect(ready.get("message").? == .null);
+    try testing.expectEqualStrings("disabled", ready.get("models").?.array.items[1].object.get("state").?.string);
+}
+
+test "a voice model disabled before the call: ready lists it disabled though nothing had to load" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const settled = [_]backend.CallModel{.{ .id = "whisper", .state = "disabled", .@"error" = "disabled in settings" }};
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{&settled} });
+    defer rig.stop();
+    const ready = (try rig.rec.get(a, try rig.rec.waitFor("localrouter.session.ready", 0, 3000))).object;
+    try testing.expectEqualStrings("none", ready.get("load").?.string);
+    try testing.expect(ready.get("message").? == .null);
+    const m = ready.get("models").?.array.items[0].object;
+    try testing.expectEqualStrings("whisper", m.get("id").?.string);
+    try testing.expectEqualStrings("disabled", m.get("state").?.string);
+}
+
+test "a call in the voice already warm in the instance warms nothing at connect: ready at once, speech warm" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_warm = true, .warm_ms = 500 });
+    defer rig.stop();
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warm", ready.get("speech").?.string);
+    try testing.expect(ready.get("ms").?.integer < 200); // no settle wait, no warm-up
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
+}
+
+test "a voice named before the connect's warm-up runs: only that voice is warmed, and ready says warmed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_voice = "Mae", .instance_warm = true, .warm_ms = 30 });
+    defer rig.stop();
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}"); // within the settle window
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
+    try testing.expectEqualStrings("Arlo", ready.get("voice").?.string);
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+    rig.fake.mutex.lockUncancelable(rig.fake.io);
+    defer rig.fake.mutex.unlock(rig.fake.io);
+    try testing.expectEqualStrings("Arlo", rig.fake.instance_voice);
+}
+
+test "a voice change while a stale voice's warm-up speaks drops it: the new voice alone is warmed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 1500 });
+    defer rig.stop();
+    Io.sleep(testing.io, .fromMilliseconds(500), .awake) catch {}; // past the settle window: the default voice is speaking
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}");
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
+    try testing.expect(rig.fake.speech_cancelled.load(.acquire)); // the stale one was stopped, not finished
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+    try testing.expect(ready.get("ms").?.integer < 2 * 1500 + 300);
+}
+
+test "a call-mode load warmed in the call's voice (Nora): the session finds it warm and warms nothing more" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loading = [_]backend.CallModel{.{ .id = "drama-3", .state = "warming" }};
+    const ready_now = [_]backend.CallModel{.{ .id = "drama-3", .state = "ready" }};
+    var rig: Rig = undefined;
+    // the scheduler's post-load warm-up spoke Nora, the voice the call named (`voice_local.callVoice`)
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_voice = "Nora", .instance_warm = true, .warm_ms = 500, .call_script = &.{ &loading, &loading, &ready_now } });
+    defer rig.stop();
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Nora\"}}");
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("loaded", ready.get("load").?.string);
+    try testing.expectEqualStrings("warm", ready.get("speech").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
 }

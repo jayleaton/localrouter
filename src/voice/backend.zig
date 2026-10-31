@@ -55,6 +55,18 @@ pub const Shadow = struct {
     turn_ms: u64 = 0, // from the end of the user's turn to the end of this reply
 };
 
+/// A model the scheduler loads for an open call (residency `call`) and how far it is: `queued` (not started yet),
+/// `loading`, `warming` (a speech model, loaded: its voice's warm-up runs), `ready`, `failed` (its load failed: `error`
+/// says why), `no_room` (it does not fit beside what is kept) or `disabled` (turned off in settings since the call
+/// asked for it: it is not coming, by choice). The last four are settled. `elapsed_ms`: since the
+/// call asked for it.
+pub const CallModel = struct { id: []const u8, state: []const u8, elapsed_ms: u64 = 0, @"error": []const u8 = "" };
+
+pub fn settled(m: CallModel) bool {
+    for ([_][]const u8{ "queued", "loading", "warming" }) |x| if (std.mem.eql(u8, m.state, x)) return false;
+    return true;
+}
+
 /// Which model a session setting names.
 pub const Role = enum { chat, speech, transcription };
 
@@ -88,7 +100,15 @@ pub const Backend = struct {
         assistant_name: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: the default
         model_skill: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 = null, // null: no models line
         speech_warm: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator, o: Say) bool = null, // null: never known warm
+        call_models: ?*const fn (ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const CallModel = null, // null: none
     };
+
+    /// The models this machine loads for a call (residency `call`) and their state now, in `a`; none when it has none.
+    /// Takes the scheduler's lock: never call it under the session's.
+    pub fn callModels(b: Backend, a: std.mem.Allocator) error{OutOfMemory}![]const CallModel {
+        const f = b.vtable.call_models orelse return &.{};
+        return f(b.ptr, a);
+    }
 
     /// Whether `o`'s voice is warm in its speech model's loaded instance: its first sentence starts at the warm speed.
     /// False when the backend cannot tell (the session then warms it).

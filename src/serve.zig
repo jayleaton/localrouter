@@ -65,6 +65,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
         if (pl != .remote) try engine.resolve(io, arena, tools[k .. k + 1]);
         if (pl == .follower) { // another rank of a group: it loads when rank 0 asks, and stays until rank 0 stops it
             t.keep_loaded = false;
+            t.residency = null;
             t.idle_ttl_s = std.math.maxInt(u32);
         }
     }
@@ -136,6 +137,9 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     var scheduler: sched.Scheduler = .{ .io = io, .gpa = gpa, .cfg = &cfg, .slots = slots, .table = &table, .speech = .init(gate_path) };
     defer scheduler.deinit();
     var app: routes.App = .{ .gpa = gpa, .io = io, .cfg = &cfg, .scheduler = &scheduler, .table = &table, .jobs_dir = jobs_dir };
+    const followers = try arena.alloc(bool, cfg.tools.len);
+    for (followers, plan.places) |*f, pl| f.* = pl == .follower;
+    @import("sched/residency.zig").apply(io, gpa, cfg.data_dir, slots, followers); // what was set through the API, over the config
     scheduler.notify = app.voice.notifier(io, gpa); // voice sessions hear when a voice model is unloaded to make room
     scheduler.loaded = .{ .ctx = &app, .f = @import("api/voice_local.zig").warmLoaded }; // a kept speech model's voice warms as it loads
     defer app.voice.deinit(gpa);

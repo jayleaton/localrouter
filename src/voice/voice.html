@@ -1244,7 +1244,7 @@ function renderLightboxVoice() {
   pill.hidden = !V.ws;
   if (!V.ws) return;
   const s = voiceState();
-  $('lbVoiceText').textContent = `On a call · ${STATE_TEXT[s][0].toLowerCase()}`;
+  $('lbVoiceText').textContent = `On a call · ${stateText(s)[0].toLowerCase()}`;
   pill.querySelector('.dot').dataset.s = s === 'speaking' || s === 'hearing' ? 'busy' : s === 'connecting' ? 'loading' : 'ready';
   $('lbHush').hidden = !(s === 'speaking' || s === 'thinking');
 }
@@ -1572,11 +1572,12 @@ async function pollTools() {
 const lastLat = { voice: null, chat: null };
 function overall() {
   if (!online) return ['offline', 'Offline'];
-  const list = tools.data || [];
+  const list = (tools.data || []).filter(t => t.supported !== false && t.residency !== 'disabled'); // what can run here and is switched on
   if (!list.length) return ['loading', 'Connecting'];
-  const core = list.filter(t => t.keep_loaded);
+  const core = list.filter(t => t.keep_loaded || t.residency === 'call');
   if (core.some(t => t.state === 'failed' || (t.state === 'unloaded' && t.last_error))) return ['failed', 'Model problem'];
-  if (core.some(t => t.state === 'loading' || t.state === 'unloaded')) return ['loading', 'Warming up'];
+  // a call model is unloaded between calls by design
+  if (core.some(t => t.state === 'loading' || (t.state === 'unloaded' && t.residency !== 'call'))) return ['loading', 'Warming up'];
   if (list.some(t => t.state === 'busy')) return ['busy', 'Working'];
   return ['ready', 'Ready'];
 }
@@ -1593,7 +1594,7 @@ function renderStatus() {
   let html = '<h3>Models</h3>';
   for (const t of tools.data || []) {
     const st = t.state === 'unloaded' && t.last_error ? 'failed' : t.state;
-    html += `<div class="m model" data-id="${esc(t.id)}" title="${esc(t.last_error || t.id)}"><span class="dot" data-s="${esc(st)}"></span><span>${esc(name(t.id))}</span><em>${esc(words[st] || st)}${t.keep_loaded ? ' · kept warm' : ''}</em></div>`;
+    html += `<div class="m model" data-id="${esc(t.id)}" title="${esc(t.last_error || t.id)}"><span class="dot" data-s="${esc(st)}"></span><span>${esc(name(t.id))}</span><em>${esc(words[st] || st)}${t.residency === 'call' ? ' · loads for calls' : t.keep_loaded ? ' · kept warm' : ''}</em></div>`;
   }
   if (tools.mem_available_bytes) html += `<div class="lat">${(tools.mem_available_bytes / 2 ** 30).toFixed(0)} GiB memory free</div>`;
   html += '<h3 style="margin-top:14px">Last turns</h3><div class="lat">';
@@ -2532,7 +2533,7 @@ const V = {
   retries: 0, retryTimer: 0,
   held: [], holdTimer: 0, started: new Set(), holding: null, firstAt: new Map(), got: new Map(), lastRate: 0, freeRate: new Map(), textDone: new Set(), speechDone: new Set(), chars: new Map(), speechFirst: new Set(), written: new Map(), rates: new Map(), marginUp: 0, gaps: new Map(), rec: null,
   doneMs: new Map(), cut: new Set(), byItem: new Map(), byCall: new Map(), lastLoudMic: 0, turnEnd: 0,
-  pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '',
+  pendingTurn: null, gate: { held: [], loud: 0, openUntil: 0 }, lock: null, open: false, lastYou: '', lastBot: '', loading: '',
 };
 const vsend = obj => {
   if (!V.ws || V.ws.readyState !== WebSocket.OPEN) return;
@@ -3335,11 +3336,22 @@ function handle(ev) {
       break;
     case 'session.created':
       V.warming = true;
+      V.loading = '';
       renderVoice();
       break;
+    case 'localrouter.session.loading': { // the models this machine loads for calls are still on their way
+      V.warming = true;
+      const ms = ev.models || [];
+      const m = ms.find(x => x.state === 'loading') || ms.find(x => x.state === 'warming') || ms.find(x => x.state === 'queued');
+      V.loading = m ? `${short(models.find(x => x.id === m.id) || { id: m.id })}${m.state === 'warming' ? ' warming its voice' : ''} · ${Math.round((m.elapsed_ms || 0) / 1000)} s` : 'The first reply waits for them';
+      renderVoice();
+      break;
+    }
     case 'localrouter.session.ready':
       V.warming = false;
-      dbg('voice.ready', { speech: ev.speech, chat: ev.chat, ms: ev.ms });
+      V.loading = '';
+      dbg('voice.ready', { speech: ev.speech, chat: ev.chat, ms: ev.ms, load: ev.load, loaded_ms: ev.loaded_ms });
+      if (ev.load === 'failed' && ev.message) note(ev.message, true);
       renderVoice();
       break;
     case 'response.output_item.done':
@@ -3432,6 +3444,8 @@ function voiceState() {
   if (S.mode === 'ptt') return 'ptt';
   return V.muted ? 'muted' : 'listening';
 }
+/** The state's title and hint; while call models load, which one and for how long. */
+const stateText = s => s === 'warming' && V.loading ? ['Loading voice models…', V.loading] : STATE_TEXT[s];
 const STATE_TEXT = {
   off: ['Voice is off', ''], connecting: ['Connecting…', 'Allow the microphone if asked'],
   listening: ['Listening', 'Just talk; I answer when you pause'], hearing: ['Hearing you…', ''],
@@ -3447,13 +3461,13 @@ function renderVoice() {
   $('mic').dataset.on = V.ws ? '1' : '';
   $('mic').setAttribute('aria-label', V.ws ? 'Open voice mode' : 'Start voice mode');
   $('vbar').hidden = !V.ws || V.open;
-  $('vbarText').textContent = `Voice on · ${STATE_TEXT[s][0].toLowerCase()}`;
+  $('vbarText').textContent = `Voice on · ${stateText(s)[0].toLowerCase()}`;
   $('text').placeholder = V.ws ? 'Type, and hear the reply' : `Message ${A.name}`;
   if (!V.open) return;
   const orb = $('orb');
   if (orb.dataset.state !== s) orb.dataset.state = s;
-  $('vmState').textContent = STATE_TEXT[s][0];
-  if (!/^Keep holding/.test($('vmHint').textContent) || s !== 'ptt') $('vmHint').textContent = STATE_TEXT[s][1];
+  $('vmState').textContent = stateText(s)[0];
+  if (!/^Keep holding/.test($('vmHint').textContent) || s !== 'ptt') $('vmHint').textContent = stateText(s)[1];
   orb.setAttribute('aria-label', s === 'speaking' || s === 'thinking' ? 'Interrupt' : s === 'muted' ? 'Unmute' : s === 'listening' ? 'Mute' : 'Voice');
   $('vmYou').textContent = V.lastYou ? `“${V.lastYou}”` : '';
   $('vmBot').textContent = V.lastBot;
