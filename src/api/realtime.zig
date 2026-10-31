@@ -11,6 +11,7 @@ const routes = @import("routes.zig");
 const config = @import("../config.zig");
 const ws = @import("../voice/ws.zig");
 const Session = @import("../voice/session.zig").Session;
+const respond = @import("../voice/respond.zig");
 const Local = @import("voice_local.zig").Local;
 const pair = @import("pair.zig");
 
@@ -73,9 +74,18 @@ pub const Registry = struct {
         r.broadcast("localrouter.voice.paused", .{ .model = model, .for_model = for_model, .message = "voice is paused while a model makes room; it comes back by itself when the job is done" });
     }
 
+    /// Each session then checks its voice again (the speech model is a new instance) and says when it is ready.
     fn resumed(ctx: *anyopaque) void {
         const r: *Registry = @ptrCast(@alignCast(ctx));
         r.broadcast("localrouter.voice.resumed", .{ .message = "voice is back" });
+        const io = r.io orelse return;
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        for (r.sessions.items) |s| {
+            s.mutex.lockUncancelable(io);
+            defer s.mutex.unlock(io);
+            respond.getReady(s);
+        }
     }
 
     fn broadcast(r: *Registry, comptime typ: []const u8, fields: anytype) void {

@@ -89,8 +89,9 @@ pub const Voice = struct {
     // nothing more said: only the transcript is early, nothing considers it before the wait ends); 0: none
     prime_chat: bool = true, // at the start and after each response the chat server reads the conversation so far
     // (max_tokens 1, discarded), so the next turn's request finds it in its prefix cache
-    warm_speech: bool = true, // the first session after a start speaks one sentence (discarded) as it connects, on its own
-    // thread: the speech model's first job after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm)
+    warm_speech: bool = true, // a kept speech model speaks one word (discarded) as it loads, and a call whose voice is not
+    // the one warm in the loaded instance speaks it as it connects, before `localrouter.session.ready`: the first job
+    // after a load is slow (0.84 s to first audio on DGX-01, 0.1 s warm), and on the Mac a voice switch is 4 to 6 s
     greedy_transcripts: bool = true, // voice turns decode in one greedy pass (Whisper: transcripts identical to its
     // recipe on the qualify set and the e2e prompts, measured on DGX-01, about 150 ms sooner)
     speech_first: bool = true, // while a reply is written, this daemon's own chat model is paused (SIGSTOP, lossless) whenever

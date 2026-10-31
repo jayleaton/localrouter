@@ -240,7 +240,16 @@ interrupt_response}` or `null`), `tools` (function tools only), `tool_choice`, `
 | `localrouter.response.timing` | `response_id`, `from`, `ms` (per stage), `stt_worker_ms`, `voiced_audio_ms` | latency measurement |
 | `localrouter.job.created` / `.job.done` | `call_id`, `job_id`, `kind`; then `status`, `urls`, `error` | a built-in generation tool's job (below) |
 | `localrouter.voice.paused` / `.voice.resumed` | `model`, `for_model`, `message` | a voice model made room for a job; the session stays open |
+| `localrouter.session.ready` | `speech` (`warm`, `warmed`, `paused`, `failed`, `off`), `chat` (`primed`, `off`), `voice`, `ms` | the call answers at its warm speed from now on (below) |
 | `localrouter.function_call.cancelled` | `item_id`, `call_id`, `name`, `response_id`, `reason` (`turn_detected`, `response_started`) | client tool mode: stop that call's work, its output will be refused |
+
+**Readiness.** `localrouter.session.ready` always follows `session.created`, once the session's voice is warm in the
+speech model's loaded instance and the chat server holds the conversation's prefix (`voice.warm_speech`,
+`voice.prime_chat`). It comes again after a `session.updated` that changed the voice or the speech model, and after
+`localrouter.voice.resumed`. Show the call as getting ready until it arrives: audio sent before it is heard and
+answered, but the first reply waits for the warm-up (on the Mac's Drama 3 a voice not yet warm costs 4 to 6 s).
+`ms` is how long the check took; `speech` says whether the voice was already warm, was warmed now, or could not be
+(`paused`: a voice model is making room for a job; `failed`: the warm-up failed and the first reply pays it).
 
 **Tool execution** (`realtime.tool_execution`), chosen per session with the extension
 `session.update {session: {localrouter: {tool_execution: "server" | "client"}}}` before its first response, and echoed

@@ -11,6 +11,7 @@ const backend = @import("backend.zig");
 const chat = @import("chat.zig");
 const Stop = @import("stop.zig").Stop;
 const Session = @import("session.zig").Session;
+const respond = @import("respond.zig");
 
 const Fake = struct {
     io: Io,
@@ -30,9 +31,16 @@ const Fake = struct {
     can_yield: bool = false, // the chat model can be paused for speech (speech first)
     yields: std.atomic.Value(u32) = .init(0), // holds taken or renewed
     held: std.atomic.Value(bool) = .init(false), // a hold is in place now
+    // The speech model's loaded instance: the voice it last spoke ("" after a load), as the scheduler tracks it; with
+    // `knows_warm`, the backend answers `speech_warm` from it.
+    knows_warm: bool = false,
+    instance_voice: []const u8 = "",
+    instance_warm: bool = false,
+    voice_paused: std.atomic.Value(bool) = .init(false),
+    warm_ms: u32 = 0, // how long the warm-up word takes (a cold instance's first job)
 
     fn b(f: *Fake) backend.Backend {
-        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools, .yield_chat = yieldChat } };
+        return .{ .ptr = f, .vtable = &.{ .transcribe = transcribe, .speak = speak, .stream = chatFn, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .client_tools = clientTools, .yield_chat = yieldChat, .speech_warm = speechWarm, .paused = pausedFn } };
     }
 
     fn self(p: *anyopaque) *Fake {
@@ -64,17 +72,21 @@ const Fake = struct {
         return a.dupe(u8, f.heard);
     }
 
-    fn speak(p: *anyopaque, a: std.mem.Allocator, text: []const u8, _: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *backend.Why) backend.Error!void {
+    fn speak(p: *anyopaque, a: std.mem.Allocator, text: []const u8, o: backend.Say, sink: backend.PcmSink, stop: *Stop, why: *backend.Why) backend.Error!void {
         const f = self(p);
         if (std.mem.indexOf(u8, text, "unspeakable") != null) {
             why.set("the fake voice failed", .{});
             return error.Failed;
         }
-        if (!f.nap(f.speak_ms, stop)) {
+        if (!f.nap(if (std.mem.eql(u8, text, backend.warm_sentence)) f.warm_ms else f.speak_ms, stop)) {
             f.speech_cancelled.store(true, .release);
             return error.Cancelled;
         }
         f.keep(&f.spoke, text);
+        f.mutex.lockUncancelable(f.io);
+        f.instance_voice = f.arena.allocator().dupe(u8, o.voice) catch "";
+        f.instance_warm = true;
+        f.mutex.unlock(f.io);
         const samples = try a.alloc(i16, 2205 * @max(text.len / 10, 1)); // 100 ms at 22.05 kHz per 10 characters
         @memset(samples, 1000);
         const half = samples.len / 2; // streamed, in two pieces
@@ -179,6 +191,32 @@ const Fake = struct {
         return true;
     }
 
+    fn speechWarm(p: *anyopaque, _: std.mem.Allocator, o: backend.Say) bool {
+        const f = self(p);
+        f.mutex.lockUncancelable(f.io);
+        defer f.mutex.unlock(f.io);
+        return f.knows_warm and f.instance_warm and std.mem.eql(u8, f.instance_voice, o.voice);
+    }
+
+    fn pausedFn(p: *anyopaque) bool {
+        return self(p).voice_paused.load(.acquire);
+    }
+
+    /// The speech model was unloaded and loaded again: a new instance, no voice warm in it.
+    fn reload(f: *Fake) void {
+        f.mutex.lockUncancelable(f.io);
+        defer f.mutex.unlock(f.io);
+        f.instance_warm = false;
+    }
+
+    fn spokenCount(f: *Fake, text: []const u8) usize {
+        f.mutex.lockUncancelable(f.io);
+        defer f.mutex.unlock(f.io);
+        var n: usize = 0;
+        for (f.spoke.items) |x| n += @intFromBool(std.mem.eql(u8, x, text));
+        return n;
+    }
+
     fn clientTools(p: *anyopaque, why: *backend.Why) bool {
         if (!self(p).no_inference) return true;
         why.set("client tool execution needs the inference scope", .{});
@@ -263,11 +301,21 @@ const Rig = struct {
     s: *Session = undefined,
 
     fn start(rig: *Rig, voice: config.Voice) !void {
-        const io = testing.io;
         var v = voice;
         v.warm_speech = false; // the tests count what is spoken
-        rig.* = .{ .fake = .{ .io = io, .arena = .init(testing.allocator) }, .rec = .{ .io = io, .arena = .init(testing.allocator) } };
-        rig.s = try Session.create(testing.allocator, io, rig.fake.b(), .{ .ctx = &rig.rec, .send = Rec.send }, v, "");
+        return rig.startWarm(v, .{ .io = testing.io, .arena = .init(testing.allocator) });
+    }
+
+    /// With `voice` as given (warm-ups as it says), against `fake`.
+    fn startWarm(rig: *Rig, voice: config.Voice, fake: Fake) !void {
+        const io = testing.io;
+        rig.* = .{ .fake = fake, .rec = .{ .io = io, .arena = .init(testing.allocator) } };
+        rig.s = try Session.create(testing.allocator, io, rig.fake.b(), .{ .ctx = &rig.rec, .send = Rec.send }, voice, "");
+    }
+
+    /// Another call on the same fake (the same speech model instance).
+    fn connect(rig: *Rig, rec: *Rec, voice: config.Voice) !*Session {
+        return Session.create(testing.allocator, testing.io, rig.fake.b(), .{ .ctx = rec, .send = Rec.send }, voice, "");
     }
 
     fn stop(rig: *Rig) void {
@@ -947,4 +995,104 @@ test "a barge-in while a picture call is written: no call, and the session's \"M
     const next = rig.fake.requests.items[rig.fake.requests.items.len - 1];
     try testing.expect(contains(next, "never mind, hello there"));
     try testing.expect(!contains(next, "Making that now."));
+}
+
+fn readyOf(a: std.mem.Allocator, rec: *Rec, nth: usize) !std.json.ObjectMap {
+    return (try rec.get(a, try rec.wait("localrouter.session.ready", nth))).object;
+}
+
+test "a call is ready when it connects: its voice is warmed first, localrouter.session.ready says so, and a call in a warm voice speaks nothing" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 150 });
+    defer rig.stop();
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
+    try testing.expectEqualStrings("off", ready.get("chat").?.string);
+    try testing.expect(ready.get("ms").?.integer >= 150); // after the slow first job, not before it
+    try testing.expect(try rig.rec.wait("session.created", 0) < try rig.rec.wait("localrouter.session.ready", 0));
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+
+    // The next call in the same voice finds it warm in the loaded instance: ready at once, nothing spoken.
+    var rec2: Rec = .{ .io = testing.io, .arena = .init(testing.allocator) };
+    defer rec2.arena.deinit();
+    const s2 = try rig.connect(&rec2, .{ .prime_chat = false });
+    defer s2.destroy();
+    const r2 = try readyOf(a, &rec2, 0);
+    try testing.expectEqualStrings("warm", r2.get("speech").?.string);
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+}
+
+test "warmth belongs to the loaded instance and the voice: a reload or a voice switch warms again, and the client hears ready each time" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20 });
+    defer rig.stop();
+    _ = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+
+    // Another voice (a client sets it after connecting): warmed in it, and ready again.
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}");
+    const switched = try readyOf(a, &rig.rec, 1);
+    try testing.expectEqualStrings("warmed", switched.get("speech").?.string);
+    try testing.expectEqualStrings("Arlo", switched.get("voice").?.string);
+    try testing.expectEqual(@as(usize, 2), rig.fake.spokenCount("Hello."));
+    rig.fake.mutex.lockUncancelable(rig.fake.io);
+    try testing.expectEqualStrings("Arlo", rig.fake.instance_voice);
+    rig.fake.mutex.unlock(rig.fake.io);
+
+    // An update that keeps the voice checks nothing again.
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"instructions\":\"Be brief.\"}}");
+    _ = try rig.rec.wait("session.updated", 1);
+    Io.sleep(testing.io, .fromMilliseconds(50), .awake) catch {};
+    try testing.expectEqual(@as(usize, 2), rig.rec.count("localrouter.session.ready", 0));
+
+    // The model was unloaded to make room and came back (voice.resumed): a new instance, so the voice warms again.
+    rig.fake.reload();
+    rig.s.mutex.lockUncancelable(rig.s.io);
+    respond.getReady(rig.s); // what the registry does for each session when voice is back
+    rig.s.mutex.unlock(rig.s.io);
+    const back = try readyOf(a, &rig.rec, 2);
+    try testing.expectEqualStrings("warmed", back.get("speech").?.string);
+    try testing.expectEqual(@as(usize, 3), rig.fake.spokenCount("Hello."));
+}
+
+test "while voice is paused a call is ready as paused (nothing spoken), and warms when it is back" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true };
+    fake.voice_paused.store(true, .release);
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, fake);
+    defer rig.stop();
+    try testing.expectEqualStrings("paused", (try readyOf(a, &rig.rec, 0)).get("speech").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
+    rig.fake.voice_paused.store(false, .release);
+    rig.s.mutex.lockUncancelable(rig.s.io);
+    respond.getReady(rig.s);
+    rig.s.mutex.unlock(rig.s.io);
+    try testing.expectEqualStrings("warmed", (try readyOf(a, &rig.rec, 1)).get("speech").?.string);
+}
+
+test "ready waits for the chat prime, and a session.update during it primes again with the new instructions" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .warm_speech = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .delta_ms = 10 });
+    defer rig.stop();
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"instructions\":\"Speak like a pirate.\"}}");
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("primed", ready.get("chat").?.string);
+    try testing.expectEqualStrings("off", ready.get("speech").?.string);
+    rig.fake.mutex.lockUncancelable(rig.fake.io);
+    defer rig.fake.mutex.unlock(rig.fake.io);
+    const last = rig.fake.requests.items[rig.fake.requests.items.len - 1];
+    try testing.expect(contains(last, "\"max_tokens\":1"));
+    try testing.expect(contains(last, "Speak like a pirate.")); // the prime the first turn finds is the one it will send
 }
