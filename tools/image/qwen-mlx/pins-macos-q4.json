@@ -1,0 +1,87 @@
+{
+ "note": "macOS only: the 4-bit alternative to pins-macos.json's 8-bit pack, for a Mac whose warm models leave no room for 18 GiB (fetch.sh --pack q4; the worker's option pack: q4). The runtime is pins-macos.json's. tools/package/verify_assets.py form (selected_files).",
+ "repo_id": "ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit",
+ "revision": "394f9477a956a0c4fd70ebcbe3a326d74ef0add4",
+ "base_model": "Qwen/Qwen-Image-2.1-Turbo",
+ "license": {
+  "name": "Qwen Research License Agreement: non-commercial research or evaluation only",
+  "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE"
+ },
+ "selected_files": [
+  {
+   "path": "LICENSE",
+   "size_bytes": 7831,
+   "git_blob_sha1": "13ae08d5a5828f508cf0e852b1b316c0c0bbb9b3"
+  },
+  {
+   "path": "NOTICE",
+   "size_bytes": 434,
+   "git_blob_sha1": "853eb90e79b0ddea49f7edc11c12da326bbea664"
+  },
+  {
+   "path": "README.md",
+   "size_bytes": 4137,
+   "git_blob_sha1": "e70fbf2fe18f0769444df05fd04e44489b8750a3"
+  },
+  {
+   "path": "config.json",
+   "size_bytes": 117,
+   "git_blob_sha1": "623ef1e3fa7bd18ff495f114c4357d142c7ff1ed"
+  },
+  {
+   "path": "model_index.json",
+   "size_bytes": 578,
+   "git_blob_sha1": "cdc1dae2997ff637225c42c388196b38a9bbaae8"
+  },
+  {
+   "path": "processor/tokenizer.json",
+   "size_bytes": 11422650,
+   "lfs_sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"
+  },
+  {
+   "path": "processor/tokenizer_config.json",
+   "size_bytes": 705,
+   "git_blob_sha1": "6577e86ca277ad0367551e280ba1d58ad4d42c52"
+  },
+  {
+   "path": "scheduler/scheduler_config.json",
+   "size_bytes": 486,
+   "git_blob_sha1": "72837792c1944182b3707415cdaeb825e6bf5598"
+  },
+  {
+   "path": "text_encoder/config.json",
+   "size_bytes": 1542,
+   "git_blob_sha1": "b5881fa79f7c988a9ac2f91e4f1192deed7ac034"
+  },
+  {
+   "path": "text_encoder/model.safetensors",
+   "size_bytes": 5676130033,
+   "lfs_sha256": "6d326352bd9468e77c3788120b5cd7c50beafec379578aa5c172819c2f31e746"
+  },
+  {
+   "path": "transformer/config.json",
+   "size_bytes": 370,
+   "git_blob_sha1": "b3f8d1cf08a94a1d4ec09e2bfeb5344af25f2983"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+   "size_bytes": 2974367042,
+   "lfs_sha256": "11b3e959d1b9031d15d3b8fabb7b13b8cac571c3cdf22452960523a9c3adcb81"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+   "size_bytes": 1223193789,
+   "lfs_sha256": "242eb483f30a10446758255694a23a518c171cd544303a0d681aaf4c9fdb9a33"
+  },
+  {
+   "path": "vae/config.json",
+   "size_bytes": 2172,
+   "git_blob_sha1": "9b780c2dd9601cb0b93ae8f462b58dd3a7468347"
+  },
+  {
+   "path": "vae/diffusion_pytorch_model.safetensors",
+   "size_bytes": 662000745,
+   "lfs_sha256": "3ecb67f7df44bef3a74a65fa2a90d477122e45c7214906f04222a59ca4ca8aeb"
+  }
+ ]
+}

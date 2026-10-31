@@ -218,3 +218,104 @@ which differs between CUDA 13.0 (the box's nvcc, which builds the engine) and 13
 four GELU ops differed by a few bytes in 66,709 and the chained replay diverged from there. The same header serves the
 H3 vision tower. References are resized to about one megapixel with sides up to 2048 (4:1), independent of the
 output's `max_side`; the worker's memory is 38.2 / 41.3 / 44.1 GiB at `edit_refs` 1 / 2 / 3 (31.2 GiB without the pack).
+
+## macOS (Apple Silicon): MLX-Serve worker
+
+On a Mac the image tool is a `cmd` worker, `tools/image/qwen-mlx/qwen_mlx_worker.py`, not the Zig/CUDA engine above. It
+starts MLX-Serve (a native Zig/MLX server) on 127.0.0.1 and is its client, the "model's own server" shape of
+docs/ARCHITECTURE.md. Text to image and edits with one to five input images, the same checkpoint (Qwen-Image 2.1
+Turbo, its own unshifted eight-node `sample_sigmas` schedule).
+
+| Part | Pin (`tools/image/qwen-mlx/pins-macos.json`) |
+| --- | --- |
+| Runtime | MLX-Serve 26.10.3 release binary `mlx-serve-bin-macos-arm64.tar.gz`, sha256 `d1781c89…652b` (source `046b6476`); 26.10.2 is the first that runs Turbo's own schedule, so the worker refuses older |
+| Weights | `ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit@214ca346`, 17.7 GB: MLX affine 8-bit (group 64) DiT and text-encoder linears, dense f32 VAE, the Qwen3-VL vision tower; every file's size and digest checked by `verify_assets.py` |
+| 4-bit weights (the Mac profile's) | `ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-4bit@394f9477`, 10.5 GB (`pins-macos-q4.json`): 4-bit DiT and text-encoder linears, the same tower, VAE and schedule; `fetch.sh ROOT --pack q4`, option `pack: "q4"`. The profile and `config.example.json` install and run this pack; its bookings are below |
+| Worker Python | Pillow 13.0.0 (`requirements-macos.txt`, hashes required) |
+
+Setup: `tools/image/qwen-mlx/fetch.sh ROOT --pack q4` (binary, pack, venv; without `--pack` the 8-bit one), then a tool like
+`tools/image/qwen-mlx/config.example.json`. Tests without a model: `ROOT/venv/bin/python -I
+tools/image/qwen-mlx/test_worker.py` (lifecycle, memory, refusals, cancellation, failures, outputs, against a fake
+MLX-Serve).
+
+**Licence.** The weights are Qwen's, under the Qwen Research License Agreement: non-commercial research or evaluation
+only; commercial use needs a separate licence from Qwen. The 8-bit conversion does not change that. MLX-Serve is MIT,
+its bundled MLX libraries Apache-2.0.
+
+**Same request, same meaning.** The worker applies the Spark tool's rules itself (the daemon does not run a `cmd`
+tool's `check`): `max_side` / `max_pixels` on the output, steps 0 or 8, `n` images with seeds `seed`, `seed+1`, …,
+up to `edit_refs` (at most 5) input images in order (the first is the one edited), an edit without a size gets the last
+image's shape at about one megapixel within the limits (`editSize`), inputs under 32 pixels a side or past 4:1 are
+refused, and a mask (alpha 0 where the edit goes) keeps the first image where it is opaque (the `Keep` composite, done
+with Pillow: premultiplied Lanczos, then `Image.composite`; at the soft edges its rounding may differ from the Zig
+blend by 1). `guidance` and `negative_prompt` are not used, as on the Spark. Differences, refused rather than changed
+quietly: an explicit edit size must be a multiple of 32 (MLX-Serve floors it); WebP inputs are sent as lossless PNG
+(MLX-Serve decodes PNG and JPEG). Output is RGBA (the VAE's own alpha, MLX-Serve's `transparent`), with `prompt` and
+`seed` text chunks; the daemon adds the machine-generated label. Cancel: SIGUSR1 closes the stream, MLX-Serve stops at
+its next step and stays loaded. A dead server takes the worker with it (a 503; the next request reloads).
+
+**Numerics.** This is a deliberate numerical change from the Spark engine (8-bit MLX weights, MLX kernels), not a port
+of it: no bit-parity with the Spark or the twin is claimed. The Mac reference is the baseline below, MLX-Serve 26.10.3
+with its lossy `--w8a8` (int8 x int8 DiT linears, on by default on M5 with 64 GiB or more) turned **off**
+(option `w8a8`, default false).
+
+### Baseline (2026-10-30, Mac Studio M5 Ultra, 96 GiB, macOS 27.2)
+
+`tools/image/qwen-mlx/baseline.py ROOT OUT` drives the worker through the protocol as the daemon does, under the
+machine's GPU lock. Its inputs are made first by the same model (so nothing comes from outside): `woman` 1024x1024 seed
+11, `hat` 768x768 seed 12, `cup` 1024x768 seed 13, `dog` 768x1024 seed 14, `room` 1344x768 seed 15 (prompts in the
+script). Every case runs with seeds 7 and 8; edits leave the size to the model (the last input's shape: 1024x1024, or
+1344x768 for five inputs). Memory: the server's resident set sampled every 100 ms (unified memory, MLX's buffers are in
+it; MLX's own `/props` peak agreed within 0.1 GB).
+
+| Case | Inputs | Seconds a image (seed 7 / 8) | Peak resident |
+| --- | --- | --- | --- |
+| load (server start, model, a 256x256 warm-up image) | | 2.3 (weights in the file cache; 11.9 s server start cold) | 16.9 GB resident |
+| text to image 1024x1024 | | 8.48 / 8.50 | 16.3 GB |
+| edit "make it night time…" | woman | 12.92 / 11.26 | 16.8 GB |
+| edit "…wearing the red beanie from image 2" | woman, hat | 14.25 / 14.22 | 16.6 GB |
+| edit "…sitting in the armchair of the room in image 5…" | all five | 25.59 / 24.44 | 17.3 GB |
+| masked edit "give her a bright yellow sweater" | woman + mask | 11.39 / 11.40 | 16.7 GB |
+| exit | | 1.9 | |
+
+Peak over the run 17.33 GB; an 8-bit tool books 16 GiB resident plus 2 GiB working. For comparison the Spark (GB10, FP8)
+makes the 1024x1024 image in 6.3 s and edits one input in 11 to 12.5 s.
+
+**Bookings (the 4-bit pack).** The scheduler books an image job at `resident_bytes + working_bytes`, and an edit at
+`working_bytes + reference_working_bytes × inputs` on top of the resident set (`reference_working_bytes` is an option
+the daemon reads; the worker leaves it alone). The integration run measured the 4-bit pack under load: 9.27 GiB
+resident after the load, a 15.1 GiB peak for a 1-megapixel image, 13.2 GiB for an edit of one input and 24.3 GiB for
+one of five. The profile and `config.example.json` book it at:
+
+| Field | Bytes | |
+| --- | --- | --- |
+| `resident_bytes` | 10200547328 | 9.5 GiB (9.27 measured at load) |
+| `working_bytes` | 6979321856 | 6.5 GiB (9.5 + 6.5 = 16 GiB against the 15.1 GiB peak of a 1 MP image) |
+| `options.reference_working_bytes` | 2147483648 | 2 GiB an input: 18 GiB booked for a 1-input edit (13.2 measured), 26 GiB for 5 inputs (24.3 measured) |
+
+On the Mac profile the image model loads on demand (`warm: false`, `keep_loaded: false`): chat, Drama 3 and Whisper
+stay warm (about 66 of the GPU's 77.8 GiB), and the 8-bit pack's 18 GiB does not fit beside them, so the profile
+installs the 4-bit pack. Still to do: the 4-bit pack against the 8-bit baseline above on quality and speed.
+
+**Why MLX-Serve and not mflux.** Same Turbo checkpoint at 8 bits (`mflux-community/qwen-image-2-1-turbo-mflux-q8@19d2068a`,
+which also has the vision tower), mflux `5171ae15` `QwenImage21Edit`, the same prompts, inputs and seeds, one load:
+
+| | MLX-Serve 26.10.3 | mflux 5171ae15 |
+| --- | --- | --- |
+| text to image 1024x1024 (s, seed 7 / 8) | 8.48 / 8.50 | 11.13 / 8.33 |
+| edit, 1 input | 12.92 / 11.26 | 44.01 / 52.89 |
+| edit, 2 inputs | 14.25 / 14.22 | 32.31 / 25.43 |
+| edit, 5 inputs | 25.59 / 24.44 | 36.46 / 39.11 |
+| peak memory (MLX) | 16.8 to 17.3 GB | 29.1 to 34.0 GB |
+
+**Through the daemon** (the same Mac, LocalRouter built with `zig build -Doptimize=ReleaseSafe`, the tool of
+`config.example.json`; seconds are the HTTP round trip): `/v1/images/generations` 1024x1024 10.8 s for the first
+request (loading the tool included), `n` 2 16.8 s; `/v1/images/edits` with 1, 2 and 5 inputs 11.3, 14.0 and 24.0 s, a
+mask 11.2 s; MCP `generate_image` 8.6 s, `edit_image` with 1 and 2 images 11.3 and 14.5 s. Refused with a 400 and
+the reason: six inputs (the API), steps 25, 1600x1024, and an edit at 1008x1008 (the worker). Outputs carry the
+machine-generated label and the `prompt` / `seed` chunks; the scheduler measured 16,089 MiB resident. A SIGKILLed
+daemon leaves no worker or MLX-Serve behind (`localrouter guard`).
+
+Both produce correct edits with all five inputs. MLX-Serve is as fast for text to image, two to four times faster for
+edits, and needs half the memory; it is also a server that cancels at the next step, where mflux is a library a worker
+would have to host itself.

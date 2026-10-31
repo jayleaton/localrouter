@@ -1,0 +1,96 @@
+{
+ "note": "macOS (Apple Silicon) only: the Qwen-Image 2.1 Turbo media worker (qwen_mlx_worker.py). fetch.sh downloads and checks these; the model part is in tools/package/verify_assets.py form (selected_files).",
+ "mlx_serve": {
+  "version": "26.10.3",
+  "url": "https://github.com/ddalcu/mlx-serve/releases/download/v26.10.3/mlx-serve-bin-macos-arm64.tar.gz",
+  "sha256": "d1781c89c206f0d077d6d1abbcab43aa9ec65280202c83eac908f957956b652b",
+  "source_commit": "046b647686419df06c6c7132fb1d15d76185c3e5",
+  "dir": "mlx-serve-macos-arm64",
+  "license": "MIT (LICENSE), bundled MLX and libraries Apache-2.0 (LICENSE-APACHE-2.0, NOTICE)",
+  "min_version": "26.10.2"
+ },
+ "repo_id": "ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit",
+ "revision": "214ca346520a59597b89bd77408afa49d526bde5",
+ "base_model": "Qwen/Qwen-Image-2.1-Turbo",
+ "license": {
+  "name": "Qwen Research License Agreement: non-commercial research or evaluation only",
+  "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE"
+ },
+ "selected_files": [
+  {
+   "path": "LICENSE",
+   "size_bytes": 7831,
+   "git_blob_sha1": "13ae08d5a5828f508cf0e852b1b316c0c0bbb9b3"
+  },
+  {
+   "path": "NOTICE",
+   "size_bytes": 434,
+   "git_blob_sha1": "64ce1369d01ae65234d232e24247a46d2690ac83"
+  },
+  {
+   "path": "README.md",
+   "size_bytes": 4086,
+   "git_blob_sha1": "c6885534c89d452982efa92197253a68e2366e56"
+  },
+  {
+   "path": "config.json",
+   "size_bytes": 117,
+   "git_blob_sha1": "8e2235069c6d88a8e614e97011cc44771badc283"
+  },
+  {
+   "path": "model_index.json",
+   "size_bytes": 578,
+   "git_blob_sha1": "cdc1dae2997ff637225c42c388196b38a9bbaae8"
+  },
+  {
+   "path": "processor/tokenizer.json",
+   "size_bytes": 11422650,
+   "lfs_sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"
+  },
+  {
+   "path": "processor/tokenizer_config.json",
+   "size_bytes": 705,
+   "git_blob_sha1": "6577e86ca277ad0367551e280ba1d58ad4d42c52"
+  },
+  {
+   "path": "scheduler/scheduler_config.json",
+   "size_bytes": 486,
+   "git_blob_sha1": "72837792c1944182b3707415cdaeb825e6bf5598"
+  },
+  {
+   "path": "text_encoder/config.json",
+   "size_bytes": 1542,
+   "git_blob_sha1": "b5881fa79f7c988a9ac2f91e4f1192deed7ac034"
+  },
+  {
+   "path": "text_encoder/model.safetensors",
+   "size_bytes": 9367829459,
+   "lfs_sha256": "4db3757e59b070b827e1285e506df8874527206bcbc708fdcf02b79bb9a915a2"
+  },
+  {
+   "path": "transformer/config.json",
+   "size_bytes": 370,
+   "git_blob_sha1": "b3f8d1cf08a94a1d4ec09e2bfeb5344af25f2983"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+   "size_bytes": 5407063648,
+   "lfs_sha256": "cff3e7601fa701d189ce6b013a3f7ca7a318ba49c8b4c8b820faf443adeb1ec8"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+   "size_bytes": 2280158619,
+   "lfs_sha256": "1a4117365d8e6a13b72d71abd13f2a3c60edcb9128a44c1018d0128182bf3728"
+  },
+  {
+   "path": "vae/config.json",
+   "size_bytes": 2172,
+   "git_blob_sha1": "9b780c2dd9601cb0b93ae8f462b58dd3a7468347"
+  },
+  {
+   "path": "vae/diffusion_pytorch_model.safetensors",
+   "size_bytes": 662000745,
+   "lfs_sha256": "3ecb67f7df44bef3a74a65fa2a90d477122e45c7214906f04222a59ca4ca8aeb"
+  }
+ ]
+}
