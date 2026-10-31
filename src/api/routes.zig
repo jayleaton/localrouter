@@ -1,4 +1,5 @@
-//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/audio (`speech.zig`) and
+//! The routes: OpenAI's /v1/models, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/assets3d (one picture to
+//! a 3D asset, shaped like /v1/videos), /v1/audio (`speech.zig`) and
 //! /v1/chat/completions (`chat.zig`), /v1/responses (`responses.zig`, the Responses API over the chat path), /v1/systemone (`decide.zig`, typed decisions)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
 //! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
@@ -25,6 +26,7 @@ const pair = @import("pair.zig");
 const desktop = @import("desktop.zig");
 const voices = @import("voices.zig");
 const Need = @import("../pair.zig").Need;
+const asset3d = @import("../media/asset3d.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -79,6 +81,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .GET and eql(p, "/v1/desktop")) return desktop.serve(app, conn, req, a);
     if (std.mem.startsWith(u8, p, "/v1/computer/")) return desktop.route(app, req, a, p["/v1/computer/".len..]);
     if (m == .GET and (eql(p, "/voice") or eql(p, "/voice/"))) return realtime.page(app, conn, req, a);
+    if (m == .GET and std.mem.startsWith(u8, p, "/voice/vendor/")) return realtime.vendor(app, conn, req, a, p["/voice/vendor/".len..]);
     if (m == .POST and eql(p, "/v1/pair")) return pair.redeem(app, req, a);
     if (m == .GET and eql(p, "/v1/pair")) return pair.status(app, req, a);
     if (m == .GET and eql(p, "/")) return req.respond("", .{ .status = .found, .extra_headers = &.{.{ .name = "location", .value = "/voice" }} });
@@ -88,6 +91,8 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (m == .POST and eql(p, "/v1/images/edits")) return images(app, req, a, host, scheme, ctype, true, caller);
     if (m == .POST and eql(p, "/v1/videos")) return videoCreate(app, req, a, host, ctype, caller);
     if (std.mem.startsWith(u8, p, "/v1/videos/")) return videoRoute(app, req, a, p["/v1/videos/".len..], caller);
+    if (m == .POST and eql(p, "/v1/assets3d")) return assetCreate(app, req, a, host, scheme, ctype, caller);
+    if (std.mem.startsWith(u8, p, "/v1/assets3d/")) return assetRoute(app, req, a, scheme, host, p["/v1/assets3d/".len..], caller);
     if (m == .POST and eql(p, "/v1/audio/speech")) return speech.speech(app, req, a, caller.owner());
     if (m == .POST and eql(p, "/v1/audio/transcriptions")) return speech.transcriptions(app, req, a, host, ctype, caller.owner());
     if (m == .POST and eql(p, "/v1/chat/completions")) return chat.completions(app, req, a, caller.owner());
@@ -97,6 +102,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (eql(p, "/v1/audio/translations")) return h.fail(req, a, 404, "invalid_request_error", "translation is not offered: transcribe with /v1/audio/transcriptions, which keeps the spoken language");
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/files/")) return file(app, req, a, p["/v1/files/".len..], caller);
     if (m == .GET and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobObject(app, req, a, p["/v1/jobs/".len..], caller);
+    if (m == .DELETE and std.mem.startsWith(u8, p, "/v1/jobs/")) return jobCancel(app, req, a, p["/v1/jobs/".len..], caller);
     if (m == .GET and eql(p, "/v1/skills/model-manager")) return h.jsonValue(req, a, .ok, .{ .enabled = app.cfg.voice.tools and app.cfg.voice.manage_models, .text = try @import("voice_local.zig").modelSkill(app, a) });
     if (eql(p, "/v1/voices")) return voices.route(app, req, a, host, ctype, "", caller);
     if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
@@ -115,6 +121,7 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
 pub fn need(m: std.http.Method, p: []const u8) ?Need {
     const starts = std.mem.startsWith;
     if (eql(p, "/health") or eql(p, "/v1/pair") or eql(p, "/voice") or eql(p, "/voice/") or eql(p, "/")) return null;
+    if (m == .GET and starts(u8, p, "/voice/vendor/")) return null; // the page's own pinned libraries (the 3D viewer): static, as open as the page
     if (m == .GET and eql(p, "/v1/capabilities")) return null; // how to get in has to be readable before getting in
     if (eql(p, "/v1/desktop") or starts(u8, p, "/v1/computer/")) return null;
     if (eql(p, "/mcp")) return .mcp;
@@ -124,8 +131,8 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
     if (m == .GET and eql(p, "/v1/assistant")) return .paired; // every client shows the name; renaming it: manage
     if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
     if (eql(p, "/v1/systemone")) return .decisions;
-    if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or starts(u8, p, "/v1/audio/")) return .media;
-    if (starts(u8, p, "/v1/videos/") or starts(u8, p, "/v1/jobs/") or starts(u8, p, "/v1/files/")) return .owned;
+    if (eql(p, "/v1/images/generations") or eql(p, "/v1/images/edits") or eql(p, "/v1/videos") or eql(p, "/v1/assets3d") or starts(u8, p, "/v1/audio/")) return .media;
+    if (starts(u8, p, "/v1/videos/") or starts(u8, p, "/v1/assets3d/") or starts(u8, p, "/v1/jobs/") or starts(u8, p, "/v1/files/")) return .owned;
     return .manage; // POST /v1/tools/..., and whatever is not named above
 }
 
@@ -135,24 +142,29 @@ test "every route class needs its scope; only the open routes need none; an unna
     for (open) |p| try t.expect(need(.GET, p) == null);
     const Case = struct { std.http.Method, []const u8, Need };
     const cases = [_]Case{
-        .{ .POST, "/mcp", .mcp },                       .{ .GET, "/v1/realtime", .realtime },
-        .{ .GET, "/v1/models", .read },                 .{ .GET, "/models", .read },
-        .{ .GET, "/v1/tools", .read },                  .{ .GET, "/v1/skills/model-manager", .read },
-        .{ .POST, "/v1/tools/release", .manage },       .{ .POST, "/v1/tools/x/load", .manage },
-        .{ .POST, "/v1/tools/x/unload", .manage },      .{ .POST, "/v1/chat/completions", .inference },
-        .{ .POST, "/v1/tools/x/settings", .manage },    .{ .POST, "/v1/responses", .inference },
-        .{ .GET, "/v1/responses/resp_1", .inference },  .{ .POST, "/v1/systemone", .decisions },
-        .{ .POST, "/v1/images/generations", .media },   .{ .POST, "/v1/images/edits", .media },
-        .{ .POST, "/v1/videos", .media },               .{ .POST, "/v1/audio/speech", .media },
-        .{ .POST, "/v1/audio/transcriptions", .media }, .{ .GET, "/v1/videos/v_1/content", .owned },
-        .{ .DELETE, "/v1/videos/v_1", .owned },         .{ .GET, "/v1/jobs/img_1", .owned },
-        .{ .GET, "/v1/files/img_1/0.png", .owned },     .{ .POST, "/v1/models", .manage },
-        .{ .GET, "/v1/something-new", .manage },        .{ .GET, "/v1/voices", .read },
-        .{ .GET, "/v1/voices/JJ", .read },              .{ .POST, "/v1/voices", .manage },
-        .{ .PATCH, "/v1/voices/draft-1", .manage },     .{ .DELETE, "/v1/voices/JJ", .manage },
-        .{ .GET, "/v1/assistant", .paired },            .{ .PATCH, "/v1/assistant", .manage },
-        .{ .GET, "/v1/node/status", .manage },          .{ .POST, "/v1/node/jobs", .manage },
+        .{ .POST, "/mcp", .mcp },                        .{ .GET, "/v1/realtime", .realtime },
+        .{ .GET, "/v1/models", .read },                  .{ .GET, "/models", .read },
+        .{ .GET, "/v1/tools", .read },                   .{ .GET, "/v1/skills/model-manager", .read },
+        .{ .POST, "/v1/tools/release", .manage },        .{ .POST, "/v1/tools/x/load", .manage },
+        .{ .POST, "/v1/tools/x/unload", .manage },       .{ .POST, "/v1/chat/completions", .inference },
+        .{ .POST, "/v1/tools/x/settings", .manage },     .{ .POST, "/v1/responses", .inference },
+        .{ .GET, "/v1/responses/resp_1", .inference },   .{ .POST, "/v1/systemone", .decisions },
+        .{ .POST, "/v1/images/generations", .media },    .{ .POST, "/v1/images/edits", .media },
+        .{ .POST, "/v1/videos", .media },                .{ .POST, "/v1/audio/speech", .media },
+        .{ .POST, "/v1/audio/transcriptions", .media },  .{ .GET, "/v1/videos/v_1/content", .owned },
+        .{ .DELETE, "/v1/videos/v_1", .owned },          .{ .GET, "/v1/jobs/img_1", .owned },
+        .{ .GET, "/v1/files/img_1/0.png", .owned },      .{ .POST, "/v1/models", .manage },
+        .{ .GET, "/v1/something-new", .manage },         .{ .GET, "/v1/voices", .read },
+        .{ .GET, "/v1/voices/JJ", .read },               .{ .POST, "/v1/voices", .manage },
+        .{ .PATCH, "/v1/voices/draft-1", .manage },      .{ .DELETE, "/v1/voices/JJ", .manage },
+        .{ .GET, "/v1/assistant", .paired },             .{ .PATCH, "/v1/assistant", .manage },
+        .{ .GET, "/v1/node/status", .manage },           .{ .POST, "/v1/node/jobs", .manage },
+        .{ .POST, "/v1/assets3d", .media },              .{ .GET, "/v1/assets3d/a3d_1", .owned },
+        .{ .DELETE, "/v1/assets3d/a3d_1", .owned },      .{ .DELETE, "/v1/jobs/a3d_1", .owned },
+        .{ .GET, "/v1/assets3d/a3d_1/content", .owned },
     };
+    try t.expect(need(.GET, "/voice/vendor/viewer.js") == null);
+    try t.expectEqual(@as(?Need, .manage), need(.POST, "/voice/vendor/viewer.js"));
     for (cases) |c| try t.expectEqual(@as(?Need, c[2]), need(c[0], c[1]));
 }
 
@@ -163,7 +175,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const std.json.Value = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const std.json.Value = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null, formats: ?[]const std.json.Value = null, input_modes: ?[]const std.json.Value = null, gaussians: ?engine.Gaussians = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -509,6 +521,7 @@ fn article(k: request.Kind) []const u8 {
         .transcription => "a transcription",
         .chat => "a chat",
         .decision => "a decision",
+        .asset3d => "a 3D",
     };
 }
 
@@ -792,6 +805,155 @@ fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !
     };
     app.table.mutex.unlock(app.io);
     try h.jsonValue(req, a, .ok, obj);
+}
+
+// ---------------------------------------------------------------- 3D assets (one picture to a 3D asset)
+
+const AssetBody = struct {
+    model: ?[]const u8 = null,
+    input_mode: []const u8 = "synthetic",
+    format: []const u8 = "ply",
+    seed: ?u64 = null,
+    steps: ?u32 = null,
+    guidance: ?f32 = null,
+    num_gaussians: ?u32 = null,
+    wait_s: u32 = 0, // how long to hold the reply for the job to finish; 0: the queued job at once
+};
+
+/// The longest a request holds its reply for its job (`wait_s`); after it the job's state, for GET /v1/assets3d/{id}.
+pub const max_wait_s = 3000;
+
+/// The request for one picture's 3D asset, the way the route and the MCP tool read it; null with `why` set.
+pub fn assetRequest(image: []const u8, input_mode: []const u8, format: []const u8, seed: u64, steps: ?u32, guidance: ?f32, num_gaussians: ?u32, why: *[]const u8) ?request.Request {
+    const mode = std.meta.stringToEnum(request.Asset3d.InputMode, input_mode) orelse {
+        why.* = "input_mode must be synthetic (a render or product shot on a plain background) or real (a photograph)";
+        return null;
+    };
+    const fmt = std.meta.stringToEnum(request.Asset3d.Format, format) orelse {
+        why.* = "format must be ply";
+        return null;
+    };
+    return .{ .asset3d = .{ .image = image, .input_mode = mode, .format = fmt, .seed = seed, .steps = steps, .guidance = guidance, .num_gaussians = num_gaussians } };
+}
+
+/// POST /v1/assets3d: `image` (a multipart file, or JSON base64, a data URL or a URL) and the settings; the job object,
+/// after waiting up to `wait_s` for it to finish.
+fn assetCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, scheme: []const u8, ctype: []const u8, caller: pair.Caller) !void {
+    const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
+    var why: []const u8 = "the body is not a valid 3D request";
+    var raws: std.ArrayList([]const u8) = .empty;
+    const b = parseBody(AssetBody, app, a, host, text, ctype, &.{"image"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
+    if (raws.items.len == 0) return h.fail(req, a, 400, "invalid_request_error", "image is required: one picture of the object, as a file, base64, a data URL or a URL");
+    const files = inputs.validate(a, "image", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", if (raws.items.len > 1) "send one image" else why);
+    const r = assetRequest(files[0].name, b.input_mode, b.format, b.seed orelse randomSeed(app.io), b.steps, b.guidance, b.num_gaussians, &why) orelse return h.fail(req, a, 400, "invalid_request_error", why);
+    var why_model: Refusal = .{};
+    const tool = resolve(app, b.model, .image_to_3d, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
+    const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
+    waitDone(app, j, b.wait_s);
+    try assetObject(app, req, a, scheme, host, j);
+}
+
+/// Waits until `j` finishes or `wait_s` (at most `max_wait_s`) passes.
+fn waitDone(app: *App, j: *jobs.Job, wait_s: u32) void {
+    const deadline = Io.Clock.awake.now(app.io).addDuration(.fromSeconds(@min(wait_s, max_wait_s)));
+    while (true) {
+        app.table.mutex.lockUncancelable(app.io);
+        const done = j.finished();
+        app.table.mutex.unlock(app.io);
+        if (done or Io.Clock.awake.now(app.io).nanoseconds >= deadline.nanoseconds) return;
+        Io.sleep(app.io, .fromMilliseconds(250), .awake) catch return;
+    }
+}
+
+/// GET {id} (`?wait_s=N` waits for it), GET {id}/content (the asset file), DELETE {id} (cancel).
+fn assetRoute(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const u8, host: []const u8, rest_q: []const u8, caller: pair.Caller) !void {
+    const q = std.mem.indexOfScalar(u8, rest_q, '?') orelse rest_q.len;
+    const rest = rest_q[0..q];
+    const content = std.mem.endsWith(u8, rest, "/content");
+    const id = if (content) rest[0 .. rest.len - "/content".len] else rest;
+    const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such 3D asset");
+    if (j.kind() != .asset3d or !caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such 3D asset");
+    switch (req.head.method) {
+        .DELETE => {
+            app.scheduler.cancel(j);
+            waitDone(app, j, 10);
+            return assetObject(app, req, a, scheme, host, j);
+        },
+        .GET => {
+            if (!content) {
+                const wait = if (realtime.query(rest_q, "wait_s")) |w| std.fmt.parseInt(u32, w, 10) catch 0 else 0;
+                waitDone(app, j, wait);
+                return assetObject(app, req, a, scheme, host, j);
+            }
+            if (j.status != .completed) return h.fail(req, a, 409, "invalid_request_error", "the 3D asset is not ready");
+            var why: []const u8 = "";
+            const m = asset3d.check(app.io, a, j.dir, j.files, j.request.asset3d, &why) orelse return h.fail(req, a, 500, "server_error", why);
+            const data = try Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, m.file }), a, .limited(1 << 31));
+            return h.bytes(req, contentType(m.file), data);
+        },
+        else => return h.fail(req, a, 405, "invalid_request_error", "method not allowed"),
+    }
+}
+
+/// What a completed 3D job hands out: the asset, its manifest and the input view, as URLs on this server.
+pub const AssetOutput = struct {
+    representation: []const u8,
+    format: []const u8,
+    asset_url: []const u8,
+    manifest_url: []const u8,
+    input_url: []const u8,
+    num_gaussians: ?u32 = null,
+};
+
+/// A completed 3D job's output (its manifest checked again: the files are on disk), null for any other state.
+pub fn assetOutput(app: *App, a: std.mem.Allocator, scheme: []const u8, host: []const u8, j: *jobs.Job) ?AssetOutput {
+    if (j.status != .completed) return null;
+    var why: []const u8 = "";
+    const m = asset3d.check(app.io, a, j.dir, j.files, j.request.asset3d, &why) orelse return null;
+    const url = struct {
+        fn f(x: std.mem.Allocator, s: []const u8, hst: []const u8, id: []const u8, name: []const u8) []const u8 {
+            return std.fmt.allocPrint(x, "{s}://{s}/v1/files/{s}/{s}", .{ s, hst, id, name }) catch "";
+        }
+    }.f;
+    return .{ .representation = m.representation, .format = m.format, .asset_url = url(a, scheme, host, j.id, m.file), .manifest_url = url(a, scheme, host, j.id, asset3d.manifest_name), .input_url = url(a, scheme, host, j.id, m.input), .num_gaussians = if (eql(m.representation, "gaussian_splat")) j.request.asset3d.num_gaussians else null };
+}
+
+fn assetObject(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const u8, host: []const u8, j: *jobs.Job) !void {
+    const Err = struct { code: []const u8, message: []const u8 };
+    try app.table.mutex.lock(app.io);
+    const v = j.request.asset3d;
+    const status = j.status;
+    const obj = .{
+        .id = j.id,
+        .object = "asset3d",
+        .model = app.scheduler.slots[j.tool].tool.config().id,
+        .status = @tagName(status),
+        .progress = j.percent,
+        .phase = try a.dupe(u8, j.phaseName()),
+        .created_at = j.created_at,
+        .completed_at = if (j.finished()) @as(?i64, j.completed_at) else null,
+        .input_mode = @tagName(v.input_mode),
+        .format = @tagName(v.format),
+        .seed = v.seed,
+        .steps = v.steps,
+        .guidance = v.guidance,
+        .num_gaussians = v.num_gaussians,
+        .ms = if (status == .completed) @as(?u64, j.ms) else null,
+        .@"error" = if (status == .failed or status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+    };
+    app.table.mutex.unlock(app.io);
+    const out = assetOutput(app, a, scheme, host, j); // reads files: outside the table's lock (a completed job's fields no longer change)
+    try h.jsonValue(req, a, .ok, .{ .id = obj.id, .object = obj.object, .model = obj.model, .status = obj.status, .progress = obj.progress, .phase = obj.phase, .created_at = obj.created_at, .completed_at = obj.completed_at, .input_mode = obj.input_mode, .format = obj.format, .seed = obj.seed, .steps = obj.steps, .guidance = obj.guidance, .num_gaussians = obj.num_gaussians, .ms = obj.ms, .output = out, .@"error" = obj.@"error" });
+}
+
+/// DELETE /v1/jobs/{id}: cancels any job of the caller's (queued: it never runs; running: its model stops it), then its
+/// state as GET returns it.
+fn jobCancel(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, caller: pair.Caller) !void {
+    const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such job");
+    if (!caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such job");
+    app.scheduler.cancel(j);
+    waitDone(app, j, 10);
+    return jobObject(app, req, a, id, caller);
 }
 
 // ---------------------------------------------------------------- files

@@ -1,5 +1,6 @@
 //! The machine-generated label every image and video LocalRouter hands out carries in its metadata (the MiniMax H3
 //! licence asks for one; all generated media gets it). Metadata only: pixels and samples are never touched.
+//! A PLY (a 3D asset) gets `comment` lines in its header (`ply.zig`).
 //! A PNG gets tEXt `Software` and `Comment` chunks and an XMP packet (iTXt `XML:com.adobe.xmp`) naming the IPTC digital
 //! source type; an MP4 gets `comment` (`©cmt`) and `description` (`desc`) tags in `moov/udta/meta/ilst`.
 //! Compiled-in engines label at the writer (`png.Options.marker`, `mp4.Options.marker`); `outputs` labels what any
@@ -10,6 +11,7 @@ const std = @import("std");
 const Io = std.Io;
 const png = @import("png.zig");
 const mp4 = @import("mp4.zig");
+const ply = @import("ply.zig");
 const Request = @import("../tool/request.zig").Request;
 
 /// Who made a file, and whether from an input image.
@@ -34,6 +36,7 @@ pub fn forRequest(model: []const u8, req: Request) Marker {
     const edit = switch (req) {
         .image => |v| v.references.len > 0,
         .video => |v| v.first_frame != null,
+        .asset3d => true, // made from the input picture
         .speech, .transcription, .chat, .decision => false,
     };
     return .{ .model = model, .edit = edit };
@@ -75,7 +78,7 @@ pub fn present(bytes: []const u8) bool {
     return std.ascii.findIgnoreCase(bytes, "trainedalgorithmicmedia") != null;
 }
 
-/// Labels the PNG and MP4 files a job made that are not labelled yet, recognised by their bytes, not their names:
+/// Labels the PNG, MP4 and PLY files a job made that are not labelled yet, recognised by their bytes, not their names:
 /// a PNG gets the chunks inserted after IHDR (rewritten through a temporary file), an MP4 is remuxed by ffmpeg with
 /// `-c copy`. For a compiled-in engine's outputs this only reads. A failure is logged and leaves the file as it was.
 pub fn outputs(io: Io, gpa: std.mem.Allocator, dir: []const u8, files: []const []const u8, m: Marker) void {
@@ -106,6 +109,16 @@ fn file(io: Io, gpa: std.mem.Allocator, path: []const u8, m: Marker) !void {
     } else if (std.mem.eql(u8, head[4..8], "ftyp")) {
         if (try mp4.hasMarker(io, gpa, path)) return;
         try mp4.mark(io, gpa, path, m);
+    } else if (std.mem.startsWith(u8, &head, "ply\n")) {
+        const data = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 31));
+        defer gpa.free(data);
+        const marked = try ply.mark(gpa, data, m) orelse return;
+        defer gpa.free(marked);
+        const tmp = try std.mem.concat(gpa, u8, &.{ path, ".marking" });
+        defer gpa.free(tmp);
+        errdefer Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = marked });
+        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, io);
     }
 }
 

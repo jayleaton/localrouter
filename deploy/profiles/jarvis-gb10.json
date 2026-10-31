@@ -190,6 +190,25 @@
      "run": "$STEPS free 64 && LOCALROUTER_HOME=$J/lr WEIGHTS_ONLY=1 MODELS=video bash $REPO/tools/spark/install.sh && python3 -I $REPO/tools/package/verify_assets.py $REPO/tools/twin/packs/built/minimax-h3.json $J/lr/weights/minimax-h3 && $STEPS stamp video-packs $REPO/tools/twin/packs/built/minimax-h3.json",
      "done": "$STEPS stamped video-packs $REPO/tools/twin/packs/built/minimax-h3.json && [ -f $J/lr/weights/minimax-h3/h3-turbo-nvfp4/manifest.json ]",
      "fix": "exit 137 (killed): as for image/download. Network: run again (finished downloads are kept). 'differs from': delete the named file and run again. Docker errors: doctor.sh"}
+   ]},
+  {"key": "asset3d", "id": "idol", "warm": false,
+   "title": "Idol image to 3D Gaussian splat (PyTorch CUDA cmd worker): untested on GB10 until qualified, so its residency is disabled and it never loads until someone qualifies it and enables it in Settings",
+   "licence": {"name": "Apache-2.0 (Idol, its BiRefNet copy, the FLUX.2 autoencoder) + DINOv3 License (the image encoder: Meta's custom licence; redistribution allowed under the Agreement)",
+               "url": "https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/LICENSE.md"},
+   "accept": ["the DINOv3 License (link below; Last Updated August 19, 2025) for timm/vit_huge_plus_patch16_dinov3.lvd1689m, Idol's image encoder: use, copying, redistribution and derivatives are allowed, but redistribute the weights or anything derived from them only under the Agreement with a copy of it (kept as dinov3/LICENSE.md beside the weights); acknowledge DINOv3 in publications; no reverse engineering; laws, privacy and Trade Controls apply; no ITAR or prohibited end uses (military, nuclear, espionage, ...). Idol (speridlabs/idol) and the FLUX.2 autoencoder (black-forest-labs/FLUX.2-klein-4B vae/) are Apache-2.0; nothing here is non-commercial"],
+   "pins": "tools/asset3d/idol/pins.json, tools/asset3d/idol/uv.lock",
+   "download_bytes": 9609204537, "disk_bytes": 13700000000, "memory_bytes": 5368709120, "working_bytes": 8053063680,
+   "skip": "leave asset3d out of --models; image to 3D requests then fail with no image_to_3d model (installed, it is disabled until qualified anyway)",
+   "steps": [
+    {"id": "venv", "download_bytes": 3000000000, "disk_bytes": 7000000000, "title": "the Idol venv from tools/asset3d/idol/uv.lock (Python 3.12, torch 2.13.0+cu130 and torchvision 0.28.0+cu130 aarch64 wheels, the idol-sdk at its pinned commit; every wheel by its locked hash)",
+     "run": "UV_PROJECT_ENVIRONMENT=$J/venvs/asset3d-idol $J/bin/uv sync --locked --python 3.12 --project $REPO/tools/asset3d/idol && $STEPS stamp asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock",
+     "done": "$STEPS stamped asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock && [ -x $J/venvs/asset3d-idol/bin/python ]",
+     "fix": "network (pypi.org, download.pytorch.org, github.com for the idol-sdk): run again"},
+    {"id": "fetch", "download_bytes": 6609204537, "disk_bytes": 6700000000, "needs_accept": true,
+     "title": "the Idol, DINOv3 (timm) and FLUX.2 autoencoder weights at their pinned revisions (6.6 GB, ungated, no token), every file by sha256 against pins.json",
+     "run": "bash $REPO/tools/asset3d/idol/fetch.sh $J/models/idol && $STEPS stamp asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json",
+     "done": "$STEPS stamped asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json && python3 -I $REPO/tools/package/verify_assets.py --quick $REPO/tools/asset3d/idol/pins.json $J/models/idol > /dev/null",
+     "fix": "network (huggingface.co): run again (finished files are kept, a partial one resumes). 'is N bytes, pinned M' or 'does not match pins.json': delete the named file and run again"}
    ]}
  ],
  "deploy": {

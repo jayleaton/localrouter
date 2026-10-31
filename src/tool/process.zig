@@ -99,6 +99,8 @@ pub const ProcessTool = struct {
         if (engine.find(p.cfg.engine)) |e| return e.needs(p.cfg, req);
         // encoding a voice runs the model's encoder beside the loaded model: its measured peak, else the unmeasured rule
         if (req.* == .speech and req.speech.clone.len > 0) return .{ .resident = p.cfg.resident_bytes, .working = engine.optionInt(p.cfg, "clone_working_bytes", unmeasured_working) };
+        // a 3D asset: the measured peak for its count (`working_bytes_by_gaussians`), else the flat figure
+        if (req.* == .asset3d) if (engine.asset3dWorking(p.cfg, req.asset3d)) |w| return .{ .resident = p.cfg.resident_bytes, .working = w };
         return .{ .resident = p.cfg.resident_bytes, .working = p.cfg.working_bytes +| referenceWorking(p.cfg, req) };
     }
 

@@ -38,7 +38,7 @@ needs instead (`--scopes LIST` on `token` or `add`; `pair scopes` changes it lat
 | Scope | HTTP | MCP tools | Voice session (`/v1/realtime`) |
 | --- | --- | --- | --- |
 | `inference` | `POST /v1/chat/completions` | `chat` | opens the socket (its speech in and out is part of it) |
-| `media` | `/v1/images/*`, `POST /v1/videos`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
+| `media` | `/v1/images/*`, `POST /v1/videos`, `POST /v1/assets3d`, `/v1/audio/*` | `generate_image`, `edit_image`, `generate_video`, `generate_3d`, `transcribe_audio`, `synthesize_speech` | the picture, edit and video tools |
 | `decisions` | `POST /v1/systemone` | `decide` | |
 | `read` | `GET /v1/models`, `/v1/tools`, `/v1/skills/model-manager`, `/v1/voices` | `list_models`, `list_voices` | `list_models` |
 | `manage` | `POST /v1/tools/{id}/load`, `/unload`, `/settings`, `/v1/tools/release`; `POST /v1/voices`, `PATCH` and `DELETE /v1/voices/{id}` (cloning a voice); `PATCH /v1/assistant` (its name; `GET` needs only a paired device) | `load_model`, `unload_model`, `reserve_for`, `release_models`, `set_model_residency` | the model tools |
@@ -115,7 +115,7 @@ a daemon it cannot reach answers each request with a JSON-RPC error rather than 
 ## Tools
 
 Call `list_models` first. A model that is not loaded loads on its first call; the chat model and the voice models are
-kept warm. Long jobs never need a long tool call: `generate_image`, `edit_image`, `generate_video` and `transcribe_audio` take
+kept warm. Long jobs never need a long tool call: `generate_image`, `edit_image`, `generate_video`, `generate_3d` and `transcribe_audio` take
 `wait_s` (default 600, at most 3000) and return the job id when it passes; `get_job` with its own `wait_s` picks the
 job up. Output files come back as `resource_link` URLs on the server (kept 24 h), images and speech also inline.
 
@@ -136,6 +136,7 @@ full machine says `insufficient_memory`.
 | `generate_image` | **`prompt`**, `size` (1024x1024; for an edit, the input's shape), `n`, `seed`, `steps`, `negative_prompt`, `images` (edit inputs), `inline_images`, `wait_s` | PNGs inline and as URLs, the seed; or the job id |
 | `edit_image` | **`prompt`**, `image` or `images` (1 to 5), `mask`, `size` (omit: the input's shape), `model`, `n`, `seed`, `steps`, `negative_prompt`, `inline_images`, `wait_s` | as `generate_image`; refused when no model lists `image_edit` |
 | `generate_video` | **`prompt`**, `size` (omit: the model's own), `seconds`, `fps`, `seed`, `steps`, `audio`, `image`, `wait_s` | the MP4's URL; or the job id |
+| `generate_3d` | **`image`** (base64, data URL or URL, this server's `/v1/files` URLs too), `input_mode` (`synthetic`, `real`), `format` (`ply`), `model`, `seed`, `steps`, `guidance`, `num_gaussians`, `inline_preview` (true), `wait_s` | the job (id, seed, the PLY's, manifest's and input view's URLs), the manifest, the input view inline; or the job id. Refused when no model lists `image_to_3d` |
 | `synthesize_speech` | **`input`**, `voice`, `model`, `speed`, `preset`, `instructions` (for a model whose `instructions` is true; Drama 3 speaks them as `[...]` before the text), `format` (wav), `seed`, `references`, `inline_audio` | the audio inline and as a URL |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside `local_files`), `language`, `prompt`, `timestamps`, `temperature`, `wait_s` | the text, then JSON (language, duration, segments, words) |
 | `get_job` | **`id`**, `wait_s` | status, progress, output URLs; a transcript's text |

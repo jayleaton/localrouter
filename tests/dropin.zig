@@ -1,6 +1,6 @@
 //! Integration tests that a model is a drop-in replacement: every kind (image, video, speech, transcription, chat,
-//! decision) is served by set A, then by set B, with other ids and, where a fake exists, another adapter (testpattern
-//! speech and transcription in A, the `cmd` worker tests/fixtures/speech_worker.py in B; chat and decision are
+//! decision, asset3d) is served by set A, then by set B, with other ids and, where a fake exists, another adapter
+//! (testpattern speech, transcription and 3D in A, the `cmd` worker tests/fixtures/speech_worker.py in B; chat and decision are
 //! `openai_server` on their fixtures in both). Only the config changes: the MCP tool list and /v1/capabilities' MCP
 //! tools stay the same, /v1/models lists what is configured, every endpoint and MCP tool works with and without a model
 //! named, a capability a model lacks is refused naming it and what it can do, `defaults` alone moves a request, the
@@ -28,18 +28,20 @@ const Set = struct {
     transcription: []const u8,
     chat: []const u8,
     decision: []const u8,
+    asset3d: []const u8,
+    gaussians: []const u8, // the 3D model's declared range, as its refusal words it
     inputs: bool, // the image model edits and the video model takes a first frame
     heard: []const u8,
     rate: u32,
     tools: []const []const u8,
 
-    fn ids(s: Set) [6][]const u8 {
-        return .{ s.image, s.video, s.speech, s.transcription, s.chat, s.decision };
+    fn ids(s: Set) [7][]const u8 {
+        return .{ s.image, s.video, s.speech, s.transcription, s.chat, s.decision, s.asset3d };
     }
 
     /// `defaults` naming this set's model for each kind's main capability.
     fn defaults(s: Set, a: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(a, "{{\"text_to_image\": \"{s}\", \"text_to_video\": \"{s}\", \"text_to_speech\": \"{s}\", \"speech_to_text\": \"{s}\", \"chat_completion\": \"{s}\", \"typed_decision\": \"{s}\"}}", .{ s.image, s.video, s.speech, s.transcription, s.chat, s.decision });
+        return std.fmt.allocPrint(a, "{{\"text_to_image\": \"{s}\", \"text_to_video\": \"{s}\", \"text_to_speech\": \"{s}\", \"speech_to_text\": \"{s}\", \"chat_completion\": \"{s}\", \"typed_decision\": \"{s}\", \"image_to_3d\": \"{s}\"}}", .{ s.image, s.video, s.speech, s.transcription, s.chat, s.decision, s.asset3d });
     }
 };
 
@@ -55,25 +57,27 @@ fn worker(a: std.mem.Allocator, id: []const u8, kind: []const u8, extra: []const
 
 /// Set A: compiled-in testpattern media with every input capability.
 fn setA(a: std.mem.Allocator) !Set {
-    return .{ .image = "img-a", .video = "vid-a", .speech = "tts-a", .transcription = "stt-a", .chat = "chat-a", .decision = "dec-a", .inputs = true, .heard = "testpattern heard", .rate = 24_000, .tools = try a.dupe([]const u8, &.{
+    return .{ .image = "img-a", .video = "vid-a", .speech = "tts-a", .transcription = "stt-a", .chat = "chat-a", .decision = "dec-a", .asset3d = "a3d-a", .gaussians = "num_gaussians 1024 to 65536 in multiples of 32", .inputs = true, .heard = "testpattern heard", .rate = 24_000, .tools = try a.dupe([]const u8, &.{
         "{\"id\": \"img-a\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 5}}",
         "{\"id\": \"vid-a\", \"kind\": \"video\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 5}}",
         "{\"id\": \"tts-a\", \"kind\": \"speech\", \"engine\": \"testpattern\", \"options\": {\"voices\": [\"plain\"]}}",
         "{\"id\": \"stt-a\", \"kind\": \"transcription\", \"engine\": \"testpattern\"}",
         try server(a, "chat-a", "chat", opts.chat_server),
         try server(a, "dec-a", "decision", opts.decide_server),
+        "{\"id\": \"a3d-a\", \"kind\": \"asset3d\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 5, \"min_gaussians\": 1024, \"max_gaussians\": 65536, \"gaussian_multiple\": 32, \"default_gaussians\": 2048}}",
     }) };
 }
 
 /// Set B: other ids; image and video narrowed to text input only; speech and transcription by the `cmd` worker.
 fn setB(a: std.mem.Allocator) !Set {
-    return .{ .image = "img-b", .video = "vid-b", .speech = "tts-b", .transcription = "stt-b", .chat = "chat-b", .decision = "dec-b", .inputs = false, .heard = "external worker heard", .rate = 22_050, .tools = try a.dupe([]const u8, &.{
+    return .{ .image = "img-b", .video = "vid-b", .speech = "tts-b", .transcription = "stt-b", .chat = "chat-b", .decision = "dec-b", .asset3d = "a3d-b", .gaussians = "num_gaussians 32 to 4096 in multiples of 32", .inputs = false, .heard = "external worker heard", .rate = 22_050, .tools = try a.dupe([]const u8, &.{
         "{\"id\": \"img-b\", \"kind\": \"image\", \"engine\": \"testpattern\", \"capabilities\": [\"text_to_image\"], \"options\": {\"step_ms\": 5}}",
         "{\"id\": \"vid-b\", \"kind\": \"video\", \"engine\": \"testpattern\", \"capabilities\": [\"text_to_video\"], \"options\": {\"step_ms\": 5}}",
         try worker(a, "tts-b", "speech", ", \"options\": {\"voices\": [\"plain\", \"bright\"]}"),
         try worker(a, "stt-b", "transcription", ""),
         try server(a, "chat-b", "chat", opts.chat_server),
         try server(a, "dec-b", "decision", opts.decide_server),
+        try worker(a, "a3d-b", "asset3d", ", \"working_bytes\": 1048576, \"options\": {\"input_modes\": [\"synthetic\", \"real\"], \"min_gaussians\": 32, \"max_gaussians\": 4096, \"gaussian_multiple\": 32, \"default_gaussians\": 1024, \"working_bytes_by_gaussians\": {\"1024\": 1048576, \"4096\": 4194304}}"),
     }) };
 }
 
@@ -158,6 +162,29 @@ fn rateOf(r: Daemon.Resp) !u32 {
     return std.mem.readInt(u32, r.body[24..28], .little);
 }
 
+/// A 3D job (POST /v1/assets3d, waited for): its model, after checking it completed with an asset, a manifest and an
+/// input view that the files route serves, the asset labelled as machine-generated.
+fn assetModel(d: *Daemon, a: std.mem.Allocator, r: Daemon.Resp) ![]const u8 {
+    try expectStatus(r, .ok, &.{ "\"object\":\"asset3d\"", "\"status\":\"completed\"", "\"representation\":\"gaussian_splat\"" });
+    const J = struct { id: []const u8, model: []const u8, output: struct { asset_url: []const u8, manifest_url: []const u8, input_url: []const u8 } };
+    const j = try std.json.parseFromSliceLeaky(J, a, r.body, .{ .ignore_unknown_fields = true });
+    const path = struct {
+        fn of(url: []const u8) []const u8 {
+            return url[std.mem.indexOf(u8, url, "/v1/files/").?..];
+        }
+    }.of;
+    const ply = try d.call(a, .GET, path(j.output.asset_url), null);
+    try expectStatus(ply, .ok, &.{"comment AI-edited (machine-generated) from an input image"});
+    try testing.expect(std.mem.startsWith(u8, ply.body, "ply\nformat binary_little_endian 1.0\n"));
+    const content = try d.call(a, .GET, try std.fmt.allocPrint(a, "/v1/assets3d/{s}/content", .{j.id}), null);
+    try testing.expectEqualSlices(u8, ply.body, content.body);
+    const manifest = try d.call(a, .GET, path(j.output.manifest_url), null);
+    try expectStatus(manifest, .ok, &.{});
+    try testing.expectEqualStrings("asset3d", (try std.json.parseFromSliceLeaky(struct { object: []const u8 }, a, manifest.body, .{ .ignore_unknown_fields = true })).object);
+    try testing.expectEqualStrings("\x89PNG", (try d.call(a, .GET, path(j.output.input_url), null)).body[0..4]);
+    return j.model;
+}
+
 /// The model of a video job (POST /v1/videos) once it completes.
 fn videoModel(d: *Daemon, a: std.mem.Allocator, create: Daemon.Resp) ![]const u8 {
     try expectStatus(create, .ok, &.{});
@@ -191,6 +218,7 @@ fn everyEndpoint(d: *Daemon, a: std.mem.Allocator, s: Set, named: bool) !void {
     const said = try d.call(a, .POST, "/v1/chat/completions", try std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]{s}}}", .{try modelArg(a, named, s.chat)}));
     try testing.expectEqualStrings(s.chat, try modelOf(a, said));
     try testing.expect(std.mem.indexOf(u8, said.body, "echo: hi") != null);
+    try testing.expectEqualStrings(s.asset3d, try assetModel(d, a, try d.call(a, .POST, "/v1/assets3d", try std.fmt.allocPrint(a, "{{\"image\":\"{s}\",\"input_mode\":\"real\",\"seed\":3,\"wait_s\":60{s}}}", .{ try b64(a, png), try modelArg(a, named, s.asset3d) }))));
     const decided = try d.call(a, .POST, "/v1/systemone", try std.fmt.allocPrint(a, "{{\"state\":{{\"user_said\":\"draw an image of a fox, yes\"}},{s}{s}}}", .{ route, try modelArg(a, named, s.decision) }));
     try testing.expectEqualStrings(s.decision, try modelOf(a, decided));
 
@@ -211,6 +239,18 @@ fn everyEndpoint(d: *Daemon, a: std.mem.Allocator, s: Set, named: bool) !void {
     const chosen = try mcpCall(d, a, "decide", try std.fmt.allocPrint(a, "{{\"state\":\"make a video of waves\",\"questions\":{{\"route\":{{\"type\":\"choice\",\"criteria\":{{\"image\":\"a picture\",\"video\":\"a clip\"}}}}}}{s}}}", .{try modelArg(a, named, s.decision)}));
     try testing.expectEqualStrings(s.decision, try mcpModel(a, chosen));
     try testing.expect(std.mem.startsWith(u8, texts(chosen)[0].object.get("text").?.string, "route: video"));
+    const made = try mcpCall(d, a, "generate_3d", try std.fmt.allocPrint(a, "{{\"image\":\"data:image/png;base64,{s}\",\"wait_s\":60{s}}}", .{ try b64(a, png), try modelArg(a, named, s.asset3d) }));
+    try testing.expectEqualStrings(s.asset3d, try mcpModel(a, made));
+    const job = try std.json.parseFromSliceLeaky(Value, a, texts(made)[0].object.get("text").?.string, .{}); // the job first
+    try testing.expectEqualStrings("completed", job.object.get("status").?.string);
+    try testing.expectEqual(@as(usize, 3), job.object.get("files").?.array.items.len);
+    var kinds: std.ArrayList([]const u8) = .empty; // the job, a link to each file, the manifest, the input view inline
+    for (texts(made)) |c| try kinds.append(a, c.object.get("type").?.string);
+    const want = [_][]const u8{ "text", "resource_link", "resource_link", "resource_link", "text", "image" };
+    try testing.expectEqual(want.len, kinds.items.len);
+    for (want, kinds.items) |w, k| try testing.expectEqualStrings(w, k);
+    const manifest = try std.json.parseFromSliceLeaky(Value, a, texts(made)[4].object.get("text").?.string, .{});
+    try testing.expectEqualStrings("asset3d", manifest.object.get("object").?.string);
 }
 
 /// MCP tools/list's tools and /v1/capabilities' `mcp.tools`, as JSON text.
@@ -238,9 +278,9 @@ test "drop-in: a swapped model set has the same MCP tools and capabilities; /v1/
         // Exactly the six configured ids, in config order, each with its kind and capabilities.
         const M = struct { data: []const struct { id: []const u8, kind: []const u8, capabilities: []const []const u8 } };
         const models = try std.json.parseFromSliceLeaky(M, a, (try d.call(a, .GET, "/v1/models", null)).body, .{ .ignore_unknown_fields = true });
-        try testing.expectEqual(@as(usize, 6), models.data.len);
-        const kinds = [_][]const u8{ "image", "video", "speech", "transcription", "chat", "decision" };
-        const caps = [_][]const u8{ if (s.inputs) "text_to_image,image_edit" else "text_to_image", if (s.inputs) "text_to_video,image_to_video" else "text_to_video", "text_to_speech", "speech_to_text", "chat_completion", "typed_decision" };
+        try testing.expectEqual(@as(usize, 7), models.data.len);
+        const kinds = [_][]const u8{ "image", "video", "speech", "transcription", "chat", "decision", "asset3d" };
+        const caps = [_][]const u8{ if (s.inputs) "text_to_image,image_edit" else "text_to_image", if (s.inputs) "text_to_video,image_to_video" else "text_to_video", "text_to_speech", "speech_to_text", "chat_completion", "typed_decision", "image_to_3d" };
         for (models.data, s.ids(), kinds, caps) |got, id, kind, want| {
             try testing.expectEqualStrings(id, got.id);
             try testing.expectEqualStrings(kind, got.kind);
@@ -275,6 +315,13 @@ test "drop-in: a capability the model lacks is refused, naming it and what it ca
         const http_edit = try d.call(a, .POST, "/v1/images/edits", try std.fmt.allocPrint(a, "{{\"prompt\":\"bars\",\"size\":\"256x256\",\"image\":\"{s}\"}}", .{image}));
         const mcp_i2v = try mcpCall(&d, a, "generate_video", try std.fmt.allocPrint(a, "{{\"prompt\":\"waves\",\"size\":\"256x256\",\"seconds\":1,\"audio\":false,\"wait_s\":60,\"image\":\"{s}\"}}", .{image}));
         const http_i2v = try d.call(a, .POST, "/v1/videos", try std.fmt.allocPrint(a, "{{\"prompt\":\"waves\",\"size\":\"256x256\",\"seconds\":\"1\",\"audio\":false,\"input_reference\":\"{s}\"}}", .{image}));
+        // Each 3D model's own Gaussian range: refused before it loads, naming the range; an unknown mode by the API.
+        const too_many = try std.fmt.allocPrint(a, "{{\"image\":\"{s}\",\"num_gaussians\":100000}}", .{image});
+        try expectStatus(try d.call(a, .POST, "/v1/assets3d", too_many), .bad_request, &.{ s.asset3d, s.gaussians });
+        try expectToolError(try mcpCall(&d, a, "generate_3d", too_many), &.{ s.asset3d, s.gaussians });
+        try expectStatus(try d.call(a, .POST, "/v1/assets3d", try std.fmt.allocPrint(a, "{{\"image\":\"{s}\",\"input_mode\":\"sketch\"}}", .{image})), .bad_request, &.{"input_mode must be synthetic"});
+        try expectStatus(try d.call(a, .POST, "/v1/assets3d", "{\"input_mode\":\"real\"}"), .bad_request, &.{"image is required"});
+        try testing.expectEqualStrings("unloaded", try d.toolState(a, s.asset3d));
         if (s.inputs) {
             try testing.expectEqualStrings(s.image, try mcpModel(a, mcp_edit));
             try testing.expectEqualStrings(s.image, try modelOf(a, http_edit));

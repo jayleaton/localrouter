@@ -36,6 +36,7 @@ claude mcp add --transport http localrouter http://<host>:8190/mcp --header "Aut
 | `generate_image` | `prompt`, `size`, `n`, `seed`, `steps`, `model`: waits, returns the PNG(s) inline and as URLs, and the seed. `images` (up to 5 base64 strings or http(s) URLs) makes it an edit of those images |
 | `edit_image` | `prompt` and `image` (one base64 string, data URL or URL) or `images` (1 to 5), optional `mask`, `size` (omit it for the input's shape), `n`, `seed`, `model`: the edited PNG(s) as `generate_image` returns them. Needs a model that lists `image_edit` |
 | `generate_video` | `prompt`, `size` (omit it for the model's own size), `seconds`, `seed`, `audio`, `wait_s`: the MP4's URL when done within `wait_s`, else a job id. `image` (one base64 string or URL) makes it image to video |
+| `generate_3d` | `image` (one base64 string, data URL or URL), `input_mode` (`synthetic` for a render or product shot, `real` for a photo), `format` (`ply`), `seed`, `steps`, `guidance`, `num_gaussians`, `model`, `inline_preview`, `wait_s`: the manifest (with the PLY's and the input view's URLs) and the input view inline when done within `wait_s`, else a job id. Needs a model that lists `image_to_3d` |
 | `list_voices` | each speech model's voices (cloned ones included), its default voice, whether it is loaded and whether it is the default |
 | `transcribe_audio` | `audio` (base64, data URL or URL) or `path` (a file on the box inside the config's `local_files`), `language`, `prompt`, `timestamps` (`none`, `segment`, `word`), `wait_s`: the transcript's text, then its JSON (language, duration, segments, words); a longer job returns its id for `get_job` |
 | `synthesize_speech` | `input`, `voice`, `speed`, `preset`, `format`, `seed`, `references`: the audio inline (WAV by default) and as a URL; the summary says why the audio ended (`finish_reason`) |
@@ -62,9 +63,9 @@ curl -s $BASE/capabilities | jq '{contract, unsupported}'   # what this box offe
 `GET /v1/capabilities` is the harness contract's discovery document ([HARNESS.md](HARNESS.md)): the contract
 version, each surface's profile and authorization, the MCP tools and the features not offered.
 
-`kind` is `image`, `video`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now. On a
+`kind` is `image`, `video`, `asset3d`, `speech`, `transcription`, `chat` or `decision`. `running: true` means it is loaded now. On a
 multi-node LocalRouter each model also names the `node` that runs it; the API is the same whichever node that is.
-`capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`,
+`capabilities` lists what the model can do: `text_to_image`, `image_edit`, `text_to_video`, `image_to_video`, `image_to_3d`,
 `text_to_speech`, `speech_to_text`, `chat_completion`, `typed_decision`, `voice_clone` (a speech model that clones a
 voice from recordings: [Voices](#voices-cloning)). Speech models also list `voices`, `default_voice`, `presets`, `speed` (the range they take),
 `max_input_chars`, `stream` (whether `stream: true` works), `references` (whether voice references do) and
@@ -174,6 +175,37 @@ first frame: `AI-edited ... from an input image`) and `description` (`desc`), th
 (`.../digitalsourcetype/trainedAlgorithmicMedia`, or `compositeWithTrainedAlgorithmicMedia` from a first frame).
 Read it with `ffprobe -v error -show_entries format_tags out.mp4`. `encoder` stays ffmpeg's (`Lavf...`): its CLI
 overwrites that tag. No XMP box and no C2PA manifest (see [Images](#images-openai-images-api)).
+
+## 3D assets (one picture to a Gaussian splat)
+
+```bash
+id=$(curl -s $BASE/assets3d -F image=@mug.png -F input_mode=synthetic | jq -r .id)
+curl -s "$BASE/assets3d/$id?wait_s=300"   # status, progress (0-100), phase; output once completed
+curl -s -o mug.ply $BASE/assets3d/$id/content   # the PLY, once completed
+curl -s -X DELETE $BASE/assets3d/$id      # cancel (DELETE /v1/jobs/{id} too)
+```
+
+The body is multipart (`image` a file) or JSON (`image` a base64 string, data URL or URL; PNG, JPEG or WebP).
+`input_mode` is `synthetic` (default: a render, product shot or generated image of one object on a plain background)
+or `real` (a photograph; the object is cut out of it). `format` is `ply`. Optional: `seed`, `steps`, `guidance`,
+`num_gaussians` (the model's range and multiple are in `/v1/models`' `gaussians`; outside it is refused before
+anything loads), `model`, `wait_s` (hold the reply up to that many seconds, at most 3000, for the job to finish).
+
+The object is `{id, object: "asset3d", model, status, progress, phase, created_at, completed_at, input_mode, format,
+seed, steps, guidance, num_gaussians, ms, output, error}`; once completed `output` holds `representation`
+(`gaussian_splat`), `format`, `num_gaussians`, `asset_url` (the PLY), `manifest_url` and `input_url` (the view the model
+saw, cropped and with its background removed), all under `/v1/files/` and read with the same authorization. The
+manifest (`asset.json`) gives the splat's count and field encodings, its frame (`up` is PLY `-y`), its bounds, a camera
+that frames it as the input did, the model's components with their licences, the settings and the timings. The `/voice`
+page and the companion show a finished asset as a card with the input, an orbit view and a Download PLY button.
+
+Idol on an M5 Ultra (PyTorch MPS, 50 steps) takes about 100 s an asset, nearly all of it denoising, at any
+`num_gaussians` from 32,768 to 1,048,576 (17.8 MB of PLY at the default 262,144); it holds 5 GiB loaded and books
+7.5 GiB more while it runs. Only the counts measured are offered.
+
+The PLY is labelled as machine-generated in its header, with `comment` lines after the `format` line:
+`AI-edited (machine-generated) from an input image by model <id> with LocalRouter`, `DigitalSourceType` with the IPTC
+term `compositeWithTrainedAlgorithmicMedia`, and `CreatorTool LocalRouter`. The body is the model's own.
 
 ## Speech (OpenAI Audio API)
 
@@ -412,7 +444,8 @@ by sentence. Speaking over the assistant (`input_audio_buffer.speech_started`) s
 | `localrouter` | extension: `{"tool_execution": "server"}` (default) or `"client"`; set it before the first response; with pairing it needs the `inference` scope |
 
 The chat model can also call LocalRouter's own `generate_image` and `generate_video` (and `edit_image`, which edits the
-session's last picture, when a model lists `image_edit`): the job runs, its URLs arrive as
+session's last picture, when a model lists `image_edit`, and `generate_3d`, which makes a 3D asset of a picture, the
+session's last one by default, when a model lists `image_to_3d`): the job runs, its URLs arrive as
 `localrouter.job.done` `{call_id, job_id, kind, status, urls, error}`, and the assistant says it is done. With
 `"tool_execution": "client"` only your `tools` exist (any names, built-in ones included) and none runs on the box: each
 call arrives once, complete, as `response.function_call_arguments.done`; return its `function_call_output` and send
@@ -529,7 +562,7 @@ the session first and brings the voice back after the job) is unchanged.
 Each model's weights keep their publisher's licence. `GET /v1/models` lists it per model as `license`, and
 `GET /v1/capabilities` lists them all (`models.licenses`); an operator sets one per tool in the config (`license`,
 the same shape), and the compiled-in image and video engines state their own when the config does not. LocalRouter
-informs and enforces nothing: check the terms before you use or publish what a model makes. The Jarvis box's models
+informs and enforces nothing: check the terms before you use or publish what a model makes. The Jarvis box's and the Mac's models
 (a summary, not legal advice; the [README](../README.md#credits) has the links):
 
 | Model | Licence | Use | Restrictions / notice |
@@ -541,6 +574,7 @@ informs and enforces nothing: check the terms before you use or publish what a m
 | `kitten-tts-2` (optional) | Stellon Labs Community License | commercial after registering, until USD 1,000,000 revenue or funding | outputs may not train another model; "Powered by Stellon Labs" |
 | `qwen-image-2.1`, `qwen-image-2.1-turbo` | Qwen Research License | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
 | `minimax-h3` | MiniMax H3 Community License | outside the excluded territories; commercial included (over USD 20 million yearly revenue: MiniMax's written authorization) | not licensed in the US, EU, UK or South Korea; public content disclosed as machine-generated; "MiniMax H3" on a commercial product's interface |
+| `idol` (Mac, on demand) | Apache-2.0 (Idol, its BiRefNet, the FLUX.2 autoencoder) + DINOv3 License (the image encoder) | any | DINOv3: redistribute only under its licence with a copy; acknowledge it in publications; no reverse engineering; trade controls; no military, nuclear, espionage or ITAR uses |
 
 ## Errors
 

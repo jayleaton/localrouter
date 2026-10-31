@@ -69,7 +69,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, tool_json: []const u8, parent: i3
                     try reply(gpa, .{ .ok = false, .@"error" = "generate without a request", .type = "protocol_error" });
                     continue;
                 } };
-                const heavy = job.request == .image or job.request == .video;
+                const heavy = job.request == .image or job.request == .video or job.request == .asset3d;
                 var ctx: SinkCtx = .{ .gpa = gpa, .io = io, .gate = if (heavy) &gate else null };
                 if (heavy) {
                     gate.reset();

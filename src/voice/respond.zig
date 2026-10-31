@@ -996,7 +996,10 @@ const builtin_tools =
     \\  "from_last_image": {"type": "boolean", "description": "true: the video starts from the last picture made or edited in this conversation"}}, "required": ["prompt"]}}},
     \\ {"type": "function", "function": {"name": "edit_image", "description": "Change a picture as the user asks (make it night, add a hat, change the colours): by default the last picture made or edited in this conversation. Use it, not generate_image, when the user wants that picture changed. It takes several seconds. When you call this, only say briefly that you are on it (for example: Making that now). Never say or imply it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
     \\  "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "the change, in detail: what to change and what to keep"},
-    \\  "image": {"type": "string", "description": "the URL of another picture from an earlier result; omit for the last picture"}}, "required": ["prompt"]}}}]
+    \\  "image": {"type": "string", "description": "the URL of another picture from an earlier result; omit for the last picture"}}, "required": ["prompt"]}}},
+    \\ {"type": "function", "function": {"name": "generate_3d", "description": "Turn a picture into a 3D model of the object in it (a Gaussian splat the user can turn around and download): by default the last picture made or edited in this conversation. It takes a few minutes. When you call this, only say that you are making the 3D model and that it takes a few minutes. Never say it is ready: you get the result later as the tool output, and then you say it is ready, or that it failed.",
+    \\  "parameters": {"type": "object", "properties": {"image": {"type": "string", "description": "the URL of another picture from an earlier result; omit for the last picture"},
+    \\  "input_mode": {"type": "string", "enum": ["synthetic", "real"], "description": "real for a photograph, synthetic (default) for a render or a made picture"}}}}}]
 ;
 
 /// The model management tools (`voice.manage_models`), offered with the procedure (`skill.zig`) in the instructions.
@@ -1039,7 +1042,7 @@ fn request(s: *Session, a: std.mem.Allocator, ask: Task.Ask) !chat.Request {
     };
 }
 
-/// Under the lock: the tools a reply is offered: the built-in image, edit and video tools a model can serve, the model
+/// Under the lock: the tools a reply is offered: the built-in image, edit, video and 3D tools a model can serve, the model
 /// management tools when enabled, the computer tools when a helper is paired, then the client's own (only those with
 /// client tool execution).
 fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
@@ -1050,6 +1053,7 @@ fn offered(s: *Session, a: std.mem.Allocator) ![]const chat.Tool {
         if (offer.image) try tools.append(a, all[0]);
         if (offer.image_edit) try tools.append(a, all[3]);
         if (offer.video) try tools.append(a, if (offer.image_to_video) all[2] else all[1]); // from_last_image only with a model for it
+        if (offer.asset3d) try tools.append(a, all[4]);
         if (s.voice.manage_models) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, manage_tools, .{}));
         if (offer.computer) try tools.appendSlice(a, try std.json.parseFromSliceLeaky([]const chat.Tool, a, computer_tools, .{}));
     }

@@ -18,7 +18,7 @@ work.
 | Voice | `GET /v1/realtime` (WebSocket) | OpenAI Realtime, beta events | [Realtime](#realtime-profile-openai-realtime-beta) |
 | Tools for agents | `POST /mcp`, `localrouter mcp-stdio` | MCP, Streamable HTTP (stateless) | [MCP](#mcp) |
 | Decisions | `POST /v1/systemone` | TypeSafe System One | [Decisions](#decisions) |
-| Media | `/v1/images/*`, `/v1/videos`, `/v1/audio/*`, `/v1/jobs`, `/v1/files` | OpenAI Images, Videos, Audio | [Media](#media-and-jobs) |
+| Media | `/v1/images/*`, `/v1/videos`, `/v1/assets3d`, `/v1/audio/*`, `/v1/jobs`, `/v1/files` | OpenAI Images, Videos, Audio | [Media](#media-and-jobs) |
 | Pairing | `/v1/pair`, bearer tokens | LocalRouter | [Authorization](#authorization) |
 | Computer control | `/v1/desktop`, `/v1/computer/*` | LocalRouter | [Computer control](#computer-control-legacy-placement) |
 
@@ -61,7 +61,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `realtime` | `path`, `transport`, `profile` (`openai-realtime-beta`), `remote` (whether a call from another machine that reaches the daemon is served: false only when it listens beyond loopback with `voice.remote` off; true behind a loopback-only listener, where a proxy such as `tailscale serve` decides), `audio`, `turn_detection`, `modalities`, `tool_execution` (the modes: `server`, `client`), `tool_execution_default`, `tool_execution_set`, `server_tools` (which built-ins a session gets), `client_events`, `server_events`, `extension_events`, `token_transports` |
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
-| `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
+| `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video`, `image_to_3d` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
 | `model_management` | the operator routes and the MCP tools that change what is loaded |
 | `computer` | `enabled`, the helper and approval routes, and `placement` (`box_policy` today) |
 | `unsupported` | `[{feature, status, note}]`: `status` is `unsupported` or `coming`; `note` says what to use instead |
@@ -287,7 +287,8 @@ for a mode the box lacks finds out at once.
   required, the session's device needs the `inference` scope for this mode (the legacy `voice` profile includes it).
 - **`server` (default, what our web page and app use).** The client's `tools` plus, unless the operator turned them
   off, the box's built-ins (`realtime.server_tools`): `generate_image`, `generate_video`, `edit_image` (when a model
-  lists `image_edit`: `server_tools.image_edit`), the model management tools
+  lists `image_edit`: `server_tools.image_edit`), `generate_3d` (when a model lists `image_to_3d`:
+  `server_tools.image_to_3d`; the session's last picture by default), the model management tools
   with `voice.manage_models`, and `computer_control` / `computer_use` while a desktop helper is paired. Client calls
   return as above; a built-in runs on the box, its job's events (`localrouter.job.*`) arrive and the assistant follows
   up by itself. A client tool may not reuse a built-in's name.
@@ -307,13 +308,13 @@ a command use `localrouter mcp-stdio --url URL [--token TOKEN]`, a stateless bri
 `$LOCALROUTER_TOKEN`).
 
 Tools (`mcp.tools`; schemas strict, `additionalProperties: false`): `list_models`, `list_voices`, `reserve_for`,
-`unload_model`, `load_model`, `generate_image`, `edit_image`, `generate_video`, `transcribe_audio`, `synthesize_speech`, `chat`,
+`unload_model`, `load_model`, `generate_image`, `edit_image`, `generate_video`, `generate_3d`, `transcribe_audio`, `synthesize_speech`, `chat`,
 `decide`, `get_job`, `cancel_job`, `release_models`, `computer_control`, `computer_use`, `computer_status`,
 `computer_stop`. Arguments and results: [MCP.md](MCP.md#tools).
 
 - **Failures** are tool results with `isError: true` whose text says what to change; a JSON-RPC error means the call
   itself was malformed (unknown tool, bad params).
-- **Long jobs never need a long call:** `generate_image`, `edit_image`, `generate_video` and `transcribe_audio` take `wait_s`
+- **Long jobs never need a long call:** `generate_image`, `edit_image`, `generate_video`, `generate_3d` and `transcribe_audio` take `wait_s`
   (default 600, at most 3000) and return the job id when it passes; `get_job {id, wait_s}` picks it up and
   `cancel_job` ends it. A client with a short tool timeout passes a small `wait_s` and polls.
 - **Outputs** come back as `resource_link` URLs on the box (`/v1/files/...`, kept 24 h) and, for images and speech,
@@ -330,8 +331,10 @@ questions) and returns typed answers with probabilities, checked against the que
 OpenAI's Images (`/v1/images/generations`, `/v1/images/edits`), Videos (`/v1/videos`, `/v1/videos/{id}`,
 `/content`, `DELETE`) and Audio (`/v1/audio/speech`, `/v1/audio/transcriptions`) APIs with documented extensions
 (`seed`, `steps`, `stream` for PCM speech...): [AGENTS.md](AGENTS.md). Voices (an extension): `GET /v1/voices` lists
-every speech model's, and a model with `voice_clone` clones one from recordings ([AGENTS.md](AGENTS.md#voices-cloning)). Any job's state: `GET /v1/jobs/{id}` `{id, kind,
-status, progress, phase, urls, error}`. Outputs: `GET /v1/files/{job}/{name}`, kept `keep_outputs_s` (24 h by
+every speech model's, and a model with `voice_clone` clones one from recordings ([AGENTS.md](AGENTS.md#voices-cloning)). 3D assets (an extension): `POST /v1/assets3d` turns one picture into a Gaussian splat PLY with a manifest and the
+input view, `GET /v1/assets3d/{id}` (`?wait_s`), `/content`, `DELETE` ([AGENTS.md](AGENTS.md#3d-assets-one-picture-to-a-gaussian-splat)).
+Any job's state: `GET /v1/jobs/{id}` `{id, kind,
+status, progress, phase, urls, error}`; `DELETE /v1/jobs/{id}` cancels it. Outputs: `GET /v1/files/{job}/{name}`, kept `keep_outputs_s` (24 h by
 default). Absolute output URLs (MCP results, `response_format: url`, `localrouter.job.done`) are built from the
 request's `Host` and the scheme the client used: `https` when a TLS proxy in front (`tailscale serve`) sends
 `X-Forwarded-Proto: https`. Input URLs are fetched by the daemon and may not name private addresses
@@ -342,7 +345,9 @@ Every PNG and MP4 output is labelled as machine-generated in its metadata (pixel
 `Software`/`Comment` plus an XMP packet with the IPTC `DigitalSourceType` `trainedAlgorithmicMedia`
 (`compositeWithTrainedAlgorithmicMedia` for an edit or a first-frame video); MP4 `comment` and `description` tags in
 `moov/udta/meta/ilst`. The compiled-in engines write it; files from any other tool (a `cmd` adapter) are labelled
-when the job completes, a PNG by inserting the chunks after IHDR, an MP4 by an ffmpeg `-c copy` remux. Details and
+when the job completes, a PNG by inserting the chunks after IHDR, an MP4 by an ffmpeg `-c copy` remux. A 3D asset's
+PLY carries the label as header `comment` lines (`compositeWithTrainedAlgorithmicMedia`: it is made from an input
+image), its body untouched. Details and
 how to read them: [AGENTS.md](AGENTS.md#images-openai-images-api). No C2PA manifest: it needs a signing certificate.
 
 ## Computer control (legacy placement)

@@ -88,7 +88,7 @@ pub fn jobNeed(kind: @import("tool/request.zig").Kind) Need {
     return switch (kind) {
         .chat => .inference,
         .decision => .decisions,
-        .image, .video, .speech, .transcription => .media,
+        .image, .video, .speech, .transcription, .asset3d => .media,
     };
 }
 

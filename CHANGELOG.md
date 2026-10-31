@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
+  synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
+  (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian
+  splat `asset.ply` labelled as machine-generated in its header, a manifest `asset.json` (checked before the job
+  completes) and the input view, all through `/v1/files`. MCP `generate_3d` (media scope; `tools/list` has 21 tools),
+  `list_models`' `formats`, `input_modes` and `gaussians`, `/v1/capabilities`' `media.image_to_3d`, and a voice-loop
+  built-in on the session's last picture. A tool books working memory per measured Gaussian count
+  (`working_bytes_by_gaussians`); a count above every measurement is refused. Idol ships as a PyTorch `cmd` worker
+  (`tools/asset3d/idol`: MPS on macOS, CUDA on Linux, idol-sdk and every weight pinned, no Hugging Face token), on demand
+  on the Mac (about 100 s an asset, 5 + 7.5 GiB) and disabled, untested, on the GB10. The `/voice` page and the
+  companion show an asset as a card with the input, an orbit view (Spark 2.4.0, self-hosted under `/voice/vendor/`,
+  loaded on first use) and Download PLY.
+
 - Kandinsky-6 Pro distilled (`kandinsky6`): text to video at 832x480 landscape only (what a request naming no size
   gets, through the engine's `Entry.defaults`; any other size or orientation is refused before any GPU work), 121
   frames at 24 fps with its coupled mono 44.1 kHz audio, native Zig and CUDA end to end: Qwen2.5-VL and CLIP text

@@ -106,7 +106,7 @@ fn guards(a: std.mem.Allocator) ![]const Guard {
 }
 
 /// The MCP tools for media and its jobs, as `media.mcp_tools`.
-const media_tools = [_][]const u8{ "generate_image", "edit_image", "generate_video", "transcribe_audio", "synthesize_speech", "get_job", "cancel_job" };
+const media_tools = [_][]const u8{ "generate_image", "edit_image", "generate_video", "generate_3d", "transcribe_audio", "synthesize_speech", "get_job", "cancel_job" };
 
 /// One thing a harness might expect that this daemon does not offer (or not yet), and what to do instead.
 const Gap = struct { feature: []const u8, status: []const u8, note: []const u8 };
@@ -226,7 +226,7 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .tool_execution = std.meta.fieldNames(@import("../voice/events.zig").ToolExecution),
             .tool_execution_default = "server",
             .tool_execution_set = "session.update {session: {localrouter: {tool_execution}}} before the first response",
-            .server_tools = .{ .media = cfg.voice.tools, .image_edit = cfg.voice.tools and has(caps.items, .image_edit), .image_to_video = cfg.voice.tools and has(caps.items, .image_to_video), .model_management = cfg.voice.tools and cfg.voice.manage_models, .computer = computer and cfg.computer.voice },
+            .server_tools = .{ .media = cfg.voice.tools, .image_edit = cfg.voice.tools and has(caps.items, .image_edit), .image_to_video = cfg.voice.tools and has(caps.items, .image_to_video), .image_to_3d = cfg.voice.tools and has(caps.items, .image_to_3d), .model_management = cfg.voice.tools and cfg.voice.manage_models, .computer = computer and cfg.computer.voice },
             .client_events = realtime_client_events,
             .server_events = realtime_server_events,
             .extension_events = realtime_extension_events,
@@ -249,11 +249,13 @@ pub fn serve(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
             .image_to_video = has(caps.items, .image_to_video),
             .mcp_tools = media_tools,
             .videos = "/v1/videos",
+            .assets3d = "/v1/assets3d", // one picture to a 3D asset (a Gaussian splat PLY and its manifest); async like videos
+            .image_to_3d = has(caps.items, .image_to_3d),
             .speech = "/v1/audio/speech",
             .transcriptions = "/v1/audio/transcriptions",
             .voices = "/v1/voices", // GET lists every voice; POST clones one from recordings (manage)
             .voice_clone = has(caps.items, .voice_clone),
-            .jobs = "/v1/jobs/{id}",
+            .jobs = "/v1/jobs/{id}", // GET its state; DELETE cancels it
             .files = "/v1/files/{job}/{name}",
         },
         .model_management = .{ .status = "/v1/tools", .load = "/v1/tools/{id}/load", .unload = "/v1/tools/{id}/unload", .settings = "/v1/tools/{id}/settings", .release = "/v1/tools/release", .residency = [_][]const u8{ "always", "call", "on_demand", "disabled" }, .mcp_tools = [_][]const u8{ "list_models", "reserve_for", "load_model", "unload_model", "release_models", "set_model_residency" } },

@@ -79,7 +79,9 @@ pub fn license(cfg: *const ToolConfig) ?config.License {
 /// The size a video request without one gets when its engine has no `defaults`.
 pub const default_video_size = [2]u32{ 1344, 768 };
 
-/// Fills what `req` left to the model, before validation: the engine's `defaults`, then `default_video_size`.
+/// Fills what `req` left to the model, before validation: the engine's `defaults`, then `default_video_size`; for a 3D
+/// asset the tool's declared `default_gaussians` (a splat model), `default_steps` and `default_guidance`, so the job,
+/// its booking and its manifest say what runs.
 pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
     switch (req.*) {
@@ -87,8 +89,101 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
             v.width = default_video_size[0];
             v.height = default_video_size[1];
         },
+        .asset3d => |*v| {
+            if (v.num_gaussians == null and gaussianRange(cfg) != null) v.num_gaussians = std.math.cast(u32, optionInt(cfg, "default_gaussians", 0));
+            if (v.num_gaussians == 0) v.num_gaussians = null;
+            if (v.steps == null) v.steps = std.math.cast(u32, optionInt(cfg, "default_steps", 0));
+            if (v.steps == 0) v.steps = null;
+            if (v.guidance == null and hasOption(cfg, "default_guidance")) v.guidance = optionFloat(cfg, "default_guidance", 0);
+        },
         .image, .speech, .transcription, .chat, .decision => {},
     }
+}
+
+/// Whether the tool's `options` name `key`.
+fn hasOption(cfg: *const ToolConfig, key: []const u8) bool {
+    const opts = cfg.options orelse return false;
+    return opts == .object and opts.object.get(key) != null;
+}
+
+/// An image_to_3d tool's own limits, from its options, checked before it loads: `formats` (the asset formats it writes;
+/// absent: ply), `input_modes` (absent: both), `max_steps` and `max_guidance`, and for a Gaussian-splat model `min_gaussians`, `max_gaussians` and
+/// `gaussian_multiple`. A tool without `max_gaussians` makes no splats, so a `num_gaussians` is refused rather than
+/// ignored. With `working_bytes_by_gaussians` (measured peaks by count), a count past its largest bucket is refused:
+/// it was never measured, so it cannot be booked.
+pub fn checkAsset3d(cfg: *const ToolConfig, v: request.Asset3d, why: *std.Io.Writer) bool {
+    const fmt = @tagName(v.format);
+    if (if (optionList(cfg, "formats")) |l| !listed(l, fmt) else v.format != .ply) {
+        why.print("model '{s}' does not write {s}; its formats: ", .{ cfg.id, fmt }) catch {};
+        if (optionList(cfg, "formats")) |l| printList(l, why) else why.writeAll("ply") catch {};
+        return false;
+    }
+    if (optionList(cfg, "input_modes")) |l| if (!listed(l, @tagName(v.input_mode))) {
+        why.print("model '{s}' does not take input_mode '{s}'; its input modes: ", .{ cfg.id, @tagName(v.input_mode) }) catch {};
+        printList(l, why);
+        return false;
+    };
+    if (v.steps) |n| if (hasOption(cfg, "max_steps") and n > optionInt(cfg, "max_steps", 0)) {
+        why.print("model '{s}' takes at most {d} steps", .{ cfg.id, optionInt(cfg, "max_steps", 0) }) catch {};
+        return false;
+    };
+    if (v.guidance) |x| if (hasOption(cfg, "max_guidance") and x > optionFloat(cfg, "max_guidance", 0)) {
+        why.print("model '{s}' takes guidance 0 to {d}", .{ cfg.id, optionFloat(cfg, "max_guidance", 0) }) catch {};
+        return false;
+    };
+    const n = v.num_gaussians orelse return true;
+    const g = gaussianRange(cfg) orelse {
+        why.print("model '{s}' makes no Gaussian splats: leave num_gaussians unset", .{cfg.id}) catch {};
+        return false;
+    };
+    if (n < g.min or n > g.max or n % g.multiple != 0) {
+        why.print("model '{s}' takes num_gaussians {d} to {d} in multiples of {d}", .{ cfg.id, g.min, g.max, g.multiple }) catch {};
+        return false;
+    }
+    if (hasOption(cfg, "working_bytes_by_gaussians") and asset3dWorking(cfg, v) == null) {
+        why.print("model '{s}' has no measured booking for {d} Gaussians", .{ cfg.id, n }) catch {};
+        return false;
+    }
+    return true;
+}
+
+/// A splat model's Gaussian counts: `min_gaussians` (default 1) to `max_gaussians`, in multiples of
+/// `gaussian_multiple` (default 1), and its `default_gaussians`; null for a tool that declares no `max_gaussians`.
+pub const Gaussians = struct { min: u64, max: u64, multiple: u64, default: ?u64 = null };
+
+pub fn gaussianRange(cfg: *const ToolConfig) ?Gaussians {
+    const max = optionInt(cfg, "max_gaussians", 0);
+    if (max == 0) return null;
+    const d = optionInt(cfg, "default_gaussians", 0);
+    return .{ .min = @max(optionInt(cfg, "min_gaussians", 1), 1), .max = max, .multiple = @max(optionInt(cfg, "gaussian_multiple", 1), 1), .default = if (d > 0) d else null };
+}
+
+/// The measured working bytes of a 3D job from the tool's `working_bytes_by_gaussians` (`{"<count>": bytes, ...}`):
+/// the smallest bucket at least as large as the job's count (the largest bucket when it names none); null when the
+/// option is absent or no bucket covers the count. Never interpolated: a job is booked at a peak that was measured.
+pub fn asset3dWorking(cfg: *const ToolConfig, v: request.Asset3d) ?u64 {
+    const opts = cfg.options orelse return null;
+    if (opts != .object) return null;
+    const table = opts.object.get("working_bytes_by_gaussians") orelse return null;
+    if (table != .object) return null;
+    const want: ?u64 = if (v.num_gaussians) |n| n else null;
+    var best_count: ?u64 = null;
+    var best: u64 = 0;
+    var it = table.object.iterator();
+    while (it.next()) |e| {
+        const count = std.fmt.parseInt(u64, e.key_ptr.*, 10) catch continue;
+        const bytes: u64 = switch (e.value_ptr.*) {
+            .integer => |i| if (i >= 0) @intCast(i) else continue,
+            else => continue,
+        };
+        if (want) |w| if (count < w) continue;
+        const better = if (best_count) |b| (if (want != null) count < b else count > b) else true;
+        if (better) {
+            best_count = count;
+            best = bytes;
+        }
+    }
+    return if (best_count != null) best else null;
 }
 
 /// The CUDA engines are built on Linux only (build.zig); elsewhere a tool naming one finds no engine (`find`).
@@ -104,10 +199,11 @@ pub const entries = [_]Entry{
 };
 
 /// Whether the tool can serve `cap`: its configured capabilities, else its engine's, else its kind's plain one (text to
-/// image, text to video, text to speech, speech to text, chat completion, typed decision); always within the tool's kind.
+/// image, text to video, text to speech, speech to text, chat completion, typed decision, image to 3D); always within
+/// the tool's kind.
 pub fn supports(cfg: *const ToolConfig, cap: Capability) bool {
     if (cap.kind() != cfg.kind) return false;
-    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text, .chat_completion, .typed_decision };
+    const base: []const Capability = if (cfg.capabilities.len > 0) cfg.capabilities else if (find(cfg.engine)) |e| e.capabilities else &.{ .text_to_image, .text_to_video, .text_to_speech, .speech_to_text, .chat_completion, .typed_decision, .image_to_3d };
     return std.mem.indexOfScalar(Capability, base, cap) != null;
 }
 
@@ -137,6 +233,7 @@ pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
 pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     if (req.* == .speech and !checkSpeech(cfg, req.speech, why)) return false;
     if (req.* == .transcription and !checkTranscription(cfg, req.transcription, why)) return false;
+    if (req.* == .asset3d and !checkAsset3d(cfg, req.asset3d, why)) return false;
     const e = find(cfg.engine) orelse return true;
     const f = e.check orelse return true;
     return f(cfg, req, why);
@@ -198,8 +295,8 @@ pub fn checkSpeech(cfg: *const ToolConfig, v: request.Speech, why: *std.Io.Write
     return true;
 }
 
-/// What a speech or transcription tool takes, for the model lists (`/v1/models`, MCP list_models); null fields are
-/// not shown.
+/// What a speech, transcription or 3D tool takes, for the model lists (`/v1/models`, MCP list_models); null fields
+/// are not shown.
 pub const AudioInfo = struct {
     voices: ?[]const std.json.Value = null,
     default_voice: ?[]const u8 = null,
@@ -211,7 +308,13 @@ pub const AudioInfo = struct {
     instructions: ?bool = null,
     max_audio_s: ?u64 = null,
     languages: ?[]const std.json.Value = null,
+    formats: ?[]const std.json.Value = null, // a 3D tool's asset formats
+    input_modes: ?[]const std.json.Value = null,
+    gaussians: ?Gaussians = null, // a splat model's counts
 };
+
+const ply_only = [_]std.json.Value{.{ .string = "ply" }};
+const both_modes = [_]std.json.Value{ .{ .string = "synthetic" }, .{ .string = "real" } };
 
 pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
     return switch (cfg.kind) {
@@ -226,6 +329,7 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .instructions = optionString(cfg, "instructions", "").len > 0,
         },
         .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60), .languages = optionList(cfg, "languages") },
+        .asset3d => .{ .formats = optionList(cfg, "formats") orelse &ply_only, .input_modes = optionList(cfg, "input_modes") orelse &both_modes, .gaussians = gaussianRange(cfg) },
         else => .{},
     };
 }
@@ -304,6 +408,16 @@ fn printList(list: []const std.json.Value, why: *std.Io.Writer) void {
 /// Whether each configured default (`Config.defaults`) names a tool that has its capability; the first that does not
 /// is written to `why`.
 pub fn checkDefaults(c: *const config.Config, why: *std.Io.Writer) bool {
+    for (c.tools) |*t| if (t.kind == .asset3d) if (gaussianRange(t)) |g| {
+        if (g.min > g.max or (g.default != null and (g.default.? < g.min or g.default.? > g.max or g.default.? % g.multiple != 0))) {
+            why.print("tool '{s}': min_gaussians must be at most max_gaussians, and default_gaussians within them", .{t.id}) catch {};
+            return false;
+        }
+        if (hasOption(t, "working_bytes_by_gaussians") and asset3dWorking(t, .{ .image = "", .num_gaussians = std.math.cast(u32, g.max) orelse std.math.maxInt(u32) }) == null) {
+            why.print("tool '{s}': max_gaussians {d} is past its largest measured working_bytes_by_gaussians bucket; offer only what was measured", .{ t.id, g.max }) catch {};
+            return false;
+        }
+    };
     for (c.tools) |*t| {
         if (t.kind != .speech) continue;
         const dv = optionString(t, "default_voice", "");

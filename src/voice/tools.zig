@@ -1,7 +1,8 @@
 //! Built-in tool calls of a voice session: the image or video job a call asks for (a waiter thread reports the result
 //! as `localrouter.job.done` and asks for a spoken follow-up once voice is back), and the model management tools
 //! (list_models, reserve_for, unload_model, load_model), whose JSON answers the call. The session keeps the file of
-//! its last picture: edit_image edits it unless the call names another, and generate_video's from_last_image animates it.
+//! its last picture: edit_image edits it unless the call names another, generate_video's from_last_image animates it,
+//! and generate_3d makes a 3D asset of it.
 
 const std = @import("std");
 const session = @import("session.zig");
@@ -49,7 +50,7 @@ fn wait(s: *Session, c: Call) void {
     }
     var why: backend.Why = .{};
     var job_id: []const u8 = "";
-    const kind: backend.JobKind = if (std.mem.eql(u8, c.name, "generate_video")) .video else .image;
+    const kind = jobKind(c.name);
     const outcome: backend.Outcome = blk: {
         const spec = jobSpec(a, c.name, c.arguments, lastImage(s, a), &why) orelse break :blk .{ .status = "failed", .@"error" = why.message };
         const job = s.backend.startJob(a, spec, &why) catch break :blk .{ .status = "failed", .@"error" = why.message };
@@ -77,8 +78,14 @@ fn wait(s: *Session, c: Call) void {
 
 /// The built-in tools that run a job (the rest answer at once).
 fn isJob(name: []const u8) bool {
-    for ([_][]const u8{ "generate_image", "edit_image", "generate_video" }) |n| if (std.mem.eql(u8, name, n)) return true;
+    for ([_][]const u8{ "generate_image", "edit_image", "generate_video", "generate_3d" }) |n| if (std.mem.eql(u8, name, n)) return true;
     return false;
+}
+
+fn jobKind(name: []const u8) backend.JobKind {
+    if (std.mem.eql(u8, name, "generate_video")) return .video;
+    if (std.mem.eql(u8, name, "generate_3d")) return .asset3d;
+    return .image;
 }
 
 /// The session's last picture's file, copied into `a` ("" when it has made none).
@@ -157,17 +164,25 @@ fn answer(s: *Session, a: std.mem.Allocator, c: Call, output: []const u8) void {
 /// with `why` set when they are not usable. edit_image edits `image` (a URL) or else the last picture; generate_video
 /// with from_last_image starts from the last picture.
 fn jobSpec(a: std.mem.Allocator, name: []const u8, arguments: []const u8, last: []const u8, why: *backend.Why) ?backend.JobSpec {
-    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0, image: []const u8 = "", from_last_image: bool = false };
+    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0, image: []const u8 = "", from_last_image: bool = false, input_mode: []const u8 = "" };
     const args = std.json.parseFromSliceLeaky(Args, a, arguments, .{ .ignore_unknown_fields = true }) catch {
         why.set("the tool call's arguments are not valid JSON: {s}", .{arguments[0..@min(arguments.len, 200)]});
         return null;
     };
+    const kind = jobKind(name);
+    if (kind == .asset3d) { // a picture, not a prompt: the one named, else the last
+        if (args.image.len == 0 and last.len == 0) {
+            why.set("there is no picture in this conversation yet to make a 3D model of: make one with generate_image first, or send its URL as image", .{});
+            return null;
+        }
+        return .{ .kind = .asset3d, .prompt = "", .input_url = args.image, .input_file = if (args.image.len > 0) "" else last, .input_mode = args.input_mode };
+    }
     if (std.mem.trim(u8, args.prompt, " ").len == 0) {
         why.set("the tool call has no prompt", .{});
         return null;
     }
     const edit = std.mem.eql(u8, name, "edit_image");
-    var spec: backend.JobSpec = .{ .kind = if (std.mem.eql(u8, name, "generate_video")) .video else .image, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
+    var spec: backend.JobSpec = .{ .kind = kind, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
     if (edit and args.image.len > 0) {
         spec.input_url = args.image;
     } else if (edit or (spec.kind == .video and args.from_last_image)) {
@@ -201,4 +216,12 @@ test "a tool call's arguments: a prompt is needed, JSON only; an edit takes the 
     try std.testing.expectEqual(backend.JobKind.video, v.kind);
     try std.testing.expectEqualStrings("/jobs/img_1/0.png", v.input_file);
     try std.testing.expectEqualStrings("", jobSpec(a, "generate_video", "{\"prompt\": \"waves\"}", "/jobs/img_1/0.png", &why).?.input_file);
+    // generate_3d: no prompt; the last picture, or the URL named, or a refusal saying there is none
+    const m = jobSpec(a, "generate_3d", "{\"input_mode\": \"real\"}", "/jobs/img_1/0.png", &why).?;
+    try std.testing.expectEqual(backend.JobKind.asset3d, m.kind);
+    try std.testing.expectEqualStrings("/jobs/img_1/0.png", m.input_file);
+    try std.testing.expectEqualStrings("real", m.input_mode);
+    try std.testing.expectEqualStrings("http://x/v1/files/img_2/0.png", jobSpec(a, "generate_3d", "{\"image\": \"http://x/v1/files/img_2/0.png\"}", "", &why).?.input_url);
+    try std.testing.expect(jobSpec(a, "generate_3d", "{}", "", &why) == null);
+    try std.testing.expect(std.mem.startsWith(u8, why.message, "there is no picture in this conversation yet to make a 3D model of"));
 }

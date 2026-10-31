@@ -1,0 +1,14 @@
+{
+  "name": "localrouter-voice-vendor",
+  "private": true,
+  "description": "Builds the pinned 3D splat viewer bundle the /voice page lazy-loads (src/voice/vendor/). See src/voice/vendor/README.md.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@sparkjsdev/spark": "2.4.0",
+    "esbuild": "0.28.2",
+    "three": "0.187.0"
+  }
+}

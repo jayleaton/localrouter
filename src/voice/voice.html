@@ -317,6 +317,23 @@
   #lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; color: #fff; }
   #lightbox::backdrop { background: rgba(10, 11, 12, .82); }
   .lb-media img, .lb-media video { display: block; max-width: 96vw; max-height: 78vh; border-radius: 14px; margin: 0 auto; background: #000; }
+  /* A 3D model (kind asset3d): its picture with a 3D badge on the cards; in the lightbox, a canvas made when it opens. */
+  .three { position: relative; }
+  .badge-3d { position: absolute; left: 8px; bottom: 8px; padding: 1px 8px; border-radius: 999px; background: rgba(21, 23, 24, .72);
+    color: #fef3e1; font-size: 12px; font-weight: 700; letter-spacing: .02em; pointer-events: none; }
+  .card .thumb.three .badge-3d { left: 10px; bottom: 10px; }
+  .card .thumb.three > .ph { display: grid; place-items: center; aspect-ratio: 1; width: 100%; color: var(--muted); }
+  .rc-thumb.three > .ph { display: grid; place-items: center; width: 100%; height: 100%; color: var(--muted); }
+  .lb-3d { position: relative; width: min(92vw, 78vh, 900px); aspect-ratio: 1; margin: 0 auto; border-radius: 14px; overflow: hidden;
+    background: #000; touch-action: none; }
+  .lb-3d canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  .lb-3d canvas:active { cursor: grabbing; }
+  .lb-3d canvas:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; border-radius: 14px; }
+  .lb-3d-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; font-size: 14px;
+    color: #e8e2d6; pointer-events: none; }
+  .lb-3d-status:empty { display: none; }
+  .lb-3d-hint { position: absolute; left: 0; right: 0; bottom: 8px; margin: 0; text-align: center; font-size: 12px; color: rgba(232, 226, 214, .75);
+    pointer-events: none; }
   .lb-cap { margin: 10px auto 0; max-width: min(720px, 92vw); text-align: center; font-size: 14px; color: #e8e2d6; }
   .lb-voice { display: inline-flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 999px; background: rgba(254, 185, 62, .18);
               border: 1px solid #feb93e; min-height: 44px; font-size: 13px; }
@@ -633,11 +650,13 @@
 </dialog>
 
 <dialog id="lightbox" aria-labelledby="lbCap">
-  <div class="lb-media"><img id="lbImg" alt=""><video id="lbVid" controls playsinline hidden></video></div>
+  <div class="lb-media"><img id="lbImg" alt=""><video id="lbVid" controls playsinline hidden></video>
+    <div class="lb-3d" id="lb3d" hidden><div class="lb-3d-status" id="lb3dStatus" role="status" aria-live="polite"></div>
+      <p class="lb-3d-hint" id="lb3dHint" hidden>Drag to turn it · scroll or pinch to zoom</p></div></div>
   <p class="lb-cap" id="lbCap"></p>
   <div class="lb">
     <span class="lb-voice" id="lbVoice" hidden><span class="dot" data-s="ready"></span><span id="lbVoiceText">On a call</span><button class="btn" id="lbHush">Interrupt</button></span>
-    <button class="btn" id="lbCopy">Copy prompt</button><a class="btn" id="lbDl" download>Download</a><button class="btn primary" id="lbClose">Close</button>
+    <button class="btn" id="lbCopy">Copy prompt</button><button class="btn" id="lb3dReset" hidden>Reset view</button><a class="btn" id="lbDl" download>Download</a><button class="btn primary" id="lbClose">Close</button>
   </div>
 </dialog>
 <div id="cc" aria-live="assertive" aria-label="Computer control"></div>
@@ -668,6 +687,7 @@ const I = {
   down: '<svg viewBox="0 0 24 24"><path d="M12 4v12M6 11l6 6 6-6M5 21h14"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
   play: '<svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg>',
+  cube: '<svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"/></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
   send: '<svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
   chev: '<svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
@@ -675,6 +695,30 @@ const I = {
   mic: '<svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>',
   micOff: '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M9 9v1a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.7-1.3M19 10a7 7 0 0 1-1.1 3.8M5 10a7 7 0 0 0 10.6 6M12 17v5"/></svg>',
 };
+// What each kind of generation is called, the tool that makes it and its download's name: the cards, the reel and the
+// tools read this one table (a kind it does not know is drawn as a picture).
+const KINDS = {
+  image: { tool: 'generate_image', a: 'a picture', the: 'the picture', label: 'Picture', file: 'image.png' },
+  video: { tool: 'generate_video', a: 'a video', the: 'the video', label: 'Video', file: 'video.mp4' },
+  asset3d: { tool: 'generate_3d', a: 'a 3D model', the: 'the 3D model', label: '3D model', file: 'model.ply' },
+};
+const K = kind => KINDS[kind] || KINDS.image;
+const The = kind => K(kind).the.replace(/^t/, 'T');
+const toolKind = name => Object.keys(KINDS).find(k => KINDS[k].tool === name) || 'image';
+// A finished job's files as the cards' items: one per picture or video; one per 3D asset, its file (a splat: .ply),
+// with its manifest (asset.json) and the picture it was made from (input.png, its thumbnail).
+function mediaItems(kind, urls, prompt) {
+  const list = (urls || []).map(href).filter(Boolean);
+  if (kind !== 'asset3d') return list.map(url => ({ kind, url, prompt }));
+  const path = u => u.split('?')[0];
+  const url = list.find(u => /\.(ply|spz|splat|ksplat)$/i.test(path(u)));
+  if (!url) return [];
+  const thumb = list.find(u => /\/input\.png$/i.test(path(u))) || list.find(u => /\.(png|jpe?g|webp)$/i.test(path(u))) || '';
+  return [{ kind, url, manifest: list.find(u => /\.json$/i.test(path(u))) || '', thumb, prompt }];
+}
+const mediaUrls = m => (m.media || []).flatMap(x => [x.url, x.manifest, x.thumb].filter(Boolean));
+// A tool call's arguments as the conversation keeps them: a 3D model's (which picture), the others' prompt.
+const toolArgs = m => m.kind === 'asset3d' ? (m.args && typeof m.args === 'object' ? m.args : { from_last_image: true }) : { prompt: (m.args && m.args.prompt) || (m.failed && m.failed.prompt) || toolPrompt(m) };
 const CHAT_TOOLS = {
   image: { type: 'function', function: { name: 'generate_image', description: 'Make a picture on this machine from a detailed description. The user sees it inline.',
     parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what to draw, in detail' },
@@ -682,6 +726,11 @@ const CHAT_TOOLS = {
   video: { type: 'function', function: { name: 'generate_video', description: 'Make a short video clip with sound on this machine. It takes minutes.',
     parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'what happens, in detail' },
       seconds: { type: 'integer', description: 'length, 1 to 20 (default 5)' } }, required: ['prompt'] } } },
+  asset3d: { type: 'function', function: { name: 'generate_3d', description: 'Turn a picture into a 3D model of its object on this machine (a Gaussian splat the user can turn around): the last picture in the conversation unless `image` names another. It takes a minute or two.',
+    parameters: { type: 'object', properties: { from_last_image: { type: 'boolean', description: 'use the last picture in the conversation (default true)' },
+      image: { type: 'string', description: 'the picture to use instead: a URL from an earlier result' },
+      input_mode: { type: 'string', enum: ['synthetic', 'real'], description: 'synthetic for a generated picture or a render on a plain background (default), real for a photograph' },
+      seed: { type: 'integer' }, num_gaussians: { type: 'integer', description: 'how many splats (more: finer and larger); omit for the default' } } } } },
 };
 // Model management (the server's voice.manage_models): the same tools and procedure as the voice session's, run through
 // /mcp, so their guardrails (never the chat model; voice told before it pauses; every unload logged) hold here too.
@@ -710,7 +759,7 @@ function hostItem(m) {
   if (m.partial || m.streaming || m.gone) return null;
   if (m.role === 'user' || m.role === 'assistant') return { id: m.id, role: m.role, via: m.via === 'voice' ? 'voice' : 'text', text: m.role === 'assistant' ? splitThink(m.text || '').answer : (m.text || '') };
   if (m.role === 'sys' && m.call && m.result != null) return { id: m.id, role: 'tool', via: m.via === 'voice' ? 'voice' : 'text', call: m.call, ok: !m.error, output: m.result };
-  if (m.role === 'tool' && m.media && m.media.length) return { id: m.id, role: 'tool', via: m.via === 'voice' ? 'voice' : 'text', call: { call_id: m.callId || m.id, name: m.kind === 'video' ? 'generate_video' : 'generate_image', arguments: JSON.stringify({ prompt: (m.args && m.args.prompt) || '' }) }, ok: true, output: JSON.stringify({ status: 'completed', urls: m.media.map(x => x.url) }) };
+  if (m.role === 'tool' && m.media && m.media.length) return { id: m.id, role: 'tool', via: m.via === 'voice' ? 'voice' : 'text', call: { call_id: m.callId || m.id, name: K(m.kind).tool, arguments: JSON.stringify(m.kind === 'asset3d' ? toolArgs(m) : { prompt: (m.args && m.args.prompt) || '' }) }, ok: true, output: JSON.stringify({ status: 'completed', urls: mediaUrls(m) }) };
   return null;
 }
 let hostSaveTimer = 0;
@@ -1170,7 +1219,7 @@ function drawTool(m, el) {
   if (m.media && m.media.length) for (const x of m.media) cards.append(card(x));
   else if (!m.error) {
     const f = Object.assign(document.createElement('figure'), { className: 'card pending' });
-    f.innerHTML = `<div class="thumb"><span>${esc(m.kind === 'video' || /video/.test(m.text || '') ? 'Making a video…' : 'Making a picture…')}</span></div><figcaption><span>${esc((m.text || '').replace(/^making [^:]*:\s*/, ''))}</span></figcaption>`;
+    f.innerHTML = `<div class="thumb"><span>${esc(`Making ${K(m.kind || (/video/.test(m.text || '') ? 'video' : 'image')).a}…`)}</span></div><figcaption><span>${esc((m.text || '').replace(/^making [^:]*:\s*/, ''))}</span></figcaption>`;
     cards.append(f);
   }
 }
@@ -1188,7 +1237,8 @@ function card(x) {
   const f = Object.assign(document.createElement('figure'), { className: 'card' });
   const h = href(x.url);
   if (!h) return f;
-  const name = `${fileStem()}-${x.kind === 'video' ? 'video.mp4' : 'image.png'}`;
+  const name = `${fileStem()}-${K(x.kind).file}`;
+  if (x.kind === 'asset3d') return card3d(f, x, h, name);
   if (x.kind === 'video') {
     const v = Object.assign(document.createElement('video'), { controls: true, playsInline: true, preload: 'metadata' });
     v.setAttribute('aria-label', x.prompt || 'generated video');
@@ -1219,6 +1269,56 @@ function card(x) {
   f.append(cap);
   return f;
 }
+// A 3D model's card: the picture it was made from (a 3D badge on it) opens the 3D view; Download PLY saves the asset.
+function card3d(f, x, h, name) {
+  const b = Object.assign(document.createElement('button'), { className: 'thumb three' });
+  b.setAttribute('aria-label', `Turn the 3D model around${x.prompt ? ': ' + x.prompt : ''}`);
+  b.append(thumb3d(x, 'lazy'), Object.assign(document.createElement('span'), { className: 'badge-3d', textContent: '3D', ariaHidden: 'true' }));
+  b.onclick = () => openMedia(x);
+  f.append(b);
+  const cap = document.createElement('figcaption');
+  cap.append(Object.assign(document.createElement('span'), { textContent: x.prompt || K(x.kind).label, title: x.prompt || '' }));
+  const v = Object.assign(document.createElement('button'), { className: 'icon-btn', innerHTML: I.cube, title: 'View in 3D' });
+  v.setAttribute('aria-label', 'View in 3D');
+  v.onclick = () => openMedia(x);
+  const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, title: 'Download PLY' });
+  dl.setAttribute('aria-label', 'Download PLY');
+  bigDownload(dl, h, name);
+  cap.append(v, dl);
+  f.append(cap);
+  return f;
+}
+// The picture a 3D model was made from, or a placeholder when it has none.
+function thumb3d(x, loading) {
+  const t = x.thumb && href(x.thumb);
+  if (!t) return Object.assign(document.createElement('span'), { className: 'ph', textContent: '3D model' });
+  const img = Object.assign(document.createElement('img'), { alt: '', decoding: 'async' });
+  if (loading) img.loading = loading;
+  img.onload = () => scrollDown();
+  mediaSrc(t, u => { img.src = u; });
+  return img;
+}
+// A download of a large file (a 3D asset is up to ~70 MB): a plain link without a key; with one (the box asks for
+// it), fetched with it only when clicked, and let go a minute later, so no card holds it in memory.
+function bigDownload(a, url, name) {
+  a.download = name;
+  a.href = url;
+  a.onclick = null;
+  if (!S.key) return;
+  a.onclick = async e => {
+    if (a.dataset.ready) return;
+    e.preventDefault();
+    try {
+      const r = await api(url);
+      if (!r.ok) throw new Error(await errorText(r));
+      const u = URL.createObjectURL(await r.blob());
+      a.href = u;
+      a.dataset.ready = '1';
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(u); a.href = url; delete a.dataset.ready; }, 60000);
+    } catch (err) { toast(`Couldn't download it: ${err.message}`); }
+  };
+}
 // One lightbox for every picture and video, from the chat or the reel. It opens over voice mode without touching the
 // call: the session, the microphone and barge-in by voice go on, and its call pill can interrupt the reply.
 let lbItem = null;
@@ -1226,17 +1326,23 @@ function openMedia(x) {
   const h = href(x.url);
   if (!h) return;
   lbItem = x;
-  const img = $('lbImg'), vid = $('lbVid');
-  img.hidden = x.kind === 'video';
+  const img = $('lbImg'), vid = $('lbVid'), three = x.kind === 'asset3d';
+  img.hidden = x.kind === 'video' || three;
   vid.hidden = x.kind !== 'video';
+  $('lb3d').hidden = !three;
+  $('lb3dReset').hidden = true;
+  if (!three) close3d();
   if (x.kind === 'video') { img.removeAttribute('src'); mediaSrc(h, u => { vid.src = u; vid.play().catch(() => {}); }); }
+  else if (three) { img.removeAttribute('src'); vid.pause(); vid.removeAttribute('src'); }
   else { vid.pause(); vid.removeAttribute('src'); mediaSrc(h, u => { img.src = u; }); img.alt = x.prompt || 'generated image'; }
-  $('lbCap').textContent = x.prompt || (x.kind === 'video' ? 'Video' : 'Picture');
-  $('lbDl').download = `${fileStem()}-${x.kind === 'video' ? 'video.mp4' : 'image.png'}`;
-  mediaSrc(h, u => { $('lbDl').href = u; });
+  $('lbCap').textContent = x.prompt || K(x.kind).label;
+  $('lbDl').textContent = three ? 'Download PLY' : 'Download';
+  if (three) bigDownload($('lbDl'), h, `${fileStem()}-${K(x.kind).file}`);
+  else { $('lbDl').onclick = null; $('lbDl').download = `${fileStem()}-${K(x.kind).file}`; mediaSrc(h, u => { $('lbDl').href = u; }); }
   $('lbCopy').hidden = !x.prompt;
   renderLightboxVoice();
   if (!$('lightbox').open) $('lightbox').showModal();
+  if (three) void open3d(x);
   dbg('lightbox', { kind: x.kind, url: h, call: !!V.ws });
 }
 function renderLightboxVoice() {
@@ -1247,6 +1353,178 @@ function renderLightboxVoice() {
   $('lbVoiceText').textContent = `On a call · ${stateText(s)[0].toLowerCase()}`;
   pill.querySelector('.dot').dataset.s = s === 'speaking' || s === 'hearing' ? 'busy' : s === 'connecting' ? 'loading' : 'ready';
   $('lbHush').hidden = !(s === 'speaking' || s === 'thinking');
+}
+
+// ---------------------------------------------------------------- the 3D view (kind asset3d)
+// A 3D model (a Gaussian splat) in the lightbox, drawn with three.js and Spark (MIT; /voice/vendor/THIRD_PARTY_NOTICES):
+// pinned, served by this server and loaded the first time a model opens. The canvas exists only while the lightbox
+// shows the model; closing it frees its GPU memory. It opens on the manifest's camera, the view the picture shows, and
+// turns around the camera's target.
+const VIEWER_JS = '/voice/vendor/splat-viewer-3527417f73f0.js';
+let viewerLib = null, hasGl2 = null, v3 = null;
+const loadViewer = () => viewerLib || (viewerLib = import(VIEWER_JS).catch(e => { viewerLib = null; throw e; }));
+const webgl2 = () => hasGl2 ?? (hasGl2 = (() => { try { return !!document.createElement('canvas').getContext('webgl2'); } catch { return false; } })());
+const SPLAT_TYPES = { ply: 'PLY', spz: 'SPZ', splat: 'SPLAT', ksplat: 'KSPLAT' };
+async function open3d(x) {
+  close3d();
+  const me = v3 = { x, ctl: new AbortController() };
+  const live = () => v3 === me;
+  const status = $('lb3dStatus');
+  status.textContent = 'Loading the 3D model…';
+  try {
+    if (!webgl2()) throw new Error('this browser has WebGL 2 off, so it cannot draw it here. Download PLY opens it in a 3D app.');
+    const [lib, manifest, bytes] = await Promise.all([
+      loadViewer(),
+      x.manifest ? api(href(x.manifest), { signal: me.ctl.signal }).then(r => r.ok ? r.json() : null).catch(() => null) : null,
+      fetchBytes(href(x.url), me.ctl.signal, p => { if (live()) status.textContent = `Loading the 3D model… ${p}%`; }),
+    ]);
+    if (!live()) return;
+    status.textContent = 'Preparing the 3D model…';
+    build3d(me, lib, manifest, bytes);
+    await me.mesh.initialized;
+    if (!live()) return;
+    status.textContent = '';
+    $('lb3dHint').hidden = false;
+    $('lb3dReset').hidden = false;
+    dbg('3d.open', { url: x.url, bytes: bytes.length, camera: !!(manifest && manifest.camera) });
+  } catch (e) {
+    if (!live() || e.name === 'AbortError') return;
+    dropGl(me);
+    status.textContent = `Couldn't show the 3D model: ${e.message}`;
+    dbg('3d.open', { url: x.url, error: e.message });
+  }
+}
+// A file's bytes, with its download's progress in percent when the size is known.
+async function fetchBytes(url, signal, progress) {
+  const r = await api(url, { signal });
+  if (!r.ok) throw new Error(await errorText(r));
+  const total = +r.headers.get('content-length') || 0;
+  if (!r.body || !total) return new Uint8Array(await r.arrayBuffer());
+  const parts = [], rd = r.body.getReader();
+  let n = 0;
+  for (;;) {
+    const { value, done } = await rd.read();
+    if (done) break;
+    parts.push(value);
+    n += value.length;
+    progress(Math.min(99, Math.floor(n * 100 / total)));
+  }
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+// The first view, from the manifest's camera (position, target, up, fov_y_deg; perspective or orthographic), else a
+// view of its bounds. An orthographic camera sees the same from any distance, so it is moved near (depth stays precise)
+// with its frame kept: half its height is `half_height`, or the distance times tan(fov_y / 2).
+function camera3d(V, man, aspect) {
+  const c = (man && man.camera) || {}, fr = (man && man.frame) || {};
+  const vec = (a, d) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite) ? new V.Vector3(a[0], a[1], a[2]) : d;
+  const lo = fr.bounds && vec(fr.bounds.min), hi = fr.bounds && vec(fr.bounds.max);
+  const size = lo && hi ? Math.max(lo.distanceTo(hi) / 2, 1e-3) : 0.87; // the radius of its bounds (Idol's: a unit cube)
+  const target = vec(c.target, lo && hi ? lo.clone().add(hi).multiplyScalar(0.5) : new V.Vector3());
+  const up = vec(c.up, vec(fr.up, new V.Vector3(0, 1, 0))).normalize();
+  const fov = Number.isFinite(c.fov_y_deg) && c.fov_y_deg > 0 && c.fov_y_deg < 180 ? c.fov_y_deg : 40;
+  let pos = vec(c.position, null);
+  if (!pos || pos.distanceTo(target) < 1e-6) pos = target.clone().add(new V.Vector3(0, 0, 1.3 * size / Math.tan(fov * Math.PI / 360)));
+  const dir = pos.clone().sub(target), dist = dir.length();
+  dir.divideScalar(dist);
+  let cam;
+  if (c.projection === 'orthographic') {
+    const half = Number.isFinite(c.half_height) && c.half_height > 0 ? c.half_height : dist * Math.tan(fov * Math.PI / 360);
+    const d = Math.max(4 * size, 1);
+    cam = new V.OrthographicCamera(-half * aspect, half * aspect, half, -half, d / 100, d + 4 * size);
+    cam.position.copy(target).addScaledVector(dir, d);
+    cam.userData.half = half;
+  } else {
+    cam = new V.PerspectiveCamera(fov, aspect, Math.max(dist / 1000, 1e-3), 5 * dist + 4 * size);
+    cam.position.copy(pos);
+  }
+  cam.up.copy(up);
+  cam.lookAt(target);
+  return { cam, target, size, dist };
+}
+function build3d(me, V, man, bytes) {
+  const box = $('lb3d');
+  const renderer = me.renderer = new V.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const canvas = renderer.domElement;
+  canvas.tabIndex = 0;
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', `3D model${me.x.prompt ? ': ' + me.x.prompt : ''}. Drag or use the arrow keys to turn it; scroll, pinch, + or − to zoom; 0 resets.`);
+  box.prepend(canvas);
+  const w = box.clientWidth || 512, h = box.clientHeight || 512;
+  renderer.setSize(w, h, false);
+  const scene = me.scene = new V.Scene();
+  scene.background = new V.Color(0x000000);
+  me.spark = new V.SparkRenderer({ renderer });
+  scene.add(me.spark);
+  const ext = ((man && man.format) || (me.x.url.split('?')[0].match(/\.(\w+)$/) || [])[1] || 'ply').toLowerCase();
+  me.mesh = new V.SplatMesh({ fileBytes: bytes, fileType: V.SplatFileType[SPLAT_TYPES[ext] || 'PLY'] });
+  scene.add(me.mesh);
+  const view = camera3d(V, man, w / h);
+  const cam = me.cam = view.cam;
+  const controls = me.controls = new V.OrbitControls(cam, canvas);
+  controls.target.copy(view.target);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.12;
+  controls.minDistance = view.size * 0.3;
+  controls.maxDistance = Math.max(view.dist, view.size) * 4;
+  controls.minZoom = 0.25;
+  controls.maxZoom = 8;
+  controls.update();
+  controls.saveState();
+  me.V = V;
+  me.ro = new ResizeObserver(() => {
+    const W = box.clientWidth, H = box.clientHeight;
+    if (!W || !H || !me.renderer) return;
+    renderer.setSize(W, H, false);
+    if (cam.isOrthographicCamera) { const half = cam.userData.half; cam.left = -half * W / H; cam.right = half * W / H; }
+    else cam.aspect = W / H;
+    cam.updateProjectionMatrix();
+  });
+  me.ro.observe(box);
+  canvas.addEventListener('keydown', e => key3d(me, e));
+  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, cam); });
+}
+// The keyboard: arrows turn it around its target, + and − zoom, 0 (or Home) goes back to the first view.
+function key3d(me, e) {
+  const { V, cam, controls } = me;
+  if (!controls) return;
+  const step = Math.PI / 12, t = controls.target, off = cam.position.clone().sub(t), up = cam.up.clone().normalize();
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') off.applyAxisAngle(up, e.key === 'ArrowLeft' ? -step : step);
+  else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    const a = e.key === 'ArrowUp' ? step : -step, polar = off.angleTo(up);
+    if (polar - a > 0.05 && polar - a < Math.PI - 0.05) off.applyAxisAngle(new V.Vector3().crossVectors(off, up).normalize(), a);
+  } else if (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_') {
+    const f = e.key === '-' || e.key === '_' ? 1.25 : 0.8;
+    if (cam.isOrthographicCamera) { cam.zoom = Math.min(controls.maxZoom, Math.max(controls.minZoom, cam.zoom / f)); cam.updateProjectionMatrix(); }
+    else off.setLength(Math.min(controls.maxDistance, Math.max(controls.minDistance, off.length() * f)));
+  } else if (e.key === '0' || e.key === 'Home') { controls.reset(); e.preventDefault(); return; }
+  else return;
+  e.preventDefault();
+  cam.position.copy(t).add(off);
+  cam.lookAt(t);
+  controls.update();
+}
+function close3d() {
+  const me = v3;
+  v3 = null;
+  $('lb3dStatus').textContent = '';
+  $('lb3dHint').hidden = true;
+  $('lb3dReset').hidden = true;
+  if (!me) return;
+  me.ctl.abort();
+  dropGl(me);
+}
+// Everything the view holds on the GPU, let go now rather than when the page is collected.
+function dropGl(me) {
+  if (me.ro) me.ro.disconnect();
+  if (me.renderer) me.renderer.setAnimationLoop(null);
+  if (me.controls) me.controls.dispose();
+  for (const o of [me.mesh, me.spark]) if (o) { me.scene.remove(o); try { o.dispose(); } catch (e) { dbg('3d.dispose', { error: e.message }); } }
+  if (me.renderer) { me.renderer.dispose(); me.renderer.forceContextLoss(); me.renderer.domElement.remove(); }
+  me.ro = me.renderer = me.controls = me.mesh = me.spark = me.scene = me.cam = null;
 }
 
 // The reel: every picture and video in the conversation (typed or spoken), newest first, from the same messages the
@@ -1275,18 +1553,21 @@ function reelCard(it) {
   const b = Object.assign(document.createElement(waiting ? 'div' : 'button'), { className: 'rc-thumb' });
   if (it.pending) {
     b.setAttribute('role', 'status');
-    b.textContent = kind === 'video' ? 'Creating a video…' : 'Creating a picture…';
+    b.textContent = `Creating ${K(kind).a}…`;
   } else if (it.failed) {
     b.setAttribute('role', 'status');
-    b.append(Object.assign(document.createElement('span'), { textContent: `Couldn't make ${kind === 'video' ? 'the video' : 'the picture'}: ${it.m.error}`, title: it.m.error }));
+    b.append(Object.assign(document.createElement('span'), { textContent: `Couldn't make ${K(kind).the}: ${it.m.error}`, title: it.m.error }));
     const rt = Object.assign(document.createElement('button'), { className: 'btn', textContent: 'Retry' });
     rt.setAttribute('aria-label', `Retry: ${prompt || kind}`);
     rt.onclick = () => retryTool(it.m);
     b.append(rt);
   } else {
-    b.setAttribute('aria-label', `Open the ${kind === 'video' ? 'video' : 'picture'}: ${prompt || 'untitled'}`);
+    b.setAttribute('aria-label', `Open ${K(kind).the}: ${prompt || 'untitled'}`);
     const h = href(it.x.url);
-    if (kind === 'video') {
+    if (kind === 'asset3d') {
+      b.classList.add('three');
+      b.append(thumb3d(it.x), Object.assign(document.createElement('span'), { className: 'badge-3d', textContent: '3D', ariaHidden: 'true' }));
+    } else if (kind === 'video') {
       const v = Object.assign(document.createElement('video'), { muted: true, playsInline: true, preload: 'metadata' });
       mediaSrc(h, u => { v.src = u + '#t=0.5'; });
       b.append(v, Object.assign(document.createElement('span'), { className: 'rc-play', innerHTML: I.play, ariaHidden: 'true' }));
@@ -1298,7 +1579,7 @@ function reelCard(it) {
     b.onclick = () => openMedia(it.x);
   }
   const cap = document.createElement('figcaption');
-  cap.append(Object.assign(document.createElement('span'), { textContent: prompt || (kind === 'video' ? 'Video' : 'Picture'), title: prompt }));
+  cap.append(Object.assign(document.createElement('span'), { textContent: prompt || K(kind).label, title: prompt }));
   if (prompt) {
     const cp = Object.assign(document.createElement('button'), { className: 'icon-btn', innerHTML: I.copy });
     cp.setAttribute('aria-label', 'Copy the prompt');
@@ -1306,9 +1587,10 @@ function reelCard(it) {
     cap.append(cp);
   }
   if (!waiting) {
-    const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, download: `${fileStem()}-${kind === 'video' ? 'video.mp4' : 'image.png'}` });
-    dl.setAttribute('aria-label', 'Download');
-    mediaSrc(href(it.x.url), u => { dl.href = u; });
+    const dl = Object.assign(document.createElement('a'), { className: 'icon-btn', innerHTML: I.down, download: `${fileStem()}-${K(kind).file}` });
+    dl.setAttribute('aria-label', kind === 'asset3d' ? 'Download PLY' : 'Download');
+    if (kind === 'asset3d') bigDownload(dl, href(it.x.url), dl.download);
+    else mediaSrc(href(it.x.url), u => { dl.href = u; });
     cap.append(dl);
   }
   f.append(b, cap);
@@ -1648,7 +1930,7 @@ function apiMessages() {
       else if (content) msgs.push({ role: 'assistant', content });
     } else if (m.role === 'tool') {
       if (m.callId && msgs.some(x => x.tool_calls && x.tool_calls.some(c => c.id === m.callId))) msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result || m.text || '' });
-      else if (m.media && m.media.length) msgs.push({ role: 'system', content: `The ${m.media[0].kind} was made: ${m.media.map(x => x.url).join(' ')}` });
+      else if (m.media && m.media.length) msgs.push({ role: 'system', content: `${The(m.media[0].kind)} was made: ${mediaUrls(m).join(' ')}` });
     }
   }
   // A tool call that never got its result (the reply was stopped) still needs one, or the chat API refuses the history.
@@ -1668,7 +1950,7 @@ function chatBody() {
   if (S.maxTokens > 0) b.max_tokens = S.maxTokens;
   if (S.think) b.chat_template_kwargs = { enable_thinking: true };
   else { b.chat_template_kwargs = { enable_thinking: false }; b.reasoning_effort = 'none'; }
-  const offered = S.tools ? [has('image') && CHAT_TOOLS.image, has('video') && CHAT_TOOLS.video].filter(Boolean) : [];
+  const offered = S.tools ? [has('image') && CHAT_TOOLS.image, has('video') && CHAT_TOOLS.video, has('asset3d') && CHAT_TOOLS.asset3d].filter(Boolean) : [];
   if (S.tools && MM.enabled) offered.push(...MODEL_TOOLS);
   if (S.tools) offered.push(...HOST_TOOLS.filter(t => !offered.some(o => o.function.name === t.function.name)));
   if (FORCE_TOOL && !offered.some(o => o.function.name === FORCE_TOOL.name)) offered.push(FORCE_TOOL.tool);
@@ -1773,8 +2055,53 @@ function hostSummary(name, output, ok) {
   if (name === 'edit_image') return r.status === 'completed' ? 'Changed the picture' : `Changing the picture (${r.status})`;
   return `${name.replace(/_/g, ' ')}: done`;
 }
-// A picture or a video over HTTP (the chat's own tool calls, and Retry): its URLs, or an Error with the server's reason.
+// A wait that a stop ends early.
+const pause = (ms, signal) => new Promise((ok, no) => { const t = setTimeout(ok, ms); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); no(new DOMException('aborted', 'AbortError')); }, { once: true }); });
+// The last picture in this conversation (made or changed here): what generate_3d turns into a model by default.
+function lastPicture() {
+  for (let i = cur.msgs.length - 1; i >= 0; i--) {
+    const x = (cur.msgs[i].media || []).filter(x => x.kind === 'image' || !x.kind).pop();
+    if (x) return x.url;
+  }
+  return '';
+}
+// A picture as a data URL, fetched the way the cards fetch it (the box's own files need its key; the app's proxy adds it).
+async function dataUrl(url, signal) {
+  if (/^data:/i.test(url)) return url;
+  const h = href(url);
+  if (!h) throw new Error('that picture is not a URL this page can read');
+  const r = await api(h, { signal });
+  if (!r.ok) throw new Error(`couldn't read the picture: ${await errorText(r)}`);
+  const b = await r.blob();
+  return new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = () => no(fr.error); fr.readAsDataURL(b); });
+}
+// A 3D model from a picture (POST /v1/assets3d), polled through /v1/jobs until it is done: its files' URLs.
+async function generate3d(args, signal, progress) {
+  const src = typeof args.image === 'string' && args.image ? args.image : args.from_last_image === false ? '' : lastPicture();
+  if (!src) throw new Error(args.from_last_image === false ? 'name the picture to use (image)' : 'there is no picture in this conversation yet: make one first');
+  const req = { image: await dataUrl(src, signal), wait_s: 0 };
+  if (args.input_mode === 'real' || args.input_mode === 'synthetic') req.input_mode = args.input_mode;
+  if (Number.isInteger(args.seed) && args.seed >= 0) req.seed = args.seed;
+  if (Number.isInteger(args.num_gaussians) && args.num_gaussians > 0) req.num_gaussians = args.num_gaussians;
+  const r = await api('/v1/assets3d', { json: req, signal });
+  if (!r.ok) throw new Error(await errorText(r));
+  let j = await r.json();
+  const id = j.id;
+  while (j.status === 'queued' || j.status === 'in_progress') {
+    if (progress) progress(j.progress || 0);
+    await pause(3000, signal);
+    const p = await api(`/v1/jobs/${encodeURIComponent(id)}`, { signal });
+    if (!p.ok) throw new Error(await errorText(p));
+    j = await p.json();
+  }
+  if (j.status !== 'completed') throw new Error((j.error && j.error.message) || j.status);
+  const o = j.output || {};
+  return (j.urls && j.urls.length ? j.urls : [o.asset_url, o.manifest_url, o.input_url]).filter(Boolean);
+}
+// A picture, a video or a 3D model over HTTP (the chat's own tool calls, and Retry): its URLs, or an Error with the
+// server's reason.
 async function generate(kind, args, signal, progress) {
+  if (kind === 'asset3d') return generate3d(args, signal, progress);
   const prompt = String(args.prompt || '');
   if (kind === 'image') {
     const req = { prompt, response_format: 'url' };
@@ -1790,7 +2117,7 @@ async function generate(kind, args, signal, progress) {
   let v = await r.json();
   while (v.status === 'queued' || v.status === 'in_progress') {
     if (progress) progress(v.progress || 0);
-    await new Promise((ok, no) => { const t = setTimeout(ok, 3000); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); no(new DOMException('aborted', 'AbortError')); }, { once: true }); });
+    await pause(3000, signal);
     v = await (await api(`/v1/videos/${encodeURIComponent(v.id)}`, { signal })).json();
   }
   if (v.status !== 'completed') throw new Error((v.error && v.error.message) || v.status);
@@ -1836,12 +2163,14 @@ async function runTool(call, signal) {
     saveConv();
     return;
   }
-  const kind = name === 'generate_video' ? 'video' : 'image';
-  const tm = addMsg({ role: 'tool', kind, callId: call.id, args, owner: PAGE_ID, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}` });
+  const kind = toolKind(name);
+  // A 3D model has no prompt of its own: its caption is the picture's.
+  const about = kind === 'asset3d' ? sourcePrompt(args) : args.prompt || '';
+  const tm = addMsg({ role: 'tool', kind, callId: call.id, args, owner: PAGE_ID, text: `making ${K(kind).a}: ${about}` });
   dbg('tool.start', { name, args });
-  if (name !== 'generate_image' && name !== 'generate_video') return jobFinished(tm, 'failed', [], `unknown tool ${name}`, kind);
+  if (!Object.values(KINDS).some(k => k.tool === name)) return jobFinished(tm, 'failed', [], `unknown tool ${name}`, kind);
   try {
-    const urls = await generate(kind, args, signal, p => { tm.progress = p; tm.text = `making a video (${p}%): ${args.prompt || ''}`; draw(tm); });
+    const urls = await generate(kind, args, signal, p => { tm.progress = p; tm.text = `making ${K(kind).a} (${p}%): ${about}`; draw(tm); });
     dbg('tool.done', { name, urls });
     jobFinished(tm, 'completed', urls, '', kind);
   } catch (e) {
@@ -1849,19 +2178,26 @@ async function runTool(call, signal) {
     jobFinished(tm, 'failed', [], e.message, kind);
   }
 }
+// The prompt of the picture a 3D model is made from, for its caption ('' when it has none).
+function sourcePrompt(args) {
+  const u = href(typeof args.image === 'string' && args.image ? args.image : lastPicture() || '');
+  for (const m of cur.msgs) for (const x of m.media || []) if (u && x.url === u && x.prompt) return x.prompt;
+  return '';
+}
 // A generation's outcome, from whichever path learnt it first (the session's job.done, the chat's own call, a poll).
 function jobFinished(m, status, urls, error, kind) {
   if (m.media && m.media.length) return;
-  kind = m.kind || (kind === 'video' ? 'video' : 'image');
+  kind = m.kind || (KINDS[kind] ? kind : 'image');
   const prompt = toolPrompt(m) || (m.args && m.args.prompt) || '';
   m.result = JSON.stringify({ status, urls: urls || [], error: error || '' });
-  if (status === 'completed' && (urls || []).length) {
-    m.media = urls.map(u => ({ kind, url: href(u), prompt })).filter(x => x.url);
+  const media = status === 'completed' ? mediaItems(kind, urls, prompt) : [];
+  if (media.length) {
+    m.media = media;
     m.error = '';
   } else {
-    m.error = error || status || 'failed';
-    m.failed = { prompt, kind };
-    m.text = `The ${kind === 'video' ? 'video' : 'picture'} failed: ${m.error}`;
+    m.error = error || (status === 'completed' ? 'it finished without a file to show' : status) || 'failed';
+    m.failed = { prompt, kind, args: m.args };
+    m.text = `${The(kind)} failed: ${m.error}`;
   }
   dbg('tool.finished', { kind, status, error: m.error || '', urls: urls || [] });
   draw(m);
@@ -1869,7 +2205,7 @@ function jobFinished(m, status, urls, error, kind) {
 }
 // A voice generation never waits on one event: if job.done is late (the socket was replaced, the tab slept), the job is
 // asked for by id; a job that never started, or makes no progress, fails with a reason instead of spinning for ever.
-const NEVER_STARTED_MS = 45000, STALL_MS = { image: 240000, video: 1500000 };
+const NEVER_STARTED_MS = 45000, STALL_MS = { image: 240000, video: 1500000, asset3d: 900000 };
 // This page load: an HTTP generation (the chat's own call, a retry) runs only as long as the page that started it.
 const PAGE_ID = Math.random().toString(36).slice(2);
 async function watchJobs() {
@@ -1881,7 +2217,7 @@ async function watchJobs() {
       continue;
     }
     if (m.role !== 'tool' || m.via !== 'voice' || (m.media && m.media.length) || m.error || m.polling) continue;
-    const kind = m.kind === 'video' ? 'video' : 'image';
+    const kind = KINDS[m.kind] ? m.kind : 'image';
     if (!m.jobId) {
       if (now - m.at > NEVER_STARTED_MS) jobFinished(m, 'failed', [], 'the job did not start', kind);
       continue;
@@ -1906,17 +2242,19 @@ async function watchJobs() {
 }
 // Retry: the same prompt again, over HTTP; the card shows it in progress, then the result.
 async function retryTool(m) {
-  const f = m.failed || { prompt: toolPrompt(m), kind: m.kind || 'image' };
+  const f = m.failed || { prompt: toolPrompt(m), kind: m.kind || 'image', args: m.args };
   m.error = '';
   m.failed = null;
   m.media = null;
   m.jobId = null;
   m.via = 'retry';
   m.owner = PAGE_ID;
-  m.text = `making ${f.kind === 'video' ? 'a video' : 'a picture'}: ${f.prompt}`;
+  m.text = `making ${K(f.kind).a}: ${f.prompt}`;
   draw(m);
   dbg('tool.retry', { kind: f.kind, prompt: f.prompt });
-  try { jobFinished(m, 'completed', await generate(f.kind, { prompt: f.prompt }), '', f.kind); }
+  // A 3D model again from the same picture it was asked for (a voice call's, the one last before it).
+  const args = f.kind === 'asset3d' ? { ...(f.args || {}), image: (f.args && f.args.image) || lastPicture() } : { prompt: f.prompt };
+  try { jobFinished(m, 'completed', await generate(f.kind, args), '', f.kind); }
   catch (e) { jobFinished(m, 'failed', [], e.message, f.kind); }
 }
 const voiceListed = (id, v) => {
@@ -2573,11 +2911,10 @@ function seed() {
       continue;
     }
     if (m.role === 'tool') {
-      const video = m.kind === 'video' || !!(m.media && m.media[0] && m.media[0].kind === 'video');
+      const kind = m.kind || (m.media && m.media[0] && m.media[0].kind) || 'image';
       const call = m.callId || `call_${m.id}`;
-      const prompt = (m.args && m.args.prompt) || (m.failed && m.failed.prompt) || toolPrompt(m);
-      vsend({ type: 'conversation.item.create', item: { type: 'function_call', call_id: call, name: video ? 'generate_video' : 'generate_image', arguments: JSON.stringify({ prompt }) } });
-      const out = m.media && m.media.length ? { status: 'completed', urls: m.media.map(x => x.url) } : m.error ? { status: 'failed', error: m.error } : null;
+      vsend({ type: 'conversation.item.create', item: { type: 'function_call', call_id: call, name: K(kind).tool, arguments: JSON.stringify(toolArgs({ ...m, kind })) } });
+      const out = m.media && m.media.length ? { status: 'completed', urls: mediaUrls(m) } : m.error ? { status: 'failed', error: m.error } : null;
       if (out) vsend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: call, output: JSON.stringify(out) } });
       continue;
     }
@@ -3360,10 +3697,10 @@ function handle(ev) {
         try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
         note(`${ev.item.name.replace('_', ' ')}${args.model ? ' ' + args.model : ''}${args.dry_run ? ' (checking)' : ''}`);
       } else if (ev.item && ev.item.type === 'function_call') {
-        const kind = ev.item.name === 'generate_video' ? 'video' : 'image';
+        const kind = toolKind(ev.item.name);
         let args = {};
         try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
-        V.byCall.set(ev.item.call_id, addMsg({ role: 'tool', kind, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: ${args.prompt || ''}`, via: 'voice' }));
+        V.byCall.set(ev.item.call_id, addMsg({ role: 'tool', kind, args: kind === 'asset3d' ? args : undefined, text: `making ${K(kind).a}: ${kind === 'asset3d' ? sourcePrompt(args) : args.prompt || ''}`, via: 'voice' }));
         saveConv();
       }
       break;
@@ -3380,8 +3717,8 @@ function handle(ev) {
     case 'localrouter.job.created': {
       let m = V.byCall.get(ev.call_id) || cur.msgs.find(x => x.role === 'tool' && x.jobId && x.jobId === ev.job_id);
       if (!m) { // a call whose function_call item this page missed: the card shows anyway
-        const kind = ev.kind === 'video' ? 'video' : 'image';
-        m = addMsg({ role: 'tool', kind, text: `making ${kind === 'video' ? 'a video' : 'a picture'}: `, via: 'voice' });
+        const kind = KINDS[ev.kind] ? ev.kind : 'image';
+        m = addMsg({ role: 'tool', kind, text: `making ${K(kind).a}: `, via: 'voice' });
         if (ev.call_id) V.byCall.set(ev.call_id, m);
       }
       m.jobId = ev.job_id; m.seenAt = Date.now(); saveConv();
@@ -3690,7 +4027,8 @@ document.addEventListener('keydown', e => {
 });
 $('lbClose').onclick = () => $('lightbox').close();
 $('lightbox').addEventListener('click', e => { if (e.target === $('lightbox') || e.target === $('lbImg')) $('lightbox').close(); });
-$('lightbox').addEventListener('close', () => { $('lbVid').pause(); lbItem = null; dbg('lightbox.closed', { call: !!V.ws }); if (V.open) $('orb').focus({ preventScroll: true }); });
+$('lb3dReset').onclick = () => { if (v3 && v3.controls) v3.controls.reset(); };
+$('lightbox').addEventListener('close', () => { $('lbVid').pause(); close3d(); lbItem = null; dbg('lightbox.closed', { call: !!V.ws }); if (V.open) $('orb').focus({ preventScroll: true }); });
 $('lbCopy').onclick = async () => { if (lbItem) { const ok = await copyText(lbItem.prompt || ''); $('lbCopy').textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { $('lbCopy').textContent = 'Copy prompt'; }, 1400); } };
 $('lbHush').onclick = () => bargeIn(true);
 $('reelToggle').onclick = () => { const c = $('reel').classList.toggle('collapsed'); $('reelToggle').setAttribute('aria-expanded', String(!c)); $('reelToggle').setAttribute('aria-label', c ? 'Show the generations' : 'Hide the generations'); };

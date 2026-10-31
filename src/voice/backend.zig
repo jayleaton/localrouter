@@ -24,11 +24,12 @@ pub const Say = struct { model: []const u8 = "", voice: []const u8 = "" };
 /// reply waits behind it.
 pub const warm_sentence = "Hello.";
 
-pub const JobKind = enum { image, video };
+pub const JobKind = enum { image, video, asset3d };
 
 /// A tool call's job: what the model asked for. An input image (an image's: an edit; a video's: its first frame) is
 /// `input_file`, a file an earlier job of this session made, or `input_url`, a URL the model gave.
-pub const JobSpec = struct { kind: JobKind, prompt: []const u8, size: []const u8 = "", seconds: u32 = 0, input_file: []const u8 = "", input_url: []const u8 = "" };
+/// A 3D asset's `input_mode` ("": synthetic) is what its picture is.
+pub const JobSpec = struct { kind: JobKind, prompt: []const u8, size: []const u8 = "", seconds: u32 = 0, input_file: []const u8 = "", input_url: []const u8 = "", input_mode: []const u8 = "" };
 
 /// A started job: its id, and the implementation's handle.
 pub const Job = struct { id: []const u8, kind: JobKind, handle: *anyopaque };
@@ -71,7 +72,7 @@ pub fn settled(m: CallModel) bool {
 pub const Role = enum { chat, speech, transcription };
 
 /// What the built-in tools can do here: a tool is offered only when a model can serve it.
-pub const Offer = struct { image: bool = false, image_edit: bool = false, video: bool = false, image_to_video: bool = false, computer: bool = false };
+pub const Offer = struct { image: bool = false, image_edit: bool = false, video: bool = false, image_to_video: bool = false, asset3d: bool = false, computer: bool = false };
 
 /// Lines the session speaks while a computer task runs ("I need your OK on screen to send that"), from any thread.
 pub const Speaker = struct {

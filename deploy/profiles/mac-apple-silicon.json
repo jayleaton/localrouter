@@ -1,7 +1,7 @@
 {
  "profile": "mac-apple-silicon",
  "status": "preview",
- "description": "LocalRouter on one Apple Silicon Mac (unified memory, Metal): chat, Drama 3 speech and Whisper transcription kept warm, KnowLine decisions and Qwen-Image on demand, each as an out-of-process server or cmd worker, served by a launchd user agent. Preview: tested on one M5 Ultra (docs/dev/MAC-PORT.md, Installing on a Mac).",
+ "description": "LocalRouter on one Apple Silicon Mac (unified memory, Metal): chat, Drama 3 speech and Whisper transcription kept warm, KnowLine decisions, Qwen-Image and Idol image to 3D on demand, each as an out-of-process server or cmd worker, served by a launchd user agent. Preview: tested on one M5 Ultra (docs/dev/MAC-PORT.md, Installing on a Mac).",
  "tested_on": "M5 Ultra (96 GiB unified memory, macOS 27), 2026-10-30: every model installed, qualified and served through the daemon; the launchd service installed, started, paired and removed on 2026-10-31",
  "hardware": {
   "arch": "arm64",
@@ -300,6 +300,47 @@
      "run": "python3 -I $REPO/tools/speech/drama3/qualify_macos.py $J/qualify-drama3/config.json $J/qualify-drama3/run-$(date -u +%Y%m%dT%H%M%SZ) --accept-native-numerics --first-audio-gate 0.55",
      "done": "[ -f $DRAMA_MARKER ] && jq -e --arg p \"$(shasum -a 256 $REPO/tools/speech/drama3/pins-macos.json | cut -c1-64)\" '.qualified == true and .pins_sha256 == $p' $DRAMA_MARKER > /dev/null",
      "fix": "the run directory named on the last line (under $J/qualify-drama3/) has report.json, which says which step failed: not enough free memory: stop what holds the GPU; anything else: report it with that file"
+    }
+   ]
+  },
+  {
+   "key": "asset3d",
+   "id": "idol",
+   "warm": false,
+   "title": "Idol image to 3D Gaussian splat (PyTorch cmd worker, loaded on demand; Mac baseline: PyTorch MPS eager, about 98 s an asset)",
+   "licence": {
+    "name": "Apache-2.0 (Idol, its BiRefNet copy, the FLUX.2 autoencoder) + DINOv3 License (the image encoder: Meta's custom licence; redistribution allowed under the Agreement)",
+    "url": "https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/LICENSE.md"
+   },
+   "accept": [
+    "the DINOv3 License (link below; Last Updated August 19, 2025) for timm/vit_huge_plus_patch16_dinov3.lvd1689m, Idol's image encoder: use, copying, redistribution and derivatives are allowed, but redistribute the weights or anything derived from them only under the Agreement with a copy of it (kept as dinov3/LICENSE.md beside the weights); acknowledge DINOv3 in publications; no reverse engineering; laws, privacy and Trade Controls apply; no ITAR or prohibited end uses (military, nuclear, espionage, ...). Idol (speridlabs/idol) and the FLUX.2 autoencoder (black-forest-labs/FLUX.2-klein-4B vae/) are Apache-2.0; nothing here is non-commercial"
+   ],
+   "pins": "tools/asset3d/idol/pins.json, tools/asset3d/idol/uv.lock",
+   "download_bytes": 6809204537,
+   "disk_bytes": 7700000000,
+   "memory_bytes": 5368709120,
+   "working_bytes": 8053063680,
+   "tool": "tools/asset3d/idol/config.example.json: cmd $J/venvs/asset3d-idol/bin/python -I $REPO/tools/asset3d/idol/worker.py, weights $J/models/idol",
+   "skip": "leave asset3d out of --models; image to 3D requests then fail with no image_to_3d model",
+   "steps": [
+    {
+     "id": "venv",
+     "download_bytes": 200000000,
+     "disk_bytes": 1000000000,
+     "title": "the Idol venv from tools/asset3d/idol/uv.lock (Python 3.12, torch 2.13.0 for MPS, the idol-sdk at its pinned commit; every wheel by its locked hash)",
+     "run": "UV_PROJECT_ENVIRONMENT=$J/venvs/asset3d-idol uv sync --locked --python 3.12 --project $REPO/tools/asset3d/idol && $STEPS stamp asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock",
+     "done": "$STEPS stamped asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock && [ -x $J/venvs/asset3d-idol/bin/python ]",
+     "fix": "uv on PATH (the uv host step); network (pypi.org, github.com for the idol-sdk): run again"
+    },
+    {
+     "id": "fetch",
+     "download_bytes": 6609204537,
+     "disk_bytes": 6700000000,
+     "needs_accept": true,
+     "title": "the Idol, DINOv3 (timm) and FLUX.2 autoencoder weights at their pinned revisions (6.6 GB, ungated, no token), every file by sha256 against pins.json",
+     "run": "bash $REPO/tools/asset3d/idol/fetch.sh $J/models/idol && $STEPS stamp asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json",
+     "done": "$STEPS stamped asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json && python3 -I $REPO/tools/package/verify_assets.py --quick $REPO/tools/asset3d/idol/pins.json $J/models/idol > /dev/null",
+     "fix": "network (huggingface.co): run again (finished files are kept, a partial one resumes). 'is N bytes, pinned M' or 'does not match pins.json': delete the named file and run again"
     }
    ]
   }

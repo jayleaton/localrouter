@@ -53,7 +53,7 @@ export type SessionOptions = {
 }
 
 // Made during a call, shown as the page's own job card. A video on a call is a proposal (`videoHandoff`), never a job.
-const GENERATION_TOOLS = new Set(['generate_image', 'edit_image'])
+const GENERATION_TOOLS = new Set(['generate_image', 'edit_image', 'generate_3d'])
 
 /** The box refused the realtime socket (401, 403): retrying cannot help; `message` is its reason. */
 export class RealtimeRefused extends Error {

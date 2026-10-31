@@ -211,4 +211,29 @@ describe('pictures: a call edits the last one unless it names another', () => {
     await edit.run({ prompt: 'add snow', image: 'https://box/v1/files/img_1/0.png' }, ctx)
     expect(asked[2].args.image).toBe('https://box/v1/files/img_1/0.png')
   })
+
+  it('generate_3d is offered only for a box with a 3D model, takes the last picture, and its job reaches the page as asset3d', async () => {
+    const asked: Array<{ name: string; args: Record<string, unknown> }> = []
+    const f = (async (_url: string, init?: { body?: string }) => {
+      const rpc = JSON.parse(init?.body ?? '{}') as { params: { name: string; arguments: Record<string, unknown> } }
+      asked.push({ name: rpc.params.name, args: rpc.params.arguments })
+      const n = asked.length
+      const files = rpc.params.name === 'generate_3d' ? [`/v1/files/a3d_${n}/asset.ply`, `/v1/files/a3d_${n}/asset.json`, `/v1/files/a3d_${n}/input.png`] : [`/v1/files/img_${n}/0.png`]
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify({ id: `job_${n}`, status: 'completed', files }) }] } }))
+    }) as unknown as typeof fetch
+    const { pictureTools } = await import('./tools.ts')
+    const spark = new Spark('http://127.0.0.1:8190', '', f)
+    expect(pictureTools(spark).map((t) => t.name)).toEqual(['generate_image', 'edit_image'])
+    const [make, , threeD] = pictureTools(spark, undefined, { threeD: true })
+    expect(threeD.name).toBe('generate_3d')
+    const events: ToolEvent[] = []
+    const ctx = { callId: 'c', utterance: '', signal: new AbortController().signal, emit: (e: ToolEvent) => void events.push(e) }
+    await expect(threeD.run({}, ctx)).rejects.toThrow(/no picture to turn into 3D/)
+    await make.run({ prompt: 'a red chair' }, ctx)
+    const out = (await threeD.run({ input_mode: 'synthetic', seed: 0 }, ctx)) as { urls: string[] }
+    expect(asked[1]).toMatchObject({ name: 'generate_3d', args: { image: '/v1/files/img_1/0.png', input_mode: 'synthetic', seed: 0, wait_s: 0 } })
+    expect(out.urls).toEqual(['/v1/files/a3d_2/asset.ply', '/v1/files/a3d_2/asset.json', '/v1/files/a3d_2/input.png'])
+    expect(events.filter((e) => e.type === 'job.done').map((e) => e.type === 'job.done' && e.kind)).toEqual(['image', 'asset3d'])
+    expect(pageView({ type: 'response.output_item.done', item: { type: 'function_call', name: 'generate_3d' } })).toBe(true)
+  })
 })

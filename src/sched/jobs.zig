@@ -77,6 +77,7 @@ pub const Table = struct {
             .transcription => "transcription",
             .chat => "chat",
             .decision => "decision",
+            .asset3d => "a3d",
         };
         j.id = try std.fmt.allocPrint(a, "{s}_{x}", .{ prefix, std.mem.readInt(u64, &rnd, .little) });
         j.request = try dupeRequest(a, req);
@@ -233,6 +234,11 @@ pub fn dupeRequest(a: std.mem.Allocator, req: Request) !Request {
             var c = v;
             c.body = try a.dupe(u8, v.body);
             return .{ .decision = c };
+        },
+        .asset3d => |v| {
+            var c = v;
+            c.image = try a.dupe(u8, v.image);
+            return .{ .asset3d = c };
         },
     }
 }

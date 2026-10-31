@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseControl } from '../../../desktop-helper/src/computer/macControls.ts'
 import { BACKGROUND_NOTE, CONTROL_OFF } from '../executor/broker.ts'
 import type { Broker, Caller } from '../executor/broker.ts'
-import type { Tool, ToolContext } from './registry.ts'
+import type { MediaKind, Tool, ToolContext } from './registry.ts'
 import type { McpResult, Spark } from './spark.ts'
 
 /**
@@ -146,7 +146,9 @@ export function jobOf(r: McpResult): JobSummary {
   throw new Error(text || 'the LocalRouter server did not start it')
 }
 
-async function generation(spark: Spark, kind: 'image' | 'video', tool: string, args: Record<string, unknown>, ctx: ToolContext, waitS: number) {
+const MADE: Record<MediaKind, string> = { image: 'picture', video: 'video', asset3d: '3D model' }
+
+async function generation(spark: Spark, kind: MediaKind, tool: string, args: Record<string, unknown>, ctx: ToolContext, waitS: number) {
   const started = await spark.mcp(tool, { ...args, wait_s: 0, ...(kind === 'image' ? { inline_images: false } : {}) }, ctx.signal)
   if (started.isError) throw new Error(started.content.map((c) => c.text ?? '').join(' ') || 'the LocalRouter server refused it')
   const job = jobOf(started)
@@ -171,7 +173,7 @@ async function generation(spark: Spark, kind: 'image' | 'video', tool: string, a
     for (let i = 0; i < 20 && !ended(j); i++) j = await poll(300).catch(() => j)
     if (ended(j)) finish(j)
   })()
-  return { status: 'in_progress', job_id: job.id, note: `The ${kind === 'image' ? 'picture' : 'video'} is being made and appears for the user when it is done; tell them so.` }
+  return { status: 'in_progress', job_id: job.id, note: `The ${MADE[kind]} is being made and appears for the user when it is done; tell them so.` }
 }
 
 /** The last picture a conversation made or edited: what `edit_image` changes when the call names none. */
@@ -183,9 +185,12 @@ const remember = (state: PictureState) => (out: Record<string, unknown>) => {
   return out
 }
 
-/** Pictures on the Spark: make one, or change one ("make it night"), the last one unless the call names another. */
-export function pictureTools(spark: Spark, state: PictureState = { last: '' }, opts: { imageWaitS?: number } = {}): Tool[] {
-  return [
+/**
+ * Pictures on the Spark: make one, or change one ("make it night"), the last one unless the call names another; with
+ * `threeD` (the box has a model of kind asset3d), turn one into a 3D model the same way.
+ */
+export function pictureTools(spark: Spark, state: PictureState = { last: '' }, opts: { imageWaitS?: number; threeD?: boolean } = {}): Tool[] {
+  const tools: Tool[] = [
     {
       name: 'generate_image',
       description: 'Make a picture on the user’s LocalRouter box from a detailed description. The user sees it when it is done.',
@@ -203,6 +208,33 @@ export function pictureTools(spark: Spark, state: PictureState = { last: '' }, o
       },
     },
   ]
+  if (opts.threeD) tools.push(threeDTool(spark, state))
+  return tools
+}
+
+/** One picture to a 3D model of its object (a Gaussian splat the user turns around in LocalRouter): the box's `generate_3d`. */
+export function threeDTool(spark: Spark, state: PictureState): Tool {
+  return {
+    name: 'generate_3d',
+    description: 'Turn a picture into a 3D model of its object on the user’s LocalRouter box (a Gaussian splat they can turn around): the last picture made here unless `image` names another. It takes a minute or two; the user sees it when it is done.',
+    parameters: {
+      type: 'object',
+      properties: {
+        from_last_image: { type: 'boolean', description: 'use the last picture made here (default true)' },
+        image: { type: 'string', description: 'the picture to use instead (a URL from an earlier result)' },
+        input_mode: { type: 'string', enum: ['synthetic', 'real'], description: 'synthetic for a generated picture or render on a plain background (default), real for a photograph' },
+        seed: { type: 'integer', minimum: 0 },
+        num_gaussians: { type: 'integer', minimum: 1, description: 'how many splats (more: finer and larger); omit for the default' },
+      },
+      additionalProperties: false,
+    },
+    run: async (args, ctx) => {
+      const image = typeof args.image === 'string' && args.image ? args.image : args.from_last_image === false ? '' : state.last
+      if (!image) throw new Error(args.from_last_image === false ? 'name the picture to use (image)' : 'there is no picture to turn into 3D yet: make one first, or name it')
+      const extra = { ...(args.input_mode ? { input_mode: args.input_mode } : {}), ...(args.seed !== undefined ? { seed: args.seed } : {}), ...(args.num_gaussians ? { num_gaussians: args.num_gaussians } : {}) }
+      return generation(spark, 'asset3d', 'generate_3d', { image, ...extra }, ctx, 0)
+    },
+  }
 }
 
 export function mediaTools(spark: Spark, opts: { imageWaitS?: number } = {}): Tool[] {

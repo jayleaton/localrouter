@@ -168,13 +168,37 @@ fn allowed(app: *App, conn: *const h.Conn) bool {
 
 const refused = "the voice endpoints answer this machine only; the operator can open them with voice.remote in the config (on by default when the daemon listens beyond loopback with pairing required)";
 
+/// GET /voice/vendor/{name}: a pinned library the page lazy-loads (the 3D viewer), embedded in the binary; 404 for any
+/// other name. Same reach as the page itself.
+pub fn vendor(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator, name: []const u8) !void {
+    if (!allowed(app, conn)) return h.fail(req, a, 403, "invalid_request_error", refused);
+    for (vendor_files) |f| if (std.mem.eql(u8, name, f.name)) {
+        return req.respond(f.data, .{
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = f.type },
+                // The names carry a content hash (tools/voice-vendor/build.mjs), so a name never changes its bytes.
+                .{ .name = "cache-control", .value = f.cache },
+                .{ .name = "x-content-type-options", .value = "nosniff" },
+            },
+        });
+    };
+    return h.fail(req, a, 404, "invalid_request_error", "no such file");
+}
+
+/// The files under `src/voice/vendor/` the page may load (README.md there: pins, hashes, how to rebuild). Exact names
+/// only; the bundle's name is rewritten by the build.
+const vendor_files = [_]struct { name: []const u8, data: []const u8, type: []const u8, cache: []const u8 }{
+    .{ .name = "splat-viewer-3527417f73f0.js", .data = @embedFile("../voice/vendor/splat-viewer-3527417f73f0.js"), .type = "text/javascript; charset=utf-8", .cache = "public, max-age=31536000, immutable" },
+    .{ .name = "THIRD_PARTY_NOTICES", .data = @embedFile("../voice/vendor/THIRD_PARTY_NOTICES"), .type = "text/plain; charset=utf-8", .cache = "no-cache" },
+};
+
 /// GET /voice: the page.
 pub fn page(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocator) !void {
     if (!allowed(app, conn)) return h.fail(req, a, 403, "invalid_request_error", refused);
     try req.respond(page_html, .{ .extra_headers = &.{
         .{ .name = "content-type", .value = "text/html; charset=utf-8" },
         .{ .name = "cache-control", .value = "no-store" },
-        .{ .name = "content-security-policy", .value = "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'unsafe-inline'; worker-src blob:; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self' ws: wss:" },
+        .{ .name = "content-security-policy", .value = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self' ws: wss:" },
     } });
 }
 

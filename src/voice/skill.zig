@@ -33,6 +33,7 @@ fn role(m: Member) []const u8 {
         .image => "the image model",
         .video => "the video model",
         .decision => "the decision model",
+        .asset3d => "the 3D model",
     };
 }
 

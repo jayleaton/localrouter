@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const Kind = enum { image, video, speech, transcription, chat, decision };
+pub const Kind = enum { image, video, speech, transcription, chat, decision, asset3d };
 
 /// What a model can do; a request needs exactly one (`Request.capability`).
 pub const Capability = enum {
@@ -15,6 +15,7 @@ pub const Capability = enum {
     chat_completion,
     typed_decision,
     voice_clone, // a speech model that encodes recorded clips into a voice of its own (`Speech.clone`)
+    image_to_3d, // one picture of an object to a 3D asset (`Asset3d`)
 
     pub fn kind(c: Capability) Kind {
         return switch (c) {
@@ -24,6 +25,7 @@ pub const Capability = enum {
             .speech_to_text => .transcription,
             .chat_completion => .chat,
             .typed_decision => .decision,
+            .image_to_3d => .asset3d,
         };
     }
 };
@@ -127,8 +129,47 @@ pub const Decision = struct {
     seed: u64 = 0, // decisions are deterministic: kept for the common request shape
 };
 
+/// One picture to a 3D asset. The tool writes the asset (`asset.ply` for a Gaussian splat), `input.png` (the view it
+/// conditioned on, after any background removal and framing) and `asset.json` (the manifest: `Manifest`). Fields left
+/// null are the tool's own defaults (`engine.fill` writes those its options declare), so 0 stays a real value (seed 0,
+/// guidance 0: no negative pass).
+pub const Asset3d = struct {
+    image: []const u8, // a file name in the job directory: PNG, JPEG or WebP
+    input_mode: InputMode = .synthetic,
+    format: Format = .ply,
+    seed: u64 = 0,
+    steps: ?u32 = null,
+    guidance: ?f32 = null,
+    num_gaussians: ?u32 = null, // a Gaussian splat's size; refused by a tool that makes no splats
+
+    /// What the picture is: a render or product shot on a plain background (`synthetic`), or a photograph (`real`);
+    /// a model frames each its own way. Nothing guesses it.
+    pub const InputMode = enum { synthetic, real };
+    /// The asset file's format; a tool lists those it writes in its `formats` option.
+    pub const Format = enum {
+        ply,
+
+        pub fn extension(f: Format) []const u8 {
+            return switch (f) {
+                .ply => ".ply",
+            };
+        }
+    };
+};
+
+/// What an image_to_3d tool writes as `asset.json`: the fields the daemon checks before the job completes (the rest
+/// of the manifest, such as the camera, the coordinate frame and the model's revisions, passes through to clients).
+pub const Manifest = struct {
+    object: []const u8,
+    version: u32,
+    representation: []const u8,
+    format: []const u8,
+    file: []const u8,
+    input: []const u8,
+};
+
 /// The wire form is std.json's union shape: {"image": {...}}, {"video": {...}}, {"speech": {...}}, {"transcription": {...}},
-/// {"chat": {...}} or {"decision": {...}}.
+/// {"chat": {...}}, {"decision": {...}} or {"asset3d": {...}}.
 pub const Request = union(Kind) {
     image: Image,
     video: Video,
@@ -136,6 +177,7 @@ pub const Request = union(Kind) {
     transcription: Transcription,
     chat: Chat,
     decision: Decision,
+    asset3d: Asset3d,
 
     pub fn kind(r: Request) Kind {
         return std.meta.activeTag(r);
@@ -150,6 +192,7 @@ pub const Request = union(Kind) {
             .transcription => .speech_to_text,
             .chat => .chat_completion,
             .decision => .typed_decision,
+            .asset3d => .image_to_3d,
         };
     }
 
@@ -176,6 +219,8 @@ pub const Limits = struct {
     max_transcription_prompt: usize = 4096,
     max_chat_body: usize = 16 << 20, // one chat request as sent to the model's server
     max_decision_body: usize = 16 << 10, // one decision request (state and questions): its model is booked at the peak of one this large
+    max_gaussians: u32 = 1 << 24, // one splat; a model's own range is its `min_gaussians` / `max_gaussians`
+    max_guidance: f32 = 100,
 };
 
 pub const Invalid = error{Invalid};
@@ -227,6 +272,12 @@ pub fn validate(r: Request, l: Limits, why: *[]const u8) Invalid!void {
         .decision => |v| {
             if (v.body.len == 0) return fail(why, "the decision request is empty");
             if (v.body.len > l.max_decision_body) return fail(why, "the decision request is larger than 16 KB: send a shorter state");
+        },
+        .asset3d => |v| {
+            if (v.image.len == 0 or !token(v.image)) return fail(why, "image must name a file in the job directory");
+            if (v.steps) |n| if (n == 0 or n > l.max_steps) return fail(why, "steps must be 1 to 200");
+            if (v.guidance) |g| if (!(g >= 0 and g <= l.max_guidance)) return fail(why, "guidance must be 0 to 100");
+            if (v.num_gaussians) |n| if (n == 0 or n > l.max_gaussians) return fail(why, "num_gaussians must be 1 to 16777216");
         },
     }
 }
@@ -338,6 +389,35 @@ test "chat requests: capability, limits and wire shape" {
     defer back.deinit();
     try std.testing.expectEqualStrings(ask.chat.body, back.value.chat.body);
     try std.testing.expect(back.value.chat.stream);
+}
+
+test "asset3d requests: capability, limits and wire shape" {
+    var why: []const u8 = "";
+    const make: Request = .{ .asset3d = .{ .image = "image_0.png", .input_mode = .real, .seed = 0, .guidance = 0, .num_gaussians = 32768 } };
+    try validate(make, .{}, &why);
+    try std.testing.expectEqual(Capability.image_to_3d, make.capability());
+    try std.testing.expectEqual(Kind.asset3d, make.capability().kind());
+    const bad = [_]struct { r: Request, msg: []const u8 }{
+        .{ .r = .{ .asset3d = .{ .image = "../x.png" } }, .msg = "image must name a file in the job directory" },
+        .{ .r = .{ .asset3d = .{ .image = "" } }, .msg = "image must name a file in the job directory" },
+        .{ .r = .{ .asset3d = .{ .image = "i.png", .steps = 0 } }, .msg = "steps must be 1 to 200" },
+        .{ .r = .{ .asset3d = .{ .image = "i.png", .guidance = std.math.nan(f32) } }, .msg = "guidance must be 0 to 100" },
+        .{ .r = .{ .asset3d = .{ .image = "i.png", .guidance = -1 } }, .msg = "guidance must be 0 to 100" },
+        .{ .r = .{ .asset3d = .{ .image = "i.png", .num_gaussians = 0 } }, .msg = "num_gaussians must be 1 to 16777216" },
+    };
+    for (bad) |b| {
+        try std.testing.expectError(error.Invalid, validate(b.r, .{}, &why));
+        try std.testing.expectEqualStrings(b.msg, why);
+    }
+    // Unset fields stay off the wire (the worker's defaults); a set 0 is sent.
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(make, .{ .emit_null_optional_fields = false }, &out.writer);
+    try std.testing.expectEqualStrings("{\"asset3d\":{\"image\":\"image_0.png\",\"input_mode\":\"real\",\"format\":\"ply\",\"seed\":0,\"guidance\":0,\"num_gaussians\":32768}}", out.written());
+    const back = try std.json.parseFromSlice(Request, std.testing.allocator, out.written(), .{});
+    defer back.deinit();
+    try std.testing.expect(back.value.asset3d.steps == null);
+    try std.testing.expectEqual(@as(?f32, 0), back.value.asset3d.guidance);
 }
 
 test "decision requests: capability, limits and wire shape" {

@@ -475,8 +475,8 @@ async function stopRuntime() {
 // ------------------------------------------------------------------ lr://app: the UI, the local executor, the Spark
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' }
-// The page may talk only to this app; media it shows comes through it too.
-const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+// The page may talk only to this app; media it shows comes through it too. WebAssembly: the 3D viewer's (voice/vendor/).
+const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 async function staticFile(path: string): Promise<Response> {
   const rel = path === '/' || path === '/voice' ? 'voice.html' : path.slice(1)

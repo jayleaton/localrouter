@@ -4,7 +4,7 @@
  "local_files": ["@DEPLOY@/inbox"],
  "defaults": {"chat_completion": "qwen3.8-27b", "text_to_speech": "fishaudio/drama-3",
               "speech_to_text": "whisper-large-v3-turbo", "text_to_image": "qwen-image-2.1-turbo",
-              "text_to_video": "minimax-h3", "typed_decision": "knowline-4b"},
+              "text_to_video": "minimax-h3", "typed_decision": "knowline-4b", "image_to_3d": "idol"},
  "stt": {"language": "en"},
  "voice": {
   "chat_extra": {"chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none", "top_p": 0.8},
@@ -59,6 +59,19 @@
    "license": {"name": "Apache-2.0", "url": "https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5", "commercial": true},
    "options": {"server": ["@J@/venvs/decide/bin/python", "-I", "@SRC@/tools/decide/knowline/serve.py", "{weights}",
                           "--port", "{port}", "--served-model-name", "{id}"],
-               "env": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}, "health": "/health"}}
+               "env": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}, "health": "/health"}},
+  {"id": "idol", "kind": "asset3d", "name": "Idol (one image to a 3D Gaussian splat, PyTorch CUDA, eager; untested on GB10 until qualified)",
+   "capabilities": ["image_to_3d"],
+   "cmd": ["@J@/venvs/asset3d-idol/bin/python", "-I", "@SRC@/tools/asset3d/idol/worker.py"], "weights": "@J@/models/idol",
+   "resident_bytes": 5368709120, "working_bytes": 8053063680, "residency": "disabled", "priority": 0, "idle_ttl_s": 120,
+   "load_timeout_s": 300, "generate_timeout_s": 600,
+   "license": {"name": "Apache-2.0 (Idol, its BiRefNet copy, the FLUX.2 autoencoder) + DINOv3 License (the image encoder)",
+               "url": "https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/LICENSE.md",
+               "notice": "DINOv3 License (Last Updated August 19, 2025), kept as <weights>/dinov3/LICENSE.md: redistribute only under it with a copy; acknowledge use in publications; no reverse engineering; Trade Controls apply; no ITAR or prohibited end uses (military, nuclear, espionage, ...).",
+               "commercial": true},
+   "options": {"device": "cuda", "formats": ["ply"], "input_modes": ["synthetic", "real"],
+               "min_gaussians": 32768, "max_gaussians": 1048576, "gaussian_multiple": 32, "default_gaussians": 262144,
+               "default_steps": 50, "default_guidance": 3.0, "max_steps": 100, "max_guidance": 10,
+               "working_bytes_by_gaussians": {"32768": 8053063680, "262144": 8053063680, "1048576": 8053063680}}}
  ]
 }
