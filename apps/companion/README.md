@@ -208,7 +208,7 @@ npm run package:linux  # Linux: AppImage and .deb in out/ (electron-builder.yml)
 npm run package:win    # Windows: NSIS installer and .zip in out/
 ```
 
-CI runs the checks (`.github/workflows/ci.yml`, job `companion`), and on a macOS 14 runner builds, packages and
+CI runs the checks (`.github/workflows/ci.yml`, job `companion`), and on a macOS 15 (arm64) runner builds, packages and
 smoke-starts the app (`--version`, `--smoke`: headless window, UI loaded with its shim, the executor answering on its
 socket) and the MCP launcher, then uploads the artifact (`.github/workflows/companion-mac.yml`). The same runs on
 ubuntu-24.04 (under Xvfb) and windows-latest (`.github/workflows/companion-desktop.yml`), whose smoke line also reports
