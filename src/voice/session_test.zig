@@ -1204,3 +1204,66 @@ test "a voice model disabled before the call: ready lists it disabled though not
     try testing.expectEqualStrings("whisper", m.get("id").?.string);
     try testing.expectEqualStrings("disabled", m.get("state").?.string);
 }
+
+test "a call in the voice already warm in the instance warms nothing at connect: ready at once, speech warm" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_warm = true, .warm_ms = 500 });
+    defer rig.stop();
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warm", ready.get("speech").?.string);
+    try testing.expect(ready.get("ms").?.integer < 200); // no settle wait, no warm-up
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
+}
+
+test "a voice named before the connect's warm-up runs: only that voice is warmed, and ready says warmed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_voice = "Mae", .instance_warm = true, .warm_ms = 30 });
+    defer rig.stop();
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}"); // within the settle window
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
+    try testing.expectEqualStrings("Arlo", ready.get("voice").?.string);
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+    rig.fake.mutex.lockUncancelable(rig.fake.io);
+    defer rig.fake.mutex.unlock(rig.fake.io);
+    try testing.expectEqualStrings("Arlo", rig.fake.instance_voice);
+}
+
+test "a voice change while a stale voice's warm-up speaks drops it: the new voice alone is warmed" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rig: Rig = undefined;
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 1500 });
+    defer rig.stop();
+    Io.sleep(testing.io, .fromMilliseconds(500), .awake) catch {}; // past the settle window: the default voice is speaking
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Arlo\"}}");
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("warmed", ready.get("speech").?.string);
+    try testing.expect(rig.fake.speech_cancelled.load(.acquire)); // the stale one was stopped, not finished
+    try testing.expectEqual(@as(usize, 1), rig.fake.spokenCount("Hello."));
+    try testing.expect(ready.get("ms").?.integer < 2 * 1500 + 300);
+}
+
+test "a call-mode load warmed in the call's voice (Nora): the session finds it warm and warms nothing more" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loading = [_]backend.CallModel{.{ .id = "drama-3", .state = "warming" }};
+    const ready_now = [_]backend.CallModel{.{ .id = "drama-3", .state = "ready" }};
+    var rig: Rig = undefined;
+    // the scheduler's post-load warm-up spoke Nora, the voice the call named (`voice_local.callVoice`)
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .instance_voice = "Nora", .instance_warm = true, .warm_ms = 500, .call_script = &.{ &loading, &loading, &ready_now } });
+    defer rig.stop();
+    rig.s.handle("{\"type\":\"session.update\",\"session\":{\"voice\":\"Nora\"}}");
+    const ready = try readyOf(a, &rig.rec, 0);
+    try testing.expectEqualStrings("loaded", ready.get("load").?.string);
+    try testing.expectEqualStrings("warm", ready.get("speech").?.string);
+    try testing.expectEqual(@as(usize, 0), rig.fake.spokenCount("Hello."));
+}

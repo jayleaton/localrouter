@@ -118,6 +118,20 @@ pub const Registry = struct {
         };
     }
 
+    /// The speech model and voice each open session speaks in now (copies in `a`), oldest session first.
+    pub fn speechWants(r: *Registry, io: Io, a: std.mem.Allocator) []const @import("../voice/backend.zig").Say {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        var out: std.ArrayList(@import("../voice/backend.zig").Say) = .empty;
+        for (r.sessions.items) |s| {
+            s.mutex.lockUncancelable(io);
+            defer s.mutex.unlock(io);
+            if (s.closing) continue;
+            out.append(a, .{ .model = a.dupe(u8, s.settings.speech_model) catch continue, .voice = a.dupe(u8, s.settings.voice) catch continue }) catch break;
+        }
+        return out.items;
+    }
+
     /// How many sessions are open (an operator restarts only when none is).
     pub fn count(r: *Registry, io: Io) usize {
         r.mutex.lockUncancelable(io);

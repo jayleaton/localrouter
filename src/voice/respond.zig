@@ -215,6 +215,7 @@ pub fn connect(s: *Session) void {
     s.getting_ready = true;
     s.ready_from_ns = s.clock();
     s.speech_ready = .off;
+    s.settle_voice = true; // its first warm-up may wait a moment for the client's voice (`voice_settle_ms`)
     s.mutex.unlock(s.io);
     const models = s.backend.callModels(tmp.allocator()) catch &.{}; // takes the scheduler's lock: not under ours
     s.mutex.lockUncancelable(s.io);
@@ -342,6 +343,7 @@ fn warmUp(s: *Session) void {
     if (!s.voice.warm_speech or !s.settings.audio or s.closing or s.loading) return; // loading: the loader warms after it
     if (s.warming) {
         s.warm_again = true;
+        if (s.warm_stop) |st| st.set(s.io); // a stale voice's warm-up, queued or speaking: dropped
         return;
     }
     if (s.warmer) |t| t.join(); // finished: `warming` is cleared as its last step
@@ -353,17 +355,25 @@ fn warmUp(s: *Session) void {
     };
 }
 
+/// How long a connect's warm-up waits for the client's first `session.update`, which usually names its voice a round
+/// trip after session.created, before warming the voice it has: the default voice warmed first and then the client's
+/// cost 4 to 6 s each on the Mac's Drama 3 (a call in Arlo was ready in 9 s, twice its own warm-up). Only when the
+/// voice it has is not warm already.
+const voice_settle_ms = 300;
+
 fn warmSpeech(s: *Session) void {
+    var warmed = false; // some pass spoke: ready says `warmed`, even when the last pass found its voice warm
     while (true) {
         const how = warmOnce(s);
+        if (how == .warmed) warmed = true;
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
-        if (s.warm_again and !s.closing) {
+        if (s.warm_again and !s.closing) { // the voice changed: the latest is the one to warm
             s.warm_again = false;
             continue;
         }
         s.warming = false;
-        s.speech_ready = how;
+        s.speech_ready = if (how == .warm and warmed) .warmed else how orelse .failed;
         readyCheck(s);
         return;
     }
@@ -374,19 +384,48 @@ fn warmSpeech(s: *Session) void {
 /// switch: 4 to 6 s to first audio on the Mac's Drama 3, which keeps one voice's prefix) are paid before a reply needs
 /// them. One short word: the engine speaks one request at a time, and a turn's reply waits behind it (a cold first
 /// sentence of 2 s took 4.7 s on DGX-01). Its rate is not kept (a first job's, and a second sentence collided with the
-/// first turn there).
-fn warmOnce(s: *Session) SpeechReady {
+/// first turn there). Null: superseded, the voice changed before or while it spoke (`warmUp` stops a stale one).
+fn warmOnce(s: *Session) ?SpeechReady {
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
     const a = tmp.allocator();
     s.mutex.lockUncancelable(s.io);
     const say: backend.Say = .{ .model = a.dupe(u8, s.settings.speech_model) catch "", .voice = a.dupe(u8, s.settings.voice) catch "" };
+    const settle_first = s.settle_voice;
+    s.settle_voice = false;
     s.mutex.unlock(s.io);
     if (s.backend.paused()) return .paused; // it would be text only; voice.resumed checks again
-    if (s.backend.speechWarm(a, say)) return .warm;
+    if (s.backend.speechWarm(a, say)) return .warm; // its default voice, for an empty one: as a reply would speak it
+    if (settle_first) { // a connect: the client may be about to name its voice
+        var waited: u32 = 0;
+        while (waited < voice_settle_ms) : (waited += 20) {
+            s.mutex.lockUncancelable(s.io);
+            const changed = s.warm_again or s.closing;
+            s.mutex.unlock(s.io);
+            if (changed) return null;
+            Io.sleep(s.io, .fromMilliseconds(20), .awake) catch break;
+        }
+    }
+    var stop: Stop = .{}; // set when the voice changes (a stale warm-up is dropped) or the session closes
+    s.mutex.lockUncancelable(s.io);
+    if (s.closing or s.warm_again) {
+        s.mutex.unlock(s.io);
+        return null;
+    }
+    s.warm_stop = &stop;
+    s.mutex.unlock(s.io);
+    defer {
+        s.mutex.lockUncancelable(s.io);
+        s.warm_stop = null;
+        s.mutex.unlock(s.io);
+    }
     var why: backend.Why = .{};
     const began = s.clock();
-    s.backend.speak(a, backend.warm_sentence, say, .{ .ctx = s, .write = discardPcm }, &s.close_stop, &why) catch return .failed;
+    s.backend.speak(a, backend.warm_sentence, say, .{ .ctx = s, .write = discardPcm }, &stop, &why) catch {
+        if (!stop.cancelled()) return .failed;
+        std.log.info("voice {s}: warm-up in voice '{s}' dropped: the voice changed", .{ s.id, say.voice });
+        return null;
+    };
     std.log.info("voice {s}: speech warmed in {d} ms (voice '{s}')", .{ s.id, @divTrunc(s.clock() - began, std.time.ns_per_ms), say.voice });
     return .warmed;
 }

@@ -128,6 +128,8 @@ pub const Session = struct {
     prime_again: bool = false, // the session changed while a prime ran: one more after it
     warming: bool = false,
     warm_again: bool = false, // the voice changed while a warm-up ran: one more after it
+    warm_stop: ?*Stop = null, // the warm-up speaking now: set when the voice changes or the session closes
+    settle_voice: bool = false, // the connect's warm-up: it may wait for the client's voice first (respond.warmOnce)
     getting_ready: bool = false, // a readiness check is open: `localrouter.session.ready` follows (respond.getReady)
     ready_from_ns: i96 = 0,
     loading: bool = false, // the loader waits for call models: no prime, warm-up or ready until it is done
@@ -172,6 +174,7 @@ pub const Session = struct {
     pub fn destroy(s: *Session) void {
         s.mutex.lockUncancelable(s.io);
         s.closing = true;
+        if (s.warm_stop) |st| st.set(s.io);
         if (s.resp) |r| r.stop.set(s.io);
         s.cond.broadcast(s.io);
         s.mutex.unlock(s.io);

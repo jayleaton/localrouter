@@ -359,6 +359,9 @@ pub fn warmLoaded(ctx: *anyopaque, tool: usize) ?*const jobs.Job {
     if (defaultVoice(app, a) catch null) |d| if (std.mem.eql(u8, d.model, c.id)) {
         voice = d.voice;
     };
+    // An open call that speaks on it (a call's load: the call is why it loaded): its voice, not the default, or the call
+    // warms a second time (Nora was ready 5.5 s after Mae on the M5 Ultra).
+    if (callVoice(app, a, tool, app.voice.speechWants(app.io, a))) |v| voice = v;
     if (app.scheduler.speechWarm(tool, voice)) return null;
     var ref: routes.Refusal = .{};
     const j = speech.startSpeech(app, a, .{ .model = c.id, .input = backend.warm_sentence, .voice = voice, .stream = engine.optionBool(c, "stream", false) }, "", &ref) orelse {
@@ -368,6 +371,21 @@ pub fn warmLoaded(ctx: *anyopaque, tool: usize) ?*const jobs.Job {
     forget(app, j);
     std.log.info("voice: warming {s} in voice '{s}' after its load ({s})", .{ c.id, voice, j.id });
     return j;
+}
+
+/// The voice the first of `wants` (open sessions' speech model and voice) speaks in on speech tool `tool`, resolved as
+/// a reply resolves it (an empty voice: the tool's default voice); null when none of them speaks on it.
+fn callVoice(app: *App, a: std.mem.Allocator, tool: usize, wants: []const backend.Say) ?[]const u8 {
+    for (wants) |o| {
+        const wanted = if (o.voice.len > 0) o.voice else app.cfg.voice.voice;
+        const first = (speechCandidates(app, a, if (o.model.len > 0) o.model else app.cfg.voice.speech_model, wanted) catch continue)[0];
+        const voice = voiceFor(app, first, wanted);
+        var ref: routes.Refusal = .{};
+        const i = routes.resolveSpeech(app, first, voice, &ref) orelse continue;
+        if (i != tool) continue;
+        return if (voice.len > 0) voice else engine.optionString(app.scheduler.slots[i].tool.config(), "default_voice", "");
+    }
+    return null;
 }
 
 /// `wanted` when `model` has that voice (or lists none, or is the text_to_speech default, which picks its own), else ""
@@ -772,4 +790,25 @@ fn check(ptr: *anyopaque, role: backend.Role, name: []const u8, why: *Why) bool 
         return false;
     }
     return true;
+}
+
+test "a speech model's post-load warm-up speaks the open call's voice; an empty one is its default voice" {
+    const t = std.testing;
+    const sched = @import("../sched/scheduler.zig");
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const opts = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"default_voice\": \"Mae\", \"voices\": [\"Mae\", \"Nora\"]}", .{});
+    var fakes = [_]sched.FakeTool{
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .cmd = &.{"x"} } },
+        .{ .cfg = .{ .id = "drama", .kind = .speech, .cmd = &.{"x"}, .options = opts } },
+    };
+    var b: sched.Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var app: App = .{ .gpa = t.allocator, .io = t.io, .cfg = &b.cfg, .scheduler = &b.s, .table = &b.table, .jobs_dir = "" };
+    try t.expectEqualStrings("Nora", callVoice(&app, a, 1, &.{.{ .voice = "Nora" }}).?);
+    try t.expectEqualStrings("Mae", callVoice(&app, a, 1, &.{.{}}).?); // a call that named none: the default voice
+    try t.expect(callVoice(&app, a, 1, &.{}) == null); // no call: warmLoaded keeps the default
+    try t.expect(callVoice(&app, a, 0, &.{.{ .voice = "Nora" }}) == null); // not the tool it speaks on
 }
