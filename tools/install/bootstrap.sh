@@ -190,7 +190,8 @@ for s in "${todo[@]}"; do
     "$(jq -r 'if .gpu then " [GPU, \(.min_free_gib) GiB free]" else "" end' <<< "$s")"
 done
 if jq -e .deploy "$p" > /dev/null; then
-  printf '  %-5s %-16s %s\n' todo deploy "deploy/jarvis/install.sh (config, unit $UNIT, service on $listen:$PORT), then start.sh until the warm models are ready"
+  svc="unit $UNIT"; [ "$(jq -r '.deploy.service // "systemd"' "$p")" = launchd ] && svc="launchd agent $(launchd_label "$UNIT")"
+  printf '  %-5s %-16s %s\n' todo deploy "$(jq -r .deploy.install "$p") (config, $svc, service on $listen:$PORT), then $(basename "$(jq -r .deploy.start "$p")") until the warm models are ready"
 else
   printf '  %-5s %-16s %s\n' none deploy "this profile has no deploy yet: the run ends after its steps"
 fi
@@ -280,11 +281,12 @@ if [ $nogpu = 1 ]; then echo "== --no-gpu: the GPU steps are left; when the GPU 
 
 jq -e .deploy "$p" > /dev/null || { echo "== the steps are done; $profile has no deploy yet (its manifest names none)"; exit 0; }
 
-# ---- 4. deploy: the service on the selected models (install.sh waits for open voice sessions before a restart)
+# ---- 4. deploy: the service on the selected models, by the manifest's deploy.install and deploy.start (deploy/jarvis:
+# a systemd user unit; deploy/mac: a launchd user agent). install.sh waits for open voice sessions before a restart.
 echo "run   deploy (log: $LOGS/deploy.log)"
 tools=$(for k in "${keys[@]}"; do jq -r --arg k "$k" '.models[] | select(.key == $k) | .id' "$p"; done | tr '\n' ' ')
-{ TOPOLOGY=$topology NODE=$node TOOLS=$tools SKIP_BUILD=1 bash "$repo/deploy/jarvis/install.sh" &&
-    bash "$repo/deploy/jarvis/start.sh"; } > >(tee -a "$LOGS/deploy.log") 2>&1 || {
+{ TOPOLOGY=$topology NODE=$node TOOLS=$tools SKIP_BUILD=1 bash "$repo/$(jq -r .deploy.install "$p")" &&
+    bash "$repo/$(jq -r .deploy.start "$p")"; } > >(tee -a "$LOGS/deploy.log") 2>&1 || {
   echo "FAILED deploy: the end of $LOGS/deploy.log is above. next: tools/install/doctor.sh --profile $profile --prefix $PREFIX --port $PORT --unit $UNIT${topology:+ --topology $topology --node $node}; fix what it lists, then run again: $again" >&2
   exit 1
 }
@@ -293,5 +295,10 @@ if [ "$listen" != 127.0.0.1 ]; then   # a node that is not the front: the API an
   echo "check it from the front: tools/install/doctor.sh --profile $profile --topology $topology --node <the front>"
   exit 0
 fi
-echo "== done in $(($(date +%s) - t_all)) s: $UNIT serves http://127.0.0.1:$PORT (voice: /voice, API: /v1, MCP: /mcp)"
-echo "check it: LOCK=/dev/null bash $repo/tools/jarvis/smoke.sh --quick --url http://127.0.0.1:$PORT"
+svc=$UNIT; [ "$(jq -r '.deploy.service // "systemd"' "$p")" = launchd ] && svc=$(launchd_label "$UNIT")
+echo "== done in $(($(date +%s) - t_all)) s: $svc serves http://127.0.0.1:$PORT (voice: /voice, API: /v1, MCP: /mcp)"
+if [ "$(jq -r .deploy.install "$p")" = deploy/jarvis/install.sh ]; then
+  echo "check it: LOCK=/dev/null bash $repo/tools/jarvis/smoke.sh --quick --url http://127.0.0.1:$PORT"
+else
+  echo "check it: bash $repo/$(jq -r .deploy.status "$p")"
+fi

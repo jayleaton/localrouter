@@ -25,7 +25,7 @@ separate pins files (`pins-macos.json`), never a replacement.
 
 The `mac-apple-silicon` profile ([deploy/profiles/mac-apple-silicon.json](../../deploy/profiles/mac-apple-silicon.json))
 is a **preview**. Every model installs, qualifies and serves through the daemon on the reference M5 Ultra (96 GiB,
-macOS 27). It has not run on other Macs yet, and there is no service. You need an Apple Silicon Mac with at least
+macOS 27). It has not run on other Macs yet. You need an Apple Silicon Mac with at least
 64 GiB, Xcode with its Metal Toolchain, Zig 0.17.0 and python3 3.11 or newer. The plan checks each of these and says
 how to fix what is missing.
 
@@ -39,19 +39,34 @@ tools/install/bootstrap.sh --profile mac-apple-silicon --accept     # after read
 The run builds LocalRouter and downloads every model, about 60 GiB, each file checked against its pin. It then benches
 chat and runs Drama 3's Metal qualification, which writes the marker the daemon needs. `--models` picks a subset.
 
-The run then ends: no launchd service is written yet. To serve, build one daemon config whose `tools` list has each
-model's entry. `$J` is the `--prefix`, `~/jarvis` by default.
+Last, the run installs the service ([deploy/mac](../../deploy/mac/install.sh)) and starts it. It waits until chat,
+Drama 3 and Whisper are warm.
 
-| Model | Its tool entry |
+- **The service** is a launchd user agent, `com.localrouter.jarvis` (`--unit NAME` gives `com.localrouter.NAME`), in
+  `~/Library/LaunchAgents/`. It listens on `127.0.0.1:8190` (`--port`). It starts at login, and again after a crash,
+  but not after a clean stop. Its models are its children and stop with it.
+- **The config** is generated, not hand-written: `$J/deploy/config.json`. `$J` is the `--prefix`, `~/jarvis` by
+  default. Each selected model's tool entry comes from `deploy/mac/config.json.in`. Its booking and its residency
+  come from the profile, so the two never disagree: `always` for a warm model, `on_demand` for the rest. Settings
+  can change a model's residency later (see Residency below) without a reinstall. The daemon's settings come from the profile's
+  `deploy.daemon`, which holds `reserve_bytes` (see [Measured on the Mac](#measured-on-the-mac)).
+- **The log** is `$J/deploy/logs/daemon.log`. Each model's own log is under `$J/deploy/data/logs/`.
+
+| Do | Command |
 | --- | --- |
-| Qwen3.8 27B chat | `$J/chat/config.json`, written by the `chat/setup` step |
-| Drama 3 | `$J/qualify-drama3/config.json`, written by the `tts/config` step |
-| Whisper | the entry in [tools/speech/whisper/macos/README.md](../../tools/speech/whisper/macos/README.md), with your paths |
-| KnowLine-4B | [tools/decide/knowline/macos/config.example.json](../../tools/decide/knowline/macos/config.example.json) |
-| Qwen-Image 2.1 Turbo | [tools/image/qwen-mlx/config.example.json](../../tools/image/qwen-mlx/config.example.json) |
+| start, and wait until warm (`--no-wait`: until it answers) | `deploy/mac/start.sh` |
+| stop it and its models | `deploy/mac/stop.sh` |
+| state, build, models, memory | `deploy/mac/status.sh` |
+| pair a phone or the companion app (a code for 10 minutes) | `deploy/mac/pair.sh add "JJ's phone"` |
+| a token for an MCP client or a script | `deploy/mac/pair.sh token claude-code` |
+| what is missing, with its fix | `tools/install/doctor.sh --profile mac-apple-silicon` |
+| remove the agent (`--purge`: and `$J/deploy`; the models stay) | `deploy/mac/uninstall.sh` |
 
-Then run `zig-out/bin/localrouter serve --config FILE`. `tools/install/doctor.sh` still checks for the systemd
-service, so its service checks do not apply on a Mac.
+The scripts take the same settings as the install: `JARVIS` (the prefix), `PORT`, `UNIT` or `LABEL`. Pairing is
+off until `PAIRING_REQUIRED=1 deploy/mac/install.sh`. After that, every route but `/health` and `/v1/pair` needs a
+paired device's token, and the scripts use their own read-only token, `$J/deploy/operator.token`. With tailscale,
+the install also puts HTTPS for the tailnet on port 10443 (`--https-port`, 0 for none) in front of the loopback
+port.
 
 ## Per-model engines
 
@@ -124,9 +139,19 @@ Bookings are only the plan. To admit a request, the scheduler checks live memory
 `reserve_bytes` must cover the request, plus whatever earlier admissions have not allocated yet. `memory.available()`
 is the GPU ceiling less what is wired now, or the VM's available memory if that is smaller. When `budget_bytes` is set,
 the bookings must also stay under it. Loaded models count in the live check by what they actually wire, not by their
-bookings. `reserve_bytes` defaults to 8 GiB, so with the default a 1-reference edit needs 26 GiB available, which means
-the warm set may wire at most about 51.8 GiB. With a smaller reserve, the edit fits beside the voice set as long as
-what the warm set wires still leaves the reserve plus 18 GiB.
+bookings.
+
+**Why the Mac service reserves 3 GiB.** The Mac service sets `reserve_bytes` to 3 GiB, through the profile's
+`deploy.daemon`; the daemon's own default is 8 GiB.
+
+- On macOS, `memory.available()` is already capped by the GPU's wired ceiling, which keeps about 18 GiB of the 96
+  for the OS. So the reserve only has to cover what the ceiling does not.
+- With 8 GiB, a cold 1-reference edit needs 26 GiB available, so the warm set may wire at most about 51.8 GiB. It
+  wires more, so the edit unloads speech.
+- With 3 GiB, the edit needs 21 GiB available, so the warm set may wire up to about 56.8 GiB. The integration run
+  on the live Mac stack used these bookings and a 3 GiB reserve, and admitted the warm voice set plus a
+  1-reference edit (75.8 of 77.76 GiB booked).
+- A decision (KnowLine, 10 + 1.25 GiB) admits with room to spare. The GB10 deploy uses 3 GiB too.
 
 **Residency (`call`, docs/AGENTS.md).** Instead of keeping chat, Drama 3 and Whisper warm, an operator may set them
 to `call` (`POST /v1/tools/{id}/settings`): they load as a voice call connects, in parallel, and unload `idle_ttl_s`
@@ -273,8 +298,9 @@ Other differences:
 - `--peer-store` needs bash 4.
 - Hard-link reuse (`cp -l`) falls back to downloading, because BSD `cp` has no `-l`.
 - A `skeleton` profile with no models plans its host steps alone.
-- A profile without `deploy` ends after its steps. The Mac service, launchd rather than systemd, is not written
-  yet, and `doctor.sh`'s service checks are still the systemd ones.
+- A profile without `deploy` ends after its steps. Otherwise the run ends with the manifest's `deploy.install`,
+  then `deploy.start`: `deploy/jarvis` (a systemd user unit) on the GB10, `deploy/mac` (a launchd user agent) on
+  the Mac. `doctor.sh` checks whichever service it is.
 
 `bootstrap.sh --profile mac-apple-silicon --dry-run` runs on this Mac, and CI dry-runs every profile as before. On
 Linux, the `jarvis-gb10` plan is byte-identical before and after this change.
