@@ -22,6 +22,7 @@
         },
         onMessage: (data) => {
           hop(data);
+          loading(data);
           if (this.readyState === CompanionSocket.OPEN && this.onmessage) this.onmessage({ type: 'message', data });
         },
         onClose: (code, reason) => this.closed(code, reason),
@@ -43,6 +44,8 @@
     closed(code, reason) {
       if (this.readyState === CompanionSocket.CLOSED) return;
       this.readyState = CompanionSocket.CLOSED;
+      // However the call ends (the page, the app or the server), its loading banner goes with it.
+      loading(null);
       if (code !== 1000 && this.onerror) this.onerror({ type: 'error' });
       if (this.onclose) this.onclose({ type: 'close', code, reason: reason || '', wasClean: code === 1000 });
     }
@@ -71,6 +74,44 @@
       if (typeof dbg === 'function') dbg('app.audio_hop', stats); // eslint-disable-line no-undef
     }
   }
+  // A call whose voice models load when it starts: the app sends its banner (src/app/models.ts `callLoading`) with
+  // each `localrouter.session.loading`, and `localrouter.session.ready` ends it. A disabled voice model stops it with
+  // what to do. Null (the call closed) removes it.
+  let banner = null;
+  let bannerTimer = 0;
+  function loading(data) {
+    let view = null;
+    if (data !== null) {
+      if (typeof data !== 'string' || data.indexOf('"lr_loading"') < 0) return;
+      try {
+        view = JSON.parse(data).lr_loading;
+      } catch { return; }
+      if (!view) return;
+    }
+    clearTimeout(bannerTimer);
+    if (!view) {
+      if (banner) banner.remove();
+      banner = null;
+      return;
+    }
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'lr-loading';
+      banner.setAttribute('role', 'status');
+      banner.innerHTML = '<b></b><span></span><i><em></em></i>';
+      document.body.appendChild(banner);
+    }
+    banner.querySelector('b').textContent = view.text;
+    banner.querySelector('span').textContent = view.detail;
+    const bar = banner.querySelector('i');
+    // Stopped (a voice model is disabled): the message stays until the call closes, with no bar to wait on.
+    bar.hidden = Boolean(view.stopped);
+    banner.dataset.stopped = String(Boolean(view.stopped));
+    bar.dataset.indeterminate = String(view.progress === null);
+    bar.querySelector('em').style.width = view.progress === null ? '' : `${Math.round(view.progress * 100)}%`;
+    banner.dataset.done = String(view.done);
+    if (view.done) bannerTimer = setTimeout(() => loading(null), 1800);
+  }
   CompanionSocket.CONNECTING = 0;
   CompanionSocket.OPEN = 1;
   CompanionSocket.CLOSING = 2;
@@ -92,7 +133,17 @@
     const style = document.createElement('style');
     style.textContent = 'label.field:has(#key){display:none}' +
       '.top .lr-beta{flex:none;padding:2px 8px;border-radius:999px;border:1px solid var(--amber);background:var(--amber-soft);' +
-      'color:var(--text);font-size:10.5px;font-weight:700;letter-spacing:.6px;line-height:16px;text-transform:uppercase;cursor:default}';
+      'color:var(--text);font-size:10.5px;font-weight:700;letter-spacing:.6px;line-height:16px;text-transform:uppercase;cursor:default}' +
+      '.lr-loading{position:fixed;z-index:50;top:64px;left:50%;transform:translateX(-50%);min-width:280px;max-width:min(520px,90vw);' +
+      'padding:10px 14px;border-radius:14px;border:1px solid var(--amber);background:var(--surface);color:var(--text);' +
+      'box-shadow:0 6px 24px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:4px;font-size:13px}' +
+      '.lr-loading span{color:var(--muted);font-size:12px}.lr-loading[data-done=true]{border-color:var(--green)}' +
+      '.lr-loading[data-stopped=true]{border-color:var(--red)}.lr-loading i[hidden]{display:none}' +
+      '.lr-loading i{display:block;height:4px;border-radius:999px;background:var(--raised);overflow:hidden}' +
+      '.lr-loading em{display:block;height:100%;background:var(--amber);transition:width .8s}' +
+      '.lr-loading[data-done=true] em{background:var(--green)}' +
+      '.lr-loading i[data-indeterminate=true] em{width:30%;animation:lr-slide 1.4s ease-in-out infinite}' +
+      '@keyframes lr-slide{0%{margin-left:-30%}100%{margin-left:100%}}';
     document.head.appendChild(style);
     // The desktop app is a beta: a small permanent pill after the conversation's title, in the top bar's own row, so it
     // takes its own space (the title ellipsizes first) and never covers a control.

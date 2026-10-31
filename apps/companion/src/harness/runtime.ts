@@ -69,7 +69,7 @@ export function voiceRegistry(local: Tool[], picture: Tool[], handoff: VideoHand
 }
 
 /** What computer use says on a computer that runs LocalRouter but has not paired with a Spark (yet, or any more). */
-export const UNPAIRED = 'LocalRouter is open on this computer but not paired with a Spark yet, so computer use has nothing to decide its steps: pair it on LocalRouter’s Connect page. Fixed controls (open or quit an app, volume, media, dark mode) and reading the screen work already.'
+export const UNPAIRED = 'LocalRouter is open on this computer but not paired with a LocalRouter server yet, so computer use has nothing to decide its steps: pair it on LocalRouter’s Connect page. Fixed controls (open or quit an app, volume, media, dark mode) and reading the screen work already.'
 
 /** A call's tools as the requester the approvals and the audit name: "<assistant> (voice)", read when asked. */
 export function voiceCaller(assistant: () => string): Caller {

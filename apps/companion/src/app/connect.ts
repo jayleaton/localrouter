@@ -68,7 +68,7 @@ export function callRefusal(caps: Capabilities, base: string): string | null {
     return null
   }
   if (host === 'localhost' || host.startsWith('127.') || host === '::1') return null
-  return 'the Spark answers voice calls from itself only: set "voice": {"remote": true} in its config (the default for a box on the network with pairing on) and restart it'
+  return 'the LocalRouter server answers voice calls from itself only: set "voice": {"remote": true} in its config (the default for a box on the network with pairing on) and restart it'
 }
 
 /** The client tool mode this app's calls need (contract 2026-10-23). */
@@ -114,13 +114,13 @@ export function connectView(i: ConnectInput): ConnectView {
   let address: Step
   if (i.errors.address) address = { id: 'address', status: 'error', summary: i.errors.address.title }
   else if (i.paired || i.draft) address = { id: 'address', status: 'done', summary: server ? `${base} · ${describeServer(server)}` : base }
-  else address = { id: 'address', status: 'todo', summary: 'Where your Spark answers' }
+  else address = { id: 'address', status: 'todo', summary: 'Where your LocalRouter server answers' }
 
   let code: Step
-  if (address.status !== 'done') code = { id: 'code', status: 'todo', summary: 'A one-time code from the Spark' }
+  if (address.status !== 'done') code = { id: 'code', status: 'todo', summary: 'A one-time code from the server' }
   else if (i.errors.code) code = { id: 'code', status: 'error', summary: i.errors.code.title }
   else if (i.paired && !repairing) code = { id: 'code', status: 'done', summary: 'Paired' }
-  else code = { id: 'code', status: 'todo', summary: repairing ? 'Enter a new code to replace this computer’s token' : 'A one-time code from the Spark' }
+  else code = { id: 'code', status: 'todo', summary: repairing ? 'Enter a new code to replace this computer’s token' : 'A one-time code from the server' }
 
   let connection: Step
   if (!i.paired || repairing) connection = { id: 'connection', status: 'todo', summary: 'After pairing' }
@@ -164,7 +164,7 @@ export function scopeLabel(scope: string): string {
 }
 
 /** Whether a token with `scopes` may use a service scope: `all` (the default), `voice` or `mcp` (or none listed) grants every one. */
-function allows(scopes: string[], scope: string): boolean {
+export function allows(scopes: string[], scope: string): boolean {
   return scopes.length === 0 || scopes.includes('all') || scopes.includes('voice') || scopes.includes('mcp') || scopes.includes(scope)
 }
 
@@ -188,7 +188,7 @@ export function capabilitiesOf(caps: Capabilities, scopes: string[], base = ''):
   const tools = caps.mcp?.tools ?? []
   return [
     row('chat', 'Chat', Boolean(caps.chat?.available), 'inference', chatModels.length ? chatModels.join(', ') : 'available'),
-    voice.ok && refusal ? { ...voice, ok: false, detail: 'answered on the Spark itself only: voice.remote is off there' } : voice,
+    voice.ok && refusal ? { ...voice, ok: false, detail: 'answered on the server itself only: voice.remote is off there' } : voice,
     row('images', 'Pictures', have.has('text_to_image'), 'media', media.image_edit ? 'make and edit' : 'make'),
     row('video', 'Video', have.has('text_to_video') || have.has('image_to_video'), 'media', [have.has('text_to_video') && 'from text', media.image_to_video && 'from a picture'].filter(Boolean).join(', ') || 'available'),
     row('speech', 'Speech', have.has('text_to_speech'), 'media', 'text to speech'),
@@ -211,7 +211,7 @@ export function connectionOf(caps: Capabilities, who: WhoAmI, at: number, base =
     scopes: scopes.map((name) => ({ name, label: scopeLabel(name) })),
     pairing_required: required,
     capabilities: capabilitiesOf(caps, scopes, base),
-    ...(who.paired ? {} : { warning: 'Connected, but the Spark does not know this computer’s token. It works only while pairing is off on the Spark: re-pair to keep working when it is turned on.' }),
+    ...(who.paired ? {} : { warning: 'Connected, but the server does not know this computer’s token. It works only while pairing is off on the server: re-pair to keep working when it is turned on.' }),
   }
 }
 
@@ -240,7 +240,7 @@ function chain(error: unknown): Array<{ name?: string; code?: string; message?: 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export function tooOld(): ConnectError {
-  return { kind: 'too_old', title: 'This Spark’s LocalRouter is too old for this app', hint: 'The app needs client tool execution (contract 2026-10-23). Update LocalRouter on the Spark, then try again.' }
+  return { kind: 'too_old', title: 'This LocalRouter server is too old for this app', hint: 'The app needs client tool execution (contract 2026-10-23). Update LocalRouter on the server, then try again.' }
 }
 
 export function revoked(): ConnectError {
@@ -258,41 +258,41 @@ export function classify(error: unknown, stage: Stage, timeoutS: number): Connec
   const status = all.find((e) => e.status !== undefined)?.status
 
   if (error instanceof PlainHttpError) return plainHttp(error)
-  if (error instanceof AddressError) return { kind: 'invalid_address', title: 'That is not a Spark address', hint: `${error.message}. It looks like https://your-spark.your-tailnet.ts.net:10443.` }
-  if (error instanceof CodeError) return { kind: 'code_format', title: 'That is not a pairing code', hint: 'A code is 8 letters and digits, like 7KQ2-M9XD, as `pair.sh add` printed it.' }
+  if (error instanceof AddressError) return { kind: 'invalid_address', title: 'That is not a LocalRouter server address', hint: `${error.message}. It looks like https://your-server.your-tailnet.ts.net:10443, or http://127.0.0.1:PORT on this computer.` }
+  if (error instanceof CodeError) return { kind: 'code_format', title: 'That is not a pairing code', hint: 'A code is 8 letters and digits, like 7KQ2-M9XD, as `localrouter pair add` printed it.' }
   if (status !== undefined) {
-    if (stage === 'code' && status === 401) return { kind: 'wrong_code', title: 'The Spark did not accept that code', hint: 'It is wrong, expired (codes last 10 minutes) or already used. Make a new one on the Spark and enter it here. After five wrong codes in 10 minutes the Spark drops every pending code.' }
-    if (stage === 'code' && status === 400) return { kind: 'code_format', title: 'The Spark refused that code', hint: messageOf(error) }
+    if (stage === 'code' && status === 401) return { kind: 'wrong_code', title: 'The server did not accept that code', hint: 'It is wrong, expired (codes last 10 minutes) or already used. Make a new one on the server and enter it here. After five wrong codes in 10 minutes the server drops every pending code.' }
+    if (stage === 'code' && status === 400) return { kind: 'code_format', title: 'The server refused that code', hint: messageOf(error) }
     if (stage === 'connection' && (status === 401 || status === 403)) return { ...revoked(), detail: messageOf(error) }
-    if (status === 404 || status === 405) return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'Check the port: a LocalRouter Spark answers on the https:// address `tailscale serve` gives it, usually :10443.', detail: `HTTP ${status}` }
-    return { kind: 'server', title: `The Spark answered with an error (HTTP ${status})`, hint: messageOf(error), detail: `HTTP ${status}` }
+    if (status === 404 || status === 405) return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'Check the port: a LocalRouter server answers on the https:// address `tailscale serve` gives it (usually :10443), or on its own port.', detail: `HTTP ${status}` }
+    return { kind: 'server', title: `The server answered with an error (HTTP ${status})`, hint: messageOf(error), detail: `HTTP ${status}` }
   }
   // fetch refuses the Fetch standard's blocked ports (9, 25, 6000...) before connecting.
   if (all.some((e) => e.message === 'bad port'))
-    return { kind: 'invalid_address', title: 'This app cannot use that port', hint: 'Some ports (like 25 or 6000) are blocked for web requests. Use the port `tailscale serve` gives the Spark, usually :10443.', detail: 'bad port' }
+    return { kind: 'invalid_address', title: 'This app cannot use that port', hint: 'Some ports (like 25 or 6000) are blocked for web requests. Use the port `tailscale serve` gives the server, usually :10443.', detail: 'bad port' }
   if (all.some((e) => e.name === 'TimeoutError' || (e.code !== undefined && TIMEOUT_CODES.has(e.code))))
-    return { kind: 'timeout', title: `No answer within ${timeoutS} s`, hint: 'The Spark may be off or asleep, or this Mac is not on the tailnet right now. Check Tailscale on both, then try again.', detail }
+    return { kind: 'timeout', title: `No answer within ${timeoutS} s`, hint: 'The server may be off or asleep, or this Mac is not on the tailnet right now. Check Tailscale on both, then try again.', detail }
   if (codes.some((c) => UNREACHABLE_CODES.has(c)))
-    return { kind: 'unreachable', title: 'This Mac cannot reach that host', hint: 'No such name on this network. Is Tailscale running and signed in on this Mac? Check the name against `tailscale status` on the Spark.', detail }
+    return { kind: 'unreachable', title: 'This Mac cannot reach that host', hint: 'No such name on this network. Is Tailscale running and signed in on this Mac? Check the name against `tailscale status` on the server.', detail }
   if (codes.includes('ECONNREFUSED'))
-    return { kind: 'refused', title: 'The host answered, but nothing listens on that port', hint: 'Is LocalRouter running on the Spark, and `tailscale serve` set up? Use the address `pair.sh add` prints.', detail }
+    return { kind: 'refused', title: 'The host answered, but nothing listens on that port', hint: 'Is LocalRouter running on the server, and `tailscale serve` set up? Use the address `localrouter pair add` prints.', detail }
   if (codes.some((c) => c === 'ERR_SSL_WRONG_VERSION_NUMBER' || c === 'EPROTO') || all.some((e) => /wrong version number/i.test(e.message ?? '')))
-    return { kind: 'tls', title: 'That port does not speak HTTPS', hint: 'It answers plain HTTP. Use the https:// address `tailscale serve` gives the Spark (usually :10443), or http:// with a tailnet address and the daemon’s own port.', detail }
+    return { kind: 'tls', title: 'That port does not speak HTTPS', hint: 'It answers plain HTTP. Use the https:// address `tailscale serve` gives the server (usually :10443), or http:// with a tailnet address and the daemon’s own port.', detail }
   if (codes.some((c) => c === 'CERT_HAS_EXPIRED'))
-    return { kind: 'tls', title: 'The Spark’s certificate has expired', hint: 'On the Spark, renew it: `tailscale cert` (or restart `tailscale serve`, which renews it), then try again.', detail }
+    return { kind: 'tls', title: 'The server’s certificate has expired', hint: 'On the server, renew it: `tailscale cert` (or restart `tailscale serve`, which renews it), then try again.', detail }
   if (codes.some((c) => TLS_CODES.test(c)))
-    return { kind: 'tls', title: 'This Mac does not trust the Spark’s certificate', hint: 'Use the Spark’s full https://….ts.net name from `tailscale serve`: an IP address or a short name does not match its certificate.', detail }
+    return { kind: 'tls', title: 'This Mac does not trust the server’s certificate', hint: 'Use the server’s full https://….ts.net name from `tailscale serve`: an IP address or a short name does not match its certificate.', detail }
   if (all.some((e) => e.name === 'SyntaxError'))
     return { kind: 'not_localrouter', title: 'Something answered, but not LocalRouter', hint: 'The reply was not LocalRouter’s. Check the address and the port (usually :10443).', detail: messageOf(error) }
   if (codes.some((c) => c === 'ECONNRESET' || c === 'UND_ERR_SOCKET' || c.startsWith('HPE_')))
     return { kind: 'not_localrouter', title: 'The connection broke before LocalRouter answered', hint: 'Something else may be on that port, or it speaks HTTPS where you wrote http:// (or the other way round). Check the address.', detail }
-  return { kind: 'unreachable', title: stage === 'code' ? 'Pairing failed' : 'The Spark did not answer', hint: messageOf(error), detail }
+  return { kind: 'unreachable', title: stage === 'code' ? 'Pairing failed' : 'The server did not answer', hint: messageOf(error), detail }
 }
 
 /** Why plain http:// to a LAN address is refused (by design), and the tailnet name to use instead when it is known. */
 function plainHttp(e: PlainHttpError): ConnectError {
   const where = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|f[cd]|fe80:)/i.test(e.host) ? 'an address on your local network' : 'not this computer or a tailnet address'
-  const use = e.suggestion ? `Use its tailnet name instead: http://${e.suggestion}:${e.port}` : `Use the Spark’s tailnet name, like http://your-spark.your-tailnet.ts.net:${e.port}`
+  const use = e.suggestion ? `Use its tailnet name instead: http://${e.suggestion}:${e.port}` : `Use the server’s tailnet name, like http://your-server.your-tailnet.ts.net:${e.port}`
   return {
     kind: 'invalid_address',
     title: 'Plain http:// works only over the tailnet',

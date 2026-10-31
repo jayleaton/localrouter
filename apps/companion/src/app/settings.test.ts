@@ -67,8 +67,8 @@ describe('settings.json and the language a call hears', () => {
   it('the box’s declared languages narrow the choices; without them (or offline) the built-in list', () => {
     const models = [
       { id: 'other', kind: 'transcription', default_for: [], languages: ['fr'] },
-      { id: 'ears', kind: 'transcription', default_for: ['speech_to_text'], languages: ['de', 'en', 'xx'] },
-      { id: 'voice', kind: 'speech' },
+      { id: 'whisper-large-v3-turbo', kind: 'transcription', default_for: ['speech_to_text'], languages: ['de', 'en', 'xx'] },
+      { id: 'fishaudio/drama-3', kind: 'speech' },
     ]
     const heard = heardLanguages(models)
     expect(heard).toEqual(['de', 'en', 'xx'])
@@ -77,7 +77,7 @@ describe('settings.json and the language a call hears', () => {
     expect(sttLanguage('ja', heard)).toBe('en')
     expect(sttLanguage('ja', ['de'])).toBe('auto')
     expect(languageChoices(['de'])[0]).toEqual({ code: 'auto', name: 'Auto-detect' })
-    expect(heardLanguages([{ id: 'ears', kind: 'transcription' }])).toBeNull()
+    expect(heardLanguages([{ id: 'whisper-large-v3-turbo', kind: 'transcription' }])).toBeNull()
     expect(heardLanguages('nope')).toBeNull()
     expect(languageChoices(null)).toEqual(languageChoices())
   })

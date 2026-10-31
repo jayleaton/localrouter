@@ -206,7 +206,7 @@ export class ExecutorServer {
  * the app is not running; builds before that started it only after pairing, which is the other case named.
  */
 export function notRunning(code: string): string {
-  return `LocalRouter is not running on this computer (${code}): open the LocalRouter app. If it is open, it is an older build that starts computer control only once paired with a Spark: update it, or pair it on its Connect page.`
+  return `LocalRouter is not running on this computer (${code}): open the LocalRouter app. If it is open, it is an older build that starts computer control only once paired with a LocalRouter server: update it, or pair it on its Connect page.`
 }
 
 /** A caller's side of the socket: one request, its reply. */

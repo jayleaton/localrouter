@@ -5,7 +5,10 @@ import type { Spark } from './spark.ts'
  * unloads what the video needs and never the chat model), and after the video the voice models are asked back if the
  * box has not brought them back already. The box's scheduler decides; these only ask.
  */
-type ToolRow = { id: string; kind: string; state: string; keep_loaded?: boolean }
+type ToolRow = { id: string; kind: string; state: string; keep_loaded?: boolean; residency?: string }
+
+/** Kept loaded by the box: "always" residency, or `keep_loaded` on a box from before residency. */
+const alwaysLoaded = (t: ToolRow) => (t.residency === undefined ? t.keep_loaded === true : t.residency === 'always')
 
 const text = (r: { content: Array<{ text?: string }> }) => r.content.map((c) => c.text ?? '').join(' ').trim()
 
@@ -26,13 +29,13 @@ export async function prepareVideo(spark: Spark): Promise<{ ok: boolean; text: s
   }
 }
 
-/** The voice models (speech and transcription the box keeps loaded) back: what it asked for, or that they are back. */
+/** The voice models (speech and transcription the box keeps always loaded; one loaded per call comes back with the next call) back: what it asked for, or that they are back. */
 export async function restoreVoice(spark: Spark, waitS = 300): Promise<{ ok: boolean; text: string }> {
   try {
     const r = await spark.request('/v1/tools')
     if (!r.ok) return { ok: false, text: `the box said ${r.status}` }
     const rows = ((await r.json()) as { data: ToolRow[] }).data
-    const voice = rows.filter((t) => (t.kind === 'speech' || t.kind === 'transcription') && t.keep_loaded)
+    const voice = rows.filter((t) => (t.kind === 'speech' || t.kind === 'transcription') && alwaysLoaded(t))
     const away = voice.filter((t) => t.state !== 'ready')
     if (!away.length) return { ok: true, text: `back (${voice.map((t) => t.id).join(', ')})` }
     const results = await Promise.all(away.map(async (t) => {

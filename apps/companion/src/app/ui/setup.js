@@ -9,6 +9,20 @@ let discovered = null;
 // The Settings name field while the person edits it: a refresh does not overwrite what they typed.
 let assistantEdited = false;
 
+// The server's machine name once a check found one, kept per address so it shows while checking or offline.
+const SERVER_KEY = 'lr.settings.server';
+let knownServer = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(SERVER_KEY)) || {};
+  } catch {
+    return {};
+  }
+})();
+/** The server's machine name for this address, or '' when none is known. */
+const serverMachine = (base) => (base && knownServer.base === base && knownServer.machine) || '';
+/** `studio-test` or `box.tailnet.ts.net:10443`: what the header pill calls the server. */
+const serverLabel = (base) => serverMachine(base) || (base || '').replace(/^https?:\/\//, '');
+
 const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not needed here' };
 const PERM_DOT = { granted: 'ready', stale: 'failed', denied: 'failed' };
 
@@ -58,6 +72,92 @@ function chip(text, small) {
   return c;
 }
 
+// ------------------------------------------------ tabs (WAI-ARIA tabs: arrows, Home and End move and open; the last opened is remembered)
+const TAB_KEY = 'lr.settings.tab';
+const tabs = [...document.querySelectorAll('[role=tab]')];
+const tabOf = (el) => (el.closest('[role=tabpanel]') || { id: 'panel-general' }).id.replace(/^panel-/, '');
+let currentTab = 'general';
+
+function selectTab(id, focus) {
+  const tab = $(`tab-${id}`) ? id : 'general';
+  // Another tab starts at its top; the page scrolls under the sticky header and tab bar.
+  if (tab !== currentTab) window.scrollTo(0, 0);
+  currentTab = tab;
+  for (const t of tabs) {
+    const on = t.id === `tab-${tab}`;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute('aria-controls')).hidden = !on;
+    if (on && focus) t.focus();
+  }
+  try {
+    localStorage.setItem(TAB_KEY, tab);
+  } catch { /* storage off: the tab is not remembered */ }
+  if (tab === 'models') pollModels();
+}
+
+for (const t of tabs) {
+  const id = t.id.replace(/^tab-/, '');
+  t.onclick = () => selectTab(id);
+  t.addEventListener('keydown', (e) => {
+    const i = tabs.indexOf(t);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    selectTab(tabs[(next + tabs.length) % tabs.length].id.replace(/^tab-/, ''), true);
+  });
+}
+// The window's scroll keys, handled here so they always move the window: Chromium pages a text field the wheel last
+// passed over instead (with nothing focused, the first key does nothing), and its page step hides lines under the
+// sticky header and tab bar. PageUp and PageDown work from anywhere but a field; Space (Shift+Space up), the arrows,
+// Home and End when nothing is focused (the arrows, Home and End move between tabs on a tab).
+document.addEventListener('keydown', (e) => {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+  const free = !el || el === document.body || el.getAttribute('role') === 'tabpanel';
+  const page = Math.max(80, window.innerHeight - document.querySelector('.tabs').getBoundingClientRect().bottom - 40);
+  const by = { PageDown: page, PageUp: -page, ...(free ? { ' ': e.shiftKey ? -page : page, ArrowDown: 40, ArrowUp: -40 } : {}) }[e.key];
+  const to = free ? { Home: 0, End: document.scrollingElement.scrollHeight }[e.key] : undefined;
+  if (by === undefined && to === undefined) return;
+  e.preventDefault();
+  if (to !== undefined) window.scrollTo({ top: to, behavior: 'smooth' });
+  else window.scrollBy({ top: by, behavior: e.key.startsWith('Arrow') ? 'instant' : 'smooth' });
+});
+
+// The tab bar sticks under the header, whose height depends on the window's width.
+new window.ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${document.querySelector('.top').offsetHeight}px`)).observe(document.querySelector('.top'));
+
+let lastCurrent = null;
+/**
+ * Which tab shows: the remembered one, General until this computer is paired, and the tab of the next setup step when
+ * setup moves on (pairing done: the permissions). A tab with a step waiting or failing carries a dot.
+ */
+function followSteps(s) {
+  const c = s.connect;
+  if (lastCurrent === null) {
+    let saved = null;
+    try {
+      saved = localStorage.getItem(TAB_KEY);
+    } catch { /* no storage */ }
+    selectTab(s.paired ? saved || 'general' : 'general');
+  } else if (c.current !== lastCurrent && c.current !== 'done' && $(`step-${c.current}`)) {
+    selectTab(tabOf($(`step-${c.current}`)));
+  }
+  lastCurrent = c.current;
+  const attn = {};
+  for (const st of c.steps) {
+    const level = st.status === 'error' ? 'error' : st.status === 'active' ? 'active' : null;
+    const tab = $(`step-${st.id}`) && tabOf($(`step-${st.id}`));
+    if (level && tab && attn[tab] !== 'error') attn[tab] = level;
+  }
+  for (const t of tabs) {
+    const id = t.id.replace(/^tab-/, '');
+    if (attn[id]) t.dataset.attn = attn[id];
+    else delete t.dataset.attn;
+  }
+}
+
 function renderSteps(s) {
   const c = s.connect;
   const byId = Object.fromEntries(c.steps.map((st) => [st.id, st]));
@@ -80,11 +180,11 @@ function renderSteps(s) {
 
   // 2. Code: open once the address answers, while not paired or re-pairing.
   $('open-code').hidden = byId.address.status !== 'done' || (s.paired && !repairing);
-  $('pairCmd').textContent = `deploy/jarvis/pair.sh add "${$('name').value.trim() || s.name}"`;
+  $('pairCmd').textContent = `localrouter pair add "${$('name').value.trim() || s.name}"`;
   $('cancelRepair').hidden = !repairing;
   $('pair').textContent = repairing ? 'Pair again' : 'Pair';
   $('repairNote').hidden = !(repairing && s.device);
-  if (repairing && s.device) $('repairNote').textContent = `The Spark keeps the current entry (“${s.device.name}”) until you revoke it there: deploy/jarvis/pair.sh revoke ${s.device.id}`;
+  if (repairing && s.device) $('repairNote').textContent = `The server keeps the current entry (“${s.device.name}”) until you revoke it there: localrouter pair revoke ${s.device.id}`;
   alertCard($('err-code'), c.errors.code);
 
   // 3. Connection: the box, this token's scopes and what it can use; re-pair and disconnect.
@@ -99,7 +199,7 @@ function renderSteps(s) {
   if (conn && conn.ok) {
     $('serverText').textContent = [`LocalRouter ${conn.server.version}`, conn.server.machine && `on ${conn.server.machine}`, conn.server.contract && `· contract ${conn.server.contract}`].filter(Boolean).join(' ');
     const scopes = conn.scopes.length ? conn.scopes.map((sc) => chip(sc.name, sc.label)) : [chip('every service', '(paired before scopes)')];
-    if (!conn.pairing_required) scopes.push(chip('pairing is off on the Spark', ''));
+    if (!conn.pairing_required) scopes.push(chip('pairing is off on the server', ''));
     $('scopes').replaceChildren(...scopes);
     $('caps').replaceChildren(...conn.capabilities.map((cap) => {
       const li = document.createElement('li');
@@ -112,14 +212,14 @@ function renderSteps(s) {
       return li;
     }));
   }
-  // A token the Spark refuses: re-pairing is the way on.
+  // A token the server refuses: re-pairing is the way on.
   $('open').hidden = Boolean(conn && !conn.ok);
   $('repair').classList.toggle('primary', Boolean(conn && !conn.ok && conn.error.kind === 'revoked'));
   $('checkedAt').textContent = conn ? `Checked ${new Date(conn.at).toLocaleTimeString()}` : 'Checking…';
   $('confirmDisconnect').hidden = !confirming || !s.paired;
-  $('revokeCmd').textContent = `deploy/jarvis/pair.sh revoke ${s.device ? s.device.id : `"${s.name}"`}`;
+  $('revokeCmd').textContent = `localrouter pair revoke ${s.device ? s.device.id : `"${s.name}"`}`;
 
-  // The assistant's name: asked once after the first pairing, prefilled with the Spark's (Jarvis on a fresh box).
+  // The assistant's name: asked once after the first pairing, prefilled with the server's (Jarvis on a fresh box).
   $('open-assistant').hidden = !(byId.assistant && byId.assistant.status === 'active');
   if (!$('assistantName').value) $('assistantName').value = s.assistant.name;
   $('assistantStepNote').hidden = !s.assistant.unavailable;
@@ -127,7 +227,7 @@ function renderSteps(s) {
 
   // The header pill.
   const pill = $('linkPill');
-  const host = (s.base || '').replace(/^https?:\/\//, '').split(/[.:]/)[0];
+  const host = serverLabel(s.base);
   if (!s.paired) [pill.dataset.s, $('linkText').textContent] = ['offline', 'Not connected'];
   else if (!conn) [pill.dataset.s, $('linkText').textContent] = ['loading', `Checking ${host}…`];
   else if (!conn.ok) [pill.dataset.s, $('linkText').textContent] = ['failed', `${host}: ${conn.error.kind === 'revoked' ? 'needs re-pairing' : 'not reachable'}`];
@@ -192,7 +292,7 @@ function renderFound() {
     note.textContent = 'Looking for LocalRouter on your tailnet…';
     return;
   }
-  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this computer (or not signed in): start it to find your Spark here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
+  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this computer (or not signed in): start it to find your LocalRouter server here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
   box.hidden = discovered.found.length === 0;
   box.replaceChildren(...discovered.found.map((f) => {
     const b = document.createElement('button');
@@ -213,16 +313,23 @@ function renderFound() {
 
 function render(s) {
   last = s;
+  const conn = s.connect.connection;
+  if (conn && conn.ok && serverMachine(s.base) !== conn.server.machine) {
+    knownServer = { base: s.base, machine: conn.server.machine };
+    localStorage.setItem(SERVER_KEY, JSON.stringify(knownServer));
+  }
   $('version').textContent = s.version;
   if (!$('name').value) $('name').value = s.name;
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
   $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted by the operating system (the Keychain, Windows DPAPI or the Secret Service)' : 'for this run only (no keychain here)';
   if (s.stop_words) $('stopWords').textContent = s.stop_words;
   for (const n of document.querySelectorAll('.an')) n.textContent = s.assistant.name;
+  for (const n of document.querySelectorAll('.srv')) n.textContent = serverMachine(s.base) || 'your LocalRouter server';
   // A busy button's label is plain text for a moment (guarded), so this one is written whole.
   if (!$('grantControl').classList.contains('busy')) $('grantControl').textContent = `Let ${s.assistant.name} use this computer`;
   renderAssistant(s);
   renderSteps(s);
+  followSteps(s);
   renderPermissions(s);
   renderFound();
   $('control').checked = s.control;
@@ -260,22 +367,23 @@ function render(s) {
     li.append(t, b);
     return li;
   }));
-  // The executor runs before pairing: harnesses can be added any time (computer use itself waits for the Spark).
+  // The executor runs before pairing: harnesses can be added any time (computer use itself waits for the server).
   $('harnessNote').hidden = s.paired;
   $('legacy').checked = s.legacy.enabled;
   $('legacy').disabled = !s.paired;
-  $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? 'connected to the Spark' : 'connecting…') : '';
+  $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? `connected to ${serverMachine(s.base) || 'the server'}` : 'connecting…') : '';
 }
 
-/** Settings › Assistant: the name on the Spark, and its default voice as a hint (no voice is chosen here). */
+/** Settings › Assistant: the name on the server, and its default voice as a hint (no voice is chosen here). */
 function renderAssistant(s) {
   const a = s.assistant;
   if (!assistantEdited) $('assistantEdit').value = a.name;
   $('assistantEdit').placeholder = a.default_name;
   $('assistantEdit').disabled = $('renameAssistant').disabled = !s.paired || Boolean(a.unavailable);
   $('assistantVoice').hidden = !a.voice;
-  $('assistantVoice').textContent = a.voice ? `${a.voice}: the Spark’s default voice for calls.` : '';
-  $('assistantNote').textContent = a.unavailable || (s.paired ? `Kept on the Spark: every device paired with it shows and speaks this name. Leave it empty for ${a.default_name}.` : 'Kept on the Spark: pair with it to change the name.');
+  $('assistantVoice').textContent = a.voice ? `${a.voice}: the server’s default voice for calls.` : '';
+  const srv = serverMachine(s.base) || 'your LocalRouter server';
+  $('assistantNote').textContent = a.unavailable || (s.paired ? `Kept on ${srv}: every device paired with it shows and speaks this name. Leave it empty for ${a.default_name}.` : `Kept on ${srv}: pair with it to change the name.`);
 }
 
 /** Runs `work` with `button` showing it is busy; an error the main process threw goes into `errorEl`. */
@@ -317,7 +425,7 @@ async function discover() {
   } catch {
     discovered = { tailnet: 'off', found: [] };
   }
-  // One box on the tailnet and nothing typed: that is the Spark.
+  // One server on the tailnet and nothing typed: that is the one.
   if (discovered.found.length === 1 && !$('base').value.trim()) $('base').value = discovered.found[0].base;
   renderFound();
 }
@@ -398,6 +506,152 @@ $('export').onclick = async () => {
   const path = await api.exportConversations();
   $('exported').textContent = path ? `saved to ${path}` : '';
 };
+
+// ------------------------------------------------ Settings › Models (the view comes computed: src/app/models.ts)
+const modelRows = new Map();
+/** Each row's inline refusal (a 409's message, say), until that row is changed again. */
+const modelErrors = {};
+let modelsBusy = false;
+
+function modelRow(id) {
+  if (modelRows.has(id)) return modelRows.get(id);
+  const el = (tag, cls, text) => Object.assign(document.createElement(tag), cls ? { className: cls } : {}, text ? { textContent: text } : {});
+  const root = el('div', 'model');
+  root.dataset.id = id;
+  const head = el('div', 'mhead');
+  const pill = el('span', 'pill');
+  const state = el('span');
+  pill.append(el('span', 'dot'), state);
+  const name = el('span', 'mname');
+  const meta = el('span', 'mmeta');
+  const off = el('span', 'off-badge', 'Disabled');
+  head.append(name, off, meta, pill);
+  const ctl = el('div', 'mctl');
+  const select = el('select');
+  select.setAttribute('aria-label', 'How the server keeps this model');
+  const idle = el('label', 'idle');
+  const ttl = el('input');
+  Object.assign(ttl, { type: 'number', min: '0', step: '1', inputMode: 'numeric' });
+  idle.append('Unload after', ttl, 'seconds idle');
+  const reset = el('button', 'btn', 'Reset to default');
+  ctl.append(select, idle, reset);
+  const hint = el('p', 'note');
+  const warn = el('div', 'alert warn');
+  const err = el('div', 'alert');
+  err.setAttribute('role', 'alert');
+  const failure = el('p', 'note');
+  root.append(head, ctl, hint, warn, err, failure);
+  const r = { root, pill, state, name, meta, off, select, idle, ttl, reset, hint, warn, err, failure, pending: false };
+  const change = (body, control) => saveModel(id, body, r, control);
+  select.onchange = () => change({ residency: select.value }, select);
+  ttl.onchange = () => change({ idle_ttl_s: ttl.value }, ttl);
+  ttl.addEventListener('keydown', (e) => e.key === 'Enter' && ttl.blur());
+  reset.onclick = () => change({ reset: true }, reset);
+  modelRows.set(id, r);
+  return r;
+}
+
+async function saveModel(id, body, r, control) {
+  r.pending = true;
+  control.classList.add('busy');
+  try {
+    const out = await api.modelSettings(id, body);
+    // A change that went through moves the budget for every row: no earlier refusal still holds.
+    if (out.error) modelErrors[id] = out.error;
+    else for (const k of Object.keys(modelErrors)) delete modelErrors[k];
+    renderModels(out.view);
+  } catch (error) {
+    modelErrors[id] = ipcMessage(error);
+  } finally {
+    r.pending = false;
+    control.classList.remove('busy');
+  }
+  // The box's own value again (a refused one included).
+  if (lastModels) renderModels(lastModels);
+}
+
+let lastModels = null;
+function renderModels(v) {
+  lastModels = v;
+  // Read-only: no change is pending, so no refusal is either.
+  if (v.read_only) for (const id of Object.keys(modelErrors)) delete modelErrors[id];
+  $('modelsIntro').textContent = v.intro;
+  $('modelsProblem').hidden = !v.problem;
+  $('modelsProblem').textContent = v.problem;
+  $('modelsReadOnly').hidden = !v.read_only;
+  $('modelsReadOnly').textContent = v.read_only;
+  const b = v.budget;
+  $('memBar').hidden = !b;
+  if (b) {
+    $('memAlways').style.width = `${b.always_pct}%`;
+    $('memBooked').style.width = `${b.booked_pct}%`;
+    $('memBar').dataset.over = String(b.over);
+    $('memText').textContent = b.text;
+    $('memBarImg').setAttribute('aria-label', b.text);
+  }
+  const seen = new Set();
+  const nodes = v.rows.map((row) => {
+    seen.add(row.id);
+    const r = modelRow(row.id);
+    r.pill.dataset.s = row.dot;
+    r.state.textContent = row.state;
+    r.name.replaceChildren(Object.assign(document.createElement('b'), { textContent: row.name }), Object.assign(document.createElement('small'), { textContent: row.kind }));
+    r.name.title = row.id;
+    r.meta.textContent = `${row.memory} · ${row.loads}`;
+    const editable = !v.read_only;
+    // A row being saved, or a field being typed in, keeps what the person did until the box answers.
+    if (!r.pending) {
+      if (r.select.options.length !== row.choices.length || [...r.select.options].some((o, i) => o.value !== row.choices[i].value)) {
+        r.select.replaceChildren(...row.choices.map((c) => Object.assign(document.createElement('option'), { value: c.value, textContent: c.label })));
+      }
+      r.select.value = row.residency;
+      if (document.activeElement !== r.ttl) r.ttl.value = String(row.idle_ttl_s);
+    }
+    r.select.disabled = r.ttl.disabled = !editable;
+    r.reset.disabled = !editable || row.is_default;
+    r.idle.hidden = !row.idle_shown;
+    r.root.dataset.disabled = String(row.disabled);
+    r.off.hidden = !row.disabled;
+    r.warn.hidden = !row.warning;
+    r.warn.textContent = row.warning;
+    r.hint.textContent = row.idle_shown ? `0 unloads it right after each use. ${row.default_text}.` : `${row.default_text}.`;
+    alertCard(r.err, modelErrors[row.id] ? { title: modelErrors[row.id] } : null);
+    r.failure.hidden = !row.error;
+    r.failure.textContent = row.error ? `Last error: ${row.error}` : '';
+    return r.root;
+  });
+  for (const id of [...modelRows.keys()]) if (!seen.has(id)) modelRows.delete(id);
+  if ($('models').children.length !== nodes.length || nodes.some((n, i) => $('models').children[i] !== n)) $('models').replaceChildren(...nodes);
+  // The models the server cannot run: counted, and listed with its reasons on request (read-only).
+  $('unsupported').hidden = !v.unsupported_text;
+  $('unsupportedText').textContent = v.unsupported_text;
+  $('unsupportedList').replaceChildren(...v.unsupported.map((m) => {
+    const li = document.createElement('li');
+    const b = Object.assign(document.createElement('b'), { textContent: m.name, title: m.id });
+    const kind = Object.assign(document.createElement('small'), { textContent: ` ${m.kind}` });
+    const why = Object.assign(document.createElement('span'), { className: 'note', textContent: m.reason });
+    li.append(b, kind, why);
+    return li;
+  }));
+  $('modelsAt').textContent = v.available ? `Read ${new Date(v.at).toLocaleTimeString()}` : '';
+}
+
+/** While the Models tab shows, the models' state is read every few seconds (one read at a time). */
+async function pollModels() {
+  if (document.hidden || modelsBusy || currentTab !== 'models') return;
+  modelsBusy = true;
+  try {
+    renderModels(await api.models());
+  } catch (error) {
+    $('modelsProblem').hidden = false;
+    $('modelsProblem').textContent = ipcMessage(error);
+  } finally {
+    modelsBusy = false;
+  }
+}
+setInterval(pollModels, 3000);
+document.addEventListener('visibilitychange', pollModels);
+pollModels();
 
 // The connection is checked when the window opens and again on focus once it is a minute old.
 async function refresh() {

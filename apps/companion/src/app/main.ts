@@ -9,7 +9,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
-import { AddressError, callRefusal, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
+import { AddressError, allows, callRefusal, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
 import { controlBox, controlTicked, everPaired, migrationDecision, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
@@ -18,6 +18,8 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
+import { callLoading, listedModels, modelNames, modelsView, voiceBlockers, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import type { Tools } from './models.ts'
 import { DEFAULT_LANGUAGE, heardLanguages, languageChoices, parseSettings, settingsText, sttLanguage, type Heard } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import { assistantNameProblem, assistantOf, DEFAULT_ASSISTANT, tidyAssistantName, voiceHint } from '../harness/assistant.ts'
@@ -369,7 +371,7 @@ function machineKind(): 'native' | 'fake' {
  */
 let executor: Executor | null = null
 
-export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark: pair it on the Connect page.'
+export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a LocalRouter server: pair it on the Connect page.'
 
 /** The person's grant for computer control, kept with the tokens; "Ask before each action" is a setting. */
 const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => saveSecrets(s) }, () => settings?.askEachAction === true)
@@ -530,7 +532,7 @@ function registerIpc() {
   // The voice page's realtime socket, bridged to a client-tools session.
   ipcMain.handle('rt:open', async (e) => {
     if (!fromPage(e, 'voice.html')) throw new Error('not allowed')
-    if (!runtime) throw new Error('LocalRouter is not paired with a Spark yet: open Settings')
+    if (!runtime) throw new Error('LocalRouter is not paired with a LocalRouter server yet: open Settings')
     // A box that keeps calls to itself says so in discovery: said once here, before a call that could only fail.
     const refusal = await new Spark(settings.base, '', timed(3)).capabilities().then((caps) => callRefusal(caps, settings.base), () => null)
     if (refusal) {
@@ -538,6 +540,10 @@ function registerIpc() {
       throw new Error(refusal)
     }
     if (process.platform === 'darwin') await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+    // The models as they are now, for the call's loading banner (load times, and a voice model the person disabled); the
+    // first event can come at once, so this is read first, but never holds a call up for long.
+    namesAt = 0
+    await Promise.race([readModels().catch(() => null), new Promise((r) => setTimeout(r, 1500))])
     const id = `rt${++seq}`
     const owner = e.sender
     // The page keeps the one conversation (typed and spoken) and mirrors it into the journal (`host:save`).
@@ -547,6 +553,11 @@ function registerIpc() {
         if (owner.isDestroyed() || !pageView(ev)) return
         // When this process had each piece of speech, so the page can tell a slow box from a slow hop to it.
         if (ev.type === 'response.audio.delta') ev.lr_main_ms = performance.timeOrigin + performance.now()
+        // A call whose voice models load when it starts: the shim's banner, estimated from each model's last load.
+        if (ev.type === 'localrouter.session.loading' || ev.type === 'localrouter.session.ready') {
+          const entries = lastTools?.entries ?? []
+          ev.lr_loading = callLoading(ev, Object.fromEntries(entries.map((t) => [t.id, t.last_load_ms])), names, modelsServer(), voiceBlockers(entries))
+        }
         owner.send('rt:event', id, JSON.stringify(ev))
       },
       onClose: (reason) => {
@@ -593,7 +604,7 @@ function registerIpc() {
   const running = new Map<string, AbortController>()
   host('host:tools', () => runtime?.chat.chat() ?? [])
   host('host:run', async (callId, name, args, utterance) => {
-    if (!runtime) return { ok: false, output: JSON.stringify({ error: 'LocalRouter is not paired with a Spark yet' }) }
+    if (!runtime) return { ok: false, output: JSON.stringify({ error: 'LocalRouter is not paired with a LocalRouter server yet' }) }
     const id = String(callId)
     const abort = new AbortController()
     running.set(id, abort)
@@ -650,7 +661,7 @@ function registerIpc() {
     return { ...(await state()), link_code: errors.address ? null : linkCode }
   })
   setup('setup:pair', async (code, name) => {
-    if (!draft) throw new Error('Check the Spark address first')
+    if (!draft) throw new Error('Check the server address first')
     delete errors.code
     try {
       const c = normalizeCode(String(code ?? ''))
@@ -710,7 +721,7 @@ function registerIpc() {
     const current = settings.assistant
     const unchanged = wanted ? wanted === assistantName() : !current?.custom
     if (!unchanged) {
-      if (!runtime) throw new Error('Connect to your Spark first: the name is kept there, for every device.')
+      if (!runtime) throw new Error('Connect to your LocalRouter server first: the name is kept there, for every device.')
       if (assistantAvailable === false) throw new Error(OLD_BOX)
       try {
         useAssistant(await new Spark(settings.base, loadSecrets().token, timed(CHECK_S)).renameAssistant(wanted))
@@ -784,7 +795,7 @@ function registerIpc() {
   })
   setup('setup:legacy', async (enabled, code) => {
     if (enabled) {
-      if (!settings.base) throw new Error('Pair with your Spark first')
+      if (!settings.base) throw new Error('Pair with your LocalRouter server first')
       const p = await pair(settings.base, String(code), `${settings.name} (computer control for older clients)`)
       saveSecrets({ ...loadSecrets(), legacy_token: p.token })
     } else saveSecrets({ ...loadSecrets(), legacy_token: '' })
@@ -837,6 +848,23 @@ function registerIpc() {
     const j = runtime.journal
     writeFileSync(r.filePath, `${JSON.stringify({ format: 'localrouter-conversations/1', conversations: j.list().map((id) => j.export(id)) }, null, 1)}\n`, { mode: 0o600 })
     return r.filePath
+  })
+  // Settings › Models: read while the card shows (the page polls), changed one model at a time.
+  setup('setup:models', () => readModels())
+  setup('setup:modelSettings', async (id, change) => {
+    if (!runtime) throw new Error('LocalRouter is not paired with a server yet')
+    const body = settingsChange(change)
+    const token = loadSecrets().token
+    try {
+      await new Spark(settings.base, token, timed(CHECK_S)).toolSettings(String(id), body)
+      log.info('models.settings', { id: String(id), ...body })
+      return { view: await readModels(), error: null }
+    } catch (error) {
+      const why = settingsRefusal(error, modelsServer())
+      if (why.denied) manageRefused = token
+      log.warn('models.settings_refused', { id: String(id), error: error instanceof Error ? error.message : String(error) })
+      return { view: await readModels(), error: why.message }
+    }
   })
   setup('setup:openVoice', () => {
     showMain()
@@ -955,7 +983,7 @@ const timed = (s: number): Fetch => (input, init) => {
 
 /** The Spark's base URL from what was typed, or an AddressError (a PlainHttpError for http:// to a LAN host) saying why not. */
 function sparkBase(text: string): string {
-  if (!text) throw new AddressError('Enter the address your Spark answers on')
+  if (!text) throw new AddressError('Enter the address your LocalRouter server answers on')
   try {
     return normalizeBase(text)
   } catch (error) {
@@ -981,11 +1009,52 @@ async function checkConnection() {
   log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
 }
 
+// ------------------------------------------------------------------ models: which stay loaded (kept on the server)
+
+/** The last `/v1/tools` read (a call's loading banner estimates from its load times), and model names from `/v1/models`. */
+let lastTools: Tools | null = null
+let names: Record<string, string> = {}
+let needs: Record<string, number> = {}
+/** The server's machine name as list_models gave it, for when the connection has not been checked this run. */
+let listedMachine = ''
+let namesAt = 0
+/** The token the box refused a model change for (no `manage` scope): the card is read-only until it changes. */
+let manageRefused = ''
+
+/** Whether this pairing may change models: its scopes (when the box requires pairing), unless the box said no. */
+function mayManage(token: string): boolean {
+  if (token && manageRefused === token) return false
+  if (!connection?.ok || !connection.pairing_required) return true
+  return allows(connection.scopes.map((s) => s.name), 'manage')
+}
+
+/** The paired server as the Models card names it: its machine name when the connection check read one. */
+const modelsServer = () => serverName((connection?.ok ? connection.server.machine : '') || listedMachine)
+
+async function readModels() {
+  const at = Date.now()
+  const server = modelsServer()
+  if (!runtime) return modelsView({ tools: null, names, manage: false, server, problem: 'Pair with a LocalRouter server to see its models.', at })
+  const token = loadSecrets().token
+  const spark = new Spark(settings.base, token, timed(CHECK_S))
+  try {
+    // Names and sizes: list_models (sizes too: /v1/tools holds 0 bytes for a model not loaded), else /v1/models' names.
+    const fresh = Date.now() - namesAt < 60_000
+    const [tools, listed] = await Promise.all([spark.tools(), fresh ? null : spark.mcp('list_models', {}).then(listedModels, () => null)])
+    if (listed && Object.keys(listed.names).length) [names, needs, listedMachine, namesAt] = [listed.names, listed.needs, listed.machine, Date.now()]
+    else if (!fresh) [names, namesAt] = [modelNames(await spark.models().catch(() => null)), Date.now()]
+    lastTools = toolsOf(tools)
+    return modelsView({ tools: lastTools, names, needs, manage: mayManage(token), server, at })
+  } catch (error) {
+    return modelsView({ tools: null, names, manage: false, server, problem: `No answer from ${server}: ${error instanceof Error ? error.message : String(error)}`, at })
+  }
+}
+
 // ------------------------------------------------------------------ the assistant's name (kept on the Spark)
 
 /** Whether the Spark keeps the name: null until read, false on a box from before the setting. */
 let assistantAvailable: boolean | null = null
-const OLD_BOX = `This Spark’s LocalRouter does not keep an assistant name yet, so it stays ${DEFAULT_ASSISTANT}: update LocalRouter on the Spark to change it.`
+const OLD_BOX = `This LocalRouter server does not keep an assistant name yet, so it stays ${DEFAULT_ASSISTANT}: update LocalRouter there to change it.`
 
 /** The assistant's name: the Spark's as last read (kept in settings, so it shows offline), else the default. */
 function assistantName(): string {
@@ -1041,7 +1110,7 @@ function renameRefusal(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof SparkError && (error.status === 404 || error.status === 405)) return OLD_BOX
   if (error instanceof SparkError && (error.status === 401 || error.status === 403)) return `This computer’s pairing may not rename the assistant (that needs the manage scope): ${message}. Pair it again with a code made without --scopes, or rename it from a device that may.`
-  return `The Spark did not rename the assistant: ${message}`
+  return `The LocalRouter server did not rename the assistant: ${message}`
 }
 
 const TAILSCALE = tailscaleCandidates(process.platform, process.env)
@@ -1272,17 +1341,20 @@ async function smoke() {
         srv.close(() => resolve(port))
       })
     })
-    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind }))`)
+    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind, tabs: [...document.querySelectorAll("[role=tab]")].map((t) => { t.click(); return t.id.slice(4) + ":" + [...document.querySelectorAll("[role=tabpanel]")].filter((p) => !p.hidden).map((p) => p.id.slice(6)).join("+") }).join(","), scroll: [...document.querySelectorAll("[role=tab]")].map((t) => { window.scrollTo(0, 400); t.click(); const top = scrollY; const panel = document.getElementById(t.getAttribute("aria-controls")); window.scrollTo(0, 1e6); const bar = document.querySelector(".tabs").getBoundingClientRect(); return t.id.slice(4) + ":" + (top === 0 && panel.lastElementChild.getBoundingClientRect().bottom <= innerHeight + 1 && bar.top >= 0 && bar.bottom < innerHeight / 2 ? "ok" : "top " + top + ", last at " + Math.round(panel.lastElementChild.getBoundingClientRect().bottom) + " of " + innerHeight + ", bar " + Math.round(bar.top)) }).join(",") }))`)
     const page = result.page as { shim: boolean; bridge: boolean; beta: string }
     const icons = result.icons as { tray: { width: number }; window: { width: number } }
     const status = result.status as { computers: number; placement: string }
-    const setupPage = result.setup as { version: string; error: string }
+    const setupPage = result.setup as { version: string; error: string; tabs: string; scroll: string }
+    // Each settings tab shows its own panel and only it; in an 800×600 window each opens at its top and scrolls to its
+    // last element under the tab bar, which stays in view.
+    const tabsOk = setupPage.tabs === 'general:general,models:models,voice:voice,computer:computer,integrations:integrations' && setupPage.scroll === 'general:ok,models:ok,voice:ok,computer:ok,integrations:ok'
     type Echo = { method: string; url: string; type: string; bytes: number; clip: boolean; auth: string }
     const v = result.voices as { post: Echo; patch: Echo; del: Echo; list: Echo }
     const voices = v.post.method === 'POST' && v.post.url === '/v1/voices' && v.post.type.startsWith('multipart/form-data; boundary=') && v.post.clip && v.post.bytes > 4104 &&
       v.patch.method === 'PATCH' && v.patch.bytes === 13 && v.del.method === 'DELETE' && v.del.bytes === 0 && v.list.url === '/v1/voices?model=m' && v.list.auth === 'Bearer smoke-token'
     const unpaired = result.unpaired as { answered: boolean; computer_use: boolean | null; says: string }
-    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused' &&
+    ok = unpaired.answered && unpaired.computer_use === false && unpaired.says === 'not paired' && caps.ok && (caps.result as { computer_use?: boolean }).computer_use === true && page.shim && page.bridge && status.computers === 1 && status.placement === 'device_executor' && caps.ok && result.proxy === 200 && voices && setupPage.version === VERSION && setupPage.error === 'refused' && tabsOk &&
       page.beta === 'Beta' && icons.tray.width === 32 && icons.window.width === 1024
     // This OS's own platform, read only (what it detects and needs; nothing is clicked or typed): the CI job shows it.
     const native = await createPlatform('native', { dataDir: dir })
@@ -1332,7 +1404,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
   if (!keychain || !(await keychain.path()) || !existsSync(secretsPath())) return 'none'
   const previous = settings.secretsMigration
   if (o.interactive && !memorySecrets.token && previous?.state !== 'failed') {
-    void dialog.showMessageBox({ type: 'info', message: 'macOS will ask once to move your Spark login to the new storage', detail: 'Choose Always Allow (or Allow). It is the last time: LocalRouter keeps your login in its own keychain item from now on, and updates do not ask again.', buttons: ['OK'] })
+    void dialog.showMessageBox({ type: 'info', message: 'macOS will ask once to move your LocalRouter server login to the new storage', detail: 'Choose Always Allow (or Allow). It is the last time: LocalRouter keeps your login in its own keychain item from now on, and updates do not ask again.', buttons: ['OK'] })
   }
   const r = await migrateLegacy({ legacyPath: secretsPath(), previous, haveToken: Boolean(memorySecrets.token), run: runMigrationChild, timeoutMs: o.timeoutMs, log: (event, fields) => log.info(event, fields) })
   if (r.migration) {
@@ -1352,7 +1424,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
     }
   } else if (r.outcome === 'failed' && o.interactive) {
     showSetup()
-    void dialog.showMessageBox({ type: 'warning', message: 'Pair LocalRouter with your Spark again', detail: `Your Spark login from the older LocalRouter could not be moved (${r.migration?.reason ?? 'refused'}). Make a new pairing code on the Spark and enter it on the Connect page. LocalRouter will not ask the keychain about the old one again.`, buttons: ['OK'] })
+    void dialog.showMessageBox({ type: 'warning', message: 'Pair LocalRouter with your LocalRouter server again', detail: `Your server login from the older LocalRouter could not be moved (${r.migration?.reason ?? 'refused'}). Make a new pairing code on the server and enter it on the Connect page. LocalRouter will not ask the keychain about the old one again.`, buttons: ['OK'] })
   }
   return r.outcome
 }

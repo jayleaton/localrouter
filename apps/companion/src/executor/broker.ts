@@ -168,7 +168,7 @@ export const BACKGROUND_NOTE = 'It runs in the background as a virtual mouse: it
 export const CONTROL_OFF = 'Computer control is off on this computer. Turn it on in LocalRouter → Settings (This computer).'
 
 export const DISABLED_MESSAGE = 'Computer control is switched off on this computer'
-export const NO_DECIDER = 'computer use needs the decision service on the Spark, which is not connected'
+export const NO_DECIDER = 'computer use needs the decision service on the LocalRouter server, which is not connected'
 export const OWN_TARGET = 'LocalRouter’s own windows are never a target.'
 export const OWN_READ = 'LocalRouter’s own window is in front, and it is never read: bring the app you mean forward first.'
 const ACCESS_HINT = 'give LocalRouter the accessibility access it asks for in Settings'

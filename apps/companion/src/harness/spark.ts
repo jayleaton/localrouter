@@ -33,8 +33,8 @@ export class SparkError extends Error {
 export function normalizeBase(input: string): string {
   const raw = input.trim()
   const url = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`)
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('the Spark address is https://… (or http:// on this computer or the tailnet)')
-  if (url.username || url.password) throw new Error('the Spark address must not carry credentials')
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('the server address is https://… (or http:// on this computer or the tailnet)')
+  if (url.username || url.password) throw new Error('the server address must not carry credentials')
   if (url.protocol === 'http:' && !isPrivateHost(url.hostname)) throw new PlainHttpError(url.hostname.replace(/^\[|\]$/g, ''), url.port || '80')
   return `${url.protocol}//${url.host}`
 }
@@ -140,6 +140,21 @@ export class Spark {
     const r = await this.request('/v1/assistant', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) })
     if (!r.ok) throw await errorOf(r)
     return assistantOf(await r.json())
+  }
+
+  /** `/v1/tools`: each model's state and residency, and the memory budget (`read` scope). */
+  tools(): Promise<unknown> {
+    return this.json('/v1/tools')
+  }
+
+  /**
+   * Changes how the box keeps one model (`manage` scope): its residency, its idle time, or back to the defaults. The
+   * box applies it at once and keeps it; the answer is the model's entry. A 409 (the always-loaded set would not fit)
+   * throws a SparkError with the box's message.
+   */
+  toolSettings(id: string, change: { residency?: string; idle_ttl_s?: number; reset?: true }): Promise<unknown> {
+    // An id may hold a slash (`fishaudio/drama-3`): kept as a slash, as the box's routes read the id up to the verb.
+    return this.json(`/v1/tools/${id.split('/').map(encodeURIComponent).join('/')}/settings`, change)
   }
 
   /** One Chat Completions request (not streamed): the whole completion. */

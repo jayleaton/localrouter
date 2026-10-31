@@ -153,7 +153,7 @@ export function chatDecider(complete: Complete, extra: Record<string, unknown> =
           content = await complete(body)
         } catch (error) {
           if (!transient(error) || waited >= waitMs) {
-            if (waited > 0) throw new Error(`the decision service on the Spark did not come back within ${Math.round(waited / 1000)} s (${error instanceof Error ? error.message : String(error)})`)
+            if (waited > 0) throw new Error(`the decision service on the LocalRouter server did not come back within ${Math.round(waited / 1000)} s (${error instanceof Error ? error.message : String(error)})`)
             throw error
           }
           const step = Math.min(delay, waitMs - waited)

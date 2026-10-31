@@ -136,7 +136,7 @@ describe('a realtime socket the box refuses', () => {
     const s = new ClientToolsSession({ spark: refusing(voiceOnly), registry: new Registry(), dial: unopened, onClose: (r) => void closes.push(r) })
     const err = await s.connect().catch((e: unknown) => e)
     expect(err).toBeInstanceOf(RealtimeRefused)
-    expect((err as Error).message).toBe(`the Spark refused the call: ${voiceOnly}`)
+    expect((err as Error).message).toBe(`the LocalRouter server refused the call: ${voiceOnly}`)
     await flush()
     expect(closes).toEqual([])
   })
