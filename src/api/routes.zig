@@ -215,7 +215,7 @@ pub const ToolEntry = struct {
     last_load_ms: std.json.Value,
     loaded_since: std.json.Value,
     supported: bool, // false: it cannot run on this host (`unsupported_reason` says why); listed for diagnosis, settings refused
-    unsupported_reason: ?[]const u8,
+    unsupported_reason: std.json.Value, // a string, or null when supported
     priority: i32,
     keep_loaded: bool,
     spare_room_only: bool,
@@ -241,7 +241,7 @@ pub fn toolEntry(app: *App, a: std.mem.Allocator, i: usize) !ToolEntry {
     const why_not = try unsupported(app, a, i);
     return .{
         .supported = why_not == null,
-        .unsupported_reason = why_not,
+        .unsupported_reason = if (why_not) |w| .{ .string = w } else .null,
         .node = if (n.len > 0) n else null,
         .local = slot.tool.local(),
         .id = c.id,
