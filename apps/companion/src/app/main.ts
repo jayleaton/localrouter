@@ -371,7 +371,7 @@ function machineKind(): 'native' | 'fake' {
  */
 let executor: Executor | null = null
 
-export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark: pair it on the Connect page.'
+export const NO_APPROVAL_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a LocalRouter server: pair it on the Connect page.'
 
 /** The person's grant for computer control, kept with the tokens; "Ask before each action" is a setting. */
 const standing = new StoredStanding({ load: () => loadSecrets(), save: (s) => saveSecrets(s) }, () => settings?.askEachAction === true)
@@ -532,7 +532,7 @@ function registerIpc() {
   // The voice page's realtime socket, bridged to a client-tools session.
   ipcMain.handle('rt:open', async (e) => {
     if (!fromPage(e, 'voice.html')) throw new Error('not allowed')
-    if (!runtime) throw new Error('LocalRouter is not paired with a Spark yet: open Settings')
+    if (!runtime) throw new Error('LocalRouter is not paired with a LocalRouter server yet: open Settings')
     // A box that keeps calls to itself says so in discovery: said once here, before a call that could only fail.
     const refusal = await new Spark(settings.base, '', timed(3)).capabilities().then((caps) => callRefusal(caps, settings.base), () => null)
     if (refusal) {
@@ -604,7 +604,7 @@ function registerIpc() {
   const running = new Map<string, AbortController>()
   host('host:tools', () => runtime?.chat.chat() ?? [])
   host('host:run', async (callId, name, args, utterance) => {
-    if (!runtime) return { ok: false, output: JSON.stringify({ error: 'LocalRouter is not paired with a Spark yet' }) }
+    if (!runtime) return { ok: false, output: JSON.stringify({ error: 'LocalRouter is not paired with a LocalRouter server yet' }) }
     const id = String(callId)
     const abort = new AbortController()
     running.set(id, abort)
@@ -661,7 +661,7 @@ function registerIpc() {
     return { ...(await state()), link_code: errors.address ? null : linkCode }
   })
   setup('setup:pair', async (code, name) => {
-    if (!draft) throw new Error('Check the Spark address first')
+    if (!draft) throw new Error('Check the server address first')
     delete errors.code
     try {
       const c = normalizeCode(String(code ?? ''))
@@ -721,7 +721,7 @@ function registerIpc() {
     const current = settings.assistant
     const unchanged = wanted ? wanted === assistantName() : !current?.custom
     if (!unchanged) {
-      if (!runtime) throw new Error('Connect to your Spark first: the name is kept there, for every device.')
+      if (!runtime) throw new Error('Connect to your LocalRouter server first: the name is kept there, for every device.')
       if (assistantAvailable === false) throw new Error(OLD_BOX)
       try {
         useAssistant(await new Spark(settings.base, loadSecrets().token, timed(CHECK_S)).renameAssistant(wanted))
@@ -795,7 +795,7 @@ function registerIpc() {
   })
   setup('setup:legacy', async (enabled, code) => {
     if (enabled) {
-      if (!settings.base) throw new Error('Pair with your Spark first')
+      if (!settings.base) throw new Error('Pair with your LocalRouter server first')
       const p = await pair(settings.base, String(code), `${settings.name} (computer control for older clients)`)
       saveSecrets({ ...loadSecrets(), legacy_token: p.token })
     } else saveSecrets({ ...loadSecrets(), legacy_token: '' })
@@ -983,7 +983,7 @@ const timed = (s: number): Fetch => (input, init) => {
 
 /** The Spark's base URL from what was typed, or an AddressError (a PlainHttpError for http:// to a LAN host) saying why not. */
 function sparkBase(text: string): string {
-  if (!text) throw new AddressError('Enter the address your Spark answers on')
+  if (!text) throw new AddressError('Enter the address your LocalRouter server answers on')
   try {
     return normalizeBase(text)
   } catch (error) {
@@ -1054,7 +1054,7 @@ async function readModels() {
 
 /** Whether the Spark keeps the name: null until read, false on a box from before the setting. */
 let assistantAvailable: boolean | null = null
-const OLD_BOX = `This Spark’s LocalRouter does not keep an assistant name yet, so it stays ${DEFAULT_ASSISTANT}: update LocalRouter on the Spark to change it.`
+const OLD_BOX = `This LocalRouter server does not keep an assistant name yet, so it stays ${DEFAULT_ASSISTANT}: update LocalRouter there to change it.`
 
 /** The assistant's name: the Spark's as last read (kept in settings, so it shows offline), else the default. */
 function assistantName(): string {
@@ -1110,7 +1110,7 @@ function renameRefusal(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof SparkError && (error.status === 404 || error.status === 405)) return OLD_BOX
   if (error instanceof SparkError && (error.status === 401 || error.status === 403)) return `This computer’s pairing may not rename the assistant (that needs the manage scope): ${message}. Pair it again with a code made without --scopes, or rename it from a device that may.`
-  return `The Spark did not rename the assistant: ${message}`
+  return `The LocalRouter server did not rename the assistant: ${message}`
 }
 
 const TAILSCALE = tailscaleCandidates(process.platform, process.env)
@@ -1404,7 +1404,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
   if (!keychain || !(await keychain.path()) || !existsSync(secretsPath())) return 'none'
   const previous = settings.secretsMigration
   if (o.interactive && !memorySecrets.token && previous?.state !== 'failed') {
-    void dialog.showMessageBox({ type: 'info', message: 'macOS will ask once to move your Spark login to the new storage', detail: 'Choose Always Allow (or Allow). It is the last time: LocalRouter keeps your login in its own keychain item from now on, and updates do not ask again.', buttons: ['OK'] })
+    void dialog.showMessageBox({ type: 'info', message: 'macOS will ask once to move your LocalRouter server login to the new storage', detail: 'Choose Always Allow (or Allow). It is the last time: LocalRouter keeps your login in its own keychain item from now on, and updates do not ask again.', buttons: ['OK'] })
   }
   const r = await migrateLegacy({ legacyPath: secretsPath(), previous, haveToken: Boolean(memorySecrets.token), run: runMigrationChild, timeoutMs: o.timeoutMs, log: (event, fields) => log.info(event, fields) })
   if (r.migration) {
@@ -1424,7 +1424,7 @@ async function moveLegacySecrets(o: { interactive: boolean; timeoutMs?: number }
     }
   } else if (r.outcome === 'failed' && o.interactive) {
     showSetup()
-    void dialog.showMessageBox({ type: 'warning', message: 'Pair LocalRouter with your Spark again', detail: `Your Spark login from the older LocalRouter could not be moved (${r.migration?.reason ?? 'refused'}). Make a new pairing code on the Spark and enter it on the Connect page. LocalRouter will not ask the keychain about the old one again.`, buttons: ['OK'] })
+    void dialog.showMessageBox({ type: 'warning', message: 'Pair LocalRouter with your LocalRouter server again', detail: `Your server login from the older LocalRouter could not be moved (${r.migration?.reason ?? 'refused'}). Make a new pairing code on the server and enter it on the Connect page. LocalRouter will not ask the keychain about the old one again.`, buttons: ['OK'] })
   }
   return r.outcome
 }

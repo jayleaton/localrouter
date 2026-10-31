@@ -9,6 +9,20 @@ let discovered = null;
 // The Settings name field while the person edits it: a refresh does not overwrite what they typed.
 let assistantEdited = false;
 
+// The server's machine name once a check found one, kept per address so it shows while checking or offline.
+const SERVER_KEY = 'lr.settings.server';
+let knownServer = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(SERVER_KEY)) || {};
+  } catch {
+    return {};
+  }
+})();
+/** The server's machine name for this address, or '' when none is known. */
+const serverMachine = (base) => (base && knownServer.base === base && knownServer.machine) || '';
+/** `studio-test` or `box.tailnet.ts.net:10443`: what the header pill calls the server. */
+const serverLabel = (base) => serverMachine(base) || (base || '').replace(/^https?:\/\//, '');
+
 const PERM_WORD = { granted: 'granted', denied: 'denied', restricted: 'restricted', 'not-determined': 'not asked yet', 'not-granted': 'not granted', stale: 'kept from an older build', 'n/a': 'not needed here' };
 const PERM_DOT = { granted: 'ready', stale: 'failed', denied: 'failed' };
 
@@ -166,11 +180,11 @@ function renderSteps(s) {
 
   // 2. Code: open once the address answers, while not paired or re-pairing.
   $('open-code').hidden = byId.address.status !== 'done' || (s.paired && !repairing);
-  $('pairCmd').textContent = `deploy/jarvis/pair.sh add "${$('name').value.trim() || s.name}"`;
+  $('pairCmd').textContent = `localrouter pair add "${$('name').value.trim() || s.name}"`;
   $('cancelRepair').hidden = !repairing;
   $('pair').textContent = repairing ? 'Pair again' : 'Pair';
   $('repairNote').hidden = !(repairing && s.device);
-  if (repairing && s.device) $('repairNote').textContent = `The Spark keeps the current entry (“${s.device.name}”) until you revoke it there: deploy/jarvis/pair.sh revoke ${s.device.id}`;
+  if (repairing && s.device) $('repairNote').textContent = `The server keeps the current entry (“${s.device.name}”) until you revoke it there: localrouter pair revoke ${s.device.id}`;
   alertCard($('err-code'), c.errors.code);
 
   // 3. Connection: the box, this token's scopes and what it can use; re-pair and disconnect.
@@ -185,7 +199,7 @@ function renderSteps(s) {
   if (conn && conn.ok) {
     $('serverText').textContent = [`LocalRouter ${conn.server.version}`, conn.server.machine && `on ${conn.server.machine}`, conn.server.contract && `· contract ${conn.server.contract}`].filter(Boolean).join(' ');
     const scopes = conn.scopes.length ? conn.scopes.map((sc) => chip(sc.name, sc.label)) : [chip('every service', '(paired before scopes)')];
-    if (!conn.pairing_required) scopes.push(chip('pairing is off on the Spark', ''));
+    if (!conn.pairing_required) scopes.push(chip('pairing is off on the server', ''));
     $('scopes').replaceChildren(...scopes);
     $('caps').replaceChildren(...conn.capabilities.map((cap) => {
       const li = document.createElement('li');
@@ -198,14 +212,14 @@ function renderSteps(s) {
       return li;
     }));
   }
-  // A token the Spark refuses: re-pairing is the way on.
+  // A token the server refuses: re-pairing is the way on.
   $('open').hidden = Boolean(conn && !conn.ok);
   $('repair').classList.toggle('primary', Boolean(conn && !conn.ok && conn.error.kind === 'revoked'));
   $('checkedAt').textContent = conn ? `Checked ${new Date(conn.at).toLocaleTimeString()}` : 'Checking…';
   $('confirmDisconnect').hidden = !confirming || !s.paired;
-  $('revokeCmd').textContent = `deploy/jarvis/pair.sh revoke ${s.device ? s.device.id : `"${s.name}"`}`;
+  $('revokeCmd').textContent = `localrouter pair revoke ${s.device ? s.device.id : `"${s.name}"`}`;
 
-  // The assistant's name: asked once after the first pairing, prefilled with the Spark's (Jarvis on a fresh box).
+  // The assistant's name: asked once after the first pairing, prefilled with the server's (Jarvis on a fresh box).
   $('open-assistant').hidden = !(byId.assistant && byId.assistant.status === 'active');
   if (!$('assistantName').value) $('assistantName').value = s.assistant.name;
   $('assistantStepNote').hidden = !s.assistant.unavailable;
@@ -213,7 +227,7 @@ function renderSteps(s) {
 
   // The header pill.
   const pill = $('linkPill');
-  const host = (s.base || '').replace(/^https?:\/\//, '').split(/[.:]/)[0];
+  const host = serverLabel(s.base);
   if (!s.paired) [pill.dataset.s, $('linkText').textContent] = ['offline', 'Not connected'];
   else if (!conn) [pill.dataset.s, $('linkText').textContent] = ['loading', `Checking ${host}…`];
   else if (!conn.ok) [pill.dataset.s, $('linkText').textContent] = ['failed', `${host}: ${conn.error.kind === 'revoked' ? 'needs re-pairing' : 'not reachable'}`];
@@ -278,7 +292,7 @@ function renderFound() {
     note.textContent = 'Looking for LocalRouter on your tailnet…';
     return;
   }
-  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this computer (or not signed in): start it to find your Spark here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
+  note.textContent = discovered.tailnet === 'off' ? 'Tailscale is not running on this computer (or not signed in): start it to find your LocalRouter server here.' : discovered.found.length ? '' : 'No LocalRouter found on your tailnet: enter its address.';
   box.hidden = discovered.found.length === 0;
   box.replaceChildren(...discovered.found.map((f) => {
     const b = document.createElement('button');
@@ -299,12 +313,18 @@ function renderFound() {
 
 function render(s) {
   last = s;
+  const conn = s.connect.connection;
+  if (conn && conn.ok && serverMachine(s.base) !== conn.server.machine) {
+    knownServer = { base: s.base, machine: conn.server.machine };
+    localStorage.setItem(SERVER_KEY, JSON.stringify(knownServer));
+  }
   $('version').textContent = s.version;
   if (!$('name').value) $('name').value = s.name;
   for (const n of document.querySelectorAll('.nm')) n.textContent = s.name;
   $('secrets').textContent = s.secrets === 'keychain' ? 'encrypted by the operating system (the Keychain, Windows DPAPI or the Secret Service)' : 'for this run only (no keychain here)';
   if (s.stop_words) $('stopWords').textContent = s.stop_words;
   for (const n of document.querySelectorAll('.an')) n.textContent = s.assistant.name;
+  for (const n of document.querySelectorAll('.srv')) n.textContent = serverMachine(s.base) || 'your LocalRouter server';
   // A busy button's label is plain text for a moment (guarded), so this one is written whole.
   if (!$('grantControl').classList.contains('busy')) $('grantControl').textContent = `Let ${s.assistant.name} use this computer`;
   renderAssistant(s);
@@ -347,22 +367,23 @@ function render(s) {
     li.append(t, b);
     return li;
   }));
-  // The executor runs before pairing: harnesses can be added any time (computer use itself waits for the Spark).
+  // The executor runs before pairing: harnesses can be added any time (computer use itself waits for the server).
   $('harnessNote').hidden = s.paired;
   $('legacy').checked = s.legacy.enabled;
   $('legacy').disabled = !s.paired;
-  $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? 'connected to the Spark' : 'connecting…') : '';
+  $('legacyStatus').textContent = s.legacy.enabled ? (s.legacy.connected ? `connected to ${serverMachine(s.base) || 'the server'}` : 'connecting…') : '';
 }
 
-/** Settings › Assistant: the name on the Spark, and its default voice as a hint (no voice is chosen here). */
+/** Settings › Assistant: the name on the server, and its default voice as a hint (no voice is chosen here). */
 function renderAssistant(s) {
   const a = s.assistant;
   if (!assistantEdited) $('assistantEdit').value = a.name;
   $('assistantEdit').placeholder = a.default_name;
   $('assistantEdit').disabled = $('renameAssistant').disabled = !s.paired || Boolean(a.unavailable);
   $('assistantVoice').hidden = !a.voice;
-  $('assistantVoice').textContent = a.voice ? `${a.voice}: the Spark’s default voice for calls.` : '';
-  $('assistantNote').textContent = a.unavailable || (s.paired ? `Kept on the Spark: every device paired with it shows and speaks this name. Leave it empty for ${a.default_name}.` : 'Kept on the Spark: pair with it to change the name.');
+  $('assistantVoice').textContent = a.voice ? `${a.voice}: the server’s default voice for calls.` : '';
+  const srv = serverMachine(s.base) || 'your LocalRouter server';
+  $('assistantNote').textContent = a.unavailable || (s.paired ? `Kept on ${srv}: every device paired with it shows and speaks this name. Leave it empty for ${a.default_name}.` : `Kept on ${srv}: pair with it to change the name.`);
 }
 
 /** Runs `work` with `button` showing it is busy; an error the main process threw goes into `errorEl`. */
@@ -404,7 +425,7 @@ async function discover() {
   } catch {
     discovered = { tailnet: 'off', found: [] };
   }
-  // One box on the tailnet and nothing typed: that is the Spark.
+  // One server on the tailnet and nothing typed: that is the one.
   if (discovered.found.length === 1 && !$('base').value.trim()) $('base').value = discovered.found[0].base;
   renderFound();
 }

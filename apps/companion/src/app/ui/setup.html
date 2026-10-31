@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <span class="mark" aria-hidden="true"></span>
-  <div class="brand"><b>LocalRouter</b><small><span class="an">Jarvis</span> on this computer. The models run on your Spark; the tools, your history and every permission stay here.</small></div>
+  <div class="brand"><b>LocalRouter</b><small><span class="an">Jarvis</span> on this computer. The models run on <span class="srv">your LocalRouter server</span>; the tools, your history and every permission stay here.</small></div>
   <span class="pill" id="linkPill" data-s="offline"><span class="dot"></span><span id="linkText">Not connected</span></span>
 </header>
 
@@ -27,19 +27,19 @@
   <section class="panel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="0">
   <h2 class="group">Connect</h2>
   <ol class="steps">
-      <!-- 1. Where the Spark is -->
+      <!-- 1. Where the LocalRouter server is -->
       <li class="step" id="step-address" data-s="active">
         <div class="badge"><span>1</span></div>
         <div class="body">
-          <div class="head"><b>Spark address</b><span class="sum" id="sum-address"></span><button class="link" id="changeAddress" hidden>Change</button></div>
+          <div class="head"><b>Server address</b><span class="sum" id="sum-address"></span><button class="link" id="changeAddress" hidden>Change</button></div>
           <div class="open" id="open-address">
             <div class="field">
-              <input id="base" placeholder="https://your-spark.your-tailnet.ts.net:10443" autocomplete="off" spellcheck="false" aria-label="Spark address">
+              <input id="base" placeholder="https://your-server.your-tailnet.ts.net:10443" autocomplete="off" spellcheck="false" aria-label="LocalRouter server address">
               <button class="btn primary" id="checkAddress">Continue</button>
             </div>
             <div class="found" id="found" hidden></div>
             <p class="note" id="tailnetNote"></p>
-            <p class="note">The <code>https://</code> address <code>tailscale serve</code> gives your Spark; this computer must be on the same tailnet. Pasting the <code>localrouter://pair</code> link <code>pair.sh add</code> prints fills in the code too.</p>
+            <p class="note">The <code>https://</code> address <code>tailscale serve</code> gives your LocalRouter server (this computer must be on the same tailnet), or <code>http://127.0.0.1:PORT</code> when it runs on this computer. Pasting the <code>localrouter://pair</code> link <code>localrouter pair add</code> prints fills in the code too.</p>
             <div class="alert" id="err-address" role="alert" hidden></div>
           </div>
         </div>
@@ -51,10 +51,10 @@
         <div class="body">
           <div class="head"><b>Pairing code</b><span class="sum" id="sum-code"></span></div>
           <div class="open" id="open-code" hidden>
-            <p>On the Spark, make a code for this computer:</p>
-            <div class="code"><div class="code-h"><span>On the Spark</span><button id="copyCmd">Copy</button></div><pre id="pairCmd"></pre></div>
+            <p>On <span class="srv">your LocalRouter server</span>, make a code for this computer:</p>
+            <div class="code"><div class="code-h"><span>On <span class="srv">your LocalRouter server</span></span><button id="copyCmd">Copy</button></div><pre id="pairCmd"></pre></div>
             <ul class="explain">
-              <li><code>pair.sh add</code> makes a <b>one-time code</b> for the name you give it. It lasts <b>10 minutes</b> and works once.</li>
+              <li><code>pair add</code> makes a <b>one-time code</b> for the name you give it. It lasts <b>10 minutes</b> and works once. On a server installed with <code>deploy/jarvis</code>, run <code>deploy/jarvis/pair.sh</code> in place of <code>localrouter pair</code>.</li>
               <li>This computer gets <b>every feature</b>: chat and calls, pictures, video and speech, voice cloning, models and computer control. To narrow it, add <code>--scopes</code> (for example <code>--scopes inference,media,read</code>).</li>
               <li>The token it gives this computer is kept <span id="secrets"></span>. Nothing else leaves this computer.</li>
             </ul>
@@ -81,7 +81,7 @@
             <div class="alert" id="err-connection" role="alert" hidden></div>
             <div class="alert warn" id="warn-connection" hidden></div>
             <div id="linked" hidden>
-              <p class="kv"><span>Spark</span><b id="pairedBase"></b></p>
+              <p class="kv"><span>Address</span><b id="pairedBase"></b></p>
               <p class="kv"><span>Server</span><b id="serverText"></b></p>
               <p class="kv"><span>This computer</span><b id="pairedName"></b></p>
               <div class="kv"><span>Scopes</span><div class="chips" id="scopes"></div></div>
@@ -95,8 +95,8 @@
               <button class="btn danger" id="disconnect">Disconnect</button>
             </div>
             <div class="alert warn" id="confirmDisconnect" hidden>
-              <p><b>Disconnect from this Spark?</b></p>
-              <p>This computer forgets the Spark’s address and its token, and stops older clients from using it. To remove it from the Spark too, run <code id="revokeCmd"></code> there.</p>
+              <p><b>Disconnect from <span class="srv">your LocalRouter server</span>?</b></p>
+              <p>This computer forgets the server’s address and its token, and stops older clients from using it. To remove it from the server too, run <code id="revokeCmd"></code> there.</p>
               <div class="actions"><button class="btn danger" id="disconnectYes">Disconnect</button><button class="btn" id="disconnectNo">Cancel</button></div>
             </div>
             <p class="note" id="checkedAt"></p>
@@ -104,7 +104,7 @@
         </div>
       </li>
 
-      <!-- After a first pairing only: the assistant's name, kept on the Spark for every device -->
+      <!-- After a first pairing only: the assistant's name, kept on the server for every device -->
       <li class="step" id="step-assistant" data-s="todo" hidden>
         <div class="badge"><span>4</span></div>
         <div class="body">
@@ -115,7 +115,7 @@
               <input id="assistantName" maxlength="32" autocomplete="off" spellcheck="false" aria-label="Assistant name">
               <button class="btn primary" id="saveAssistant">Continue</button>
             </div>
-            <p class="note">The Spark keeps it, so every device paired with it shows and speaks the same name. Change it any time in Settings below.</p>
+            <p class="note">It is kept on <span class="srv">your LocalRouter server</span>, so every device paired with it shows and speaks the same name. Change it any time in Settings below.</p>
             <p class="note" id="assistantStepNote" hidden></p>
             <div class="alert" id="err-assistant" role="alert" hidden></div>
           </div>
@@ -133,7 +133,7 @@
         </div>
       </label>
       <p class="note" id="assistantVoice" hidden></p>
-      <p class="note" id="assistantNote">Kept on the Spark: every device paired with it shows and speaks this name. Leave it empty for the default.</p>
+      <p class="note" id="assistantNote">Kept on <span class="srv">your LocalRouter server</span>: every device paired with it shows and speaks this name. Leave it empty for the default.</p>
       <div class="alert" id="err-assistantEdit" role="alert" hidden></div>
     </section>
 
@@ -251,8 +251,8 @@
     </section>
 
     <section class="card">
-      <h3>Older clients (phone app, the Spark’s web page)</h3>
-      <p class="note">They ask the Spark to use this computer. Every request still goes through this computer’s rules and approvals. On the Spark: <code>deploy/jarvis/pair.sh add "<span class="nm">My Mac</span> helper" --scopes desktop_helper</code></p>
+      <h3>Older clients (phone app, the server’s web page)</h3>
+      <p class="note">They ask <span class="srv">your LocalRouter server</span> to use this computer. Every request still goes through this computer’s rules and approvals. On the server: <code>localrouter pair add "<span class="nm">My Mac</span> helper" --scopes desktop_helper</code></p>
       <label class="check"><input type="checkbox" id="legacy"> Let older clients use this computer</label>
       <div class="field"><input id="legacyCode" placeholder="XXXX-XXXX (only to switch it on)" aria-label="Code for older clients"><span class="note" id="legacyStatus"></span></div>
       <div class="alert" id="err-legacy" role="alert" hidden></div>

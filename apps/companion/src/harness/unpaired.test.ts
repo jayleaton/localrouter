@@ -15,7 +15,7 @@ import { TestGate } from '../executor/testing.ts'
  * call said "LocalRouter is not running"). Unpaired, an enrolled harness gets what needs no Spark and no approval
  * window, and every refusal says the real reason.
  */
-const NO_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a Spark.'
+const NO_WINDOW = 'Approving needs LocalRouter’s window, which opens once LocalRouter is paired with a LocalRouter server.'
 
 const dirs: string[] = []
 const opened: Executor[] = []

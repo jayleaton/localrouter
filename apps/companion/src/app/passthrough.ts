@@ -16,7 +16,7 @@ export const failure = (status: number, message: string) => json({ error: { mess
 
 /** The page's request, sent on to the Spark as the device (`spark` is null until the app is paired). */
 export async function proxy(spark: Pick<Spark, 'request'> | null, req: Request, pathAndQuery: string): Promise<Response> {
-  if (!spark) return failure(503, 'LocalRouter is not paired with a Spark yet: open Settings')
+  if (!spark) return failure(503, 'LocalRouter is not paired with a LocalRouter server yet: open Settings')
   const headers: Record<string, string> = {}
   for (const h of PASS_REQUEST) {
     const v = req.headers.get(h)
@@ -36,7 +36,7 @@ export async function proxy(spark: Pick<Spark, 'request'> | null, req: Request, 
     // fetch's own message is only "fetch failed": the reason (refused, reset, closed, a timeout) is its cause.
     const cause = error instanceof Error && error.cause ? (error.cause as { code?: string; message?: string }) : null
     const why = cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''
-    return failure(502, `the Spark did not answer: ${error instanceof Error ? error.message : String(error)}${why}`)
+    return failure(502, `the LocalRouter server did not answer: ${error instanceof Error ? error.message : String(error)}${why}`)
   }
 }
 

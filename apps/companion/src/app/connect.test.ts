@@ -29,7 +29,7 @@ describe('calls a box keeps to itself', () => {
   it('are refused before they start from another computer, with what to change on the box', () => {
     expect(callRefusal(local, 'http://100.111.125.210:8190')).toMatch(/answers voice calls from itself only: set "voice": \{"remote": true\}/)
     const row = capabilitiesOf(local, ['inference'], 'http://dgx-02:8190').find((r) => r.id === 'voice')
-    expect(row).toMatchObject({ ok: false, detail: 'answered on the Spark itself only: voice.remote is off there' })
+    expect(row).toMatchObject({ ok: false, detail: 'answered on the server itself only: voice.remote is off there' })
   })
   it('go ahead on the box itself, when it serves other machines, or when it does not say', () => {
     expect(callRefusal(local, 'http://127.0.0.1:8190')).toBeNull()
@@ -94,7 +94,7 @@ describe('the Connect steps', () => {
   it('shows a failed step as an error and keeps the steps after it waiting', () => {
     const e = { kind: 'unreachable' as const, title: 'This Mac cannot reach that host', hint: '' }
     expect(statuses(input({ errors: { address: e } }))).toMatchObject({ address: 'error', code: 'todo' })
-    const wrong = { kind: 'wrong_code' as const, title: 'The Spark did not accept that code', hint: '' }
+    const wrong = { kind: 'wrong_code' as const, title: 'The server did not accept that code', hint: '' }
     const v = connectView(input({ draft: { base: 'https://s', server, repair: false }, errors: { code: wrong } }))
     expect(v.current).toBe('code')
     expect(v.steps[1]).toMatchObject({ status: 'error', summary: wrong.title })
@@ -241,8 +241,8 @@ describe('what went wrong, from real failures', () => {
 
   it('certificate problems, as undici reports them', () => {
     const tls = (code: string) => new TypeError('fetch failed', { cause: Object.assign(new Error(code), { code }) })
-    expect(classify(tls('CERT_HAS_EXPIRED'), 'address', 8)).toMatchObject({ kind: 'tls', title: 'The Spark’s certificate has expired' })
-    expect(classify(tls('ERR_TLS_CERT_ALTNAME_INVALID'), 'address', 8)).toMatchObject({ kind: 'tls', title: 'This Mac does not trust the Spark’s certificate' })
+    expect(classify(tls('CERT_HAS_EXPIRED'), 'address', 8)).toMatchObject({ kind: 'tls', title: 'The server’s certificate has expired' })
+    expect(classify(tls('ERR_TLS_CERT_ALTNAME_INVALID'), 'address', 8)).toMatchObject({ kind: 'tls', title: 'This Mac does not trust the server’s certificate' })
     expect(classify(tls('DEPTH_ZERO_SELF_SIGNED_CERT'), 'connection', 8).kind).toBe('tls')
   })
 
@@ -271,13 +271,13 @@ describe('what went wrong, from real failures', () => {
       res.end(JSON.stringify({ error: { message: 'that pairing code is wrong, expired (codes last 10 minutes) or already used', type: 'invalid_request_error', code: 'invalid_pairing_code' } }))
     })
     const e = await caught(pair(`http://127.0.0.1:${port}`, '7KQ2-M9XD', 'Mac'))
-    expect(classify(e, 'code', 15)).toMatchObject({ kind: 'wrong_code', title: 'The Spark did not accept that code' })
+    expect(classify(e, 'code', 15)).toMatchObject({ kind: 'wrong_code', title: 'The server did not accept that code' })
     expect(classify(e, 'code', 15).hint).toMatch(/10 minutes/)
   })
 
   it('a code or address that cannot be right is caught before any request', () => {
     expect(classify(new CodeError('x'), 'code', 15).kind).toBe('code_format')
-    expect(classify(new AddressError('the Spark address must not carry credentials'), 'address', 8)).toMatchObject({ kind: 'invalid_address', hint: expect.stringContaining('credentials') })
+    expect(classify(new AddressError('the server address must not carry credentials'), 'address', 8)).toMatchObject({ kind: 'invalid_address', hint: expect.stringContaining('credentials') })
   })
 
   it('plain http:// to a LAN address says why, and names the tailnet address (real test, 2026-10-26)', async () => {
@@ -286,7 +286,7 @@ describe('what went wrong, from real failures', () => {
     const generic = classify(e, 'address', 8)
     expect(generic).toMatchObject({ kind: 'invalid_address', title: 'Plain http:// works only over the tailnet' })
     expect(generic.hint).toMatch(/local network.*unencrypted.*Tailscale/s)
-    expect(generic.hint).toContain('http://your-spark.your-tailnet.ts.net:8190')
+    expect(generic.hint).toContain('http://your-server.your-tailnet.ts.net:8190')
     ;(e as PlainHttpError).suggestion = 'dgx-02.tail1.ts.net'
     expect(classify(e, 'address', 8).hint).toContain('http://dgx-02.tail1.ts.net:8190')
   })

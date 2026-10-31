@@ -25,7 +25,7 @@ function box(reply: (method: string, path: string, body: unknown) => { status: n
   return { spark: new Spark('http://127.0.0.1:9', 'tok', f), asked }
 }
 
-describe('the Spark client for model settings', () => {
+describe('the server client for model settings', () => {
   it('reads /v1/tools and posts one model’s settings with the token', async () => {
     const { spark, asked } = box((m, _p, b) => (m === 'GET' ? { status: 200, json: body } : { status: 200, json: { ...speech, ...(b as object) } }))
     expect(toolsOf(await spark.tools()).entries.map((e) => e.id)).toEqual(['qwen3.8-27b', 'fishaudio/drama-3', 'qwen-image-2.1-turbo'])
@@ -155,11 +155,11 @@ describe('a call’s voice models loading', () => {
 
   it('a bar when every model has a last load time; ready ones count as done', () => {
     const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 5000 }, { id: W, state: 'ready', elapsed_ms: 2300 }] }, { [D]: 12500, [W]: null }, names)
-    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3 5 s of ~13 s · Whisper large-v3-turbo ready', progress: 0.7 })
+    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3: 5 s of ~13 s · Whisper large-v3-turbo: ready', progress: 0.7 })
   })
 
   it('a model never measured: no bar, the seconds so far; a slow load never shows full', () => {
-    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 3000 }] }, {}, names)).toMatchObject({ progress: null, detail: 'Fish Audio Drama 3 3 s' })
+    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 3000 }] }, {}, names)).toMatchObject({ progress: null, detail: 'Fish Audio Drama 3: 3 s' })
     expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'loading', elapsed_ms: 30_000 }] }, { [D]: 12500 }, names)?.progress).toBe(0.95)
   })
 
@@ -177,7 +177,7 @@ describe('a call’s voice models loading', () => {
 
   it('the server’s states while a call waits: queued, warming up, does not fit', () => {
     const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'warming', elapsed_ms: 13000 }, { id: W, state: 'queued', elapsed_ms: 200 }] }, { [D]: 12500, [W]: 2300 }, names)
-    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3 warming up · Whisper large-v3-turbo waiting', progress: null })
+    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3: warming up · Whisper large-v3-turbo: waiting', progress: null })
     expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'warming' }, { id: W, state: 'ready' }] }, {}, names)?.progress).toBe(0.98)
   })
 

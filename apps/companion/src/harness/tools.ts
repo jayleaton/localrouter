@@ -143,12 +143,12 @@ export function jobOf(r: McpResult): JobSummary {
   } catch {
     // An error text.
   }
-  throw new Error(text || 'the Spark did not start it')
+  throw new Error(text || 'the LocalRouter server did not start it')
 }
 
 async function generation(spark: Spark, kind: 'image' | 'video', tool: string, args: Record<string, unknown>, ctx: ToolContext, waitS: number) {
   const started = await spark.mcp(tool, { ...args, wait_s: 0, ...(kind === 'image' ? { inline_images: false } : {}) }, ctx.signal)
-  if (started.isError) throw new Error(started.content.map((c) => c.text ?? '').join(' ') || 'the Spark refused it')
+  if (started.isError) throw new Error(started.content.map((c) => c.text ?? '').join(' ') || 'the LocalRouter server refused it')
   const job = jobOf(started)
   ctx.emit?.({ type: 'job.created', call_id: ctx.callId, job_id: job.id, kind })
   const finish = (j: JobSummary) => {

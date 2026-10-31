@@ -58,7 +58,7 @@ const GENERATION_TOOLS = new Set(['generate_image', 'edit_image'])
 /** The box refused the realtime socket (401, 403): retrying cannot help; `message` is its reason. */
 export class RealtimeRefused extends Error {
   constructor(reason: string) {
-    super(`the Spark refused the call: ${reason}`)
+    super(`the LocalRouter server refused the call: ${reason}`)
     this.name = 'RealtimeRefused'
   }
 }

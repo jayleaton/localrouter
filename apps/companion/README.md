@@ -53,24 +53,24 @@ runs both workflows (plus the Intel Mac build, smoke-started under Rosetta) and 
    right-click LocalRouter in Applications › **Open** › **Open**, or in Terminal:
    `xattr -dr com.apple.quarantine /Applications/LocalRouter.app`. If macOS still says it is damaged, System Settings
    › Privacy & Security › **Open Anyway**.
-3. On the Spark, make a pairing code (ten minutes, single use):
-   `deploy/jarvis/pair.sh add "JJ's MacBook"` (no `--scopes`: every feature, voice cloning and computer control
+3. On the LocalRouter server, make a pairing code (ten minutes, single use):
+   `localrouter pair add "JJ's MacBook"` (`deploy/jarvis/pair.sh add` on a deploy/jarvis install; no `--scopes`: every feature, voice cloning and computer control
    included; add `--scopes LIST` to narrow it)
 4. LocalRouter's first window, **Connect**, walks these steps:
-   1. **Spark address**: the `https://<spark>.<tailnet>.ts.net:10443` one `tailscale serve` gives the box (the Mac must
-      be on the tailnet). If Tailscale runs on the Mac, the app asks each online peer's MagicDNS name for
+   1. **Server address**: the `https://<server>.<tailnet>.ts.net:10443` one `tailscale serve` gives the box (the Mac must
+      be on the tailnet), or `http://127.0.0.1:PORT` for a server on this computer. If Tailscale runs on the Mac, the app asks each online peer's MagicDNS name for
       `/v1/capabilities` and offers the LocalRouter boxes it finds (one found and nothing typed: filled in).
-      **Continue** checks the address before any code is spent. Pasting the `localrouter://pair?...` link `pair.sh add`
+      **Continue** checks the address before any code is spent. Pasting the `localrouter://pair?...` link `pair add`
       prints fills in the code too.
    2. **Pairing code**: the computer's name and the code, then **Pair**. The token is kept in the macOS keychain.
    3. **Connection**: the box (version, machine, contract), this token's scopes and what it can use (chat, calls,
       pictures, video, speech, transcription, decisions, MCP), checked when the window opens and again on focus.
-      **Re-pair** trades a new code for a new token (the old one works until then; revoke its entry on the Spark).
-      **Disconnect** forgets the Spark on this Mac.
+      **Re-pair** trades a new code for a new token (the old one works until then; revoke its entry on the server).
+      **Disconnect** forgets the server on this Mac.
    4. **Your assistant's name** (after this computer's first pairing only): what the assistant is called, prefilled
-      with the Spark's ("Jarvis" on a fresh box). The Spark keeps it (`PATCH /v1/assistant`, which needs the `manage`
+      with the server's ("Jarvis" on a fresh box). The server keeps it (`PATCH /v1/assistant`, which needs the `manage`
       scope), so every device paired with it shows and speaks the same name; Settings › Assistant changes it later.
-      A box from before the setting keeps "Jarvis". The app caches the name, so it shows while the Spark is offline.
+      A box from before the setting keeps "Jarvis". The app caches the name, so it shows while the server is offline.
    5. **Permissions**: **Microphone** (for calls), **Accessibility** (to control the Mac) and **Screen Recording** (for
       apps that hide their window from accessibility). Add LocalRouter in each System Settings list, then quit and
       reopen LocalRouter. macOS asks about **Automation** (System Events, Chrome, Music…) the first time the assistant

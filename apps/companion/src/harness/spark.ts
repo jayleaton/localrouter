@@ -33,8 +33,8 @@ export class SparkError extends Error {
 export function normalizeBase(input: string): string {
   const raw = input.trim()
   const url = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`)
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('the Spark address is https://… (or http:// on this computer or the tailnet)')
-  if (url.username || url.password) throw new Error('the Spark address must not carry credentials')
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('the server address is https://… (or http:// on this computer or the tailnet)')
+  if (url.username || url.password) throw new Error('the server address must not carry credentials')
   if (url.protocol === 'http:' && !isPrivateHost(url.hostname)) throw new PlainHttpError(url.hostname.replace(/^\[|\]$/g, ''), url.port || '80')
   return `${url.protocol}//${url.host}`
 }

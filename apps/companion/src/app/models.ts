@@ -336,6 +336,7 @@ export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string
   }
   let known = 0
   let sum = 0
+  // "Name: status": a name ending in a digit (Drama 3) never runs into the seconds.
   const parts = models.map((m) => {
     const name = nameOf(m)
     const elapsed = num(m.elapsed_ms)
@@ -343,19 +344,19 @@ export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string
     if (m.state === 'ready' || m.state === 'busy') {
       known++
       sum += 1
-      return `${name} ready`
+      return `${name}: ready`
     }
     if (m.state === 'warming') {
       known++
       sum += 0.95
     }
-    if (m.state !== 'loading') return `${name} ${WAITING[String(m.state)] ?? String(m.state)}`
+    if (m.state !== 'loading') return `${name}: ${WAITING[String(m.state)] ?? String(m.state)}`
     if (expected && expected > 0) {
       known++
       sum += Math.min(0.95, elapsed / expected)
-      return `${name} ${Math.round(elapsed / 1000)} s of ~${Math.max(1, Math.round(expected / 1000))} s`
+      return `${name}: ${Math.round(elapsed / 1000)} s of ~${Math.max(1, Math.round(expected / 1000))} s`
     }
-    return `${name} ${Math.round(elapsed / 1000)} s`
+    return `${name}: ${Math.round(elapsed / 1000)} s`
   })
   // Only an estimate for every model makes a bar; otherwise the banner just counts.
   const progress = models.length && known === models.length ? Math.round((sum / models.length) * 100) / 100 : null
