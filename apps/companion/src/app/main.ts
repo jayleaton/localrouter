@@ -18,7 +18,7 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
-import { callLoading, modelNames, modelsView, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import { callLoading, listedModels, modelNames, modelsView, voiceBlockers, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
 import type { Tools } from './models.ts'
 import { DEFAULT_LANGUAGE, heardLanguages, languageChoices, parseSettings, settingsText, sttLanguage, type Heard } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -540,6 +540,10 @@ function registerIpc() {
       throw new Error(refusal)
     }
     if (process.platform === 'darwin') await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+    // The models as they are now, for the call's loading banner (load times, and a voice model the person disabled); the
+    // first event can come at once, so this is read first, but never holds a call up for long.
+    namesAt = 0
+    await Promise.race([readModels().catch(() => null), new Promise((r) => setTimeout(r, 1500))])
     const id = `rt${++seq}`
     const owner = e.sender
     // The page keeps the one conversation (typed and spoken) and mirrors it into the journal (`host:save`).
@@ -551,8 +555,8 @@ function registerIpc() {
         if (ev.type === 'response.audio.delta') ev.lr_main_ms = performance.timeOrigin + performance.now()
         // A call whose voice models load when it starts: the shim's banner, estimated from each model's last load.
         if (ev.type === 'localrouter.session.loading' || ev.type === 'localrouter.session.ready') {
-          if (!lastTools) void readModels()
-          ev.lr_loading = callLoading(ev, Object.fromEntries((lastTools?.entries ?? []).map((t) => [t.id, t.last_load_ms])), names, modelsServer())
+          const entries = lastTools?.entries ?? []
+          ev.lr_loading = callLoading(ev, Object.fromEntries(entries.map((t) => [t.id, t.last_load_ms])), names, modelsServer(), voiceBlockers(entries))
         }
         owner.send('rt:event', id, JSON.stringify(ev))
       },
@@ -1010,6 +1014,9 @@ async function checkConnection() {
 /** The last `/v1/tools` read (a call's loading banner estimates from its load times), and model names from `/v1/models`. */
 let lastTools: Tools | null = null
 let names: Record<string, string> = {}
+let needs: Record<string, number> = {}
+/** The server's machine name as list_models gave it, for when the connection has not been checked this run. */
+let listedMachine = ''
 let namesAt = 0
 /** The token the box refused a model change for (no `manage` scope): the card is read-only until it changes. */
 let manageRefused = ''
@@ -1022,7 +1029,7 @@ function mayManage(token: string): boolean {
 }
 
 /** The paired server as the Models card names it: its machine name when the connection check read one. */
-const modelsServer = () => serverName(connection?.ok ? connection.server.machine : null)
+const modelsServer = () => serverName((connection?.ok ? connection.server.machine : '') || listedMachine)
 
 async function readModels() {
   const at = Date.now()
@@ -1031,11 +1038,13 @@ async function readModels() {
   const token = loadSecrets().token
   const spark = new Spark(settings.base, token, timed(CHECK_S))
   try {
+    // Names and sizes: list_models (sizes too: /v1/tools holds 0 bytes for a model not loaded), else /v1/models' names.
     const fresh = Date.now() - namesAt < 60_000
-    const [tools, models] = await Promise.all([spark.tools(), fresh ? null : spark.models().catch(() => null)])
-    if (models) [names, namesAt] = [modelNames(models), Date.now()]
+    const [tools, listed] = await Promise.all([spark.tools(), fresh ? null : spark.mcp('list_models', {}).then(listedModels, () => null)])
+    if (listed && Object.keys(listed.names).length) [names, needs, listedMachine, namesAt] = [listed.names, listed.needs, listed.machine, Date.now()]
+    else if (!fresh) [names, namesAt] = [modelNames(await spark.models().catch(() => null)), Date.now()]
     lastTools = toolsOf(tools)
-    return modelsView({ tools: lastTools, names, manage: mayManage(token), server, at })
+    return modelsView({ tools: lastTools, names, needs, manage: mayManage(token), server, at })
   } catch (error) {
     return modelsView({ tools: null, names, manage: false, server, problem: `No answer from ${server}: ${error instanceof Error ? error.message : String(error)}`, at })
   }
@@ -1332,13 +1341,14 @@ async function smoke() {
         srv.close(() => resolve(port))
       })
     })
-    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind, tabs: [...document.querySelectorAll("[role=tab]")].map((t) => { t.click(); return t.id.slice(4) + ":" + [...document.querySelectorAll("[role=tabpanel]")].filter((p) => !p.hidden).map((p) => p.id.slice(6)).join("+") }).join(",") }))`)
+    result.setup = await setupWin.webContents.executeJavaScript(`new Promise((r) => { const t = () => (document.getElementById("version").textContent ? r() : setTimeout(t, 50)); t() }).then(() => window.companion.setup.checkAddress("http://127.0.0.1:${closed}")).then(s => ({ version: document.getElementById("version").textContent, steps: s.connect.steps.map(x => x.id + ":" + x.status).join(","), error: s.connect.errors.address && s.connect.errors.address.kind, tabs: [...document.querySelectorAll("[role=tab]")].map((t) => { t.click(); return t.id.slice(4) + ":" + [...document.querySelectorAll("[role=tabpanel]")].filter((p) => !p.hidden).map((p) => p.id.slice(6)).join("+") }).join(","), scroll: [...document.querySelectorAll("[role=tab]")].map((t) => { window.scrollTo(0, 400); t.click(); const top = scrollY; const panel = document.getElementById(t.getAttribute("aria-controls")); window.scrollTo(0, 1e6); const bar = document.querySelector(".tabs").getBoundingClientRect(); return t.id.slice(4) + ":" + (top === 0 && panel.lastElementChild.getBoundingClientRect().bottom <= innerHeight + 1 && bar.top >= 0 && bar.bottom < innerHeight / 2 ? "ok" : "top " + top + ", last at " + Math.round(panel.lastElementChild.getBoundingClientRect().bottom) + " of " + innerHeight + ", bar " + Math.round(bar.top)) }).join(",") }))`)
     const page = result.page as { shim: boolean; bridge: boolean; beta: string }
     const icons = result.icons as { tray: { width: number }; window: { width: number } }
     const status = result.status as { computers: number; placement: string }
-    const setupPage = result.setup as { version: string; error: string; tabs: string }
-    // Each settings tab shows its own panel and only it.
-    const tabsOk = setupPage.tabs === 'general:general,models:models,voice:voice,computer:computer,integrations:integrations'
+    const setupPage = result.setup as { version: string; error: string; tabs: string; scroll: string }
+    // Each settings tab shows its own panel and only it; in an 800×600 window each opens at its top and scrolls to its
+    // last element under the tab bar, which stays in view.
+    const tabsOk = setupPage.tabs === 'general:general,models:models,voice:voice,computer:computer,integrations:integrations' && setupPage.scroll === 'general:ok,models:ok,voice:ok,computer:ok,integrations:ok'
     type Echo = { method: string; url: string; type: string; bytes: number; clip: boolean; auth: string }
     const v = result.voices as { post: Echo; patch: Echo; del: Echo; list: Echo }
     const voices = v.post.method === 'POST' && v.post.url === '/v1/voices' && v.post.type.startsWith('multipart/form-data; boundary=') && v.post.clip && v.post.bytes > 4104 &&

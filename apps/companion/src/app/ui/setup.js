@@ -66,6 +66,8 @@ let currentTab = 'general';
 
 function selectTab(id, focus) {
   const tab = $(`tab-${id}`) ? id : 'general';
+  // Another tab starts at its top; the page scrolls under the sticky header and tab bar.
+  if (tab !== currentTab) window.scrollTo(0, 0);
   currentTab = tab;
   for (const t of tabs) {
     const on = t.id === `tab-${tab}`;
@@ -91,6 +93,24 @@ for (const t of tabs) {
     selectTab(tabs[(next + tabs.length) % tabs.length].id.replace(/^tab-/, ''), true);
   });
 }
+// The window's scroll keys, handled here so they always move the window: Chromium pages a text field the wheel last
+// passed over instead (with nothing focused, the first key does nothing), and its page step hides lines under the
+// sticky header and tab bar. PageUp and PageDown work from anywhere but a field; Space (Shift+Space up), the arrows,
+// Home and End when nothing is focused (the arrows, Home and End move between tabs on a tab).
+document.addEventListener('keydown', (e) => {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+  const free = !el || el === document.body || el.getAttribute('role') === 'tabpanel';
+  const page = Math.max(80, window.innerHeight - document.querySelector('.tabs').getBoundingClientRect().bottom - 40);
+  const by = { PageDown: page, PageUp: -page, ...(free ? { ' ': e.shiftKey ? -page : page, ArrowDown: 40, ArrowUp: -40 } : {}) }[e.key];
+  const to = free ? { Home: 0, End: document.scrollingElement.scrollHeight }[e.key] : undefined;
+  if (by === undefined && to === undefined) return;
+  e.preventDefault();
+  if (to !== undefined) window.scrollTo({ top: to, behavior: 'smooth' });
+  else window.scrollBy({ top: by, behavior: e.key.startsWith('Arrow') ? 'instant' : 'smooth' });
+});
+
 // The tab bar sticks under the header, whose height depends on the window's width.
 new window.ResizeObserver(() => document.documentElement.style.setProperty('--top-h', `${document.querySelector('.top').offsetHeight}px`)).observe(document.querySelector('.top'));
 
@@ -515,8 +535,9 @@ async function saveModel(id, body, r, control) {
   control.classList.add('busy');
   try {
     const out = await api.modelSettings(id, body);
+    // A change that went through moves the budget for every row: no earlier refusal still holds.
     if (out.error) modelErrors[id] = out.error;
-    else delete modelErrors[id];
+    else for (const k of Object.keys(modelErrors)) delete modelErrors[k];
     renderModels(out.view);
   } catch (error) {
     modelErrors[id] = ipcMessage(error);

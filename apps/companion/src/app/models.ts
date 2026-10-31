@@ -35,7 +35,6 @@ export type ToolEntry = {
   idle_ttl_s_default: number
   allowed_residency: Residency[]
   last_load_ms: number | null
-  loaded_since: string | null
   last_error: string
   /** False: the server cannot run it on its hardware (`unsupported_reason` says why); it is not listed for settings. */
   supported: boolean
@@ -70,7 +69,6 @@ export function toolEntryOf(raw: unknown): ToolEntry | null {
     idle_ttl_s_default: Math.max(0, Math.round(num(r.idle_ttl_s_default, num(r.idle_ttl_s)))),
     allowed_residency: (allowed.includes(residency) ? allowed : [...allowed, residency]) as Residency[],
     last_load_ms: typeof r.last_load_ms === 'number' && r.last_load_ms >= 0 ? r.last_load_ms : null,
-    loaded_since: typeof r.loaded_since === 'string' ? r.loaded_since : null,
     last_error: str(r.last_error),
     supported: r.supported !== false,
     unsupported_reason: str(r.unsupported_reason),
@@ -97,6 +95,46 @@ export function modelNames(models: unknown): Record<string, string> {
     if (!m || typeof m !== 'object' || typeof (m as { id?: unknown }).id !== 'string') continue
     const { id, name } = m as { id: string; name?: unknown }
     out[id] = (typeof name === 'string' && name.replace(/\s*[(,;].*$/, '')) || id
+  }
+  return out
+}
+
+/**
+ * The models that keep a voice call from working: a call listens, thinks and speaks, so it needs a transcription, a chat
+ * and a speech model; when every one of a kind this server can run is disabled, those are listed. (One of a kind still
+ * enabled: the server uses it instead.)
+ */
+export function voiceBlockers(entries: readonly ToolEntry[]): string[] {
+  const out: string[] = []
+  for (const kind of VOICE_KINDS) {
+    const ofKind = entries.filter((e) => e.kind === kind && e.supported)
+    if (ofKind.length && ofKind.every((e) => e.residency === 'disabled')) out.push(...ofKind.map((e) => e.id))
+  }
+  return out
+}
+
+/**
+ * The MCP `list_models` answer (its text is JSON: `machine`, and `models`, each with `id`, `name` and `needs_bytes`, what it books when
+ * loaded): each model's name, shortened as `modelNames` does, and size. `/v1/tools` gives `resident_bytes`, which is 0
+ * while a model is not loaded. Empty for anything else (an older server).
+ */
+export function listedModels(result: unknown): { names: Record<string, string>; needs: Record<string, number>; machine: string } {
+  const out = { names: {} as Record<string, string>, needs: {} as Record<string, number>, machine: '' }
+  const content = (result as { content?: Array<{ text?: unknown }> } | null)?.content
+  let j: unknown = null
+  try {
+    j = JSON.parse(String(content?.[0]?.text ?? ''))
+  } catch {
+    return out
+  }
+  const models = (j as { models?: unknown } | null)?.models
+  const machine = (j as { machine?: unknown } | null)?.machine
+  out.machine = typeof machine === 'string' ? machine : ''
+  out.names = modelNames(models)
+  if (!Array.isArray(models)) return out
+  for (const m of models) {
+    if (!m || typeof m.id !== 'string') continue
+    if (typeof m.needs_bytes === 'number' && m.needs_bytes > 0) out.needs[m.id] = m.needs_bytes
   }
   return out
 }
@@ -166,7 +204,8 @@ export function budgetView(b: Budget | null): BudgetView | null {
 
 const ttlText = (s: number) => (s === 0 ? 'right after each use' : `after ${s} s idle`)
 
-export function modelRow(e: ToolEntry, names: Record<string, string>): ModelRow {
+/** `needs`: each model's size when loaded (`listedModels`); without it, what `/v1/tools` says it holds now. */
+export function modelRow(e: ToolEntry, names: Record<string, string>, needs: Record<string, number> = {}): ModelRow {
   const disabled = e.residency === 'disabled'
   const failed = !disabled && (e.state === 'failed' || (e.state === 'unloaded' && e.last_error !== ''))
   const dot = disabled ? 'disabled' : failed ? 'failed' : e.state === 'ready' ? 'ready' : e.state === 'busy' ? 'busy' : e.state === 'loading' ? 'loading' : 'offline'
@@ -179,7 +218,7 @@ export function modelRow(e: ToolEntry, names: Record<string, string>): ModelRow 
     kind: KIND_LABEL[e.kind] ?? e.kind,
     dot,
     state: disabled ? 'disabled' : failed ? 'failed' : (STATE_LABEL[e.state] ?? e.state),
-    memory: gib(e.resident_bytes),
+    memory: gib(needs[e.id] ?? e.resident_bytes),
     loads: loadsIn(e.last_load_ms),
     residency: e.residency,
     choices: e.allowed_residency.map((value) => ({ value, label: RESIDENCY_LABEL[value] })),
@@ -206,7 +245,7 @@ export const oldBoxModels = (server: string) => `The LocalRouter on ${server} ha
 export const modelsIntro = (server: string) => `Which models stay loaded on ${server} and which it shuts down to free memory. The settings are kept there for every device, and a change applies at once.`
 
 /** The Models card: the rows, the memory bar and whether they may be changed. */
-export function modelsView(o: { tools: Tools | null; names: Record<string, string>; manage: boolean; server: string; problem?: string; at: number }): ModelsView {
+export function modelsView(o: { tools: Tools | null; names: Record<string, string>; needs?: Record<string, number>; manage: boolean; server: string; problem?: string; at: number }): ModelsView {
   const intro = modelsIntro(o.server)
   if (!o.tools) return { available: false, intro, problem: o.problem || 'Not read yet', rows: [], unsupported: [], unsupported_text: '', budget: null, read_only: '', at: o.at }
   const supported = o.tools.residency || o.tools.entries.length === 0
@@ -215,7 +254,7 @@ export function modelsView(o: { tools: Tools | null; names: Record<string, strin
     available: true,
     intro,
     problem: o.problem ?? '',
-    rows: o.tools.entries.filter((e) => e.supported).map((e) => modelRow(e, o.names)),
+    rows: o.tools.entries.filter((e) => e.supported).map((e) => modelRow(e, o.names, o.needs)),
     unsupported: away.map((e) => ({ id: e.id, name: o.names[e.id] ?? e.id, kind: KIND_LABEL[e.kind] ?? e.kind, reason: e.unsupported_reason || `${o.server} cannot run it` })),
     unsupported_text: away.length ? `${away.length} ${away.length === 1 ? 'model' : 'models'} not available on ${o.server}` : '',
     budget: budgetView(o.tools.budget),
@@ -263,37 +302,54 @@ export function settingsRefusal(error: unknown, server: string): { message: stri
 
 export type CallLoading = { done: boolean; text: string; detail: string; progress: number | null; stopped?: true }
 
+const WAITING: Readonly<Record<string, string>> = { queued: 'waiting', warming: 'warming up', no_room: 'does not fit', failed: 'failed' }
+
 /**
- * The banner for a call whose models load when it starts: from `localrouter.session.loading` (`models`: each one's id,
- * state and time so far) and the server's last load time of each, a rough fraction done; `localrouter.session.ready`
- * ends it. A model in either that is "disabled" never loads, so the banner says so and stops (no progress, no spin).
- * Null for any other event.
+ * The banner for a call whose models load when it starts (`call` residency). `localrouter.session.loading` (each call
+ * model's id, state and time so far) gives a rough fraction done from the server's last load time of each;
+ * `localrouter.session.ready` ends it: `load` "loaded" (done), "failed" (its `message`), or "none" (nothing had to
+ * load: no banner). A model "disabled" in settings is skipped by the server, so the call cannot use it: the banner says
+ * so and stops (no progress, no spin); `disabledVoice` adds the models the app read as blocking calls. Null
+ * for any other event, and for a ready that loaded nothing.
  */
-export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string, number | null>, names: Record<string, string>, server = serverName(null)): CallLoading | null {
+export function callLoading(ev: Record<string, unknown>, lastLoad: Record<string, number | null>, names: Record<string, string>, server = serverName(null), disabledVoice: readonly string[] = []): CallLoading | null {
   if (ev.type !== 'localrouter.session.ready' && ev.type !== 'localrouter.session.loading') return null
   const models = (Array.isArray(ev.models) ? ev.models : []).filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && typeof (m as { id?: unknown }).id === 'string')
-  const off = models.filter((m) => m.state === 'disabled').map((m) => names[m.id as string] ?? (m.id as string))
+  const nameOf = (m: Record<string, unknown>) => names[m.id as string] ?? (m.id as string)
+  const list = (xs: string[]) => (xs.length === 1 ? xs[0] : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`)
+  // The server lists a model disabled while a call's set was loading; one disabled before the call starts is not in its
+  // events at all, so the app adds what it read in /v1/tools (`disabledVoice`: `voiceBlockers`).
+  const offIds = [...new Set([...models.filter((m) => m.state === 'disabled').map((m) => m.id as string), ...disabledVoice])]
+  const off = offIds.map((id) => names[id] ?? id)
   if (off.length) {
-    const list = off.length === 1 ? off[0] : `${off.slice(0, -1).join(', ')} and ${off[off.length - 1]}`
-    return { done: false, stopped: true, text: 'Voice calls can’t start', detail: `${list} ${off.length === 1 ? 'is' : 'are'} disabled on ${server}. Enable ${off.length === 1 ? 'it' : 'them'} in Settings › Models to use voice calls.`, progress: null }
+    const one = off.length === 1
+    return { done: false, stopped: true, progress: null, text: one ? 'A voice model is disabled' : 'Voice models are disabled', detail: `${list(off)} ${one ? 'is' : 'are'} disabled on ${server}, so this call can’t use ${one ? 'it' : 'them'}. Enable ${one ? 'it' : 'them'} in Settings › Models.` }
   }
   if (ev.type === 'localrouter.session.ready') {
+    if (ev.load === 'none') return null
+    if (ev.load === 'failed') {
+      const why = typeof ev.message === 'string' && ev.message ? ev.message : list(models.filter((m) => m.state !== 'ready').map((m) => `${nameOf(m)}: ${typeof m.error === 'string' && m.error ? m.error : WAITING[String(m.state)] ?? String(m.state)}`))
+      return { done: false, stopped: true, progress: null, text: 'Voice models didn’t load', detail: why }
+    }
     const ms = num(ev.loaded_ms, -1)
-    return { done: true, text: 'Voice models ready', detail: ms >= 0 ? `loaded in ${(ms / 1000).toFixed(1)} s` : '', progress: 1 }
+    return { done: true, text: 'Voice models ready', detail: ms > 0 ? `loaded in ${(ms / 1000).toFixed(1)} s` : '', progress: 1 }
   }
   let known = 0
   let sum = 0
   const parts = models.map((m) => {
-    const id = m.id as string
-    const name = names[id] ?? id
-    const ready = m.state === 'ready' || m.state === 'busy'
+    const name = nameOf(m)
     const elapsed = num(m.elapsed_ms)
-    const expected = lastLoad[id] ?? null
-    if (ready) {
+    const expected = lastLoad[m.id as string] ?? null
+    if (m.state === 'ready' || m.state === 'busy') {
       known++
       sum += 1
       return `${name} ready`
     }
+    if (m.state === 'warming') {
+      known++
+      sum += 0.95
+    }
+    if (m.state !== 'loading') return `${name} ${WAITING[String(m.state)] ?? String(m.state)}`
     if (expected && expected > 0) {
       known++
       sum += Math.min(0.95, elapsed / expected)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Spark, SparkError } from '../harness/spark.ts'
-import { budgetView, callLoading, loadsIn, toolEntryOf, modelNames, modelsIntro, modelsView, NO_MANAGE, oldBoxModels, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import { budgetView, callLoading, listedModels, loadsIn, toolEntryOf, voiceBlockers, modelNames, modelsIntro, modelsView, NO_MANAGE, oldBoxModels, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
 
 const server = serverName('studio')
 
@@ -77,6 +77,15 @@ describe('the Models card', () => {
     expect(toolEntryOf({ id: 'x', residency: 'disabled', allowed_residency: [] })?.allowed_residency).toEqual(['disabled'])
   })
 
+  it('what blocks a call: every model of a voice kind disabled (another of the kind enabled, or a CUDA-only one, does not count)', () => {
+    const whisper = { ...speech, id: 'whisper-large-v3-turbo', kind: 'transcription' }
+    const lineup = (over: Record<string, object>) => toolsOf({ data: [chat, speech, whisper, image].map((e) => ({ ...e, ...(over[e.id] ?? {}) })) }).entries
+    expect(voiceBlockers(lineup({}))).toEqual([])
+    expect(voiceBlockers(lineup({ 'fishaudio/drama-3': { residency: 'disabled' }, 'qwen-image-2.1-turbo': { residency: 'disabled' } }))).toEqual(['fishaudio/drama-3'])
+    expect(voiceBlockers([...lineup({ 'fishaudio/drama-3': { residency: 'disabled' } }), ...toolsOf({ data: [{ ...speech, id: 'other-tts', residency: 'call' }] }).entries])).toEqual([])
+    expect(voiceBlockers([...lineup({ 'fishaudio/drama-3': { residency: 'disabled' } }), ...toolsOf({ data: [{ ...speech, id: 'cuda-tts', supported: false }] }).entries])).toEqual(['fishaudio/drama-3'])
+  })
+
   it('only the models the server can run are listed; the rest are counted, with its reasons', () => {
     // The Spark's video model is CUDA-only; a second one without a reason is named as one the server cannot run.
     const video = { ...image, id: 'minimax-h3', kind: 'video', supported: false, unsupported_reason: 'needs NVIDIA CUDA' }
@@ -116,6 +125,15 @@ describe('the Models card', () => {
     expect(modelsIntro('studio')).toMatch(/^Which models stay loaded on studio and/)
   })
 
+  it('sizes from list_models: a model not loaded holds 0 bytes in /v1/tools but needs its size', () => {
+    const listed = listedModels({ content: [{ type: 'text', text: JSON.stringify({ models: [{ id: 'fishaudio/drama-3', name: 'Fish Audio Drama 3 (TensorFold native on Metal, 44.1 kHz). Built with Fish Audio', needs_bytes: 30870077440 }, { id: 'x', needs_bytes: 0 }], machine: 'studio' }) }] })
+    expect(listed).toEqual({ names: { 'fishaudio/drama-3': 'Fish Audio Drama 3', x: 'x' }, needs: { 'fishaudio/drama-3': 30870077440 }, machine: 'studio' })
+    const v = modelsView({ tools: toolsOf({ data: [{ ...speech, resident_bytes: 0 }] }), names: listed.names, needs: listed.needs, manage: true, server, at: 1 })
+    expect(v.rows[0].memory).toBe('28.8 GiB')
+    expect(listedModels({ content: [{ type: 'text', text: 'not json' }] })).toEqual({ names: {}, needs: {}, machine: '' })
+    expect(listedModels(null)).toEqual({ names: {}, needs: {}, machine: '' })
+  })
+
   it('load times', () => {
     expect([loadsIn(null), loadsIn(400), loadsIn(1500), loadsIn(61_000)]).toEqual(['load time not measured yet', 'loads in under 1 s', 'loads in ~2 s', 'loads in ~61 s'])
   })
@@ -147,12 +165,27 @@ describe('a call’s voice models loading', () => {
 
   it('a disabled voice model stops the banner with what to do, in loading or ready', () => {
     const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'disabled', elapsed_ms: 0 }, { id: W, state: 'loading', elapsed_ms: 900 }] }, { [D]: 12500 }, names, 'studio')
-    expect(v).toEqual({ done: false, stopped: true, progress: null, text: 'Voice calls can’t start', detail: 'Fish Audio Drama 3 is disabled on studio. Enable it in Settings › Models to use voice calls.' })
-    expect(callLoading({ type: 'localrouter.session.ready', models: [{ id: D, state: 'disabled' }, { id: W, state: 'disabled' }] }, {}, names)?.detail).toBe('Fish Audio Drama 3 and Whisper large-v3-turbo are disabled on this LocalRouter server. Enable them in Settings › Models to use voice calls.')
+    expect(v).toEqual({ done: false, stopped: true, progress: null, text: 'A voice model is disabled', detail: 'Fish Audio Drama 3 is disabled on studio, so this call can’t use it. Enable it in Settings › Models.' })
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'loaded', models: [{ id: D, state: 'disabled', error: 'disabled in settings' }, { id: W, state: 'disabled' }] }, {}, names)?.detail).toBe('Fish Audio Drama 3 and Whisper large-v3-turbo are disabled on this LocalRouter server, so this call can’t use them. Enable them in Settings › Models.')
   })
 
-  it('ready ends it; other events are not its business', () => {
-    expect(callLoading({ type: 'localrouter.session.ready', loaded_ms: 7300 }, {}, names)).toEqual({ done: true, text: 'Voice models ready', detail: 'loaded in 7.3 s', progress: 1 })
+  it('a default voice model disabled before the call (not in the server’s events) stops it too, even when nothing loads', () => {
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'none', models: null }, {}, names, 'studio', [D])).toEqual({ done: false, stopped: true, progress: null, text: 'A voice model is disabled', detail: 'Fish Audio Drama 3 is disabled on studio, so this call can’t use it. Enable it in Settings › Models.' })
+    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: W, state: 'loading', elapsed_ms: 900 }] }, {}, names, 'studio', [D])?.stopped).toBe(true)
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'loaded', models: [{ id: D, state: 'disabled' }] }, {}, names, 'studio', [D])?.detail).toMatch(/^Fish Audio Drama 3 is disabled/)
+  })
+
+  it('the server’s states while a call waits: queued, warming up, does not fit', () => {
+    const v = callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'warming', elapsed_ms: 13000 }, { id: W, state: 'queued', elapsed_ms: 200 }] }, { [D]: 12500, [W]: 2300 }, names)
+    expect(v).toEqual({ done: false, text: 'Loading voice models…', detail: 'Fish Audio Drama 3 warming up · Whisper large-v3-turbo waiting', progress: null })
+    expect(callLoading({ type: 'localrouter.session.loading', models: [{ id: D, state: 'warming' }, { id: W, state: 'ready' }] }, {}, names)?.progress).toBe(0.98)
+  })
+
+  it('ready: loaded ends it; failed says why and stops; nothing loaded shows nothing; other events are not its business', () => {
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'loaded', loaded_ms: 7300 }, {}, names)).toEqual({ done: true, text: 'Voice models ready', detail: 'loaded in 7.3 s', progress: 1 })
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'none', loaded_ms: 0, models: null }, {}, names)).toBeNull()
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'failed', message: 'fishaudio/drama-3 does not fit beside the models kept loaded', models: [{ id: D, state: 'no_room' }] }, {}, names)).toEqual({ done: false, stopped: true, progress: null, text: 'Voice models didn’t load', detail: 'fishaudio/drama-3 does not fit beside the models kept loaded' })
+    expect(callLoading({ type: 'localrouter.session.ready', load: 'failed', models: [{ id: D, state: 'failed', error: 'weights missing' }, { id: W, state: 'no_room' }] }, {}, names)?.detail).toBe('Fish Audio Drama 3: weights missing and Whisper large-v3-turbo: does not fit')
     expect(callLoading({ type: 'response.done' }, {}, names)).toBeNull()
   })
 })
