@@ -221,7 +221,7 @@
    "pins": "tools/chat/qwen38-27b/pins-macos.json",
    "download_bytes": 19936084561,
    "disk_bytes": 21000000000,
-   "memory_bytes": 32212254720,
+   "memory_bytes": 28723101696,
    "skip": "leave chat out of --models; the voice loop then has no model to answer with",
    "steps": [
     {

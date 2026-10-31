@@ -297,10 +297,14 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
 - **Speed against upstream.** TensorFold's recipe (M5 Ultra, macOS 27, 100 greedy tokens) reports plain decode 51.6 /
   49.4 / 46.2 tok/s at 2k / 8k / 32k and prefill 1,325 / 1,269 / 1,171 tok/s; this host is within 10%. The drafter is
   2.5 to 4.1 times plain decode here (4.1 on code, 2.5 at a 31k-token prompt), against about 3 on the GB10 (prose 35–39 against 13 tok/s).
-- **Memory.** `resident_bytes` in `config.macos.example.json` is **30 GiB** (32,212,254,720): the 25.6 GiB peak plus
-  room for the rest of the 4 GiB prompt cache; `working_bytes` 0 as on the Spark. Unified memory is counted once: the
-  footprint includes the Metal buffers. The research estimate was 32 GiB; TensorFold's published Mac figure 26.5 GiB
-  (M5 Max).
+- **Memory.** `resident_bytes` is **26.75 GiB** (28,723,101,696) at the 4 GiB prompt cache, in
+  `config.macos.example.json` and the Mac profile; `working_bytes` 0 as on the Spark. It covers the largest measured
+  peak: **26.06 GiB** on the live Mac stack (the integration run: the whole LocalRouter Mac configuration, chat
+  measured after four 16–31k-token prompts), against 25.6 GiB direct and 26.0 GiB through the daemon in
+  `bench_macos.py`. On that stack chat loaded in 4.9 s (5.1 s after `sudo purge`, so with a cold file cache), answered
+  its first token 0.09–0.12 s after the load, and a 30k-token prompt took 28 s cold and 1–2 s when cached. Unified
+  memory is counted once: the footprint includes the Metal buffers. The research estimate was 32 GiB; TensorFold's
+  published Mac figure 26.5 GiB (M5 Max).
 - **Through LocalRouter** (`bench_macos.py daemon`: `localrouter serve` built on this Mac from `feat/mac-foundation`,
   the tool alone): `/v1/models` lists it as chat; MCP `load_model` loads it in 3.9 s (warm page cache) and MCP `chat`
   answers in 1.9 s; through `/v1/chat/completions` 188 of 188 checks, the same replies as the baseline; decode 198 /
@@ -309,12 +313,13 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
   model server was gone, but that run's daemon did not exit within 15 s and was killed: on macOS, `shutdown()` of the
   listening socket does not wake a blocked `accept()`. The daemon now connects to itself on macOS instead
   (`feat/mac-foundation` 64bcb59, checked by `tests/orphans.zig`); the chat daemon run has not been repeated with it.
-- **A smaller prompt cache.** `setup-macos.sh ROOT --prompt-cache-gib 1` writes the same tool with `--prompt-cache-gib
-  1` and `resident_bytes` **27 GiB** (28,991,029,248), for a Mac that keeps chat, Drama 3 and Whisper warm together
-  while image and decisions load on demand. 27 GiB is an **estimate**, not a measurement: the 4 GiB configuration
-  peaked at 25.6 GiB with at most 4 GiB of cache. A 30k-token conversation needs about 2 GiB of cache (above), so 1
-  GiB keeps short and mid-length conversations warm but not a long one, whose next turn may be prefilled again. The
-  default stays 4 GiB / 30 GiB until `bench_macos.py serve` measures the 1 GiB footprint and cached-turn latency.
+- **A smaller prompt cache (an option, not the default).** `setup-macos.sh ROOT --prompt-cache-gib 1` writes the same
+  tool with `--prompt-cache-gib 1` and `resident_bytes` **about 23.75 GiB** (25,501,876,224): the 4 GiB booking less
+  the 3 GiB of cache this size cannot hold. It is an **estimate**, not a measurement, assuming the four long prompts
+  behind the 26.06 GiB peak filled the 4 GiB cache. A 30k-token conversation needs about 2 GiB of cache (above), so 1
+  GiB keeps short and mid-length conversations warm but not a long one, whose next turn may be prefilled again (28 s
+  instead of 1–2 s at 30k). The default stays 4 GiB / 26.75 GiB; measure the 1 GiB footprint and cached-turn latency
+  with `bench_macos.py serve` before booking it.
 
 ## Licences
 

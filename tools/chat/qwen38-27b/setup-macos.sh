@@ -3,8 +3,8 @@
 # Metal, and sees the checkpoint, then writes and prints the daemon config for the qwen3.8-27b tool.
 #   tools/chat/qwen38-27b/setup-macos.sh ROOT [--hf DIR] [--prompt-cache-gib 4|1]
 # ROOT and DIR as for fetch-macos.sh (DIR default the shared Hugging Face cache). --prompt-cache-gib (default 4, the
-# measured configuration) sets the server's --prompt-cache-gib and the matching resident_bytes: 4 GiB books 30 GiB
-# (measured, docs/dev/CHAT.md); 1 GiB books 27 GiB (an estimate until bench_macos.py measures it) for a Mac that
+# measured configuration) sets the server's --prompt-cache-gib and the matching resident_bytes: 4 GiB books 26.75 GiB
+# (measured, docs/dev/CHAT.md); 1 GiB books 23.75 GiB (an estimate until bench_macos.py measures it) for a Mac that
 # keeps chat, speech and transcription warm beside each other. Writes ROOT/tensorfold-version.txt,
 # ROOT/tensorfold-capabilities.json, ROOT/tensorfold-models.txt, ROOT/tensorfold-info.txt and ROOT/config.json
 # (config.macos.example.json with these paths). No root; touches nothing outside ROOT. Needs jq. The model only
@@ -29,9 +29,9 @@ die() { echo "setup-macos.sh: $*" >&2; exit 1; }
 command -v jq >/dev/null || die "needs jq"
 # The booking for each prompt cache size: the loaded footprint, the long-prompt working peak and the cache itself.
 case $cache_gib in
-  4) resident=32212254720 memory_note="" ;;  # 30 GiB, measured: 25.6 GiB peak plus the rest of the cache
-  1) resident=28991029248  # 27 GiB, estimated: the 4 GiB run's 25.6 GiB peak held at most 4 GiB of cache
-     memory_note="--prompt-cache-gib 1: 27 GiB is an estimate (the 4 GiB configuration's measured 25.6 GiB peak with a smaller cache, plus margin); measure it with bench_macos.py serve before relying on it" ;;
+  4) resident=28723101696 memory_note="" ;;  # 26.75 GiB, measured: 26.06 GiB peak on the live stack plus margin
+  1) resident=25501876224  # 23.75 GiB, estimated: the 4 GiB booking less the 3 GiB of cache this size cannot hold
+     memory_note="--prompt-cache-gib 1: 23.75 GiB is an estimate (the measured 4 GiB booking, 26.75 GiB, less 3 GiB of prompt cache); measure it with bench_macos.py serve before relying on it" ;;
   *) die "--prompt-cache-gib takes 4 or 1 (the sizes with a booking), not $cache_gib" ;;
 esac
 root=$(cd "$root" && pwd)
