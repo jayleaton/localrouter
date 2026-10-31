@@ -9,9 +9,27 @@ const c = std.c;
 
 pub const Error = error{ ConnectFailed, Closed, Timeout, BadResponse, ReadFailed, WriteFailed, TooLarge };
 
+/// A close-on-exec TCP socket, non-blocking if asked; -1 on failure. macOS has no SOCK_CLOEXEC or SOCK_NONBLOCK, so
+/// there they are set just after (a worker spawned in that instant could inherit the socket: harmless, it is unused).
+fn tcpSocket(nonblock: bool) posix.fd_t {
+    if (!@import("builtin").os.tag.isDarwin()) return c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC | @as(c_uint, if (nonblock) c.SOCK.NONBLOCK else 0), 0);
+    const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd < 0) return fd;
+    const fl = c.fcntl(fd, c.F.GETFL);
+    if (c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0 or fl < 0 or
+        (nonblock and c.fcntl(fd, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true }))) < 0))
+    {
+        _ = c.close(fd);
+        return -1;
+    }
+    var one: c_int = 1; // a write to a closed peer fails (EPIPE) rather than raising SIGPIPE
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, @ptrCast(&one), @sizeOf(c_int));
+    return fd;
+}
+
 /// A TCP connection to 127.0.0.1:`port`; the caller closes it.
 pub fn connect(port: u16) Error!posix.fd_t {
-    const fd = c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC, 0);
+    const fd = tcpSocket(false);
     if (fd < 0) return error.ConnectFailed;
     const addr: c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f00_0001) };
     while (true) {
@@ -25,7 +43,7 @@ pub fn connect(port: u16) Error!posix.fd_t {
 /// A TCP connection to `addr`:`port` within `timeout_ms` (a node that is down must not hold the caller for the
 /// kernel's minutes of retries); the caller closes it. The socket is blocking again once connected.
 pub fn connectTo(addr: [4]u8, port: u16, timeout_ms: i32) Error!posix.fd_t {
-    const fd = c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC | c.SOCK.NONBLOCK, 0);
+    const fd = tcpSocket(true);
     if (fd < 0) return error.ConnectFailed;
     errdefer _ = c.close(fd);
     const sa: c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast(addr) };
@@ -53,7 +71,7 @@ pub const Head = struct {
 
 /// A loopback port nothing listens on now (bind to port 0 and read the one the kernel chose).
 pub fn freePort() Error!u16 {
-    const fd = c.socket(c.AF.INET, c.SOCK.STREAM | c.SOCK.CLOEXEC, 0);
+    const fd = tcpSocket(false);
     if (fd < 0) return error.ConnectFailed;
     defer _ = c.close(fd);
     var addr: c.sockaddr.in = .{ .port = 0, .addr = std.mem.nativeToBig(u32, 0x7f00_0001) };

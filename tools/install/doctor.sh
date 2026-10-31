@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --profile) profile=${2:?}; shift 2 ;;
     --models) list=${2:?}; shift 2 ;;
-    --prefix) PREFIX=$(realpath -m "${2:?}"); shift 2 ;;
+    --prefix) PREFIX=$(abspath "${2:?}"); shift 2 ;;
     --port) PORT=${2:?}; port_set=1; shift 2 ;;
     --https-port) HTTPS_PORT=${2:?}; shift 2 ;;
     --unit) UNIT=${2:?}; shift 2 ;;
@@ -32,7 +32,7 @@ done
 command -v jq > /dev/null || { echo "MISSING jq"; echo "  fix: sudo apt-get install -y jq"; exit 1; }
 p=$(profile_file "$profile") || exit 1
 [ -z "$topology$node" ] || use_topology
-mapfile -t keys < <(selected "$p" "$list")
+readlines keys < <(selected "$p" "$list")
 step_env "$p"
 boot="tools/install/bootstrap.sh --profile $profile --models $(IFS=,; echo "${keys[*]}") --prefix $PREFIX --port $PORT --https-port $HTTPS_PORT --unit $UNIT${topology:+ --topology $topology --node $node}"
 bad=0

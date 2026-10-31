@@ -91,12 +91,15 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     }
 }
 
+/// The CUDA engines are built on Linux only (build.zig); elsewhere a tool naming one finds no engine (`find`).
 pub const entries = [_]Entry{
     @import("../engines/testpattern.zig").entry,
+} ++ (if (@import("build_config").cuda_engines) [_]Entry{
     @import("../engines/qwen_image_tool.zig").entry,
     @import("../engines/qwen_image_tool.zig").turbo_entry,
     @import("../engines/minimax_h3_tool.zig").entry,
     @import("../engines/kandinsky6_tool.zig").entry,
+} else [_]Entry{}) ++ [_]Entry{
     @import("../engines/openai_server.zig").entry,
 };
 
@@ -603,6 +606,7 @@ test "instructions are written into the text by a tool's template, after a leadi
 }
 
 test "a tool's licence is its config's, else its engine's, else none" {
+    if (!@import("build_config").cuda_engines) return error.SkipZigTest; // the engines it names are Linux-only
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const c = try config.parse(arena.allocator(),
@@ -623,7 +627,14 @@ test "a tool's licence is its config's, else its engine's, else none" {
     try std.testing.expect(license(c.tool("cmd").?) == null);
 }
 
+test "without the CUDA engines (macOS) the table has none of them, and a tool naming one finds no engine" {
+    if (@import("build_config").cuda_engines) return error.SkipZigTest;
+    for ([_][]const u8{ "qwen_image", "qwen_image_turbo", "minimax_h3", "kandinsky6" }) |name| try std.testing.expect(find(name) == null);
+    try std.testing.expect(find("testpattern") != null and find("openai_server") != null);
+}
+
 test "resolve drops an engine capability its weights lack, even when the config lists it" {
+    if (!@import("build_config").cuda_engines) return error.SkipZigTest; // qwen_image is Linux-only
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var tools = [_]ToolConfig{.{ .id = "edit-test", .kind = .image, .engine = "qwen_image", .weights = "/nonexistent/localrouter-edit-test", .capabilities = &.{ .text_to_image, .image_edit } }};

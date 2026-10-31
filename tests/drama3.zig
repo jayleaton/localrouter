@@ -92,10 +92,7 @@ fn expectLevel(pcm: []const u8, n: usize, level: i16) !void {
 fn lockFree(io: Io, path: []const u8) !bool {
     const f = Io.Dir.cwd().openFile(io, path, .{}) catch |err| return if (err == error.FileNotFound) true else err;
     defer f.close(io);
-    const rc = std.os.linux.flock(f.handle, std.posix.LOCK.EX | std.posix.LOCK.NB);
-    if (std.os.linux.errno(rc) != .SUCCESS) return false;
-    _ = std.os.linux.flock(f.handle, std.posix.LOCK.UN);
-    return true;
+    return harness.proc.lockFree(f.handle);
 }
 
 fn sha256Hex(io: Io, a: std.mem.Allocator, path: []const u8) ![64]u8 {
@@ -131,18 +128,9 @@ fn qualify(io: Io, a: std.mem.Allocator) !void {
 
 /// The Drama 3 worker the daemon started (a python3 child running drama3_worker.py).
 fn workerPid(d: *Daemon, a: std.mem.Allocator) !i32 {
-    var proc = try Io.Dir.cwd().openDir(d.io, "/proc", .{ .iterate = true });
-    defer proc.close(d.io);
-    var it = proc.iterate();
-    while (try it.next(d.io)) |e| {
-        const pid = std.fmt.parseInt(i32, e.name, 10) catch continue;
+    for (try harness.proc.children(a, d.io, d.child.id.?)) |pid| {
         var buf: [4096]u8 = undefined;
-        const cmdline = harness.readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/cmdline", .{pid}, 0), &buf) orelse continue;
-        if (std.mem.indexOf(u8, cmdline, "drama3_worker.py") == null) continue;
-        const status = harness.readProc(try std.fmt.allocPrintSentinel(a, "/proc/{d}/status", .{pid}, 0), &buf) orelse continue;
-        const at = std.mem.indexOf(u8, status, "PPid:\t") orelse continue;
-        const end = std.mem.indexOfScalarPos(u8, status, at, '\n') orelse continue;
-        if ((std.fmt.parseInt(i32, status[at + 6 .. end], 10) catch continue) == d.child.id.?) return pid;
+        if (std.mem.indexOf(u8, harness.proc.cmdline(a, pid, &buf), "drama3_worker.py") != null) return pid;
     }
     return error.NoWorker;
 }

@@ -33,7 +33,7 @@ client ── MCP tool / OpenAI route / voice loop
 ```
 
 A model is described entirely by its config entry. That entry gives its `kind`, its `engine` or `cmd`, its
-`capabilities` (or the engine's own list), its memory (`resident_bytes`, `working_bytes`, `clone_working_bytes`), its
+`capabilities` (or the engine's own list), its memory (`resident_bytes`, `working_bytes`, `clone_working_bytes`, `reference_working_bytes`), its
 licence, and its declared limits in `options`. `/v1/models`, MCP `list_models` / `list_voices`, `/v1/capabilities` and
 the voice loop's tool offers are all built from these fields (`engine.audioInfo`, `engine.capabilityList`,
 `routes.defaultFor`). No tool schema, description or model list names a model.
@@ -43,7 +43,7 @@ the voice loop's tool offers are all built from these fields (`engine.audioInfo`
 | chat | `chat_completion` | `server`/`env`/`health` (its own server), `min_thinking_tokens`, `thinking_off` (top level) | `openai_server`, `api/budget.zig` |
 | speech | `text_to_speech`, `voice_clone` | `voices`, `default_voice`, `presets`, `min_speed`/`max_speed`, `max_input_chars`, `instructions` (template), `stream`, `references`, `clone_rate`, `clone_codebooks`, `clone_working_bytes` | `engine.checkSpeech`, `engine.speechInstructions`, `api/voices.zig` |
 | transcription | `speech_to_text` | `max_audio_s`, `languages` | `engine.checkTranscription`, `api/speech.zig` |
-| image | `text_to_image`, `image_edit` | the engine's own (`max_side`, `max_pixels`, `edit_refs`, `precision` for Qwen-Image) | the engine's `Entry.check` |
+| image | `text_to_image`, `image_edit` | the engine's own (`max_side`, `max_pixels`, `edit_refs`, `precision` for Qwen-Image); `reference_working_bytes` (a `cmd` worker: what each edit reference adds to `working_bytes`, measured) | the engine's `Entry.check` |
 | video | `text_to_video`, `image_to_video` | the engine's own (`max_width`, `max_height`, `max_seconds`, `default_size` for H3) | the engine's `Entry.check` |
 | decision | `typed_decision` | `decision_path` | `api/decide.zig` (answers checked against the questions) |
 

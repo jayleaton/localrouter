@@ -1,4 +1,6 @@
 //! LocalRouter: one `localrouter` binary (daemon, worker, client, checks) on TensorFold's pinned CUDA runtime.
+//! On macOS the CUDA engines (Qwen-Image, MiniMax H3, Kandinsky-6), their checks and the vendor loader are left out:
+//! the binary serves out-of-process servers and `cmd` workers there (docs/dev/MAC-PORT.md).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -19,14 +21,23 @@ pub fn build(b: *std.Build) void {
     const vendor = b.createModule(.{ .root_source_file = b.path("src/engine/vendor/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
     const k6_build = @import("build/kandinsky6.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, tokenizer, vendor, nvfp4.fatbins);
     const k6 = k6_build.module;
+    // CUDA engines build on Linux only; `build_config.cuda_engines` tells the source which table it gets.
+    const cuda_engines = target.result.os.tag == .linux;
+    const build_config = b.addOptions();
+    build_config.addOption(bool, "cuda_engines", cuda_engines);
 
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 }, .{ .name = "kandinsky6", .module = k6 } },
+        .imports = if (cuda_engines) &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 }, .{ .name = "kandinsky6", .module = k6 } } else &.{},
     });
+    root.addOptions("build_config", build_config);
+    if (target.result.os.tag.isDarwin()) { // sched/memory.zig: the GPU's working-set ceiling
+        root.linkFramework("Metal", .{});
+        root.linkSystemLibrary("objc", .{});
+    }
     const exe = b.addExecutable(.{ .name = "localrouter", .root_module = root });
     b.installArtifact(exe);
 
@@ -55,7 +66,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     it_mod.addOptions("build_options", it_opts);
-    const it_test = b.addTest(.{ .root_module = it_mod });
+    const it_filters = b.option([]const []const u8, "test-filter", "Run only the integration tests whose names contain this (repeatable)") orelse &.{};
+    const it_test = b.addTest(.{ .root_module = it_mod, .filters = it_filters });
     const integration = b.addRunArtifact(it_test);
     integration.has_side_effects = true;
     // The same tests as a program, run outside the build runner so each test's name and output appear as it runs.
@@ -68,30 +80,20 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Unit, integration and self tests");
     test_step.dependOn(&unit.step);
-    test_step.dependOn(nvfp4.tests);
     test_step.dependOn(&integration.step);
     test_step.dependOn(&selftest.step);
-    const qwen_tests = b.addRunArtifact(b.addTest(.{ .root_module = qwen }));
-    test_step.dependOn(&qwen_tests.step);
-    const h3_tests = b.addRunArtifact(b.addTest(.{ .root_module = h3 }));
-    test_step.dependOn(&h3_tests.step);
-    const k6_tests = b.addRunArtifact(b.addTest(.{ .root_module = k6 }));
-    test_step.dependOn(&k6_tests.step);
-    const vendor_tests = b.addRunArtifact(b.addTest(.{ .root_module = vendor }));
-    test_step.dependOn(&vendor_tests.step);
-    // the Kandinsky-6 sampler and DiT checkpoint loader (M2): host tests, not yet reachable from main.zig
-    const k6_sampler_tests = b.addRunArtifact(b.addTest(.{ .root_module = k6_build.sampler }));
-    test_step.dependOn(&k6_sampler_tests.step);
-    const k6_dit_weights_tests = b.addRunArtifact(b.addTest(.{ .root_module = k6_build.dit_weights }));
-    test_step.dependOn(&k6_dit_weights_tests.step);
     const unit_step = b.step("test-unit", "Unit tests only");
-    unit_step.dependOn(&qwen_tests.step);
-    unit_step.dependOn(&k6_tests.step);
-    unit_step.dependOn(&vendor_tests.step);
-    unit_step.dependOn(&k6_sampler_tests.step);
-    unit_step.dependOn(&k6_dit_weights_tests.step);
     unit_step.dependOn(&unit.step);
-    unit_step.dependOn(nvfp4.tests);
+    if (cuda_engines) {
+        test_step.dependOn(nvfp4.tests);
+        unit_step.dependOn(nvfp4.tests);
+        // the Kandinsky-6 sampler and DiT checkpoint loader (M2): host tests, not yet reachable from main.zig
+        for ([_]*std.Build.Module{ qwen, h3, k6, vendor, k6_build.sampler, k6_build.dit_weights }) |m| {
+            const t = b.addRunArtifact(b.addTest(.{ .root_module = m }));
+            test_step.dependOn(&t.step);
+            if (m != h3) unit_step.dependOn(&t.step);
+        }
+    }
     b.step("test-integration", "Integration tests only").dependOn(&integration.step);
 }
 

@@ -38,6 +38,9 @@ pub const Job = struct {
     id: []const u8,
     dir: []const u8,
     request: Request,
+    /// Set (seq_cst) when the job is cancelled, before `Tool.cancel`: a tool that cannot signal its worker yet (the
+    /// generate not written) acts on it once it can. Null: never cancelled.
+    cancelled: ?*const std.atomic.Value(bool) = null,
 };
 
 /// Receives progress from a running generate; called on the scheduler's thread.

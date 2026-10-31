@@ -1,0 +1,99 @@
+{
+ "profile": "mac-apple-silicon",
+ "status": "skeleton",
+ "description": "LocalRouter on one Apple Silicon Mac (unified memory, Metal): chat, Drama 3 speech, KnowLine decisions, Whisper transcription and Qwen-Image, each as an out-of-process server or cmd worker (docs/dev/MAC-PORT.md). Not installable yet: each model's entry is added by its port.",
+ "tested_on": "",
+ "hardware": {
+  "arch": "arm64",
+  "gpu": "Apple M",
+  "unified_memory": true,
+  "min_memory_gib": 64,
+  "os": "macos 27"
+ },
+ "disk_margin_gib": 30,
+ "env": {
+  "LR_BIN": "$REPO/zig-out/bin/localrouter",
+  "DEVELOPER_DIR": "${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}",
+  "STEPS": "bash $REPO/tools/install/steps.sh"
+ },
+ "prereqs": [
+  {
+   "id": "commands",
+   "title": "jq, curl, git, tar, xz, shasum, python3",
+   "test": "for t in jq curl git tar xz shasum python3; do command -v $t > /dev/null || exit 1; done",
+   "fix": "xcode-select --install; brew install jq xz"
+  },
+  {
+   "id": "apple-silicon",
+   "title": "an Apple Silicon Mac (arm64)",
+   "test": "[ \"$(uname -s)/$(uname -m)\" = Darwin/arm64 ]",
+   "fix": "none: Intel Macs have no unified memory for these models"
+  },
+  {
+   "id": "zig",
+   "title": "Zig 0.17.0 (builds LocalRouter)",
+   "test": "zig version | grep -qx 0.17.0",
+   "fix": "brew install zig (Homebrew ships 0.17.0), or the pinned archive in host.tools.zig"
+  },
+  {
+   "id": "xcode-metal",
+   "title": "Xcode with its licence accepted and the Metal Toolchain (xcrun metal: builds Metal kernels from source; prebuilt release archives do not need it). When xcode-select points at the Command Line Tools, builds need DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer",
+   "test": "DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer} xcrun --find metal > /dev/null 2>&1",
+   "fix": "install Xcode; sudo xcodebuild -license accept; sudo xcodebuild -runFirstLaunch; xcodebuild -downloadComponent MetalToolchain; export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer (or sudo xcode-select -s /Applications/Xcode.app)"
+  },
+  {
+   "id": "python",
+   "title": "python3 3.11 or newer (the cmd workers and the qualification scripts)",
+   "test": "python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 11))'",
+   "fix": "brew install python@3.12"
+  }
+ ],
+ "host": {
+  "download_bytes": 14326193,
+  "disk_bytes": 350000000,
+  "tools": {
+   "zig": {
+    "url": "https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz",
+    "sha256": "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a",
+    "bytes": 53985220,
+    "bin": [
+     "zig"
+    ],
+    "version": "0.17.0",
+    "version_cmd": "zig version"
+   },
+   "uv": {
+    "url": "https://github.com/astral-sh/uv/releases/download/0.13.4/uv-aarch64-apple-darwin.tar.gz",
+    "sha256": "e0b1d4743ce64c55d9f0f4a444afa6b81125680070ee04e853fcd0f6c1ebf8f1",
+    "bytes": 14326193,
+    "bin": [
+     "uv",
+     "uvx"
+    ],
+    "version": "uv 0.13.4",
+    "version_cmd": "$J/bin/uv --version"
+   }
+  },
+  "steps": [
+   {
+    "id": "uv",
+    "download_bytes": 14326193,
+    "disk_bytes": 50000000,
+    "title": "uv 0.13.4 (the Python environments: the Whisper venv and the other cmd workers')",
+    "run": "$STEPS tool uv",
+    "done": "$STEPS tool-ok uv",
+    "fix": "a failed download or checksum: run again (it resumes); a checksum that keeps differing: the pinned file changed upstream, report it"
+   },
+   {
+    "id": "build",
+    "download_bytes": 0,
+    "disk_bytes": 300000000,
+    "title": "LocalRouter itself, from this checkout (zig build: no CUDA engines on macOS)",
+    "run": "cd $REPO && zig build -Doptimize=ReleaseSafe",
+    "done": "[ -x \"$LR_BIN\" ]",
+    "fix": "the build output says why; check zig version (0.17.0)"
+   }
+  ]
+ },
+ "models": []
+}

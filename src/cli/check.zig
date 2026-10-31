@@ -1,4 +1,5 @@
-//! `localrouter check gpu`: opens the CUDA driver through TensorFold's runtime and reports devices and memory.
+//! `localrouter check gpu`: opens the CUDA driver through TensorFold's runtime and reports devices and memory; on macOS,
+//! which has no CUDA engines, the unified-memory budget the scheduler admits against (sched/memory.zig).
 //! `localrouter check k6-components ...` / `k6-e2e ...`: the Kandinsky-6 bit gates' native captures (cli/k6.zig).
 //! `localrouter check health [URL]`: exit 0 when the daemon answers /health (the container's health check).
 //! `localrouter check selftest`: starts a private daemon on a free port with the test-pattern tools, makes one image and
@@ -9,29 +10,47 @@ const Io = std.Io;
 const cuda = @import("cuda");
 const qi = @import("qwen_image");
 const memory = @import("../sched/memory.zig");
+const cuda_engines = @import("build_config").cuda_engines;
 
 pub fn run(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
-    if (args.len == 1 and std.mem.eql(u8, args[0], "gpu")) return gpu();
+    if (args.len == 1 and std.mem.eql(u8, args[0], "gpu")) return if (cuda_engines) gpu() else unified();
     if (args.len == 1 and std.mem.eql(u8, args[0], "selftest")) return selftest(io, gpa);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-bench")) return @import("qwen_bench.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-te")) return @import("h3_te.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-replay")) return @import("h3_replay.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-avae")) return @import("h3_avae.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-vvae")) return @import("h3_vvae.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-i2v")) return @import("h3_i2v.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-e2e")) return @import("h3_e2e.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-step-bench")) return @import("h3_stepbench.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-bench")) return @import("h3_bench.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-vae")) return @import("qwen_vae.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-edit")) return @import("qwen_edit.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-e2e")) return @import("qwen_e2e.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-te")) return @import("qwen_te.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-replay")) return @import("qwen_replay.zig").run(io, gpa, args[1..]);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-components")) return @import("k6.zig").run(io, gpa, args[1..], false);
-    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-e2e")) return @import("k6.zig").run(io, gpa, args[1..], true);
     if (args.len >= 1 and std.mem.eql(u8, args[0], "health")) return health(io, gpa, if (args.len > 1) args[1] else "http://127.0.0.1:8190");
+    if (cuda_engines) if (try engineCheck(io, gpa, args)) |code| return code;
     std.debug.print("usage: localrouter check gpu|selftest|health [URL]\n", .{});
     return 2;
+}
+
+/// The CUDA engines' captures and benches (Linux builds only).
+fn engineCheck(io: Io, gpa: std.mem.Allocator, args: []const []const u8) !?u8 {
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-bench")) return try @import("qwen_bench.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-te")) return try @import("h3_te.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-replay")) return try @import("h3_replay.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-avae")) return try @import("h3_avae.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-vvae")) return try @import("h3_vvae.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-i2v")) return try @import("h3_i2v.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-e2e")) return try @import("h3_e2e.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-step-bench")) return try @import("h3_stepbench.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "h3-bench")) return try @import("h3_bench.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-vae")) return try @import("qwen_vae.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-edit")) return try @import("qwen_edit.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-e2e")) return try @import("qwen_e2e.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-te")) return try @import("qwen_te.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "qwen-replay")) return try @import("qwen_replay.zig").run(io, gpa, args[1..]);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-components")) return try @import("k6.zig").run(io, gpa, args[1..], false);
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "k6-e2e")) return try @import("k6.zig").run(io, gpa, args[1..], true);
+    return null;
+}
+
+/// macOS: one unified-memory budget for the CPU and the GPU, counted once.
+fn unified() u8 {
+    const m = memory.snapshot() orelse {
+        std.debug.print("memory: unavailable\n", .{});
+        return 1;
+    };
+    std.debug.print("unified memory: {d} MiB total, {d} MiB available, GPU working-set ceiling {d} MiB, pressure {t}\n", .{ m.total >> 20, m.available >> 20, m.gpu_ceiling >> 20, m.pressure });
+    std.debug.print("budget (what the scheduler admits against): {d} MiB\n", .{(memory.available() orelse 0) >> 20});
+    return 0;
 }
 
 fn gpu() !u8 {
@@ -136,13 +155,13 @@ fn report(what: []const u8, detail: []const u8) u8 {
 }
 
 test "h3 bench: its argument and shape tests run with the unit tests" {
-    _ = @import("h3_bench.zig");
+    if (cuda_engines) _ = @import("h3_bench.zig");
 }
 
 test "h3 step bench: its argument tests and the step code's type check run with the unit tests" {
-    _ = @import("h3_stepbench.zig");
+    if (cuda_engines) _ = @import("h3_stepbench.zig");
 }
 
 test "k6 gates: their argument tests run with the unit tests" {
-    _ = @import("k6.zig");
+    if (cuda_engines) _ = @import("k6.zig");
 }
