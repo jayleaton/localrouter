@@ -1,8 +1,9 @@
 //! Tensor-parallel groups on real daemons (docs/dev/MULTI-SPARK.md#tensor-parallel): the fake TensorFold server
 //! (tests/fixtures/chat_server.py) keeps the ranks' contract (the other ranks join rank 0 before it serves, and a rank
-//! that loses its peer stops), told its rank by the tool's `options.rank_env` as a real engine is. Three nodes: the front
-//! s1, and s2 and s3. `big` is split over s2 and s3 (TP=2; the front sends it to rank 0 on s2); `wide` over all three
-//! (TP=3, the front its rank 0).
+//! that loses its peer stops), told its rank by the tool's `options.rank_env` as a real engine is. Rank 0 listens on a
+//! port the OS picks and publishes it in a file in the test's directory, so no port chosen ahead can be taken. Three
+//! nodes: the front s1, and s2 and s3. `big` is split over s2 and s3 (TP=2; the front sends it to rank 0 on s2); `wide`
+//! over all three (TP=3, the front its rank 0).
 
 const std = @import("std");
 const opts = @import("build_options");
@@ -13,13 +14,14 @@ const Daemon = harness.Daemon;
 const reserve = harness.reserve;
 const sleepMs = harness.sleepMs;
 
-fn tools(a: std.mem.Allocator, big_port: u16, wide_port: u16) ![]const u8 {
+fn tools(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     const one =
         \\{{"id": "{s}", "kind": "chat", "engine": "openai_server", "resident_bytes": 41943040,
         \\  "options": {{"server": ["python3", "{s}", "--port", "{{port}}", "--name", "{{id}}"], "rank_start_ms": 300,
-        \\              "rank_env": {{"FAKE_RANK": "{{rank}}", "FAKE_WORLD": "{{world}}", "FAKE_MASTER": "{{master}}:{d}"}}}}}}
+        \\              "rank_env": {{"FAKE_RANK": "{{rank}}", "FAKE_WORLD": "{{world}}", "FAKE_MASTER": "{{master}}",
+        \\                           "FAKE_RENDEZVOUS": "{s}/{s}.port"}}}}}}
     ;
-    return std.fmt.allocPrint(a, "\"tools\": [" ++ one ++ ", " ++ one ++ "]", .{ "big", opts.chat_server, big_port, "wide", opts.chat_server, wide_port });
+    return std.fmt.allocPrint(a, "\"tools\": [" ++ one ++ ", " ++ one ++ "]", .{ "big", opts.chat_server, dir, "big", "wide", opts.chat_server, dir, "wide" });
 }
 
 fn topo(a: std.mem.Allocator, self: []const u8, ports: [3]u16) ![]const u8 {
@@ -43,10 +45,12 @@ test "tensor parallel: TP=2 and TP=3 groups start their ranks on their nodes, se
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var rnd: [2]u8 = undefined;
+    var rnd: [8]u8 = undefined;
     testing.io.random(&rnd);
-    const base: u16 = 30000 + @as(u16, std.mem.readInt(u16, &rnd, .little) % 20000);
-    const t = try tools(a, base, base + 1);
+    const dir = try std.fmt.allocPrint(a, "/tmp/localrouter-it-ranks-{x:0>16}", .{std.mem.readInt(u64, &rnd, .little)});
+    try std.Io.Dir.cwd().createDirPath(testing.io, dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const t = try tools(a, dir);
 
     // the nodes first (a rank's node must answer when rank 0 starts the group), each knowing the ports started before it
     var s3 = try start(a, "ranks-s3", t, "s3", .{ 9, 9, 9 });
@@ -101,7 +105,7 @@ test "tensor parallel: a group's tool must say how its server learns its rank" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const t = try std.mem.replaceOwned(u8, a, try tools(a, 1, 2), "\"rank_env\"", "\"no_rank_env\"");
+    const t = try std.mem.replaceOwned(u8, a, try tools(a, "/tmp/unused"), "\"rank_env\"", "\"no_rank_env\"");
     const cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", {s}, {s}}}", .{ t, try topo(a, "s1", .{ 9, 9, 9 }) });
     const dir = "/tmp/localrouter-it-ranks-bad";
     try std.Io.Dir.cwd().createDirPath(testing.io, dir);

@@ -8,10 +8,12 @@ Refusals: n != 1 and logprobs (400), a model other than --name (404). Test hooks
 chunks streamed, then the process exits mid-stream), "parallel" (with tools: two calls of the first tool). With tools,
 the reply is a call of the first tool unless tool_choice is "none" or the last message is a tool's result, which is
 answered as text (so a tool loop ends).
-As a rank of a tensor-parallel group (FAKE_RANK, FAKE_WORLD and FAKE_MASTER=host:port in its environment, as a
-tool's options.rank_env sets them), it keeps TensorFold's contract: a rank past 0 connects to rank 0 and serves no HTTP;
+As a rank of a tensor-parallel group (FAKE_RANK, FAKE_WORLD, FAKE_MASTER=rank 0's host and FAKE_RENDEZVOUS=a file in
+its environment, as a tool's options.rank_env sets them), it keeps TensorFold's contract: a rank past 0 connects to rank
+0 and serves no HTTP;
 rank 0 waits for every other rank before it serves; a rank whose peer goes exits, so the group stops together. A
-reply then says "(rank 0 of N)".
+reply then says "(rank 0 of N)". Rank 0 listens on a port the OS picks and writes it to the rendezvous file, where the
+other ranks read it: a fixed port could already be taken (a real engine's NCCL port is fixed by the operator).
 """
 
 import json
@@ -281,30 +283,36 @@ def group():
     if "FAKE_RANK" not in os.environ:
         return
     rank, WORLD = int(os.environ["FAKE_RANK"]), int(os.environ["FAKE_WORLD"])
-    host, port = os.environ["FAKE_MASTER"].rsplit(":", 1)
+    host, rendezvous = os.environ["FAKE_MASTER"], os.environ["FAKE_RENDEZVOUS"]
     def watch(s, who):  # the peer's line closing stops this rank
         while s.recv(1):
             pass
         log(f"rank {rank}: {who} is gone, stopping")
         os._exit(1)
     if rank > 0:
-        for _ in range(200):
+        for _ in range(200):  # until rank 0 has written its port and listens on it
             try:
-                s = socket.create_connection((host, int(port)), timeout=1)
+                with open(rendezvous) as f:
+                    port = int(f.read())
+                s = socket.create_connection((host, port), timeout=1)
                 break
-            except OSError:
+            except (OSError, ValueError):
                 time.sleep(0.1)
         else:
-            log(f"rank {rank}: rank 0 never answered on {host}:{port}")
+            log(f"rank {rank}: rank 0 never answered on {host} (no port in {rendezvous})")
             sys.exit(4)
         s.settimeout(None)
         s.sendall(f"{rank}\n".encode())
         log(f"rank {rank} of {WORLD}: joined rank 0 at {host}:{port}")
         watch(s, "rank 0")
     lst = socket.socket()
-    lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    lst.bind((host, int(port)))
+    lst.bind((host, 0))
     lst.listen(16)
+    port = lst.getsockname()[1]
+    part = f"{rendezvous}.{os.getpid()}"  # written whole, then renamed: a rank never reads half a port
+    with open(part, "w") as f:
+        f.write(str(port))
+    os.replace(part, rendezvous)
     lst.settimeout(30)
     for _ in range(WORLD - 1):
         c, _addr = lst.accept()
