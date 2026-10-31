@@ -1,8 +1,8 @@
 {
  "profile": "mac-apple-silicon",
  "status": "preview",
- "description": "LocalRouter on one Apple Silicon Mac (unified memory, Metal): chat, Drama 3 speech and Whisper transcription kept warm, KnowLine decisions and Qwen-Image on demand, each as an out-of-process server or cmd worker. Preview: the steps install and qualify every model, then the run ends; there is no service yet, so you start the daemon yourself (docs/dev/MAC-PORT.md, Installing on a Mac).",
- "tested_on": "M5 Ultra (96 GiB unified memory, macOS 27), 2026-10-30: every model installed, qualified and served through the daemon; no service yet",
+ "description": "LocalRouter on one Apple Silicon Mac (unified memory, Metal): chat, Drama 3 speech and Whisper transcription kept warm, KnowLine decisions and Qwen-Image on demand, each as an out-of-process server or cmd worker, served by a launchd user agent. Preview: tested on one M5 Ultra (docs/dev/MAC-PORT.md, Installing on a Mac).",
+ "tested_on": "M5 Ultra (96 GiB unified memory, macOS 27), 2026-10-30: every model installed, qualified and served through the daemon; the launchd service installed, started, paired and removed on 2026-10-31",
  "hardware": {
   "arch": "arm64",
   "gpu": "Apple M",
@@ -303,5 +303,17 @@
     }
    ]
   }
- ]
+ ],
+ "deploy": {
+  "service": "launchd",
+  "install": "deploy/mac/install.sh",
+  "start": "deploy/mac/start.sh",
+  "stop": "deploy/mac/stop.sh",
+  "status": "deploy/mac/status.sh",
+  "uninstall": "deploy/mac/uninstall.sh",
+  "smoke": "deploy/mac/status.sh",
+  "daemon": {
+   "reserve_bytes": 3221225472
+  }
+ }
 }

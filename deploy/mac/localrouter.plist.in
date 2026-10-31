@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LocalRouter on this Mac: a launchd user agent (install.sh renders the @…@ values and installs it as
+     ~/Library/LaunchAgents/@LABEL@.plist). Loopback only; tailscale serve puts HTTPS in front of it for the tailnet.
+     It starts at login (RunAtLoad) and again after a crash (KeepAlive on an unsuccessful exit), not after a clean stop.
+     Its models are its children: they stop with it (the daemon's guard, docs/dev/MAC-PORT.md). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@DEPLOY@/current/zig-out/bin/localrouter</string>
+    <string>serve</string>
+    <string>--config</string><string>@DEPLOY@/config.json</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--port</string><string>@PORT@</string>
+    <string>--data</string><string>@DEPLOY@/data</string>
+  </array>
+  <key>WorkingDirectory</key><string>@DEPLOY@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@J@/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>@LOG@</string>
+  <key>StandardErrorPath</key><string>@LOG@</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <!-- Drama 3's worker stops its server before it exits (up to 120 s): give it the time before SIGKILL -->
+  <key>ExitTimeOut</key><integer>180</integer>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

@@ -38,9 +38,9 @@ a failure, do what it says and run it again. Models already on the box are reuse
 `tools/install/doctor.sh --profile jarvis-gb10` lists anything missing, with its fix.
 
 **On an Apple Silicon Mac (preview).** `tools/install/bootstrap.sh --profile mac-apple-silicon --dry-run`, then
-`--accept`, installs and qualifies chat, Drama 3, Whisper, KnowLine and Qwen-Image on Metal. It writes no service yet,
-so you start the daemon yourself. [docs/dev/MAC-PORT.md](docs/dev/MAC-PORT.md#installing-on-a-mac) has the steps and
-the measured memory and speed.
+`--accept`, installs and qualifies chat, Drama 3, Whisper, KnowLine and Qwen-Image on Metal. It leaves one launchd
+user agent on `127.0.0.1:8190`, which starts at login, and `deploy/mac/` scripts to start, stop, check and pair it.
+[docs/dev/MAC-PORT.md](docs/dev/MAC-PORT.md#installing-on-a-mac) has the steps and the measured memory and speed.
 
 **A fresh install on DGX-01** (measured 2026-10-22):
 

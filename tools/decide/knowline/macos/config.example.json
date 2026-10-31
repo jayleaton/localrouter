@@ -9,7 +9,7 @@
       "weights": "/Users/me/jarvis/models/decide/knowline-4b-gen5.5",
       "resident_bytes": 10724056240,
       "working_bytes": 0,
-      "keep_loaded": true,
+      "keep_loaded": false,
       "spare_room_only": true,
       "priority": 15,
       "idle_ttl_s": 600,

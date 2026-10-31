@@ -122,6 +122,9 @@ step_env() {
   local k v
   while IFS=$'\t' read -r k v; do export "$k=$(eval "echo \"$v\"")"; done < <(jq -r '.env | to_entries[] | [.key, .value] | @tsv' "$1")
 }
+# launchd_label UNIT: a macOS service's launchd label (deploy/mac): UNIT itself when it has a dot, else
+# com.localrouter.UNIT without its "localrouter-" (the default unit localrouter-jarvis: com.localrouter.jarvis)
+launchd_label() { case $1 in *.*) echo "$1" ;; *) echo "com.localrouter.${1#localrouter-}" ;; esac; }
 
 # ---- several Sparks (--topology FILE --node ID; deploy/jarvis/topology.sh)
 source "$repo/deploy/jarvis/topology.sh"

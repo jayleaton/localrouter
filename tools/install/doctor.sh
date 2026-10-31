@@ -47,7 +47,7 @@ while read -r line; do
 done < <(hw_match "$p")
 avail=$(hw_disk_free "$PREFIX")
 echo "        disk free under $PREFIX: $(gib "$avail") GiB"
-[ $(($(hw_avail) / 1073741824)) -ge 88 ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to 88 GiB free and the warm models about 107 GiB" "see what holds it: nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv (INSTALL.md step 6)"
+[ $darwin = 1 ] || [ $(($(hw_avail) / 1073741824)) -ge 88 ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to 88 GiB free and the warm models about 107 GiB" "see what holds it: nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv (INSTALL.md step 6)"
 
 echo "== prerequisites"
 while read -r q; do
@@ -60,39 +60,66 @@ while read -r s; do
   else miss "$(step_id "$s"): $(jq -r .title <<< "$s")" "$boot   (it resumes at the first step not done)"; fi
 done < <(steps "$p" "${keys[@]}")
 
-echo "== service $UNIT on $listen:$PORT"
 url=http://$listen:$PORT
-if [ ! -f "$HOME/.config/systemd/user/$UNIT.service" ]; then
-  miss "the unit $UNIT is not installed" "$boot"
-elif ! systemctl --user is-active -q "$UNIT"; then
-  miss "the unit $UNIT is installed but not running ($(systemctl --user is-active "$UNIT"))" "bash $repo/deploy/jarvis/start.sh   (why it stopped: journalctl --user -u $UNIT -n 50)"
-else
-  ok "unit $UNIT active since $(systemctl --user show "$UNIT" -p ActiveEnterTimestamp --value)"
-  [ "$(systemctl --user is-enabled "$UNIT" 2> /dev/null)" = enabled ] || warn "the unit does not start at boot" "systemctl --user enable $UNIT"
+start=$(jq -r '.deploy.start // "deploy/jarvis/start.sh"' "$p")
+# the deployment's own token (install.sh makes it once pairing.required is on): /v1/tools and /v1/models need it then
+auth=(); [ -r "$PREFIX/deploy/operator.token" ] && auth=(-H "authorization: Bearer $(cat "$PREFIX/deploy/operator.token")")
+up=0   # the service runs: its health and models are checked below
+if [ "$(jq -r '.deploy.service // "systemd"' "$p")" = launchd ]; then   # a launchd user agent (deploy/mac)
+  label=$(launchd_label "$UNIT")
+  plist=$HOME/Library/LaunchAgents/$label.plist
+  log=$PREFIX/deploy/logs/daemon.log
+  state=$(launchctl print "gui/$(id -u)/$label" 2> /dev/null | awk '$1 == "state" {print $3; exit}')
+  echo "== service $label on $listen:$PORT"
+  if [ ! -f "$plist" ]; then
+    miss "the launchd agent $label is not installed ($plist)" "$boot"
+  elif [ "$state" != running ]; then
+    miss "the launchd agent $label is installed but not running (${state:-not loaded})" "bash $repo/$start   (why it stopped: tail -50 $log)"
+  else
+    ok "launchd agent $label running, pid $(launchctl print "gui/$(id -u)/$label" | awk '$1 == "pid" {print $3; exit}'); it starts at login"
+    up=1 logs="tail -50 $log; then bash $repo/$start"
+  fi
+else                       # a systemd user unit (deploy/jarvis)
+  echo "== service $UNIT on $listen:$PORT"
+  if [ ! -f "$HOME/.config/systemd/user/$UNIT.service" ]; then
+    miss "the unit $UNIT is not installed" "$boot"
+  elif ! systemctl --user is-active -q "$UNIT"; then
+    miss "the unit $UNIT is installed but not running ($(systemctl --user is-active "$UNIT"))" "bash $repo/$start   (why it stopped: journalctl --user -u $UNIT -n 50)"
+  else
+    ok "unit $UNIT active since $(systemctl --user show "$UNIT" -p ActiveEnterTimestamp --value)"
+    [ "$(systemctl --user is-enabled "$UNIT" 2> /dev/null)" = enabled ] || warn "the unit does not start at boot" "systemctl --user enable $UNIT"
+    up=1 logs="journalctl --user -u $UNIT -n 50; then systemctl --user restart $UNIT"
+  fi
+fi
+if [ $up = 1 ]; then
   if ! curl -fs -m 5 "$url/health" > /dev/null; then
-    miss "the daemon does not answer on $url/health" "journalctl --user -u $UNIT -n 50; then systemctl --user restart $UNIT"
+    miss "the daemon does not answer on $url/health" "$logs"
   else
     ok "health on $url"
-    t=$(curl -fs -m 10 "$url/v1/tools")
+    t=$(curl -fs -m 10 ${auth[@]+"${auth[@]}"} "$url/v1/tools")
     for k in "${keys[@]}"; do
       m=$(model "$p" "$k")
       id=$(jq -r .id <<< "$m")
       st=$(jq -r --arg id "$id" '.data[] | select(.id == $id) | .state' <<< "$t")
       if [ -z "$st" ]; then miss "$k ($id) is not in the service's config" "$boot"
-      elif [ "$(jq -r .warm <<< "$m")" = true ] && [ "$st" != ready ]; then
+      # warm: the service's residency now ("always", which Settings may have changed), else the profile's warm
+      elif [ "$(jq -r --arg id "$id" --argjson w "$(jq .warm <<< "$m")" 'first(.data[] | select(.id == $id) | .keep_loaded) // $w' <<< "$t")" = true ] &&
+           [ "$st" != ready ]; then
         err=$(jq -r --arg id "$id" '.data[] | select(.id == $id) | .last_error' <<< "$t")
-        miss "$k ($id) should be warm, is $st${err:+ (last error: $err)}" "wait for it (start.sh waits until warm), else journalctl --user -u $UNIT and $PREFIX/deploy/data/logs/"
+        miss "$k ($id) should be warm, is $st${err:+ (last error: $err)}" "wait for it ($(basename "$start") waits until warm), else ${logs%%;*} and $PREFIX/deploy/data/logs/"
       else ok "$k ($id): $st"; fi
     done
-    q=$(curl -fs -m 10 "$url/v1/models" | jq -r '[.data[] | select(.qualified == false) | .id] | join(" ")')
+    q=$(curl -fs -m 10 ${auth[@]+"${auth[@]}"} "$url/v1/models" | jq -r '[.data[] | select(.qualified == false) | .id] | join(" ")')
     [ -z "$q" ] || miss "not GPU-qualified on this box: $q" "$boot   (it runs each model's qualify step)"
     echo "        MemAvailable $(jq -r '.mem_available_bytes / 1073741824 * 10 | round / 10' <<< "$t") GiB, reserve $(jq -r '.reserve_bytes / 1073741824' <<< "$t") GiB, voice sessions $(jq -r '.voice_sessions // "?"' <<< "$t")"
   fi
 fi
 if [ "$HTTPS_PORT" != 0 ] && [ "$listen" = 127.0.0.1 ]; then   # (a node that is not the front serves the front only)
-  if ! command -v tailscale > /dev/null; then warn "no tailscale: reach the service with ssh -L $PORT:127.0.0.1:$PORT (deploy/jarvis/README.md)"
-  elif tailscale serve status 2> /dev/null | grep -q "127.0.0.1:$PORT"; then ok "tailscale serve: HTTPS $HTTPS_PORT to 127.0.0.1:$PORT"
-  else warn "tailscale serve has no HTTPS entry for 127.0.0.1:$PORT" "sudo tailscale serve --bg --https=$HTTPS_PORT http://127.0.0.1:$PORT"; fi
+  ts=$(command -v tailscale || true) sudo="sudo "
+  [ $darwin = 0 ] || { sudo=""; [ -n "$ts" ] || [ ! -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || ts=/Applications/Tailscale.app/Contents/MacOS/Tailscale; }
+  if [ -z "$ts" ]; then warn "no tailscale: reach the service with ssh -L $PORT:127.0.0.1:$PORT (deploy/jarvis/README.md)"
+  elif "$ts" serve status 2> /dev/null | grep -q "127.0.0.1:$PORT"; then ok "tailscale serve: HTTPS $HTTPS_PORT to 127.0.0.1:$PORT"
+  else warn "tailscale serve has no HTTPS entry for 127.0.0.1:$PORT" "${sudo}tailscale serve --bg --https=$HTTPS_PORT http://127.0.0.1:$PORT"; fi
 fi
 
 if [ -n "$topology" ]; then
