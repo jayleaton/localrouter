@@ -123,12 +123,20 @@ pub const Session = struct {
     last_heard_ns: i96 = 0, // the last transcription ended (or a warm-up was queued)
     primer: ?std.Thread = null, // the chat prefix prime (respond.prime), joined before the next and at the end
     warmer: ?std.Thread = null, // the speech warm-up (respond.warmUp), joined before the next and at the end
+    loader: ?std.Thread = null, // waits for the call models at connect (respond.connect), joined at the end
     priming: bool = false,
     prime_again: bool = false, // the session changed while a prime ran: one more after it
     warming: bool = false,
     warm_again: bool = false, // the voice changed while a warm-up ran: one more after it
     getting_ready: bool = false, // a readiness check is open: `localrouter.session.ready` follows (respond.getReady)
     ready_from_ns: i96 = 0,
+    loading: bool = false, // the loader waits for call models: no prime, warm-up or ready until it is done
+    // How the call models went, for the next `localrouter.session.ready` (respond.settle); load_arena holds the models.
+    load: respond.Load = .none,
+    loaded_ms: u64 = 0,
+    load_models: []const backend.CallModel = &.{},
+    load_message: []const u8 = "",
+    load_arena: std.heap.ArenaAllocator,
     speech_ready: respond.SpeechReady = .off,
     speech_end_ns: i96 = 0, // the last spoken turn's quiet began (awake clock), for its response's timing
     // The turn so far, transcribed once the speaker has been quiet for voice.early_stt_ms: while they stay quiet it is the
@@ -142,8 +150,9 @@ pub const Session = struct {
         errdefer gpa.destroy(s);
         var rnd: [8]u8 = undefined;
         io.random(&rnd);
-        s.* = .{ .gpa = gpa, .io = io, .backend = b, .emit = .{ .out = out }, .voice = voice, .id = "", .settings_arena = .init(gpa), .settings = .{} };
+        s.* = .{ .gpa = gpa, .io = io, .backend = b, .emit = .{ .out = out }, .voice = voice, .id = "", .settings_arena = .init(gpa), .settings = .{}, .load_arena = .init(gpa) };
         errdefer s.settings_arena.deinit();
+        errdefer s.load_arena.deinit();
         s.id = try std.fmt.allocPrint(gpa, "sess_{x:0>16}", .{std.mem.readInt(u64, &rnd, .little)});
         errdefer gpa.free(s.id);
         const sa = s.settings_arena.allocator();
@@ -154,10 +163,8 @@ pub const Session = struct {
         defer tmp.deinit();
         s.emit.send(tmp.allocator(), "session.created", .{ .session = try s.shown(tmp.allocator()) });
         s.worker = try std.Thread.spawn(.{}, respond.work, .{s});
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        respond.prime(s); // the system prompt and tools, before the first turn needs them
-        respond.getReady(s); // and the voice: `localrouter.session.ready` once both are done
+        // The call models, then the system prompt and tools and the voice: `localrouter.session.ready` once all are done.
+        respond.connect(s);
         return s;
     }
 
@@ -170,6 +177,7 @@ pub const Session = struct {
         s.mutex.unlock(s.io);
         s.close_stop.set(s.io);
         if (s.worker) |t| t.join();
+        if (s.loader) |t| t.join(); // close_stop ends its wait; joined first, as it may start a prime and a warm-up
         if (s.primer) |t| t.join(); // the worker has finished: no response can start another
         if (s.warmer) |t| t.join(); // close_stop ends its sentence
         for (s.waiters.items) |t| t.join();
@@ -183,6 +191,7 @@ pub const Session = struct {
         if (s.turn) |t| s.gpa.free(t.item_id);
         s.dropEarly();
         s.settings_arena.deinit();
+        s.load_arena.deinit();
         s.gpa.free(s.id);
         s.gpa.destroy(s);
     }

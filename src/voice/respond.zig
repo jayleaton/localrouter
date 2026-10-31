@@ -96,7 +96,7 @@ const Pass = enum { partial, early, final };
 /// cache and pays only for the new turn. On DGX-01 the first request after a new assistant message or a barge-in took
 /// 260 to 390 ms to its first token, the others 165 to 185. One at a time, off the worker thread.
 pub fn prime(s: *Session) void {
-    if (!s.voice.prime_chat or s.closing) return;
+    if (!s.voice.prime_chat or s.closing or s.loading) return; // loading: the loader primes once the models are in
     if (s.priming) { // the one in flight read the session before this change: once more after it
         s.prime_again = true;
         return;
@@ -180,20 +180,161 @@ pub fn getReady(s: *Session) void {
 /// Under the lock: once nothing it waits for runs, the readiness check's event. A client may talk before it; the first
 /// reply then waits for what is still warming.
 pub fn readyCheck(s: *Session) void {
-    if (!s.getting_ready or s.warming or s.priming or s.closing) return;
+    if (!s.getting_ready or s.loading or s.warming or s.priming or s.closing) return;
     s.getting_ready = false;
     var tmp: std.heap.ArenaAllocator = .init(s.gpa);
     defer tmp.deinit();
+    const a = tmp.allocator();
     const ms: u64 = @intCast(@max(@divTrunc(s.clock() - s.ready_from_ns, std.time.ns_per_ms), 0));
     const chat_state: []const u8 = if (s.voice.prime_chat) "primed" else "off";
-    s.emit.send(tmp.allocator(), "localrouter.session.ready", .{ .speech = @tagName(s.speech_ready), .chat = chat_state, .voice = s.settings.voice, .ms = ms });
-    std.log.info("voice {s}: ready in {d} ms (speech {s}, voice '{s}')", .{ s.id, ms, @tagName(s.speech_ready), s.settings.voice });
+    const models: ?Value = if (s.load == .none) null else readyModels(a, s.load_models) catch null;
+    const message: ?[]const u8 = if (s.load == .failed) s.load_message else null;
+    s.emit.send(a, "localrouter.session.ready", .{ .speech = @tagName(s.speech_ready), .chat = chat_state, .voice = s.settings.voice, .ms = ms, .loaded_ms = s.loaded_ms, .load = @tagName(s.load), .models = models, .message = message });
+    std.log.info("voice {s}: ready in {d} ms (speech {s}, voice '{s}', load {s} in {d} ms)", .{ s.id, ms, @tagName(s.speech_ready), s.settings.voice, @tagName(s.load), s.loaded_ms });
+    // a later check (a voice change, voice back) loads nothing
+    s.load = .none;
+    s.loaded_ms = 0;
+    s.load_models = &.{};
+    s.load_message = "";
+}
+
+/// How a session's call models went by its first `localrouter.session.ready`: none had to load (or it has none), they
+/// loaded while it waited, or one failed or did not fit (the call goes on without it).
+pub const Load = enum { none, loaded, failed };
+
+const load_poll_ms = 1000; // between `localrouter.session.loading` events
+
+/// Without the lock, at create: the readiness check opens (its `ms` counts from the connect, a load included). The
+/// scheduler was asked for the models this machine loads for calls before the session existed; while any is still on
+/// its way, the loader thread (Session.loader) waits for it, since a prime or a warm-up now would only queue behind
+/// the load. Otherwise the prime and the warm-up begin at once.
+pub fn connect(s: *Session) void {
+    var tmp: std.heap.ArenaAllocator = .init(s.gpa);
+    defer tmp.deinit();
+    s.mutex.lockUncancelable(s.io);
+    s.getting_ready = true;
+    s.ready_from_ns = s.clock();
+    s.speech_ready = .off;
+    s.mutex.unlock(s.io);
+    const models = s.backend.callModels(tmp.allocator()) catch &.{}; // takes the scheduler's lock: not under ours
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    if (allSettled(models)) return settle(s, models, null);
+    s.loading = true;
+    s.loader = std.Thread.spawn(.{}, loadModels, .{s}) catch {
+        s.loading = false;
+        return settle(s, &.{}, null); // no thread to wait on: ready as if there were nothing to load
+    };
+}
+
+fn allSettled(models: []const backend.CallModel) bool {
+    for (models) |m| if (!backend.settled(m)) return false;
+    return true;
+}
+
+/// The loader thread: `localrouter.session.loading` at once and about once a second until every call model is settled.
+/// The session closing ends it; after voice.tool_wait_s the ones still loading count as failed.
+fn loadModels(s: *Session) void {
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    const cap_ns: i96 = @as(i96, s.voice.tool_wait_s) * std.time.ns_per_s;
+    var models: []const backend.CallModel = &.{};
+    while (!s.close_stop.cancelled()) {
+        _ = arena.reset(.retain_capacity);
+        const a = arena.allocator();
+        models = s.backend.callModels(a) catch &.{};
+        if (allSettled(models)) break;
+        if (s.clock() - s.ready_from_ns >= cap_ns) { // ready_from_ns is fixed while `loading`
+            models = timedOut(a, models, s.voice.tool_wait_s) catch &.{};
+            break;
+        }
+        const Shown = struct { id: []const u8, state: []const u8, elapsed_ms: u64 };
+        const shown = a.alloc(Shown, models.len) catch break;
+        for (models, shown) |m, *x| x.* = .{ .id = m.id, .state = m.state, .elapsed_ms = m.elapsed_ms };
+        s.mutex.lockUncancelable(s.io);
+        s.emit.send(a, "localrouter.session.loading", .{ .models = shown });
+        s.mutex.unlock(s.io);
+        var slept: u32 = 0; // in steps, so that the session closing ends the wait
+        while (slept < load_poll_ms and !s.close_stop.cancelled()) : (slept += 50) Io.sleep(s.io, .fromMilliseconds(50), .awake) catch break;
+    }
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    s.loading = false;
+    if (s.closing) return;
+    settle(s, models, @intCast(@max(@divTrunc(s.clock() - s.ready_from_ns, std.time.ns_per_ms), 0)));
+}
+
+/// The models still loading at the cap, as failed.
+fn timedOut(a: std.mem.Allocator, models: []const backend.CallModel, wait_s: u32) ![]const backend.CallModel {
+    const out = try a.dupe(backend.CallModel, models);
+    for (out) |*m| if (!backend.settled(m.*)) {
+        m.@"error" = try std.fmt.allocPrint(a, "still {s} after {d} s (voice.tool_wait_s)", .{ m.state, wait_s });
+        m.state = "failed";
+    };
+    return out;
+}
+
+/// Under the lock: the call models are settled (`loaded_ms`: the wait from the connect, null when there was none). All
+/// ready: the prime and the warm-up, as at any connect. One failed or did not fit: ready at once without them, its
+/// `message` saying which and why, rather than a warm-up that would wait on a model that is not coming.
+fn settle(s: *Session, models: []const backend.CallModel, loaded_ms: ?u64) void {
+    const all_ready = for (models) |m| {
+        if (!std.mem.eql(u8, m.state, "ready") and !std.mem.eql(u8, m.state, "disabled")) break false; // disabled: by choice, not a failure
+    } else true;
+    s.load = if (!all_ready) .failed else if (loaded_ms != null) .loaded else .none;
+    s.loaded_ms = if (s.load == .none) 0 else loaded_ms orelse 0;
+    if (s.load != .none) {
+        const a = s.load_arena.allocator();
+        if (keepModels(a, models)) |kept| {
+            s.load_models = kept;
+            s.load_message = if (all_ready) "" else loadMessage(a, kept) catch "";
+        } else |_| {}
+    }
+    if (all_ready) {
+        prime(s);
+        getReady(s);
+    } else readyCheck(s);
+}
+
+fn keepModels(a: std.mem.Allocator, models: []const backend.CallModel) ![]const backend.CallModel {
+    const out = try a.dupe(backend.CallModel, models);
+    for (out) |*m| m.* = .{ .id = try a.dupe(u8, m.id), .state = try a.dupe(u8, m.state), .elapsed_ms = m.elapsed_ms, .@"error" = try a.dupe(u8, m.@"error") };
+    return out;
+}
+
+/// What a client can show: which models are missing and why.
+fn loadMessage(a: std.mem.Allocator, models: []const backend.CallModel) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "Not loaded for this call:");
+    var n: usize = 0;
+    for (models) |m| {
+        if (std.mem.eql(u8, m.state, "ready") or std.mem.eql(u8, m.state, "disabled")) continue;
+        const room = std.mem.eql(u8, m.state, "no_room");
+        const why = if (m.@"error".len > 0) m.@"error" else if (room) "not enough memory beside the models kept loaded" else "no reason given";
+        try out.print(a, "{s} {s} ({s}: {s})", .{ if (n == 0) "" else ";", m.id, if (room) "does not fit" else "failed", why });
+        n += 1;
+    }
+    try out.print(a, ". The call goes on without {s}.", .{if (n == 1) "it" else "them"});
+    return out.items;
+}
+
+/// The ready event's `models`: `{id, state, error}`, `error` only when there is one.
+fn readyModels(a: std.mem.Allocator, models: []const backend.CallModel) !Value {
+    var list: std.json.Array = .init(a);
+    for (models) |m| {
+        var o: std.json.ObjectMap = .empty;
+        try o.put(a, "id", .{ .string = m.id });
+        try o.put(a, "state", .{ .string = m.state });
+        if (m.@"error".len > 0) try o.put(a, "error", .{ .string = m.@"error" });
+        try list.append(.{ .object = o });
+    }
+    return .{ .array = list };
 }
 
 /// Under the lock: the session's voice is warmed on its own thread (Session.warmer) unless warm-ups are off or the
 /// session speaks no audio; one in flight is followed by another when the voice changed meanwhile.
 fn warmUp(s: *Session) void {
-    if (!s.voice.warm_speech or !s.settings.audio or s.closing) return;
+    if (!s.voice.warm_speech or !s.settings.audio or s.closing or s.loading) return; // loading: the loader warms after it
     if (s.warming) {
         s.warm_again = true;
         return;
