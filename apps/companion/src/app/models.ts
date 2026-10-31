@@ -1,6 +1,7 @@
 /**
- * Settings › Models: which models the box keeps loaded and which it shuts down, read from its `/v1/tools` and changed
- * with `POST /v1/tools/{id}/settings` (docs: the box decides and keeps the setting; this app only shows and asks). Also
+ * Settings › Models: which models the LocalRouter server keeps loaded and which it shuts down, read from its
+ * `/v1/tools` and changed with `POST /v1/tools/{id}/settings` (the server decides and keeps the setting; this app only
+ * shows and asks). Also
  * the banner a call shows while its voice models load (`localrouter.session.loading`). Pure: main.ts does the I/O.
  */
 import { SparkError } from '../harness/spark.ts'
@@ -119,6 +120,8 @@ export type BudgetView = { always_pct: number; booked_pct: number; text: string;
 
 export type ModelsView = {
   available: boolean
+  /** The card's first line, naming the server. */
+  intro: string
   /** Why nothing is listed (not paired, not reachable, an older box); empty when the list is there. */
   problem: string
   rows: ModelRow[]
@@ -167,18 +170,29 @@ export function modelRow(e: ToolEntry, names: Record<string, string>): ModelRow 
 }
 
 export const NO_MANAGE = 'This computer’s pairing may read the models but not change them (that needs the manage scope). Pair again with a code made without --scopes to change them here.'
-export const OLD_BOX_MODELS = 'This Spark’s LocalRouter does not offer model settings yet: update LocalRouter on the Spark to choose which models stay loaded.'
+
+/**
+ * The LocalRouter server as the card names it: its machine name from `/v1/capabilities` (`server.machine`) when it
+ * gives one, else "this LocalRouter server". The card runs against any host (a Spark, a Mac Studio, a PC).
+ */
+export function serverName(machine: string | null | undefined): string {
+  return machine?.trim() || 'this LocalRouter server'
+}
+export const oldBoxModels = (server: string) => `The LocalRouter on ${server} has no model settings yet: update it there to choose which models stay loaded.`
+export const modelsIntro = (server: string) => `Which models stay loaded on ${server} and which it shuts down to free memory. The settings are kept there for every device, and a change applies at once.`
 
 /** The Models card: the rows, the memory bar and whether they may be changed. */
-export function modelsView(o: { tools: Tools | null; names: Record<string, string>; manage: boolean; problem?: string; at: number }): ModelsView {
-  if (!o.tools) return { available: false, problem: o.problem || 'Not read yet', rows: [], budget: null, read_only: '', at: o.at }
+export function modelsView(o: { tools: Tools | null; names: Record<string, string>; manage: boolean; server: string; problem?: string; at: number }): ModelsView {
+  const intro = modelsIntro(o.server)
+  if (!o.tools) return { available: false, intro, problem: o.problem || 'Not read yet', rows: [], budget: null, read_only: '', at: o.at }
   const supported = o.tools.residency || o.tools.entries.length === 0
   return {
     available: true,
+    intro,
     problem: o.problem ?? '',
     rows: o.tools.entries.map((e) => modelRow(e, o.names)),
     budget: budgetView(o.tools.budget),
-    read_only: !supported ? OLD_BOX_MODELS : o.manage ? '' : NO_MANAGE,
+    read_only: !supported ? oldBoxModels(o.server) : o.manage ? '' : NO_MANAGE,
     at: o.at,
   }
 }
@@ -206,16 +220,16 @@ export function settingsChange(input: unknown): SettingsChange {
   return out
 }
 
-/** Why the box did not take a change, for the row; `denied`: this token may not change models at all. */
-export function settingsRefusal(error: unknown): { message: string; denied: boolean } {
+/** Why the server did not take a change, for the row; `denied`: this token may not change models at all. */
+export function settingsRefusal(error: unknown, server: string): { message: string; denied: boolean } {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof SparkError) {
     if (error.status === 409) return { message, denied: false }
     if (error.status === 401 || error.status === 403) return { message: NO_MANAGE, denied: true }
-    if (error.status === 404 || error.status === 405) return { message: OLD_BOX_MODELS, denied: false }
-    if (error.status === 400) return { message: `The Spark refused that value: ${message}`, denied: false }
+    if (error.status === 404 || error.status === 405) return { message: oldBoxModels(server), denied: false }
+    if (error.status === 400) return { message: `Refused by ${server}: ${message}`, denied: false }
   }
-  return { message: `The Spark did not change it: ${message}`, denied: false }
+  return { message: `Not changed on ${server}: ${message}`, denied: false }
 }
 
 // ------------------------------------------------------------------ a call's voice models loading

@@ -419,7 +419,7 @@ function modelRow(id) {
   head.append(name, meta, pill);
   const ctl = el('div', 'mctl');
   const select = el('select');
-  select.setAttribute('aria-label', 'How the Spark keeps this model');
+  select.setAttribute('aria-label', 'How the server keeps this model');
   const idle = el('label', 'idle');
   const ttl = el('input');
   Object.assign(ttl, { type: 'number', min: '0', step: '1', inputMode: 'numeric' });
@@ -464,6 +464,7 @@ function renderModels(v) {
   lastModels = v;
   // Read-only: no change is pending, so no refusal is either.
   if (v.read_only) for (const id of Object.keys(modelErrors)) delete modelErrors[id];
+  $('modelsIntro').textContent = v.intro;
   $('modelsProblem').hidden = !v.problem;
   $('modelsProblem').textContent = v.problem;
   $('modelsReadOnly').hidden = !v.read_only;

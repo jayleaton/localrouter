@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Spark, SparkError } from '../harness/spark.ts'
-import { budgetView, callLoading, loadsIn, modelNames, modelsView, NO_MANAGE, OLD_BOX_MODELS, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import { budgetView, callLoading, loadsIn, modelNames, modelsIntro, modelsView, NO_MANAGE, oldBoxModels, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+
+const server = serverName('studio')
 
 const GiB = 2 ** 30
 const qwen = { id: 'qwen', kind: 'chat', state: 'ready', resident_bytes: 20 * GiB, priority: 0, residency: 'on_demand', residency_default: 'always', idle_ttl_s: 300, idle_ttl_s_default: 600, allowed_residency: ['always', 'call', 'on_demand'], last_load_ms: 8400, loaded_since: '2026-10-31T10:00:00Z', last_error: '' }
@@ -36,14 +38,14 @@ describe('the Spark client for model settings', () => {
     const error = await spark.toolSettings('qwen', { residency: 'always' }).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(SparkError)
     expect((error as SparkError).status).toBe(409)
-    expect(settingsRefusal(error)).toEqual({ message: 'always-loaded models would need 120.0 GiB of a 100.0 GiB budget', denied: false })
+    expect(settingsRefusal(error, server)).toEqual({ message: 'always-loaded models would need 120.0 GiB of a 100.0 GiB budget', denied: false })
   })
 
   it('a refusal for the scope makes the card read-only; an older box and a bad value say so', () => {
-    expect(settingsRefusal(new SparkError(403, 'needs manage'))).toEqual({ message: NO_MANAGE, denied: true })
-    expect(settingsRefusal(new SparkError(404, 'no such route')).message).toBe(OLD_BOX_MODELS)
-    expect(settingsRefusal(new SparkError(400, 'idle_ttl_s out of range')).message).toMatch(/refused that value: idle_ttl_s out of range/)
-    expect(settingsRefusal(new Error('timeout')).message).toMatch(/did not change it: timeout/)
+    expect(settingsRefusal(new SparkError(403, 'needs manage'), server)).toEqual({ message: NO_MANAGE, denied: true })
+    expect(settingsRefusal(new SparkError(404, 'no such route'), server).message).toBe(oldBoxModels('studio'))
+    expect(settingsRefusal(new SparkError(400, 'idle_ttl_s out of range'), server).message).toBe('Refused by studio: idle_ttl_s out of range')
+    expect(settingsRefusal(new Error('timeout'), server).message).toBe('Not changed on studio: timeout')
   })
 })
 
@@ -51,7 +53,7 @@ describe('the Models card', () => {
   const names = modelNames([{ id: 'qwen', name: 'Qwen3 32B (NVFP4, 4-bit)' }, { id: 'tts' }, 7])
 
   it('one row per model: name, kind, state, memory, load time, and only the residencies it allows', () => {
-    const v = modelsView({ tools: toolsOf(body), names, manage: true, at: 1 })
+    const v = modelsView({ tools: toolsOf(body), names, manage: true, server, at: 1 })
     expect(v.read_only).toBe('')
     const [q, t, i] = v.rows
     expect(q).toMatchObject({ name: 'Qwen3 32B', kind: 'Chat', dot: 'ready', state: 'ready', memory: '20.0 GiB', loads: 'loads in ~8 s', residency: 'on_demand', idle_shown: true, idle_ttl_s: 300, is_default: false })
@@ -64,7 +66,7 @@ describe('the Models card', () => {
   })
 
   it('an always-loaded model has no idle field and is default whatever its idle time', () => {
-    const v = modelsView({ tools: toolsOf({ data: [{ ...qwen, residency: 'always', idle_ttl_s: 5 }] }), names, manage: true, at: 1 })
+    const v = modelsView({ tools: toolsOf({ data: [{ ...qwen, residency: 'always', idle_ttl_s: 5 }] }), names, manage: true, server, at: 1 })
     expect(v.rows[0]).toMatchObject({ idle_shown: false, is_default: true })
   })
 
@@ -75,12 +77,19 @@ describe('the Models card', () => {
   })
 
   it('read-only without manage; an older box (keep_loaded, no residency) reads as always/on demand and says to update', () => {
-    expect(modelsView({ tools: toolsOf(body), names, manage: false, at: 1 }).read_only).toBe(NO_MANAGE)
+    expect(modelsView({ tools: toolsOf(body), names, manage: false, server, at: 1 }).read_only).toBe(NO_MANAGE)
     const old = toolsOf({ data: [{ id: 'q', kind: 'chat', state: 'ready', keep_loaded: true, idle_ttl_s: 0 }, { id: 'v', kind: 'video', state: 'unloaded', keep_loaded: false }] })
     expect(old.residency).toBe(false)
     expect(old.entries.map((e) => [e.residency, e.allowed_residency])).toEqual([['always', ['always', 'on_demand']], ['on_demand', ['always', 'on_demand']]])
-    expect(modelsView({ tools: old, names, manage: true, at: 1 }).read_only).toBe(OLD_BOX_MODELS)
-    expect(modelsView({ tools: null, names, manage: true, problem: 'offline', at: 1 })).toMatchObject({ available: false, problem: 'offline', rows: [] })
+    expect(modelsView({ tools: old, names, manage: true, server, at: 1 }).read_only).toBe(oldBoxModels('studio'))
+    expect(modelsView({ tools: null, names, manage: true, server, problem: 'offline', at: 1 })).toMatchObject({ available: false, problem: 'offline', rows: [] })
+  })
+
+  it('names the server by its machine name, or neutrally when it gives none', () => {
+    expect(serverName('  ')).toBe('this LocalRouter server')
+    expect(serverName(null)).toBe('this LocalRouter server')
+    expect(modelsView({ tools: toolsOf(body), names, manage: true, server, at: 1 }).intro).toBe(modelsIntro('studio'))
+    expect(modelsIntro('studio')).toMatch(/^Which models stay loaded on studio and/)
   })
 
   it('load times', () => {

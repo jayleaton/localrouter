@@ -18,7 +18,7 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
-import { callLoading, modelNames, modelsView, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import { callLoading, modelNames, modelsView, serverName, settingsChange, settingsRefusal, toolsOf } from './models.ts'
 import type { Tools } from './models.ts'
 import { DEFAULT_LANGUAGE, heardLanguages, languageChoices, parseSettings, settingsText, sttLanguage, type Heard } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
@@ -848,7 +848,7 @@ function registerIpc() {
   // Settings › Models: read while the card shows (the page polls), changed one model at a time.
   setup('setup:models', () => readModels())
   setup('setup:modelSettings', async (id, change) => {
-    if (!runtime) throw new Error('LocalRouter is not paired with a Spark yet')
+    if (!runtime) throw new Error('LocalRouter is not paired with a server yet')
     const body = settingsChange(change)
     const token = loadSecrets().token
     try {
@@ -856,7 +856,7 @@ function registerIpc() {
       log.info('models.settings', { id: String(id), ...body })
       return { view: await readModels(), error: null }
     } catch (error) {
-      const why = settingsRefusal(error)
+      const why = settingsRefusal(error, modelsServer())
       if (why.denied) manageRefused = token
       log.warn('models.settings_refused', { id: String(id), error: error instanceof Error ? error.message : String(error) })
       return { view: await readModels(), error: why.message }
@@ -1005,7 +1005,7 @@ async function checkConnection() {
   log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
 }
 
-// ------------------------------------------------------------------ models: which stay loaded (kept on the Spark)
+// ------------------------------------------------------------------ models: which stay loaded (kept on the server)
 
 /** The last `/v1/tools` read (a call's loading banner estimates from its load times), and model names from `/v1/models`. */
 let lastTools: Tools | null = null
@@ -1021,9 +1021,13 @@ function mayManage(token: string): boolean {
   return allows(connection.scopes.map((s) => s.name), 'manage')
 }
 
+/** The paired server as the Models card names it: its machine name when the connection check read one. */
+const modelsServer = () => serverName(connection?.ok ? connection.server.machine : null)
+
 async function readModels() {
   const at = Date.now()
-  if (!runtime) return modelsView({ tools: null, names, manage: false, problem: 'Pair with a Spark to see its models.', at })
+  const server = modelsServer()
+  if (!runtime) return modelsView({ tools: null, names, manage: false, server, problem: 'Pair with a LocalRouter server to see its models.', at })
   const token = loadSecrets().token
   const spark = new Spark(settings.base, token, timed(CHECK_S))
   try {
@@ -1031,9 +1035,9 @@ async function readModels() {
     const [tools, models] = await Promise.all([spark.tools(), fresh ? null : spark.models().catch(() => null)])
     if (models) [names, namesAt] = [modelNames(models), Date.now()]
     lastTools = toolsOf(tools)
-    return modelsView({ tools: lastTools, names, manage: mayManage(token), at })
+    return modelsView({ tools: lastTools, names, manage: mayManage(token), server, at })
   } catch (error) {
-    return modelsView({ tools: null, names, manage: false, problem: `The Spark did not answer: ${error instanceof Error ? error.message : String(error)}`, at })
+    return modelsView({ tools: null, names, manage: false, server, problem: `No answer from ${server}: ${error instanceof Error ? error.message : String(error)}`, at })
   }
 }
 
