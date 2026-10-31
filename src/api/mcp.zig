@@ -8,6 +8,8 @@
 //!   edit_image       the same for an edit: `image` (or `images`) changed as the prompt says, optionally within a `mask`
 //!   generate_video   queues a clip and waits up to `wait_s` (default 600): the MP4's URL when done, else the job id;
 //!                    `image` makes it image to video
+//!   generate_3d      queues one picture's 3D asset and waits up to `wait_s` (default 600): the manifest, the input view
+//!                    inline and the asset's URL when done, else the job id
 //!   transcribe_audio waits up to `wait_s` for the transcript of an audio file (base64, data URL or URL): its text and
 //!                    JSON (language, segments, words), else the job id; get_job returns the transcript once done
 //!   synthesize_speech waits for spoken text; returns the audio inline (WAV) and as a URL
@@ -95,7 +97,8 @@ fn initialize(req: *h.Request, a: std.mem.Allocator, id: Value, params: Value) !
 const instructions =
     \\Chat, generative and speech models running locally on one GPU machine. Call list_models first. A model loads on its first use (a few seconds),
     \\then answers in seconds; it unloads by itself when idle. Send one request at a time. Images come back inline and as
-    \\URLs (edit_image changes a picture); videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); transcripts as text and
+    \\URLs (edit_image changes a picture); videos as an MP4 URL (generate_video waits for it, or returns a job id for get_job); 3D assets from one
+    \\picture as a Gaussian splat PLY URL with a manifest (generate_3d; minutes on some machines, so mind wait_s); transcripts as text and
     \\JSON; speech as WAV inline and a URL; chat replies as text (chat keeps its model loaded, so it answers at once).
 ;
 
@@ -167,6 +170,8 @@ fn invoke(app: *App, a: std.mem.Allocator, host: []const u8, name: []const u8, a
         editImage(app, a, host, args, out)
     else if (eql(name, "generate_video"))
         generateVideo(app, a, host, args, out)
+    else if (eql(name, "generate_3d"))
+        generate3d(app, a, host, args, out)
     else if (eql(name, "transcribe_audio"))
         transcribeAudio(app, a, host, args, out)
     else if (eql(name, "synthesize_speech"))
@@ -224,6 +229,7 @@ fn toolNeed(name: []const u8) ?Need {
         .{ "load_model", .manage },      .{ "unload_model", .manage },
         .{ "reserve_for", .manage },     .{ "release_models", .manage },
         .{ "edit_image", .media },       .{ "set_model_residency", .manage },
+        .{ "generate_3d", .media },
     };
     for (needs) |x| if (eql(x[0], name)) return x[1];
     return null;
@@ -304,7 +310,7 @@ fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wai
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, booked_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, residency: []const u8, idle_ttl_s: u32, disabled: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, booked_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, residency: []const u8, idle_ttl_s: u32, disabled: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null, formats: ?[]const Value = null, input_modes: ?[]const Value = null, gaussians: ?engine.Gaussians = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -425,7 +431,7 @@ fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList
 }
 
 fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
+    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, num_gaussians: ?u32 = null, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
     const b = try parseArgs(Args, a, args, out);
     const i = try modelIndex(app, a, b.model, out);
     const cfg = app.scheduler.slots[i].tool.config();
@@ -436,6 +442,7 @@ fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
         .decision => .{ .decision = .{ .body = "" } },
+        .asset3d => .{ .asset3d = .{ .image = "", .num_gaussians = b.num_gaussians } },
     };
     if (b.size.len > 0) {
         const wh = request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
@@ -563,6 +570,36 @@ fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value,
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
+}
+
+/// generate_3d: one picture (`image`, or the URL of an earlier output on this server) to a 3D asset. Waits up to
+/// `wait_s`; when done, the manifest (`asset.json`: representation, coordinate frame, camera, model, settings) as text,
+/// the input view the model used inline (unless `inline_preview` is false) and the summary with every file's URL; the
+/// asset itself (tens of MB) is never inlined. Past `wait_s`: the job id, for get_job.
+fn generate3d(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
+    const Args = struct { image: ?[]const u8 = null, model: ?[]const u8 = null, input_mode: []const u8 = "synthetic", format: []const u8 = "ply", seed: ?u64 = null, steps: ?u32 = null, guidance: ?f32 = null, num_gaussians: ?u32 = null, inline_preview: bool = true, wait_s: u32 = 600 };
+    const b = try parseArgs(Args, a, args, out);
+    const image = b.image orelse return fail(a, out, "generate_3d needs the picture: image (base64, a data URL or an http(s) URL, this server's own /v1/files URLs too)", .{});
+    try requireCapability(app, a, .image_to_3d, out);
+    const files = try inputFiles(app, a, host, "image", &.{image}, out);
+    var bad: []const u8 = "";
+    const r = routes.assetRequest(files[0].name, b.input_mode, b.format, b.seed orelse routes.randomSeed(app.io), b.steps, b.guidance, b.num_gaussians, &bad) orelse return fail(a, out, "{s}", .{bad});
+    var why: routes.Refusal = .{};
+    const tool = routes.resolve(app, b.model, .image_to_3d, &why) orelse return fail(a, out, "{s}", .{why.message});
+    const j = try start(app, a, tool, r, files, out);
+    try waitFor(app, j, b.wait_s);
+    if (!finished(app, j) or j.status != .completed) return report(app, a, host, j, out);
+    const o = routes.assetOutput(app, a, caller_scheme, host, j) orelse return fail(a, out, "the 3D asset's files are gone (outputs are kept for a day)", .{});
+    const manifest = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, "asset.json" }), a, .limited(1 << 20)) catch return fail(a, out, "could not read asset.json", .{});
+    try summary(app, a, host, j, out); // first, as every job tool's: id, status and the files' URLs
+    try out.append(a, .{ .type = "text", .text = manifest });
+    if (b.inline_preview) {
+        const name = o.input_url[std.mem.lastIndexOfScalar(u8, o.input_url, '/').? + 1 ..];
+        const png = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, name }), a, .limited(h.max_body)) catch return fail(a, out, "could not read {s}", .{name});
+        const enc = std.base64.standard.Encoder;
+        try out.append(a, .{ .type = "image", .data = enc.encode(try a.alloc(u8, enc.calcSize(png.len)), png), .mimeType = "image/png" });
+    }
+    return true;
 }
 
 fn transcribeAudio(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
@@ -823,7 +860,7 @@ const RawJson = struct {
 };
 
 const tool_list = [_]Tool{
-    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat or decision), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision, voice_clone), voices (speech models; voices cloned for a model included), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
+    .{ .name = "list_models", .title = "List models", .description = "The models on this machine: id, kind (image, video, speech, transcription, chat, decision or asset3d), capabilities (text_to_image, image_edit, text_to_video, image_to_video, text_to_speech, speech_to_text, chat_completion, typed_decision, voice_clone, image_to_3d), voices (speech models; voices cloned for a model included), formats, input_modes and gaussians (3D models: the asset formats, picture kinds and Gaussian counts they take), default_for (the capabilities it serves when a request names no model), priority and keep_loaded, whether each is loaded now (state: ready or busy is fast; unloaded loads on first use), its resident_bytes and scheduler lane, qualified (false: refused until this machine has qualified it), and the machine's memory (mem_available_bytes, reserve_bytes). Call it first.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{},"additionalProperties":false}
     } },
     .{ .name = "list_voices", .title = "List voices", .description = "The voices of every speech model: model id, voices (its own and those cloned for it on this machine), default_voice, state (ready: speaks at once), default (true: synthesize_speech uses it when no model is named) and qualified. Pass one of these voices to synthesize_speech.", .inputSchema = .{ .text =
@@ -834,6 +871,7 @@ const tool_list = [_]Tool{
     \\"model":{"type":"string","description":"The model the job needs, from list_models (e.g. the video model)."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT of the job, to price it; omit for the model's default."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; default 5."},
+    \\"num_gaussians":{"type":"integer","minimum":1,"description":"A 3D job's Gaussian count, to price it; omit for the model's default."},
     \\"dry_run":{"type":"boolean","default":false,"description":"true: unload nothing, only report what would go."},
     \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":180,"description":"The unloaded models come back after this even if the job never runs."},
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":300,"description":"How long to wait for the unloads and the load."}},
@@ -904,6 +942,20 @@ const tool_list = [_]Tool{
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}},
     \\"additionalProperties":false}
     } },
+    .{ .name = "generate_3d", .title = "Generate 3D", .description = "One picture of an object to a 3D asset (a Gaussian splat PLY with a manifest). The model reconstructs the whole object from the single view, background removed. Waits up to wait_s; when done returns the job as JSON text (id, status, seed and URLs on this server for the asset (asset.ply, tens of MB: never inlined), the manifest and the input view), then the manifest (representation, coordinate frame, a camera that matches the input view, model and settings) as JSON text, then the input view the model used inline; past wait_s it returns the job id for get_job (cancel_job stops it). It can take minutes, plus the model's load. Needs a model whose capabilities (list_models) include image_to_3d; list_models shows its input_modes and Gaussian counts.", .inputSchema = .{ .text =
+    \\{"type":"object","required":["image"],"properties":{
+    \\"image":{"type":"string","description":"The picture (PNG, JPEG or WebP, up to 32 MB) as a base64 string, a data URL or an http(s) URL, this server's own /v1/files URLs (from generate_image or edit_image) too. One object, ideally whole in frame."},
+    \\"input_mode":{"type":"string","enum":["synthetic","real"],"default":"synthetic","description":"synthetic: a render, illustration or product shot on a plain background; real: a photograph. Set real for photos."},
+    \\"model":{"type":"string","description":"A 3D model id from list_models; default: the model whose default_for lists image_to_3d."},
+    \\"format":{"type":"string","enum":["ply"],"default":"ply"},
+    \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one; reuse a returned seed to reproduce an asset."},
+    \\"steps":{"type":"integer","minimum":1,"maximum":200,"description":"Sampling steps; omit for the model's default."},
+    \\"guidance":{"type":"number","minimum":0,"description":"Guidance strength; 0 turns guidance off; omit for the model's default."},
+    \\"num_gaussians":{"type":"integer","minimum":1,"description":"How many Gaussians the splat has, within the model's gaussians range (list_models); omit for its default."},
+    \\"inline_preview":{"type":"boolean","default":true,"description":"false: no inline input view (smaller replies)."},
+    \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}},
+    \\"additionalProperties":false}
+    } },
     .{ .name = "transcribe_audio", .title = "Transcribe audio", .description = "Speech to text in the spoken language (no translation). Waits up to wait_s for the transcript and returns its text, then JSON with language, duration and segments (and words when timestamps is word); a longer job returns its id for get_job. Audio up to 32 MB and 30 minutes: WAV, MP3, FLAC, OGG/Opus, M4A/MP4, WebM or AAC.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{
     \\"audio":{"type":"string","description":"The audio file as a base64 string, a data URL or an http(s) URL (the daemon's own /v1/files URLs too). Send this or path."},
@@ -955,9 +1007,9 @@ const tool_list = [_]Tool{
     \\"additionalProperties":false}
     } },
     .{ .name = "get_job", .title = "Get job", .description = "A job's status (queued, in_progress, completed, failed, cancelled), progress and output URLs. wait_s waits for it to finish.", .inputSchema = .{ .text =
-    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"A job id from generate_video, generate_image, transcribe_audio or a /v1 response."},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"How long to wait for it to finish."}},"additionalProperties":false}
+    \\{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"A job id from generate_video, generate_image, generate_3d, transcribe_audio or a /v1 response."},"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":0,"description":"How long to wait for it to finish."}},"additionalProperties":false}
     } },
-    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job (an image, video or transcription by the id those tools or get_job returned). A cancelled job's model may be stopped, and loads again on its next use.", .inputSchema = .{ .text =
+    .{ .name = "cancel_job", .title = "Cancel job", .description = "Cancels a queued or running job (an image, video, 3D asset or transcription by the id those tools or get_job returned). A cancelled job's model may be stopped, and loads again on its next use.", .inputSchema = .{ .text =
     \\{"type":"object","required":["id"],"properties":{"id":{"type":"string"}},"additionalProperties":false}
     } },
     .{ .name = "release_models", .title = "Release models", .description = "Unloads every model now, returning its memory to the machine (they also unload by themselves when idle).", .inputSchema = .{ .text =

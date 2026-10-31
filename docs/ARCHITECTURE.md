@@ -73,7 +73,7 @@ is never a victim, and memory admitted on one lane but not yet allocated is held
 
 ## Requests and capabilities
 
-A request has a kind (`image`, `video`, `speech`, `transcription`, `chat`, `decision`) and needs one capability:
+A request has a kind (`image`, `video`, `asset3d`, `speech`, `transcription`, `chat`, `decision`) and needs one capability:
 
 | Capability | Kind | Request |
 | --- | --- | --- |
@@ -81,6 +81,7 @@ A request has a kind (`image`, `video`, `speech`, `transcription`, `chat`, `deci
 | `image_edit` | image | prompt + 1 to 5 input images |
 | `text_to_video` | video | prompt |
 | `image_to_video` | video | prompt + 1 input image |
+| `image_to_3d` | asset3d | 1 input image (+ input_mode, format, seed, steps, guidance, num_gaussians) |
 | `text_to_speech` | speech | text (+ voice, speed, preset) |
 | `speech_to_text` | transcription | one audio file (+ language, prompt, timestamps) |
 | `chat_completion` | chat | an OpenAI chat request (messages, tools, sampling, ...), proxied to the model's own server |
@@ -190,6 +191,37 @@ the model: input decoding, response encodings, and the limits checked before a t
 - A refusal's `type` is `invalid_request_error` (400), `service_unavailable` (503: the model's own server is busy or
   not ready, retry later) or anything else (500).
 - Not offered by the API, and refused with a reason: translation, SSE streams.
+
+### 3D assets
+
+An `image_to_3d` tool turns one image into a 3D asset (today a Gaussian splat PLY). `POST /v1/assets3d` and MCP
+`generate_3d` take the image, and every result is an async job (`GET /v1/assets3d/{id}`, `GET /v1/jobs/{id}`, cancel
+with `DELETE` on either). The worker gets the input as `image_0.<ext>` in the job directory:
+
+```
+{"op":"generate","id":"a3d_…","dir":"…","request":{"asset3d":{"image":"image_0.png","input_mode":"real","format":"ply",
+   "seed":7,"steps":50,"guidance":3,"num_gaussians":262144}}}
+  -> {"ok":true,"files":["asset.ply","asset.json","input.png"],"seed":7,"ms":98700}
+     asset.json: {"object":"asset3d","version":1,"representation":"gaussian_splat","format":"ply","file":"asset.ply",
+                  "input":"input.png", …}      (the model may add frame, camera, settings, timing)
+```
+
+- `input_mode` is `synthetic` (a render or generated image of one object) or `real` (a photo). Unset `steps`,
+  `guidance` and `num_gaussians` are filled from the tool's `default_steps`, `default_guidance` and
+  `default_gaussians` before the worker sees them; a null field is left off the wire.
+- Declared limits (`options`): `formats` (default `["ply"]`), `input_modes` (default both), `max_steps`,
+  `max_guidance`, `min_gaussians` / `max_gaussians` / `gaussian_multiple` / `default_gaussians` (a tool without
+  `max_gaussians` refuses any `num_gaussians`), and `working_bytes_by_gaussians`, a map from a measured count to its
+  working bytes. A job is booked at the smallest measured count at or above the one asked for (the largest when none is
+  given); a count above every measurement is refused, and nothing is interpolated.
+- Before the job completes the daemon checks `asset.json` (`media/asset3d.zig`): it must be an `asset3d` manifest of
+  version 1 in the format asked for, naming a file and an input view the worker listed, and the PLY must parse with a
+  body as long as its header says. Anything else fails the job (500), so a client never gets a manifest that points at
+  nothing. The PLY is then labelled as machine-generated with `comment` lines after its `format` line
+  (`media/ply.zig`); the body is not touched.
+- An asset3d job is heavy: like an image or video job, its cold load waits until no speech is being made, and while a
+  call is open its admission never evicts the voice loop's tools kept for the call or of a higher priority
+  (`mayEvict`).
 
 ### Models that wrap their own server
 

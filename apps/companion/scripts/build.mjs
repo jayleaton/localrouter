@@ -61,6 +61,12 @@ const patched = `${voice.slice(0, at)}${shimTag}\n${voice.slice(at)}`
 if (!patched.includes(shimTag)) fail('voice shim not injected')
 await writeFile(join(dist, 'ui', 'voice.html'), patched)
 
+// The page's pinned libraries (the 3D viewer: src/voice/vendor/README.md), at the path it imports them from (/voice/vendor/).
+const vendor = join(root, '..', '..', 'src', 'voice', 'vendor')
+const viewer = /\/voice\/vendor\/(splat-viewer-[0-9a-f]{12}\.js)/.exec(voice)
+if (viewer && !(await exists(join(vendor, viewer[1])))) fail(`the voice page imports ${viewer[1]}, which is not in ${vendor}`)
+await cp(vendor, join(dist, 'ui', 'voice', 'vendor'), { recursive: true, filter: (src) => !src.endsWith('README.md') })
+
 // The tray (Windows, Linux) and the Linux window icon, from scripts/make-icons.mjs.
 for (const name of ['icon.png', 'tray.png', 'tray@2x.png']) await cp(join(root, 'build', name), join(dist, name))
 
@@ -69,4 +75,4 @@ await writeFile(
   `${JSON.stringify({ name: 'localrouter-companion', productName: 'LocalRouter', version: pkg.version, description: pkg.description, author: { name: 'LocalRouter', email: 'noreply@localrouter.invalid' }, homepage: 'https://github.com/jayleaton/localrouter', license: pkg.license, main: 'main.cjs' }, null, 2)}\n`,
 )
 
-process.stdout.write(`build: dist/ (main.cjs, preload.cjs, mcp.cjs, ui/, icons, package.json) for ${pkg.version}\n`)
+process.stdout.write(`build: dist/ (main.cjs, preload.cjs, mcp.cjs, ui/ with voice/vendor/, icons, package.json) for ${pkg.version}\n`)

@@ -45,6 +45,7 @@ the voice loop's tool offers are all built from these fields (`engine.audioInfo`
 | transcription | `speech_to_text` | `max_audio_s`, `languages` | `engine.checkTranscription`, `api/speech.zig` |
 | image | `text_to_image`, `image_edit` | the engine's own (`max_side`, `max_pixels`, `edit_refs`, `precision` for Qwen-Image); `reference_working_bytes` (a `cmd` worker: what each edit reference adds to `working_bytes`, measured) | the engine's `Entry.check` |
 | video | `text_to_video`, `image_to_video` | the engine's own (`max_width`, `max_height`, `max_seconds`, `default_size` for H3) | the engine's `Entry.check` |
+| asset3d | `image_to_3d` | `formats`, `input_modes`, `max_steps`, `max_guidance`, `min_gaussians`/`max_gaussians`/`gaussian_multiple`/`default_gaussians`, `default_steps`, `default_guidance`, `working_bytes_by_gaussians` (measured; a count above every measurement is refused) | `engine.checkAsset3d`; the result's manifest and PLY by `media/asset3d.zig` |
 | decision | `typed_decision` | `decision_path` | `api/decide.zig` (answers checked against the questions) |
 
 Defaults come from config: `defaults.<capability>` for every route and MCP tool; `voice.chat_model`,
@@ -55,7 +56,7 @@ speech model's `default_voice`.
 ### MCP: a stable kind-level tool list
 
 `tools/list` is the same on every box: one tool per job kind (`generate_image`, `edit_image`, `generate_video`,
-`synthesize_speech`, `transcribe_audio`, `chat`, `decide`, ...). A tool whose capability no configured model has stays
+`generate_3d`, `synthesize_speech`, `transcribe_audio`, `chat`, `decide`, ...). A tool whose capability no configured model has stays
 listed. Calling it is refused cleanly and the refusal names the models and what they can do (`requireCapability`:
 "no model on this machine can do image_edit: its models are plain (text_to_image)"). This is the existing,
 tested contract (`tests/mcp.zig`), and it keeps `tools/list` identical across a swap, which harnesses cache. A model's
@@ -75,6 +76,7 @@ read a refusal before it promises a result, so the loop offers its chat model `g
 | transcription | `cmd` worker (`tools/speech/whisper`) or a compiled-in engine; `{"transcription": ...}` → `transcript.json` | the `/voice` page and the companion offer Whisper large-v3's languages (no way to declare others); the `decode: greedy` hint (`request.Decode`) is Whisper-shaped, but a worker may ignore it | config (with a wrong language list) → config (`languages` declared, refused by the daemon, `/voice` narrows its picker) |
 | image | compiled-in `engine.Entry` (`qwen_image`, `qwen_image_turbo`) or a `cmd` worker; `{"image": ...}` → PNGs | none in routing; prose hints only (MCP `size` says "about 1 megapixel is best"; the voice tool's size example) | one adapter + one `engine.entries` line (compiled-in), or config (`cmd`) |
 | video | compiled-in `minimax_h3` or a `cmd` worker; `{"video": ...}` → MP4 | none in routing; the MCP schema defaults (`fps` 24, `seconds` 1–20) are API bounds, and the model's own limits are its options | as image |
+| asset3d | a `cmd` worker (`tools/asset3d/idol`) or a compiled-in engine; `{"asset3d": ...}` → `asset.ply`, `asset.json` (the manifest), `input.png` | none: a new kind, so nothing came before it | config (`cmd`) |
 | decision | `openai_server` (KnowLine) with `decision_path`; `api/decide.zig` checks the answers | none | config |
 | speaker / voice-clone embedding | not a daemon kind: `voice_clone` is a capability of a speech tool, whose adapter encodes the voice; CAM++ (Chatterbox Turbo's encoder) is used only by offline qualification scripts on the box, never by `src/` | `vq_codes` (a codec-code grid) is the one wire shape for `references` and cloned voices | config for any codec-code model; a model that conditions on something else (a speaker embedding) needs a new reference field, which is a wire addition |
 
@@ -130,4 +132,8 @@ checks that:
 - the voice loop takes either set's speech model;
 - a set whose image model can't edit and whose video model can't do image to video gets clean refusals;
 - changing only `defaults` moves an unnamed request to the other model;
-- a declared `languages` list is shown and enforced.
+- a declared `languages` list is shown and enforced;
+- `POST /v1/assets3d` and MCP `generate_3d` make a labelled PLY, its manifest and its input view on either set
+  (testpattern, and a `cmd` worker with `working_bytes_by_gaussians`), served through `/v1/files` and `/content`;
+  a `num_gaussians` outside the declared range, an undeclared `input_mode` and a missing image are refused before the
+  tool loads.

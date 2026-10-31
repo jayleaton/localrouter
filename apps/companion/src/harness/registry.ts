@@ -11,9 +11,12 @@ export type Schema = {
   additionalProperties?: false
 }
 
+/** What a generation makes: the box's job kinds the UI draws as cards. */
+export type MediaKind = 'image' | 'video' | 'asset3d'
+
 export type ToolEvent =
-  | { type: 'job.created'; call_id: string; job_id: string; kind: 'image' | 'video' }
-  | { type: 'job.done'; call_id: string; job_id: string; kind: 'image' | 'video'; status: string; urls: string[]; error: string }
+  | { type: 'job.created'; call_id: string; job_id: string; kind: MediaKind }
+  | { type: 'job.done'; call_id: string; job_id: string; kind: MediaKind; status: string; urls: string[]; error: string }
   /** The person agreed on a call to end it and make a video in the text chat (see `videoHandoff`). */
   | { type: 'handoff'; call_id: string; kind: 'video'; prompt: string; seconds: number | null }
 

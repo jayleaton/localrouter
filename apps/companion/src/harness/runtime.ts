@@ -23,7 +23,7 @@ export const HARNESS_INSTRUCTIONS = [
   'You run inside the LocalRouter app on the user’s own computer, and its tools run there.',
   `computer_control and computer_use act on this computer. computer_use: ${BACKGROUND_NOTE}`,
   'A computer tool’s result says what really happened: tell the user what its `tell_user` says. When `done` is false the action did not happen: never say or imply that it did (nothing was typed, sent or opened), and say why.',
-  'list_files and read_file see only the folders the user shared. generate_image makes a picture on their LocalRouter box and edit_image changes one; the user sees it when it is done.',
+  'list_files and read_file see only the folders the user shared. generate_image makes a picture on their LocalRouter box and edit_image changes one; the user sees it when it is done. generate_3d, when offered, turns a picture into a 3D model the same way.',
   'A video is never made during a call: generate_video gives you a question to ask first; follow what it returns.',
 ].join(' ')
 
@@ -103,17 +103,29 @@ export async function startRuntime(o: RuntimeOptions): Promise<Runtime> {
   if (shared) shared.broker.setDecider(decider)
   const caller = o.assistant ? voiceCaller(o.assistant) : VOICE_CALLER
   const local = () => [...computerTools(executor.broker, caller), ...fileTools(o.shared)]
+  // generate_3d only when the box has a 3D model (kind asset3d): asked at start (a few seconds at most), and again as
+  // each call starts, for the next one.
+  let threeD = false
+  const readKinds = () => spark.models().then((ms) => { threeD = ms.some((m) => (m as { kind?: unknown } | null)?.kind === 'asset3d') }, () => undefined)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([readKinds(), new Promise((r) => { timer = setTimeout(r, 3000) })])
+  clearTimeout(timer)
+  const pictures = () => pictureTools(spark, undefined, { threeD })
   // Typed chat: this computer's tools and picture edits (the page makes its own pictures and videos, with their cards).
   const chat = new Registry().add(...local(), ...pictureTools(spark).filter((t) => t.name === 'edit_image'))
   const journal = new Journal(join(o.dir, 'conversations'))
   return {
     spark,
     executor,
-    registry: voiceRegistry(local(), pictureTools(spark), new VideoHandoff()),
+    registry: voiceRegistry(local(), pictures(), new VideoHandoff()),
     chat,
     journal,
     // Each call gets its own registry, so a video proposal belongs to that call only.
-    session: (s = {}) => new ClientToolsSession({ spark, registry: voiceRegistry(local(), pictureTools(spark), new VideoHandoff()), journal, instructions: HARNESS_INSTRUCTIONS, ...s }),
+    session: (s = {}) => {
+      const registry = voiceRegistry(local(), pictures(), new VideoHandoff())
+      void readKinds()
+      return new ClientToolsSession({ spark, registry, journal, instructions: HARNESS_INSTRUCTIONS, ...s })
+    },
     close: async () => {
       if (shared) shared.broker.setDecider(null, UNPAIRED)
       else await executor.close()

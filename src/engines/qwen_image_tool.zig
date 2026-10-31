@@ -93,7 +93,7 @@ fn check(comptime v: Variant) fn (cfg: *const ToolConfig, req: *const Request, w
         fn f(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
             const img = switch (req.*) {
                 .image => |x| x,
-                .video, .speech, .transcription, .chat, .decision => return true, // the kind check refuses it
+                .video, .asset3d, .speech, .transcription, .chat, .decision => return true, // the kind check refuses it
             };
             if (img.references.len > editRefs(cfg)) {
                 why.print("model '{s}' edits with up to {d} input image{s}", .{ cfg.id, editRefs(cfg), if (editRefs(cfg) == 1) "" else "s" }) catch {};
@@ -235,7 +235,7 @@ fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
         // the pixels on the host and the PNG's copy (an edit's own size: at most max_pixels), plus each input decoded,
         // resized and patched on the host (about 32 bytes a pixel at one megapixel)
         .image => |v| (if (v.width == 0) maxPixels(cfg) else @as(u64, v.width) * v.height) * 4 * 2 + v.references.len * (qi.pipeline.edit_ref_pixels * 32 + (32 << 20)),
-        .video, .speech, .transcription, .chat, .decision => 0,
+        .video, .asset3d, .speech, .transcription, .chat, .decision => 0,
     };
     return .{ .resident = residentMb(cfg) << 20, .working = working };
 }
@@ -275,7 +275,7 @@ const QwenImage = struct {
         const t: *QwenImage = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .image => |x| x,
-            .video, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
+            .video, .asset3d, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
         const p = t.p orelse return error.NotLoaded;
         if (v.references.len > 0 and p.edit_state == null) return refuse("this model's edit pack is not installed: send no input images", .{});

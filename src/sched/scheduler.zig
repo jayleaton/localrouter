@@ -50,6 +50,7 @@ const memory = @import("memory.zig");
 const speech_gate = @import("speech_gate.zig");
 const yielder = @import("yielder.zig");
 const marker = @import("../media/marker.zig");
+const asset3d = @import("../media/asset3d.zig");
 const config = @import("../config.zig");
 const Config = config.Config;
 
@@ -1102,7 +1103,7 @@ pub const Scheduler = struct {
         s.gate.unlock(s.io);
         defer s.endHold(slot); // after `done`: a reservation ends with its job, and what it unloaded comes back
         defer s.done(slot);
-        const heavy = j.request == .image or j.request == .video;
+        const heavy = j.request == .image or j.request == .video or j.request == .asset3d;
         if (cold and heavy) s.speech.waitIdle(s.io); // a load next to speech starves it too
         if (cold) {
             s.setPhase(j, "load");
@@ -1131,7 +1132,12 @@ pub const Scheduler = struct {
         s.gate.lockUncancelable(s.io);
         if (ttlOf(slot) == 0 and keepOf(slot, s.inCall()) == .no) slot.unload_after = true;
         s.gate.unlock(s.io);
-        // every image and video handed out carries the machine-generated label, whichever tool wrote it
+        // a 3D asset completes only with a manifest naming whole files (`media/asset3d.zig`)
+        if (j.request == .asset3d) {
+            var why: []const u8 = "";
+            if (asset3d.check(s.io, arena.allocator(), j.dir, out.files, j.request.asset3d, &why) == null) return s.finish(j, .failed, 500, "server_error", why, null);
+        }
+        // every image, video and 3D asset handed out carries the machine-generated label, whichever tool wrote it
         if (heavy) marker.outputs(s.io, s.gpa, j.dir, out.files, marker.forRequest(slot.tool.config().id, j.request));
         if (speaking) {
             s.gate.lockUncancelable(s.io);
@@ -1335,6 +1341,7 @@ fn placeholder(kind: @import("../tool/request.zig").Kind) @import("../tool/reque
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
         .decision => .{ .decision = .{ .body = "" } },
+        .asset3d => .{ .asset3d = .{ .image = "" } },
     };
 }
 

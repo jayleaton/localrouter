@@ -1,0 +1,52 @@
+{
+ "note": "The Idol worker's weights (worker.py, fetch.sh): every file at a pinned revision of an ungated Hugging Face repo, no token. `path` is where it goes under the tool's `weights` directory, `repo`/`revision`/`src` where it comes from (https://huggingface.co/<repo>/resolve/<revision>/<src>). selected_files is in tools/package/verify_assets.py form. Sizes and digests are the repos' own (LFS sha256; small files hashed from the pinned blob, whose git blob id matches the repo's).",
+ "code": {
+  "repo": "speridlabs/idol-sdk",
+  "commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "license": "Apache-2.0",
+  "note": "a git dependency in pyproject.toml / uv.lock, not fetched here"
+ },
+ "sources": {
+  "idol": {
+   "repo": "speridlabs/idol",
+   "revision": "2731c2291fc65a797c5cb627a5e5526fc1490902",
+   "role": "denoiser, decoders, background removal",
+   "license": "Apache-2.0 (the model card; the repository has no LICENSE file)"
+  },
+  "dinov3": {
+   "repo": "timm/vit_huge_plus_patch16_dinov3.lvd1689m",
+   "revision": "dd0addc09788111fa893d24799a44744ba022eee",
+   "role": "image encoder (DINOv3 ViT-H+/16); timm layout, remapped into Transformers' DINOv3 graph at load",
+   "license": "DINOv3 License (Last Updated August 19, 2025), LICENSE.md kept beside the weights"
+  },
+  "flux2_vae": {
+   "repo": "black-forest-labs/FLUX.2-klein-4B",
+   "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+   "role": "image encoder (FLUX.2 autoencoder, vae/ only)",
+   "license": "Apache-2.0, LICENSE.md kept beside the weights"
+  }
+ },
+ "selected_files": [
+  {"path": "idol/config.json", "source": "idol", "src": "config.json", "size_bytes": 1335,
+   "sha256": "ddd89dcc6dcf4a5ac8d951b8c59afa1eceafe377615c5912c59f4e1f5ae35b32"},
+  {"path": "idol/denoiser.safetensors", "source": "idol", "src": "denoiser.safetensors", "size_bytes": 1482258308,
+   "lfs_sha256": "ded2cacf671bf3978ebc62729087abdbd318ef4752e6805b4c9fc8ffa51fe716"},
+  {"path": "idol/decoder.safetensors", "source": "idol", "src": "decoder.safetensors", "size_bytes": 203171696,
+   "lfs_sha256": "9da4d7676bfcadb1c3fdfbff796e6257dadf82d26ec05be7717c79b2b13a1c4e"},
+  {"path": "idol/decoder_gs.safetensors", "source": "idol", "src": "decoder_gs.safetensors", "size_bytes": 949083036,
+   "lfs_sha256": "3087eb8ee5763206a53e4078acf2a1bf382dab5147d407ec13a2cf39c04cc544"},
+  {"path": "idol/birefnet.safetensors", "source": "idol", "src": "birefnet.safetensors", "size_bytes": 444466856,
+   "lfs_sha256": "44bbc97b041f879975d0d6d538b8e66a25eb04d1f49aab40697544cdd97eaa8e"},
+  {"path": "dinov3/model.safetensors", "source": "dinov3", "src": "model.safetensors", "size_bytes": 3362084520,
+   "lfs_sha256": "0d54131c846c91a78ec7641482f32e45b27cb4895f83653c038f305f18c7e61c"},
+  {"path": "dinov3/LICENSE.md", "source": "dinov3", "src": "LICENSE.md", "size_bytes": 7503,
+   "sha256": "25d122eb8f5b880fd23c736fb6ea8018ee45c12237e00b8a86d14c653904999e"},
+  {"path": "flux2-vae/vae/config.json", "source": "flux2_vae", "src": "vae/config.json", "size_bytes": 821,
+   "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"},
+  {"path": "flux2-vae/vae/diffusion_pytorch_model.safetensors", "source": "flux2_vae",
+   "src": "vae/diffusion_pytorch_model.safetensors", "size_bytes": 168120878,
+   "lfs_sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"},
+  {"path": "flux2-vae/LICENSE.md", "source": "flux2_vae", "src": "LICENSE.md", "size_bytes": 9584,
+   "sha256": "ca02bc51900ab07789d1b70283329e7137f5af98f5161c23a1c81fc38a4af1fe"}
+ ]
+}

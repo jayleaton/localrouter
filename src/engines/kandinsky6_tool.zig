@@ -64,7 +64,7 @@ const default_resident_mb = 92_000;
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image, .speech, .transcription, .chat, .decision => 0,
+        .image, .asset3d, .speech, .transcription, .chat, .decision => 0,
         // frames (at most the nominal size) and waveform on the host, the WAV, and ffmpeg's own buffers
         .video => S.sample_frames * S.width * S.height * 3 + S.audio_samples * (4 + 2) + (64 << 20),
     };
@@ -79,7 +79,7 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
             v.width = S.out_width;
             v.height = S.out_height;
         },
-        .image, .speech, .transcription, .chat, .decision => {},
+        .image, .asset3d, .speech, .transcription, .chat, .decision => {},
     }
 }
 
@@ -87,7 +87,7 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     _ = cfg;
     const v = switch (req.*) {
         .video => |x| x,
-        .image, .speech, .transcription, .chat, .decision => {
+        .image, .asset3d, .speech, .transcription, .chat, .decision => {
             why.writeAll("Kandinsky-6 Pro distilled makes videos only") catch {};
             return false;
         },
@@ -141,7 +141,7 @@ const Kandinsky6 = struct {
         const t: *Kandinsky6 = @ptrCast(@alignCast(ptr));
         const v = switch (job.request) {
             .video => |x| x,
-            .image, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
+            .image, .asset3d, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
         var why_buf: [256]u8 = undefined;
         var why: std.Io.Writer = .fixed(&why_buf);

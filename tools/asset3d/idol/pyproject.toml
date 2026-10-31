@@ -1,0 +1,38 @@
+[project]
+name = "localrouter-asset3d-idol"
+version = "0.1.0"
+description = "Idol (one image to a 3D Gaussian splat) worker for LocalRouter's cmd adapter: MPS on macOS, CUDA on the Spark"
+requires-python = "==3.12.*"  # numpy 2.5.4 needs 3.12; the reference ran on 3.12.16
+# The versions the Mac reference (research reference-avocado.ply) ran with; the worker reproduces it bit for bit.
+dependencies = [
+    "torch==2.13.0",
+    "torchvision==0.28.0",  # deform_conv2d for BiRefNet
+    "transformers==5.22.1",  # the DINOv3 ViT graph the remapped timm weights load into
+    "diffusers==0.42.1",  # AutoencoderKLFlux2
+    "huggingface-hub==2.4.0",
+    "safetensors==0.8.0",
+    "tensordict==0.15.4",
+    "numpy==2.5.4",
+    "pillow==13.0.0",
+    "plyfile==1.1.5",
+    "tqdm==4.70.1",
+    "idol",
+]
+
+[tool.uv]
+package = false
+# macOS on Apple Silicon (PyPI torch, MPS) and aarch64 Linux (GB10 / DGX Spark, CUDA 13.0 wheels).
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+idol = { git = "https://github.com/speridlabs/idol-sdk", rev = "4702a7f00850e34b6e83a2170cc123c3e9570744" }
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

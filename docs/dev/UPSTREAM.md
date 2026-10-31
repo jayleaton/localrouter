@@ -26,6 +26,7 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 9 | Chat pinned to 1.1.1 on GB10 (1.1.4 resumes only at 4,096-row chunks) | ashhart/TensorFold | none: a pin choice, no code carried | re-measure on each new release |
 | 10 | cuBLASLt with a recorded algorithm; driver identity check | ashhart/TensorFold | not upstreamable: LocalRouter's attestation policy | keep |
 | 11 | NVFP4 kernels copied from TensorFold v0.6.1 | ashhart/TensorFold v0.6.x | not upstreamable: unmodified copies of a frozen line | keep |
+| 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -155,3 +156,25 @@ Not ours, and not listed above:
 - **Here:** `kernels/cuda/nvfp4/*`, written by `tools/kernels/sync.py`. They are whole files, with only the torch
   includes and host wrappers cut.
 - **Not upstreamable:** the kernels are unmodified, and the v0.6.x Python line takes no changes.
+
+### 12. Idol pipeline with local, ungated encoders
+
+- **Here:** `tools/asset3d/idol/worker.py` (`IdolEngine.load`, `dinov3_from_timm`). The worker builds `IdolPipeline`
+  with `object.__new__` and fills in what its `__init__` would: Idol's own weights from the pinned local copy, DINOv3
+  ViT-H+/16 from the ungated timm checkpoint remapped in memory into Transformers' DINOv3 graph, and the FLUX.2
+  autoencoder from FLUX.2-klein-4B's `vae/` with `local_files_only`. idol-sdk is pinned at `4702a7f0`.
+- **What and why:** Idol's `config.json` names its image encoders by Hub repo (`image_encoders`: the gated
+  `facebook/dinov3-vith16plus-pretrain-lvd1689m` and `black-forest-labs/FLUX.2-dev`), and `ImageEncoder` loads them with
+  `AutoModel.from_pretrained` / `AutoencoderKLFlux2.from_pretrained` after `require_encoder_access` checks the gate. So
+  the SDK needs a Hugging Face token and accepted DINOv3 terms, and it cannot take the ungated timm layout. The shipping
+  path takes no token and never fetches a gated repo. The remapped DINOv3 parameters are byte-identical to the gated
+  checkpoint and its features bit-identical; the klein `vae/` gives the same latents (worker README).
+- **Upstream today:** no option to pass encoder paths or modules, at the pinned commit and on `main`.
+- **General?** Yes: anyone running offline or without the gated repos needs it.
+- **PR:** [#3](https://github.com/speridlabs/idol-sdk/pull/3): `image_encoders` on `IdolPipeline` /
+  `from_pretrained` takes each encoder from a Hub repo id, a local folder or a loaded model, and checks only repo ids
+  for gated access. Checked on MPS offline with no token: the timm-remapped DINOv3 and klein's `vae/` give the avocado
+  byte-identical to the stock gated pipeline (sha256 `b6e814f5…`). A loaded model is not cast: casting it to bf16 also
+  cast DINOv3's fp32 RoPE `inv_freq` and changed the PLY. No review yet.
+- **Next:** once #3 merges, repin idol-sdk and replace the hand-built pipeline with a `from_pretrained` call
+  (`image_encoders` with the remapped DINOv3 and the local klein folder); `test_worker.py` covers the loaded graph.

@@ -17,14 +17,14 @@ const request = @import("../tool/request.zig");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "testpattern", .capabilities = &.{ .text_to_image, .image_edit, .text_to_video, .image_to_video, .text_to_speech, .speech_to_text }, .needs = needs, .create = create, .check = check };
+pub const entry: engine.Entry = .{ .name = "testpattern", .capabilities = &.{ .text_to_image, .image_edit, .text_to_video, .image_to_video, .text_to_speech, .speech_to_text, .image_to_3d }, .needs = needs, .create = create, .check = check };
 
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     const max = engine.optionInt(cfg, "max_side", 0);
     const side: u64 = switch (req.*) {
         .image => |v| @max(v.width, v.height),
         .video => |v| @max(v.width, v.height),
-        .speech, .transcription, .chat, .decision => return true,
+        .speech, .transcription, .chat, .decision, .asset3d => return true,
     };
     if (max == 0 or side <= max) return true;
     why.print("model '{s}' takes sizes up to {d} pixels a side", .{ cfg.id, max }) catch {};
@@ -44,6 +44,7 @@ fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
         .speech => |v| speechSamples(v) * 2 * 2, // the samples, and the file's copy
         .transcription => |v| v.duration_ms * audio.input_rate / 1000 * 2 + (1 << 20), // the samples read back, and the transcript
         .chat, .decision => 0, // never served: chat and decision tools run a model server (`openai_server`)
+        .asset3d => |v| @as(u64, splatCount(v)) * splat_stride * 2 + (1 << 20), // the rows and the file's copy, and the input view
     };
     return .{ .resident = residentBytes(cfg), .working = working };
 }
@@ -69,6 +70,7 @@ const TestPattern = struct {
             .video => |v| try t.video(job.dir, v, try t.inputHash(job.dir, if (v.first_frame) |f| &.{f} else &.{}), sink, arena),
             .speech => |v| try t.speech(job.dir, v, sink, arena),
             .transcription => |v| try t.transcribe(job.dir, v, sink, arena),
+            .asset3d => |v| try t.splat(job.dir, v, try t.inputHash(job.dir, &.{v.image}), sink, arena),
             .chat, .decision => return engine.Refused.Refused,
         };
         const ms = start.durationTo(std.Io.Clock.awake.now(t.env.io)).toMilliseconds();
@@ -186,6 +188,64 @@ const TestPattern = struct {
         return names;
     }
 
+    /// A 3D asset from the input picture: a seeded cloud of Gaussians in a standard 3DGS PLY (SH degree 0), the input
+    /// view (`input.png`, colour bars of the input's hash) and the manifest a real image_to_3d tool writes.
+    fn splat(t: *TestPattern, dir: []const u8, v: request.Asset3d, mix: u64, sink: engine.Sink, arena: std.mem.Allocator) ![]const []const u8 {
+        try t.steps(v.steps orelse 0, sink, "denoise");
+        const n = splatCount(v);
+        var hdr: std.Io.Writer.Allocating = .init(arena);
+        try hdr.writer.print("ply\nformat binary_little_endian 1.0\nelement vertex {d}\n", .{n});
+        for (splat_props) |p| try hdr.writer.print("property float {s}\n", .{p});
+        try hdr.writer.writeAll("end_header\n");
+        const rows = try t.env.gpa.alloc(u8, @as(usize, n) * splat_stride);
+        defer t.env.gpa.free(rows);
+        var rng: std.Random.DefaultPrng = .init(v.seed ^ mix);
+        const r = rng.random();
+        var lo: [3]f32 = @splat(std.math.inf(f32));
+        var hi: [3]f32 = @splat(-std.math.inf(f32));
+        for (0..n) |i| {
+            var f: [splat_props.len]f32 = @splat(0);
+            // a ball of radius 0.4: positions, colour (SH0), logit opacity, log scales, identity rotation (w x y z)
+            const u = r.float(f32) * 2 - 1;
+            const th = r.float(f32) * 2 * std.math.pi;
+            const rad = 0.4 * std.math.cbrt(r.float(f32));
+            const s = @sqrt(1 - u * u);
+            f[0..3].* = .{ rad * s * @cos(th), rad * s * @sin(th), rad * u };
+            f[6..9].* = .{ r.float(f32) * 2 - 1, r.float(f32) * 2 - 1, r.float(f32) * 2 - 1 };
+            f[9] = 2;
+            f[10..13].* = @splat(@log(@as(f32, 0.01)));
+            f[13] = 1;
+            for (0..3) |k| {
+                lo[k] = @min(lo[k], f[k]);
+                hi[k] = @max(hi[k], f[k]);
+            }
+            for (f, 0..) |x, k| std.mem.writeInt(u32, rows[i * splat_stride + k * 4 ..][0..4], @bitCast(x), .little);
+        }
+        try t.writeFile(dir, "asset.ply", &.{ hdr.written(), rows });
+        sink.report(.{ .phase = "write", .step = 1, .of = 2 });
+        const side = 64;
+        var px: [side * side * 3]u8 = undefined;
+        paint(&px, side, side, mix, 0);
+        try writePng(t.env.io, try std.fs.path.join(arena, &.{ dir, "input.png" }), &px, side, side, &.{}, .{ .model = t.cfg.id, .edit = true });
+        const manifest = .{
+            .object = "asset3d",
+            .version = 1,
+            .representation = "gaussian_splat",
+            .format = "ply",
+            .file = "asset.ply",
+            .input = "input.png",
+            .bytes = hdr.written().len + rows.len,
+            .gaussians = .{ .count = n, .sh_degree = 0 },
+            .frame = .{ .up = [3]f32{ 0, 1, 0 }, .handedness = "right", .units = "normalized object box", .bounds = .{ .min = lo, .max = hi } },
+            .camera = .{ .projection = "perspective", .fov_y_deg = 40, .position = [3]f32{ 0, 0, 2 }, .target = [3]f32{ 0, 0, 0 }, .up = [3]f32{ 0, 1, 0 } },
+            .model = .{ .name = "testpattern" },
+            .settings = .{ .input_mode = @tagName(v.input_mode), .seed = v.seed, .steps = v.steps, .guidance = v.guidance, .num_gaussians = n },
+        };
+        try t.writeFile(dir, "asset.json", &.{try std.json.Stringify.valueAlloc(arena, manifest, .{})});
+        sink.report(.{ .phase = "write", .step = 2, .of = 2 });
+        return arena.dupe([]const u8, &.{ "asset.ply", "asset.json", "input.png" });
+    }
+
     fn writeFile(t: *TestPattern, dir: []const u8, name: []const u8, parts: []const []const u8) !void {
         const path = try std.fs.path.join(t.env.gpa, &.{ dir, name });
         defer t.env.gpa.free(path);
@@ -205,6 +265,15 @@ const TestPattern = struct {
 };
 
 const speech_rate: u32 = 24_000;
+
+/// A 3DGS PLY row: 17 float32 properties.
+const splat_props = [_][]const u8{ "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3" };
+const splat_stride = splat_props.len * 4;
+
+/// The splat's size: the request's count, else 1024.
+fn splatCount(v: request.Asset3d) u32 {
+    return v.num_gaussians orelse 1024;
+}
 
 /// 60 ms of tone a character, divided by the speed.
 fn speechSamples(v: request.Speech) u64 {

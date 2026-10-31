@@ -1,0 +1,53 @@
+{
+ "host": "127.0.0.1",
+ "tools": [
+  {
+   "id": "idol",
+   "kind": "asset3d",
+   "name": "Idol (one image to a 3D Gaussian splat, PyTorch MPS / CUDA, eager)",
+   "capabilities": [
+    "image_to_3d"
+   ],
+   "cmd": [
+    "/opt/localrouter-mac/asset3d/venv/bin/python",
+    "-I",
+    "/opt/localrouter/tools/asset3d/idol/worker.py"
+   ],
+   "weights": "/opt/localrouter-mac/asset3d/idol-weights",
+   "resident_bytes": 5368709120,
+   "working_bytes": 8053063680,
+   "keep_loaded": false,
+   "idle_ttl_s": 120,
+   "priority": 0,
+   "load_timeout_s": 300,
+   "generate_timeout_s": 600,
+   "license": {
+    "name": "Apache-2.0 (Idol, its BiRefNet copy, the FLUX.2 autoencoder) + DINOv3 License (the image encoder)",
+    "url": "https://github.com/facebookresearch/dinov3/blob/6876159a11b4df116f30f667f8c9888617df0751/LICENSE.md",
+    "notice": "DINOv3 License (Last Updated August 19, 2025), kept as <weights>/dinov3/LICENSE.md: redistribute only under it with a copy; acknowledge use in publications; no reverse engineering; Trade Controls apply; no ITAR or prohibited end uses (military, nuclear, espionage, ...)."
+   },
+   "options": {
+    "formats": [
+     "ply"
+    ],
+    "input_modes": [
+     "synthetic",
+     "real"
+    ],
+    "min_gaussians": 32768,
+    "max_gaussians": 1048576,
+    "gaussian_multiple": 32,
+    "default_gaussians": 262144,
+    "default_steps": 50,
+    "default_guidance": 3.0,
+    "max_steps": 100,
+    "max_guidance": 10.0,
+    "working_bytes_by_gaussians": {
+     "32768": 8053063680,
+     "262144": 8053063680,
+     "1048576": 8053063680
+    }
+   }
+  }
+ ]
+}

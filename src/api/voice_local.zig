@@ -512,7 +512,11 @@ fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *
     if (spec.input_file.len > 0 or spec.input_url.len > 0) {
         const raw = try inputImage(l, a, spec, why);
         var msg: []const u8 = "";
-        files = inputs.validate(a, if (spec.kind == .image) "ref" else "first_frame", &.{raw}, 1, &msg) catch return failed(why, msg);
+        files = inputs.validate(a, switch (spec.kind) {
+            .image => "ref",
+            .video => "first_frame",
+            .asset3d => "image",
+        }, &.{raw}, 1, &msg) catch return failed(why, msg);
     }
     var r: request.Request = undefined;
     switch (spec.kind) {
@@ -524,6 +528,11 @@ fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *
             r = .{ .image = .{ .prompt = spec.prompt, .width = wh[0], .height = wh[1], .seed = seed, .references = refs } };
         },
         .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = if (spec.seconds > 0) spec.seconds else 5, .seed = seed, .first_frame = if (files.len > 0) files[0].name else null } },
+        .asset3d => {
+            if (files.len == 0) return failed(why, "a 3D model is made from a picture: there is none");
+            var msg: []const u8 = "";
+            r = routes.assetRequest(files[0].name, if (spec.input_mode.len > 0) spec.input_mode else "synthetic", "ply", seed, null, null, null, &msg) orelse return failed(why, msg);
+        },
     }
     const tool = routes.resolve(app, null, r.capability(), &ref) orelse return failed(why, ref.message);
     const j = routes.enqueue(app, tool, r, files, l.owner, &ref) orelse return failed(why, ref.message);
@@ -712,6 +721,7 @@ fn offer(ptr: *anyopaque) backend.Offer {
             if (engine.supports(c, .image_edit)) o.image_edit = true;
             if (engine.supports(c, .text_to_video)) o.video = true;
             if (engine.supports(c, .image_to_video)) o.image_to_video = true;
+            if (engine.supports(c, .image_to_3d)) o.asset3d = true;
         }
     }
     var why: []const u8 = "";
