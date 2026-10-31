@@ -1180,7 +1180,7 @@ test "a call model disabled while it loads: ready comes once the rest are warm, 
     const loading = [_]backend.CallModel{ .{ .id = "drama-3", .state = "warming" }, .{ .id = "whisper", .state = "loading" } };
     const settled = [_]backend.CallModel{ .{ .id = "drama-3", .state = "ready" }, .{ .id = "whisper", .state = "disabled" } };
     var rig: Rig = undefined;
-    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{ &loading, &settled } });
+    try rig.startWarm(.{ .prime_chat = false }, .{ .io = testing.io, .arena = .init(testing.allocator), .knows_warm = true, .warm_ms = 20, .call_script = &.{ &loading, &loading, &settled } }); // the connect reads the first
     defer rig.stop();
     const ready = (try rig.rec.get(a, try rig.rec.waitFor("localrouter.session.ready", 0, 3000))).object;
     try testing.expect(rig.rec.count("localrouter.session.loading", 0) >= 1); // warming is not settled: it was waited for

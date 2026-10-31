@@ -1004,14 +1004,26 @@ pub const Scheduler = struct {
         for (&s.lanes) |*l| l.cond.signal(s.io);
     }
 
-    /// `loadInstance`, then a speech tool's warm-up (`Loaded`), whatever asked for the load: its first sentence is paid
-    /// now, not in a call's first reply (4.4 s for the Mac's Drama 3 to build its voice prefix).
+    /// `loadInstance`, then a speech tool's warm-up (`warmAfterLoad`): its first sentence is paid now, not in a call's
+    /// first reply (4.4 s for the Mac's Drama 3 to build its voice prefix). A job's own load warms after the job.
     fn loadSlot(s: *Scheduler, slot: *Slot) (tool_mod.Error || error{GpuLockHeld})!void {
         try s.loadInstance(slot);
+        s.warmAfterLoad(slot);
+    }
+
+    /// After every load of a speech tool (at start, a kept one coming back, an API load, a call's, a request's once its
+    /// job is done): its voice's warm-up (`Loaded`), unless the tool unloads right after each job (`idle_ttl_s` 0, not
+    /// kept), where the warm-up would only load it again, and again after that.
+    fn warmAfterLoad(s: *Scheduler, slot: *Slot) void {
         if (slot.tool.config().kind != .speech) return;
         const l = s.loaded orelse return;
+        s.gate.lockUncancelable(s.io);
+        const st = slot.tool.state();
+        const skip = (ttlOf(slot) == 0 and keepOf(slot, s.inCall()) == .no) or (st != .ready and st != .busy);
+        s.gate.unlock(s.io);
+        if (skip) return;
         const i = (@intFromPtr(slot) - @intFromPtr(s.slots.ptr)) / @sizeOf(Slot);
-        const j = l.f(l.ctx, i);
+        const j = l.f(l.ctx, i); // null when its voice is warm already (the job that loaded it spoke in it)
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
         slot.warm_job = j;
@@ -1088,11 +1100,12 @@ pub const Scheduler = struct {
         if (cold and heavy) s.speech.waitIdle(s.io); // a load next to speech starves it too
         if (cold) {
             s.setPhase(j, "load");
-            s.loadSlot(slot) catch |err| {
+            s.loadInstance(slot) catch |err| {
                 if (err == error.GpuLockHeld) return s.finish(j, .failed, 503, "server_error", s.lockMessage(), null);
                 return s.finishError(j, slot, @errorCast(err));
             };
         }
+        defer if (cold) s.warmAfterLoad(slot); // after the job (before `done`), which may have warmed its voice itself
         var arena: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena.deinit();
         const job: tool_mod.Job = .{ .id = j.id, .dir = j.dir, .request = j.request, .cancelled = &j.cancel };
@@ -1539,6 +1552,7 @@ pub const Bench = struct {
         for (b.slots, fakes) |*slot, *f| slot.* = .{ .tool = f.tool() };
         b.table = .{ .gpa = t.allocator };
         b.cfg = .{ .budget_bytes = budget_mib << 20, .reserve_bytes = 0 };
+        b.calls = .{};
         b.s = .{ .io = t.io, .gpa = t.allocator, .cfg = &b.cfg, .slots = b.slots, .table = &b.table };
         b.s.notify = b.calls.notify();
     }
@@ -1849,6 +1863,11 @@ test "every load of a speech tool is warmed, whatever asked for it; a call's too
     try t.expectEqual(@as(usize, 2), warm.n);
     b.s.unloadSlot(&b.slots[0]);
     try t.expect(b.slots[0].warm_job == null);
+    // One that unloads right after each job (idle_ttl_s 0, not kept) is not warmed: the warm-up would load it again.
+    b.calls.n.store(0, .release);
+    try t.expect(b.s.setResidency(0, .on_demand, 0) == null);
+    try b.s.loadSlot(&b.slots[0]);
+    try t.expectEqual(@as(usize, 2), warm.n);
 }
 
 test "disabled: never loads (start, call, kept reload), refuses its jobs with 409, and unloads only after its running job" {

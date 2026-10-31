@@ -65,7 +65,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
     // Every tool: a name, a description, an object schema that refuses unknown arguments.
     const listed = try std.json.parseFromSliceLeaky(Value, a, (try d.call(a, .POST, "/mcp", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).body, .{});
     const list = listed.object.get("result").?.object.get("tools").?.array.items;
-    try testing.expectEqual(@as(usize, 19), list.len);
+    try testing.expectEqual(@as(usize, 20), list.len);
     var names: std.ArrayList(u8) = .empty;
     for (list) |t| {
         const schema = t.object.get("inputSchema").?.object;
