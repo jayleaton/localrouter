@@ -31,6 +31,16 @@ or `{"ok":false,"error":"reason","type":"invalid_request_error"}`. Handle `exit`
 Input references are files in the job directory. Set `resident_bytes`, `working_bytes` and capabilities in the config.
 Test lifecycle, memory accounting, unsupported requests, cancellation, worker failure and output handling.
 
+## Upstream engine changes
+
+[docs/dev/UPSTREAM.md](docs/dev/UPSTREAM.md) lists every engine-level change LocalRouter carries against an upstream
+engine (TensorFold, drama-tensorfold and the forks they pin). That includes a `.patch` file, a scripted edit of an
+upstream file, a flag or workaround that exists only because of an upstream bug or a missing option, and vendored
+upstream code we modified. A new change of any of these kinds gets an entry there in the same pull request. It also
+gets an upstream pull request, shaped as a general option rather than a LocalRouter hook, against upstream's current
+default branch. The entry links that pull request, or says why the change cannot go upstream. When upstream merges
+it and our pin includes it, drop our copy and update the entry.
+
 ## Engine correctness
 
 Engine changes must preserve bit-exact results against the Python reference in `tools/twin`: test individual
