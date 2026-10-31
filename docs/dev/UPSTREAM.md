@@ -18,7 +18,7 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 1 | Drama 3 voice prefix cache, CUDA full model | ashhart/TensorFold | [#1745](https://github.com/ashhart/TensorFold/pull/1745) | drop `patches/engine/` at the first full-model pin that includes it |
 | 2 | Drama 3 voice prefix cache, CUDA NVFP4 | plotarmordev/TensorFold `drama-nvfp4` | already proposed: [plotarmordev/TensorFold#4](https://github.com/plotarmordev/TensorFold/pull/4) (not ours) | drop `patches/engine-nvfp4/` once #4 merges and drama-tensorfold repins NVFP4 |
 | 3 | Launchers: `--external-admission` (+ Linux `--reserve-gib`) | plotarmordev/drama-tensorfold | [#35](https://github.com/plotarmordev/drama-tensorfold/pull/35) | replace both launcher patches with flags |
-| 4 | macOS launcher: `--parent-pid` | plotarmordev/drama-tensorfold | [#36](https://github.com/plotarmordev/drama-tensorfold/pull/36) | as 3 |
+| 4 | Launchers: `--parent-pid` (macOS; Linux for callers without `PR_SET_PDEATHSIG`) | plotarmordev/drama-tensorfold | [#36](https://github.com/plotarmordev/drama-tensorfold/pull/36) | as 3 |
 | 5 | Launchers start under `python3 -I` | plotarmordev/drama-tensorfold | [#37](https://github.com/plotarmordev/drama-tensorfold/pull/37) | as 3 |
 | 6 | Streamed `reasoning_content` keeps a trailing newline | ashhart/TensorFold | [#1743](https://github.com/ashhart/TensorFold/pull/1743) | drop the qualification exception once the chat pin includes it |
 | 7 | `graph.endCapture` leaves the capture scope open on failure | ashhart/TensorFold | [#1744](https://github.com/ashhart/TensorFold/pull/1744) | drop the two `captureEnd` calls once the runtime pin includes it |
@@ -29,8 +29,9 @@ Audited 2026-10-31 against the latest upstream default branches:
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
-  `1a53b8ae`) and `pins-macos.json` (5 patches, `engine/nvfp4/macos/patches/` at `db6ba7da`) are drama-tensorfold's own.
-  Every pinned sha256 equals that commit's file, checked on 2026-10-31.
+  `1a53b8ae`) and `pins-macos.json` (5 patches, `engine/nvfp4/macos/patches/` at `db6ba7da`) are drama-tensorfold's own:
+  every patch's `From:` line and commit is plotarmordev's, and every pinned sha256 equals that commit's file, checked on
+  2026-10-31. All 59 are in TensorFold v1.1.9, which the full model now pins with an empty series.
 - `apps/mobile`'s react-native patch.
 
 ## Entries
@@ -50,7 +51,14 @@ Not ours, and not listed above:
   cache.
 - **General?** Yes. The upstream port cuts on a prefill chunk boundary, as Metal does, so a cached reply is the same
   bytes as an uncached one. Ours cuts at the system message, which changes chunk cuts for referenced prompts.
-- **PR:** [#1745](https://github.com/ashhart/TensorFold/pull/1745). Host tests run over a fake lane (cached cuts and state equal uncached). The Linux CUDA host build and the macOS Metal build both compile. CUDA wasn't run here: its PCM check, with the cache on and off on a GB10, is still to do.
+- **PR:** [#1745](https://github.com/ashhart/TensorFold/pull/1745). Host tests run over a fake lane (cached cuts and
+  state equal uncached). The Linux CUDA host build and the macOS Metal build both compile.
+- **Review:** the maintainer asked for PCM sha256 with `TF_DRAMA_REFERENCE_CACHE=0` against the default, on a
+  voice → default → voice sequence with a repeat, at `TF_DRAMA_PREFILL_ROWS` 1 and 128, with 2 concurrent lanes on one
+  voice, and the hit's prompt time both ways. The PR now carries `tools/zig/drama_reference_cache_check.py`, which runs
+  that matrix against a CUDA build and fails on any PCM difference, a hit with the cache off, or no hit with it on.
+- **Next:** run it on a GB10 and post the numbers. Not yet run: this Mac has no CUDA and the Spark wasn't reachable
+  from here.
 
 ### 2. Drama 3 voice prefix cache, CUDA NVFP4
 
@@ -81,14 +89,18 @@ Not ours, and not listed above:
 
   The Linux launcher was not run end to end (no systemd/CUDA here). Our patch has run on the GB10.
 
-### 4. macOS launcher: `--parent-pid`
+### 4. Launchers: `--parent-pid`
 
 - **Here:** part of `pilot-macos-external-admission.patch` (`4bf4b70`, #136).
 - **Why:** macOS has no parent-death signal. When the worker is killed, the launcher and server stay up, holding the
   lock and the memory.
-- **PR:** [drama-tensorfold#36](https://github.com/plotarmordev/drama-tensorfold/pull/36). Tested with smoke tests
-  using a real orphaning parent, and with the real Metal engine: the supervisor exited, then `stop_signal` was 15, the
-  group settled and the server was gone.
+- **Linux:** our Linux worker arms `PR_SET_PDEATHSIG` on the launcher, so it has no gap here. A caller that cannot
+  (a shell, another supervisor) had the same one, so #36 adds the flag to `recipe/pilot.py` too: once the parent is
+  gone it stops the systemd unit and records `parent_exited`.
+- **PR:** [drama-tensorfold#36](https://github.com/plotarmordev/drama-tensorfold/pull/36), both launchers. Tested on
+  macOS with smoke tests using a real orphaning parent and with the real Metal engine: the supervisor exited, then
+  `stop_signal` was 15, the group settled and the server was gone. On Linux, unit tests (they fail on main) mock
+  systemd; not run on a Spark.
 
 ### 5. Launchers start under `python3 -I`
 
@@ -105,6 +117,7 @@ Not ours, and not listed above:
 - **Upstream file:** `zig/src/server/chat.zig`. The whole reply `pyStrip`s the reasoning; the stream sends it as
   decoded. The bug is still on main.
 - **PR:** [#1743](https://github.com/ashhart/TensorFold/pull/1743). Tested on Metal (Qwen3.8-27B, this Mac): the stream went from 599 to 598 bytes on main's repro, equal to the whole reply; tokens and content unchanged. CI runs the zig suites.
+  The maintainer approved it and rebased it onto main; it lands with their next batch.
 
 ### 7. `graph.endCapture` leaves the capture scope open
 
@@ -113,6 +126,7 @@ Not ours, and not listed above:
 - **Why:** since 1.1.x, `endCapture` closes copy-source's capture scope only on success. After an invalidated
   capture, every later capture and `DeviceBuffer.upload`/`fromHost` in the process is refused. This is still on main.
 - **PR:** [#1744](https://github.com/ashhart/TensorFold/pull/1744). A no-GPU fake-driver test fails on main; it was compiled on Linux and CI runs it. No CUDA run.
+  CUDA only: Metal has no capture scope. No review yet.
 
 ### 8. CLIP tokenizer Lowercase
 
