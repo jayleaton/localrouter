@@ -1416,7 +1416,10 @@ async function fetchBytes(url, signal, progress) {
 }
 // The first view, from the manifest's camera (position, target, up, fov_y_deg; perspective or orthographic), else a
 // view of its bounds. An orthographic camera sees the same from any distance, so it is moved near (depth stays precise)
-// with its frame kept: half its height is `half_height`, or the distance times tan(fov_y / 2).
+// with its frame kept: half its height is `half_height`, or the distance times tan(fov_y / 2). A perspective camera
+// over 20 radii away (Idol's can sit 130 units off at half a degree) is the same view to within a few per cent, and
+// is shown that way: from that far the whole model is a sliver of depth, and the splats' depth order bands.
+const FAR_RADII = 20;
 function camera3d(V, man, aspect) {
   const c = (man && man.camera) || {}, fr = (man && man.frame) || {};
   const vec = (a, d) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite) ? new V.Vector3(a[0], a[1], a[2]) : d;
@@ -1430,7 +1433,7 @@ function camera3d(V, man, aspect) {
   const dir = pos.clone().sub(target), dist = dir.length();
   dir.divideScalar(dist);
   let cam;
-  if (c.projection === 'orthographic') {
+  if (c.projection === 'orthographic' || dist > FAR_RADII * size) {
     const half = Number.isFinite(c.half_height) && c.half_height > 0 ? c.half_height : dist * Math.tan(fov * Math.PI / 360);
     const d = Math.max(4 * size, 1);
     cam = new V.OrthographicCamera(-half * aspect, half * aspect, half, -half, d / 100, d + 4 * size);

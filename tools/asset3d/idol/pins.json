@@ -39,6 +39,8 @@
    "lfs_sha256": "44bbc97b041f879975d0d6d538b8e66a25eb04d1f49aab40697544cdd97eaa8e"},
   {"path": "dinov3/model.safetensors", "source": "dinov3", "src": "model.safetensors", "size_bytes": 3362084520,
    "lfs_sha256": "0d54131c846c91a78ec7641482f32e45b27cb4895f83653c038f305f18c7e61c"},
+  {"path": "dinov3/config.json", "source": "dinov3", "src": "config.json", "size_bytes": 675,
+   "sha256": "c22d89c036033b9f22445c136e6e050a27dd7f3bff26566b9dad0c66c9c84a83"},
   {"path": "dinov3/LICENSE.md", "source": "dinov3", "src": "LICENSE.md", "size_bytes": 7503,
    "sha256": "25d122eb8f5b880fd23c736fb6ea8018ee45c12237e00b8a86d14c653904999e"},
   {"path": "flux2-vae/vae/config.json", "source": "flux2_vae", "src": "vae/config.json", "size_bytes": 821,

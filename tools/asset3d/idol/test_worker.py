@@ -278,6 +278,173 @@ class Manifest(Base):
         self.assertIsNone(w.timm_to_transformers("head.weight"))
 
 
+FAKE_TF = r"""#!PYTHON -I
+# tf-idol-generate's CLI and outputs, faked. FAKE_TF picks: ok, fail, slow (sleeps in the denoiser), far (radius 1000).
+import json, os, sys, time
+import numpy as np
+from safetensors.numpy import load_file
+snap, vae, dino, picture, out = sys.argv[1:6]
+flags = dict(zip(sys.argv[6::2], sys.argv[7::2]))
+mode = os.environ.get("FAKE_TF", "ok")
+img = load_file(picture)["image"]
+with open(os.path.join(out, "args.json"), "w") as f:
+    json.dump({"argv": sys.argv[1:], "shape": list(img.shape), "max": float(img.max())}, f)
+print("DINOv3: 0.5 s", flush=True)
+print("VAE: 0.2 s", flush=True)
+if mode == "fail":
+    print("error: OutOfMemory", flush=True)
+    sys.exit(3)
+if mode == "slow":
+    time.sleep(60)
+print("denoiser: 20.0 s", flush=True)
+print("decoders: 1.0 s", flush=True)
+n = int(flags["--gaussians"])
+names = NAMES
+data = np.zeros(n, dtype=[(k, "<f4") for k in names])
+data["x"] = np.linspace(-0.4, 0.3, n)
+head = "ply\nformat binary_little_endian 1.0\nelement vertex %d\n" % n
+head += "".join(f"property float {k}\n" for k in names) + "end_header\n"
+with open(os.path.join(out, "generate.ply"), "wb") as f:
+    f.write(head.encode("ascii"))
+    data.tofile(f)
+r = 1000.0 if mode == "far" else 2.0
+with open(os.path.join(out, "camera.json"), "w") as f:
+    json.dump({"yaw": 0.0, "pitch": 0.0, "radius": r, "fov": 40.0}, f)
+with open(os.path.join(out, "tf-idol-generate.json"), "w") as f:
+    json.dump({"denoiser_s": 20.0, "total_s": 22.0, "metal_peak_allocated_gb": 2.5, "seed": 1}, f)
+print("PLY: 0.1 s", flush=True)
+print("total 22.0 s", flush=True)
+"""
+
+
+class FakePreprocess:
+    """Preprocess's interface without torch or BiRefNet."""
+
+    class torch:
+        __version__ = "2.13.0"
+
+    def __init__(self):
+        self.p, self.released = None, 0
+
+    def load(self):
+        self.p = object()
+
+    def __call__(self, image, mode):
+        return Image.new("RGB", (32, 32), (255, 0, 0))
+
+    def release(self):
+        self.released += 1
+
+
+class Native(unittest.TestCase):
+    """backend tensorfold: the worker's side of tf-idol-generate (the child faked)."""
+
+    def setUp(self):
+        self.job = tempfile.mkdtemp(prefix="idol-native-")
+        self.addCleanup(shutil.rmtree, self.job, True)
+        Image.new("RGB", (80, 60), (200, 100, 50)).save(os.path.join(self.job, "image_0.png"))
+        self.binary = os.path.join(self.job, "tf-idol-generate")
+        with open(self.binary, "w") as f:
+            f.write(FAKE_TF.replace("PYTHON", sys.executable).replace("NAMES", repr(NAMES)))
+        os.chmod(self.binary, 0o755)
+        self.addCleanup(os.environ.pop, "FAKE_TF", None)
+        self.pre = FakePreprocess()
+        cfg = tool(backend="tensorfold", tf_idol_generate=self.binary)
+        self.worker = w.Worker(cfg, engine=w.NativeEngine("/weights", self.binary, self.pre))
+        self.worker.check_weights = lambda: None
+        self.assertTrue(self.worker.load()["ok"])
+        self.progress = []
+        signal.signal(signal.SIGUSR1, w.on_cancel)
+
+    def gen(self, **fields):
+        req = {"image": "image_0.png", "input_mode": "synthetic", "format": "ply", "seed": 7, "steps": 12,
+               "num_gaussians": 32768}
+        req.update(fields)
+        cmd = {"op": "generate", "id": "a3d_native", "dir": self.job, "request": {"asset3d": req}}
+        return w.run_generate(self.worker, cmd, out=self.progress.append)
+
+    def test_options(self):
+        with self.assertRaisesRegex(ValueError, "tf_idol_generate"):
+            w.Options(tool(backend="tensorfold"))
+        with self.assertRaisesRegex(ValueError, "backend"):
+            w.Options(tool(backend="mlx"))
+        with self.assertRaisesRegex(ValueError, "preprocess"):
+            w.Options(tool(backend="tensorfold", tf_idol_generate="/x", preprocess="native"))
+        self.assertIsInstance(w.Worker(tool(backend="tensorfold", tf_idol_generate="/x")).engine, w.NativeEngine)
+        self.assertIsInstance(w.Worker(tool()).engine, w.IdolEngine)
+
+    def test_binary_must_be_executable(self):
+        r = w.Worker(tool(backend="tensorfold", tf_idol_generate=os.path.join(self.job, "image_0.png")))
+        r.check_weights = lambda: None
+        out = r.load()
+        self.assertFalse(out["ok"])
+        self.assertIn("not an executable", out["error"])
+
+    def test_generate(self):
+        r = self.gen(guidance=2.5)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(sorted(os.listdir(self.job)), ["asset.json", "asset.ply", "image_0.png", "input.png",
+                                                        "tf-idol-generate"])  # the child's work dir is gone
+        m = read_json(os.path.join(self.job, "asset.json"))
+        self.assertEqual(m["gaussians"]["count"], 32768)
+        self.assertEqual(m["camera"]["projection"], "perspective")  # radius 2: inverse distance 0.5
+        self.assertAlmostEqual(m["camera"]["model"]["radius"], 2.0)
+        rt = m["runtime"]
+        self.assertEqual((rt["backend"], rt["device"], rt["preprocess"], rt["binary"]),
+                         ("tensorfold", "metal", "pytorch 2.13.0", "tf-idol-generate"))
+        self.assertEqual(rt["stages_s"], {"denoiser_s": 20.0, "total_s": 22.0, "metal_peak_allocated_gb": 2.5})
+        self.assertEqual(set(m["timing_ms"]), {"preprocess", "generate", "write", "total"})
+        self.assertGreaterEqual(self.pre.released, 2)  # after load, and before the child starts
+        phases = [p["progress"]["phase"] for p in self.progress]
+        self.assertEqual(sorted(set(phases), key=phases.index), ["preprocess", "encode", "denoise", "decode", "write"])
+        self.assertIn({"phase": "denoise", "step": 12, "of": 12}, [p["progress"] for p in self.progress])
+
+    def test_child_arguments(self):
+        args_seen = []
+        real = w.shutil.rmtree
+        w.shutil.rmtree = lambda path, ignore_errors=False: args_seen.append(read_json(os.path.join(path, "args.json")))
+        try:
+            self.assertTrue(self.gen(seed=99, guidance=0, num_gaussians=65536)["ok"])
+        finally:
+            w.shutil.rmtree = real
+        a = args_seen[0]
+        work = os.path.join(self.job, ".tf-idol")
+        self.assertEqual(a["argv"], ["/weights/idol", "/weights/flux2-vae/vae", "/weights/dinov3",
+                                     os.path.join(work, "picture.safetensors"), work, "--seed", "99", "--steps", "12",
+                                     "--cfg", "0.0", "--gaussians", "65536"])
+        self.assertEqual(a["shape"], [32, 32, 3])
+        self.assertEqual(a["max"], 1.0)  # bytes / 255
+        shutil.rmtree(work, ignore_errors=True)
+
+    def test_far_camera_is_orthographic(self):
+        os.environ["FAKE_TF"] = "far"
+        self.assertTrue(self.gen()["ok"])
+        self.assertEqual(read_json(os.path.join(self.job, "asset.json"))["camera"]["projection"], "orthographic")
+
+    def test_failure_names_the_child(self):
+        os.environ["FAKE_TF"] = "fail"
+        r = self.gen()
+        self.assertEqual(r["type"], "service_unavailable", r)  # its last lines say OutOfMemory
+        self.assertIn("tf-idol-generate exited 3", r["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.job, ".tf-idol")))
+        os.environ["FAKE_TF"] = "ok"
+        self.assertTrue(self.gen()["ok"])
+
+    def test_cancel_ends_the_child(self):
+        os.environ["FAKE_TF"] = "slow"
+        import threading
+        import time
+        t = threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGUSR1))
+        t.start()
+        t0 = time.monotonic()
+        self.assertEqual(self.gen(), {"ok": False, "type": "cancelled", "error": "cancelled"})
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertFalse(os.path.exists(os.path.join(self.job, ".tf-idol")))
+        self.assertFalse(os.path.exists(os.path.join(self.job, "asset.json")))
+        os.environ["FAKE_TF"] = "ok"
+        self.assertTrue(self.gen()["ok"])
+
+
 class Protocol(unittest.TestCase):
     """worker.py as the daemon runs it: stdout carries only protocol lines."""
 

@@ -316,7 +316,7 @@
     "the DINOv3 License (link below; Last Updated August 19, 2025) for timm/vit_huge_plus_patch16_dinov3.lvd1689m, Idol's image encoder: use, copying, redistribution and derivatives are allowed, but redistribute the weights or anything derived from them only under the Agreement with a copy of it (kept as dinov3/LICENSE.md beside the weights); acknowledge DINOv3 in publications; no reverse engineering; laws, privacy and Trade Controls apply; no ITAR or prohibited end uses (military, nuclear, espionage, ...). Idol (speridlabs/idol) and the FLUX.2 autoencoder (black-forest-labs/FLUX.2-klein-4B vae/) are Apache-2.0; nothing here is non-commercial"
    ],
    "pins": "tools/asset3d/idol/pins.json, tools/asset3d/idol/uv.lock",
-   "download_bytes": 6809204537,
+   "download_bytes": 6809205212,
    "disk_bytes": 7700000000,
    "memory_bytes": 5368709120,
    "working_bytes": 8053063680,
@@ -334,7 +334,7 @@
     },
     {
      "id": "fetch",
-     "download_bytes": 6609204537,
+     "download_bytes": 6609205212,
      "disk_bytes": 6700000000,
      "needs_accept": true,
      "title": "the Idol, DINOv3 (timm) and FLUX.2 autoencoder weights at their pinned revisions (6.6 GB, ungated, no token), every file by sha256 against pins.json",

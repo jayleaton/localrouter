@@ -204,7 +204,7 @@
      "run": "UV_PROJECT_ENVIRONMENT=$J/venvs/asset3d-idol $J/bin/uv sync --locked --python 3.12 --project $REPO/tools/asset3d/idol && $STEPS stamp asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock",
      "done": "$STEPS stamped asset3d-idol-venv $REPO/tools/asset3d/idol/uv.lock && [ -x $J/venvs/asset3d-idol/bin/python ]",
      "fix": "network (pypi.org, download.pytorch.org, github.com for the idol-sdk): run again"},
-    {"id": "fetch", "download_bytes": 6609204537, "disk_bytes": 6700000000, "needs_accept": true,
+    {"id": "fetch", "download_bytes": 6609205212, "disk_bytes": 6700000000, "needs_accept": true,
      "title": "the Idol, DINOv3 (timm) and FLUX.2 autoencoder weights at their pinned revisions (6.6 GB, ungated, no token), every file by sha256 against pins.json",
      "run": "bash $REPO/tools/asset3d/idol/fetch.sh $J/models/idol && $STEPS stamp asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json",
      "done": "$STEPS stamped asset3d-idol-fetch $REPO/tools/asset3d/idol/pins.json && python3 -I $REPO/tools/package/verify_assets.py --quick $REPO/tools/asset3d/idol/pins.json $J/models/idol > /dev/null",
