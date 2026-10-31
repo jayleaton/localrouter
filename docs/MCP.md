@@ -126,7 +126,7 @@ full machine says `insufficient_memory`.
 
 | Tool | Arguments (required in bold) | Returns |
 | --- | --- | --- |
-| `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes`, `lane`, priority, `keep_loaded`, `residency`, `idle_ttl_s`, `disabled`, `qualified`; speech models' voices; the machine's `memory` |
+| `list_models` | | every model: id, kind, capabilities, `default_for`, `state` (unloaded, loading, ready, busy), `resident_bytes` (held now), `booked_bytes` (booked when loaded, loaded or not), `lane`, priority, `keep_loaded`, `residency`, `idle_ttl_s`, `disabled`, `qualified`; speech models' voices; the machine's `memory` |
 | `list_voices` | | each speech model's `voices` (voices cloned for it on this machine included), `default_voice`, `state` and whether it is the default |
 | `reserve_for` | **`model`**, `seconds`, `size`, `dry_run`, `hold_s` (180), `wait_s` | what it unloads (or would) to fit the model's job, the bytes needed and free; the model loaded and held for its job. What it unloads comes back by itself after the job. Never a chat model |
 | `unload_model` | **`model`**, `hold_s` (120) | one model unloaded now, back by itself after `hold_s`. A chat model is refused |

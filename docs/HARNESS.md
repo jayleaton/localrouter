@@ -241,7 +241,7 @@ interrupt_response}` or `null`), `tools` (function tools only), `tool_choice`, `
 | `localrouter.job.created` / `.job.done` | `call_id`, `job_id`, `kind`; then `status`, `urls`, `error` | a built-in generation tool's job (below) |
 | `localrouter.voice.paused` / `.voice.resumed` | `model`, `for_model`, `message` | a voice model made room for a job; the session stays open |
 | `localrouter.session.loading` | `models` (`[{id, state, elapsed_ms}]`; `state` `queued`, `loading`, `warming` (a speech model's voice warm-up after its load), `ready`, `failed`, `no_room`, `disabled`) | the models this machine loads for calls are still loading; about once a second until they are in (below) |
-| `localrouter.session.ready` | `speech` (`warm`, `warmed`, `paused`, `failed`, `off`), `chat` (`primed`, `off`), `voice`, `ms`, `loaded_ms`, `load` (`none`, `loaded`, `failed`), `models` (`[{id, state, error}]`, null when `load` is `none`), `message` (when `load` is `failed`) | the call answers at its warm speed from now on (below) |
+| `localrouter.session.ready` | `speech` (`warm`, `warmed`, `paused`, `failed`, `off`), `chat` (`primed`, `off`), `voice`, `ms`, `loaded_ms`, `load` (`none`, `loaded`, `failed`), `models` (`[{id, state, error}]`, null when `load` is `none` and no voice model is disabled), `message` (when `load` is `failed`) | the call answers at its warm speed from now on (below) |
 | `localrouter.function_call.cancelled` | `item_id`, `call_id`, `name`, `response_id`, `reason` (`turn_detected`, `response_started`) | client tool mode: stop that call's work, its output will be refused |
 
 **Readiness.** `localrouter.session.ready` always follows `session.created`, once the session's voice is warm in the
@@ -261,8 +261,11 @@ it), or `none` and 0 when nothing had to load. A model that fails to load or doe
 `failed`, the warm-up and prime skipped, each model's `state` and `error` in `models`, and `message` saying which
 models are missing and why, for the client to show. Later checks (a voice change, voice back) report `load` `none`.
 A speech model's state is `warming` after its load until its voice's warm-up has spoken, so ready includes the warm-up.
-A model of the call's set that is disabled in settings meanwhile is listed with `state` `disabled`: it is not waited
-for and is not a failure; the session's requests go to the next enabled model of its kind, if any.
+Every chat, speech or transcription model disabled in settings (before the call or during its load) is listed in
+`localrouter.session.loading` and `localrouter.session.ready` with `state` `disabled` and `error` "disabled in
+settings", even when nothing had to load: it is not waited for and is not a failure, and the session's requests go to
+the next enabled model of its kind, if any, so a client can say why a call has no transcription or no voice without
+reading `/v1/tools`.
 
 **Tool execution** (`realtime.tool_execution`), chosen per session with the extension
 `session.update {session: {localrouter: {tool_execution: "server" | "client"}}}` before its first response, and echoed

@@ -488,7 +488,9 @@ or a configured default that is disabled, goes to the next enabled tool of its k
   drops the tool's entry, so its config applies again.
 - A `{id}` with a slash may be sent percent-encoded (`fishaudio%2Fdrama-3`) on every `/v1/tools/{id}/...` route.
 
-`GET /v1/tools` lists per tool `residency` and `idle_ttl_s` (in effect now), `residency_default` and
+`GET /v1/tools` lists per tool `resident_bytes` (held now, 0 while not loaded), `booked_bytes` (what it books when
+loaded, loaded or not: its measured bytes, else its estimate, plus one job's working bytes; MCP `list_models` shows the
+same), `residency` and `idle_ttl_s` (in effect now), `residency_default` and
 `idle_ttl_s_default` (the config's), `allowed_residency`, `last_load_ms` (how long its last load took) and
 `loaded_since` (unix seconds; both null when unknown), `supported` and `unsupported_reason` (false with a reason when
 the tool cannot run on this host: its engine is not built for this OS, its program or weights are not installed, it

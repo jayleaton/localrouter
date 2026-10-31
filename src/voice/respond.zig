@@ -187,7 +187,7 @@ pub fn readyCheck(s: *Session) void {
     const a = tmp.allocator();
     const ms: u64 = @intCast(@max(@divTrunc(s.clock() - s.ready_from_ns, std.time.ns_per_ms), 0));
     const chat_state: []const u8 = if (s.voice.prime_chat) "primed" else "off";
-    const models: ?Value = if (s.load == .none) null else readyModels(a, s.load_models) catch null;
+    const models: ?Value = if (s.load_models.len == 0) null else readyModels(a, s.load_models) catch null;
     const message: ?[]const u8 = if (s.load == .failed) s.load_message else null;
     s.emit.send(a, "localrouter.session.ready", .{ .speech = @tagName(s.speech_ready), .chat = chat_state, .voice = s.settings.voice, .ms = ms, .loaded_ms = s.loaded_ms, .load = @tagName(s.load), .models = models, .message = message });
     std.log.info("voice {s}: ready in {d} ms (speech {s}, voice '{s}', load {s} in {d} ms)", .{ s.id, ms, @tagName(s.speech_ready), s.settings.voice, @tagName(s.load), s.loaded_ms });
@@ -283,7 +283,7 @@ fn settle(s: *Session, models: []const backend.CallModel, loaded_ms: ?u64) void 
     } else true;
     s.load = if (!all_ready) .failed else if (loaded_ms != null) .loaded else .none;
     s.loaded_ms = if (s.load == .none) 0 else loaded_ms orelse 0;
-    if (s.load != .none) {
+    if (s.load != .none or anyDisabled(models)) { // a disabled voice model is listed even when nothing had to load
         const a = s.load_arena.allocator();
         if (keepModels(a, models)) |kept| {
             s.load_models = kept;
@@ -294,6 +294,11 @@ fn settle(s: *Session, models: []const backend.CallModel, loaded_ms: ?u64) void 
         prime(s);
         getReady(s);
     } else readyCheck(s);
+}
+
+fn anyDisabled(models: []const backend.CallModel) bool {
+    for (models) |m| if (std.mem.eql(u8, m.state, "disabled")) return true;
+    return false;
 }
 
 fn keepModels(a: std.mem.Allocator, models: []const backend.CallModel) ![]const backend.CallModel {

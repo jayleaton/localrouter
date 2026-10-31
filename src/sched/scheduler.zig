@@ -93,7 +93,6 @@ pub const Slot = struct {
     ttl_s: ?u32 = null,
     armed_ns: i96 = 0, // its residency or TTL last changed: its idle TTL counts from here at the earliest
     call_ns: i96 = 0, // a call last asked for it (a `call` tool connecting while it was down)
-    called: bool = false, // in a call's set (a `call` tool at a connect): disabled since, a call reports it as such
     loaded_since_s: i64 = 0, // unix seconds of its current load; 0: not loaded
     last_load_ms: ?u64 = null, // how long its last load took
     // A speech tool's voice warm in this load: the voice of the last speech job it completed since it loaded (`said`
@@ -292,7 +291,6 @@ pub const Scheduler = struct {
         const now = nowNs(s.io);
         for (s.slots) |*slot| {
             if (ruleOf(slot) != .call) continue;
-            slot.called = true;
             slot.released = false;
             if (slot.tool.state() == .ready or slot.tool.state() == .busy) continue;
             slot.call_ns = now;
@@ -312,8 +310,9 @@ pub const Scheduler = struct {
         s.wakeAll(); // their lanes may sleep until a far TTL: they count the new one
     }
 
-    /// The `call` tools and how far their loads for the open calls are, in `out` (at most its length); a tool of a call's
-    /// set that was disabled since is listed as such, so a session says so rather than waiting for it.
+    /// The `call` tools and how far their loads for the open calls are, in `out` (at most its length), and every disabled
+    /// voice-loop model (chat, speech, transcription) as `disabled`: a session says why one is missing rather than
+    /// waiting for it, and a client need not read /v1/tools to explain it.
     pub fn callLoads(s: *Scheduler, out: []CallLoad) []CallLoad {
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
@@ -321,7 +320,7 @@ pub const Scheduler = struct {
         var n: usize = 0;
         for (s.slots, 0..) |*slot, i| {
             const rule = ruleOf(slot);
-            if (!(rule == .call or (rule == .disabled and slot.called)) or n == out.len) continue;
+            if (!(rule == .call or (rule == .disabled and voiceLoop(slot.tool.config().kind))) or n == out.len) continue;
             const st = slot.tool.state();
             if (rule == .disabled) {
                 out[n] = .{ .tool = i, .state = .disabled, .elapsed_ms = 0 };
@@ -362,6 +361,14 @@ pub const Scheduler = struct {
         return bytes;
     }
 
+    /// From any thread: what tool `i` books when loaded (`keptBytes`): its measured bytes, else its estimate, and a job's
+    /// working bytes; what /v1/tools and list_models show as `booked_bytes`, loaded or not.
+    pub fn bookedBytes(s: *Scheduler, i: usize) u64 {
+        s.gate.lockUncancelable(s.io);
+        defer s.gate.unlock(s.io);
+        return s.keptBytes(i);
+    }
+
     pub fn budget(s: *Scheduler) Budget {
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
@@ -395,7 +402,6 @@ pub const Scheduler = struct {
         slot.residency = rule;
         slot.ttl_s = ttl_s;
         if (before != after or before_ttl != ttlOf(slot)) slot.armed_ns = nowNs(s.io);
-        if (after != .call and after != .disabled) slot.called = false;
         if (after == .disabled and before != .disabled) { // gone now, or as soon as its running job ends; never back
             slot.displaced = false;
             slot.held = false;
@@ -1934,4 +1940,24 @@ test "disabled during a call: a call's model is unloaded and reported disabled, 
     try t.expectEqual(.queued, loads[1].state);
     b.s.loadKept(.realtime, true); // kept by the call no more
     try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+}
+
+test "a voice model disabled before any call is listed disabled for every call; other kinds are not; booked bytes show unloaded" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "stt", .kind = .transcription, .residency = .disabled }, .bytes = 3 << 20 },
+        .{ .cfg = .{ .id = "img", .kind = .image, .residency = .disabled } },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .keep_loaded = true } },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var buf: [4]CallLoad = undefined;
+    const loads = b.s.callLoads(&buf);
+    try t.expectEqual(@as(usize, 1), loads.len);
+    try t.expectEqual(@as(usize, 0), loads[0].tool);
+    try t.expectEqual(.disabled, loads[0].state);
+    // Not loaded: resident 0, but what it would book is known.
+    try t.expectEqual(@as(u64, 0), b.slots[0].resident);
+    try t.expectEqual(@as(u64, 3 << 20), b.s.bookedBytes(0));
 }

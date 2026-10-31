@@ -206,7 +206,8 @@ pub const ToolEntry = struct {
     id: []const u8,
     kind: []const u8,
     state: []const u8,
-    resident_bytes: u64,
+    resident_bytes: u64, // held now: 0 while not loaded
+    booked_bytes: u64, // what it books when loaded, loaded or not: measured bytes (else its estimate) and a job's working bytes
     idle_ttl_s: u32,
     idle_ttl_s_default: u32,
     residency: []const u8,
@@ -248,6 +249,7 @@ pub fn toolEntry(app: *App, a: std.mem.Allocator, i: usize) !ToolEntry {
         .kind = @tagName(c.kind),
         .state = @tagName(st),
         .resident_bytes = slot.resident,
+        .booked_bytes = app.scheduler.bookedBytes(i),
         .idle_ttl_s = r.idle_ttl_s,
         .idle_ttl_s_default = c.idle_ttl_s,
         .residency = @tagName(r.rule),
