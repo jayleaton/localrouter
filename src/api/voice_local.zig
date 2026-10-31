@@ -103,7 +103,26 @@ pub const Local = struct {
     }
 };
 
-const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName, .model_skill = modelSkillOf, .speech_warm = speechWarm };
+const vtable: backend.Backend.VTable = .{ .transcribe = transcribe, .speak = speak, .stream = chatStream, .start_job = startJob, .wait_job = waitJob, .offer = offer, .check = check, .paused = paused, .manage = manage, .computer = computer, .shadow = shadow, .client_tools = clientTools, .yield_chat = yieldChat, .assistant_name = assistantName, .model_skill = modelSkillOf, .speech_warm = speechWarm, .call_models = callModels };
+
+/// The `call` tools and their loads for the open calls (`Scheduler.callLoads`); a failed one says why.
+fn callModels(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const backend.CallModel {
+    const sched = self(ptr).app.scheduler;
+    var buf: [32]@import("../sched/scheduler.zig").CallLoad = undefined;
+    const loads = sched.callLoads(&buf);
+    const out = try a.alloc(backend.CallModel, loads.len);
+    for (out, loads) |*m, l| {
+        const t = sched.slots[l.tool].tool;
+        m.* = .{ .id = t.config().id, .state = @tagName(l.state), .elapsed_ms = l.elapsed_ms, .@"error" = switch (l.state) {
+            .failed => try a.dupe(u8, t.failure().message),
+            .no_room => "it does not fit beside the models kept loaded",
+            .warming => "",
+            .disabled => "disabled in settings",
+            else => "",
+        } };
+    }
+    return out;
+}
 
 fn assistantName(ptr: *anyopaque, a: std.mem.Allocator) error{OutOfMemory}![]const u8 {
     const app = self(ptr).app;
@@ -323,30 +342,32 @@ fn speechWarm(ptr: *anyopaque, a: std.mem.Allocator, o: backend.Say) bool {
     return app.scheduler.speechWarm(i, if (voice.len > 0) voice else engine.optionString(c, "default_voice", ""));
 }
 
-/// The scheduler's hook after a kept speech tool loads, at start and each time it comes back (`sched.Loaded`): one word
-/// in the voice a call speaks in on it (`voice.voice` on the voice loop's model, else the tool's default voice), the
-/// audio dropped, so a call that connects later finds the first job after the load paid: about 7 s to first audio with
-/// the voice's references on the Mac's Drama 3 (0.5 s warm), 0.84 s on DGX-01 (0.1 s warm). It only queues the job.
-pub fn warmLoaded(ctx: *anyopaque, tool: usize) void {
+/// The scheduler's hook after every load of a speech tool (`sched.Loaded`: at start, a kept tool coming back, an API
+/// load, a call's, a request's): one word in the voice a call speaks in on it (`voice.voice` on the voice loop's model,
+/// else the tool's default voice), the audio dropped, so the first job after the load is paid before anyone waits on it:
+/// about 7 s to first audio with the voice's references on the Mac's Drama 3 (0.5 s warm), 0.84 s on DGX-01 (0.1 s
+/// warm). It only queues the job, and returns it (null: none) so a call's readiness waits for it (`callLoads`: warming).
+pub fn warmLoaded(ctx: *anyopaque, tool: usize) ?*const jobs.Job {
     const app: *App = @ptrCast(@alignCast(ctx));
-    if (!app.cfg.voice.warm_speech) return;
+    if (!app.cfg.voice.warm_speech) return null;
     var arena: std.heap.ArenaAllocator = .init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const c = app.scheduler.slots[tool].tool.config();
-    if (!engine.supports(c, .text_to_speech)) return;
+    if (!engine.supports(c, .text_to_speech)) return null;
     var voice = engine.optionString(c, "default_voice", "");
     if (defaultVoice(app, a) catch null) |d| if (std.mem.eql(u8, d.model, c.id)) {
         voice = d.voice;
     };
-    if (app.scheduler.speechWarm(tool, voice)) return;
+    if (app.scheduler.speechWarm(tool, voice)) return null;
     var ref: routes.Refusal = .{};
     const j = speech.startSpeech(app, a, .{ .model = c.id, .input = backend.warm_sentence, .voice = voice, .stream = engine.optionBool(c, "stream", false) }, "", &ref) orelse {
         std.log.warn("voice: {s} not warmed after its load: {s}", .{ c.id, ref.message });
-        return;
+        return null;
     };
     forget(app, j);
     std.log.info("voice: warming {s} in voice '{s}' after its load ({s})", .{ c.id, voice, j.id });
+    return j;
 }
 
 /// `wanted` when `model` has that voice (or lists none, or is the text_to_speech default, which picks its own), else ""

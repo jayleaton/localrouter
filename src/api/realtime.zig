@@ -207,7 +207,9 @@ pub fn serve(app: *App, conn: *const h.Conn, req: *h.Request, a: std.mem.Allocat
     defer c.deinit();
     const fd = conn.stream.socket.handle;
     if (!app.voice.add(app.io, app.gpa, fd)) return c.close(1001, "the server is shutting down");
+    defer app.scheduler.callClosed(); // after the remove below: a `call` tool's idle TTL counts once no call is open
     defer app.voice.remove(app.io, fd);
+    app.scheduler.callOpened(); // the `call` tools load now; the session says so (`localrouter.session.loading`)
     var url_buf: [96]u8 = undefined;
     var local = Local.init(app, host, &url_buf);
     local.as(token, caller.owner()); // `routes.handle` admitted it (pairing.required: a device with inference or voice)
