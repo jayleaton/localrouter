@@ -83,7 +83,7 @@ declares chat and decision capabilities only, so it is not a media bridge.
 | Silero VAD | existing TorchScript JIT on CPU, beside the Whisper worker | in the Whisper `cmd` worker | [`snakers4/silero-vad@5cd7945`](https://github.com/snakers4/silero-vad/tree/5cd7945676eb32225748052e2e6a0580e4686a08) (v6.2.3), `silero_vad.jit` SHA-256 `e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720` | 2,272,526 B. MIT | whisper |
 | Qwen-Image 2.1 Turbo | MLX-Serve >= 26.10.2 (alternative: mflux) | `cmd` worker (load/generate/exit, progress, cancel, output files) | [`ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit@214ca34`](https://huggingface.co/ddalcu/Qwen-Image-2.1-Turbo-MLX-Serve-8bit/tree/214ca346520a59597b89bd77408afa49d526bde5); runtime [`ddalcu/mlx-serve@1fa96c6`](https://github.com/ddalcu/mlx-serve/tree/1fa96c6d212866f7c2d57f5d7fc80d28cfa08d76); upstream [`Qwen/Qwen-Image-2.1-Turbo@fc13ba1`](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | q8/g64 pack, 17.73 GB repo, vision tower included. Qwen Research License (non-commercial) | qwen-image |
 | Qwen-Image 2.1 edit | mflux `QwenImage21Edit` (`mflux-generate-qwen-2.1-edit`) | `cmd` worker (same as Turbo) | [`Qwen/Qwen-Image-2.1@d26bb61`](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/d26bb61231c349cf6b7896fa83353113880e1ba3) via [`mflux@5171ae1`](https://github.com/mflux-community/mflux/tree/5171ae15e84f81046f9685fd77bf0bafa3187b61) | 33.12 GB BF16 source, quantised to q8 at load/export; edit VAE stays FP32 | qwen-image |
-| Idol (one image to a 3D Gaussian splat) | PyTorch 2.13 MPS, eager (`optimize` off): [idol-sdk](https://github.com/speridlabs/idol-sdk) with the encoders from ungated copies ([UPSTREAM.md](UPSTREAM.md) #12) | `cmd` worker `tools/asset3d/idol` (load/generate/exit, per-step progress, SIGUSR1 cancel) | idol-sdk [`4702a7f`](https://github.com/speridlabs/idol-sdk/tree/4702a7f00850e34b6e83a2170cc123c3e9570744); [`speridlabs/idol@2731c22`](https://huggingface.co/speridlabs/idol/tree/2731c2291fc65a797c5cb627a5e5526fc1490902); DINOv3 from [`timm/vit_huge_plus_patch16_dinov3.lvd1689m@dd0addc`](https://huggingface.co/timm/vit_huge_plus_patch16_dinov3.lvd1689m/tree/dd0addc09788111fa893d24799a44744ba022eee); FLUX.2 autoencoder from [`black-forest-labs/FLUX.2-klein-4B@e7b7dc2`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/tree/e7b7dc27f91deacad38e78976d1f2b499d76a294) `vae/` | 6,809,204,537 B, every file hash-pinned in `pins.json`, no token. Apache-2.0 (Idol, FLUX.2 autoencoder) + DINOv3 License | asset3d |
+| Idol (one image to a 3D Gaussian splat) | PyTorch 2.13 MPS, eager (`optimize` off): [idol-sdk](https://github.com/speridlabs/idol-sdk) with the encoders from ungated copies ([UPSTREAM.md](UPSTREAM.md) #12) | `cmd` worker `tools/asset3d/idol` (load/generate/exit, per-step progress, SIGUSR1 cancel) | idol-sdk [`4702a7f`](https://github.com/speridlabs/idol-sdk/tree/4702a7f00850e34b6e83a2170cc123c3e9570744); [`speridlabs/idol@2731c22`](https://huggingface.co/speridlabs/idol/tree/2731c2291fc65a797c5cb627a5e5526fc1490902); DINOv3 from [`timm/vit_huge_plus_patch16_dinov3.lvd1689m@dd0addc`](https://huggingface.co/timm/vit_huge_plus_patch16_dinov3.lvd1689m/tree/dd0addc09788111fa893d24799a44744ba022eee); FLUX.2 autoencoder from [`black-forest-labs/FLUX.2-klein-4B@e7b7dc2`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/tree/e7b7dc27f91deacad38e78976d1f2b499d76a294) `vae/` | 6,809,205,212 B, every file hash-pinned in `pins.json`, no token. Apache-2.0 (Idol, FLUX.2 autoencoder) + DINOv3 License | asset3d |
 
 ## Measured on the Mac
 
@@ -98,6 +98,7 @@ footprint as macOS reports it; GB figures are decimal as reported, GiB binary.
 | Whisper large-v3-turbo (`mlx-whisper` 0.4.3) | 3.2 GB resident, 4.35 GB peak; 3.25 GiB booked + 1.25 GiB working | |
 | Qwen-Image 2.1 Turbo (q4) | 9.5 GiB resident + 6.5 GiB working + 2 GiB per reference image | 8.5 s a 1024² image |
 | Idol (PyTorch MPS, eager) | 5.03 GB resident loaded, 12.64 GB peak footprint at 32,768, 262,144 and 1,048,576 Gaussians alike (the denoiser's peak); 5 GiB + 7.5 GiB booked | 97.6 / 98.7 / 102.8 s an asset at 50 steps, 96 s of it denoising |
+| Idol native (`idol-native`, opt-in, `backend: tensorfold`: TensorFold Metal `tf-idol-generate`, background removal in PyTorch MPS; not installed yet) | 2.77 GB resident loaded (BiRefNet), 7.12 GB peak footprint, worker and child together (BiRefNet's peak; the child peaks at 2.71 GB at every count); 3 GiB + 4.5 GiB booked | 29.4 / 29.7 / 31.4 s an asset at 32,768 / 262,144 / 1,048,576 Gaussians, 50 steps |
 
 Start times. "Cache warm" means the weights are still in the page cache from a recent read; "cold" means after a purge.
 
@@ -109,6 +110,7 @@ Start times. "Cache warm" means the weights are still in the page cache from a r
 | KnowLine-4B | 2.1 s | 2.3 s | |
 | Qwen-Image 2.1 Turbo (q4) | 2.0 s | 2.3 s | 8.5 s a 1024² image |
 | Idol | 3.6 s | | about 100 s an asset |
+| Idol native | 1.4-1.9 s | | about 30 s an asset (the child loads its weights in each job, about 0.7 s) |
 
 From daemon start to the warm set loaded takes 22 s. After that, a fresh call hears first audio in 0.65 s.
 
@@ -134,6 +136,7 @@ By the bookings, the idle warm set holds 58.75 GiB: chat 26.75, Drama 3 28.75, W
 | Image edit, 1 reference image | 18 | 76.75 GiB: fits |
 | Image edit, 2 reference images | 20 | 78.75 GiB: over |
 | Image to 3D (Idol) | 5 + 7.5 = 12.5 | 71.25 GiB: fits |
+| Image to 3D (Idol native, not installed yet) | 3 + 4.5 = 7.5 | 66.25 GiB: fits |
 
 A transcription running at the same moment adds 1.25 GiB, and then a 1-reference edit does not fit. KnowLine and an
 image job together never fit, nor does Idol with either (81.25 and 87.25 GiB), so the scheduler runs them one at a time. `bootstrap.sh --dry-run` prints 60.0 GiB for the warm models, because it counts

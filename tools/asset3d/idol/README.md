@@ -5,6 +5,11 @@ out. It runs the unmodified [idol-sdk](https://github.com/speridlabs/idol-sdk/tr
 (PyTorch) stage by stage, in the same order as `IdolPipeline.__call__`. On macOS it uses MPS; on Linux it uses CUDA.
 The kind is `asset3d` and the capability is `image_to_3d`.
 
+On a Mac it has a second backend, `tensorfold` ([below](#native-backend-tensorfold-metal)): background removal stays
+in PyTorch, and everything after it runs in TensorFold's native Metal `tf-idol-generate`. It takes about 30 s an asset
+instead of about 100 s, and books 7.5 GiB instead of 12.5 GiB. It is opt-in until a TensorFold release ships
+`tf-idol-generate`; PyTorch stays the default.
+
 | File | Does |
 | --- | --- |
 | `worker.py` | the worker: `load`, `generate` (writes `asset.ply`, `input.png`, `asset.json`), `exit`, soft cancel on SIGUSR1 |
@@ -12,7 +17,7 @@ The kind is `asset3d` and the capability is `image_to_3d`.
 | `pins.json` | each file's repo, revision, size and digest (`tools/package/verify_assets.py` form) |
 | `pyproject.toml`, `uv.lock` | the environment: macOS arm64 (PyPI torch, MPS) and Linux aarch64 (PyTorch cu130 wheels) |
 | `test_worker.py` | protocol and unit tests against a fake engine (no weights, no GPU) |
-| `config.example.json` | a tool entry with the measured bookings |
+| `config.example.json` | `idol` (PyTorch, the `image_to_3d` default) and `idol-native` (the native backend, disabled: opt-in), each with its measured bookings |
 
 ## Sources and licences
 
@@ -66,7 +71,7 @@ uv sync --locked --python 3.12 --project tools/asset3d/idol
 tools/asset3d/idol/fetch.sh ~/.cache/localrouter-asset3d/weights      # 6.2 GiB; or add --venv DIR to do both
 ```
 
-`fetch.sh` downloads only the ten pinned files from `https://huggingface.co/<repo>/resolve/<revision>/<path>`. It
+`fetch.sh` downloads only the eleven pinned files from `https://huggingface.co/<repo>/resolve/<revision>/<path>`. It
 keeps any file already there with the pinned size, resumes partial downloads, and then checks every digest with
 `tools/package/verify_assets.py`. It works with bash 3.2. The worker sets `HF_HUB_OFFLINE=1`, so it never contacts the
 network. If a pinned file is missing or has the wrong size, `load` fails with a message naming the file.
@@ -147,7 +152,7 @@ orthographic camera gets `half_height` and a matching `fov_y_deg`; a perspective
 fitted half-height 0.602) and 0.86 for the coffee photo (perspective: 80.2° decoded, 60.6° fitted). `camera.framing`
 says which was used; the raw `yaw_rad`, `pitch_rad`, `radius` and `fov_deg` stay under `camera.model`.
 
-## Measured on the Mac (M5 Ultra, 96 GiB, MPS, torch 2.13.0, eager)
+## Measured on the Mac (PyTorch backend: M5 Ultra, 96 GiB, MPS, torch 2.13.0, eager)
 
 Footprint is `proc_pid_rusage` `ri_phys_footprint`, sampled every 25 ms by a driver over the protocol. It includes
 Metal buffers. The weights were in the page cache.
@@ -164,9 +169,82 @@ The worst 262,144 peak, seen in a cancel run, is 12.69 GB, or 7.61 GB working.
 - **Load** takes 3.6 s. The footprint settles at 4.5–5.1 GB once the device cache is emptied.
 - **The peak is the denoiser**, not the decoders. That is why it is flat across counts: the 24-block DiT over
   12,294 tokens runs twice per step. 1,048,576 Gaussians is qualified. Only the decode phase grows with the count.
-- **Bookings in `config.example.json`:** `resident_bytes` is 5 GiB (5.08 GB measured, plus 5%). `working_bytes` is
+- **Bookings in `config.example.json` (`idol`):** `resident_bytes` is 5 GiB (5.08 GB measured, plus 5%). `working_bytes` is
   7.5 GiB at every count (7.61 GB worst, plus 5.8%).
 - **Unload:** `exit` ends the process in under 0.1 s, and its footprint goes to 0.
+
+## Native backend (TensorFold Metal)
+
+With `"backend": "tensorfold"`, the worker loads only BiRefNet (PyTorch MPS). Each generate then works like this:
+
+1. The worker runs the SDK's own `preprocess` (background removal and the crop to 1,024 x 1,024) and empties the MPS
+   cache, so BiRefNet's peak and the child's peak never add up.
+2. It writes the picture as `<job>/.tf-idol/picture.safetensors` (`image`, [1024, 1024, 3] float32 in [0, 1]).
+3. It runs `tf_idol_generate SNAPSHOT VAE DINO PICTURE OUT --seed --steps --cfg --gaussians` from the same weights
+   directory. The child runs both encoders, the denoiser, the decoders and the PLY writer. It frees each model after
+   its stage.
+4. It moves `generate.ply` to `asset.ply`, reads `camera.json`, writes `input.png` and `asset.json` as the PyTorch path
+   does, and removes the work directory.
+
+The PLY uses the SDK's `save_ply` frame and properties, and the camera follows `decode_camera`'s convention, so the
+manifest, the asset check and the viewer are unchanged. The manifest's `runtime` says `backend: tensorfold`, the
+PyTorch version used for preprocessing, the child's stage times and its peak footprint.
+
+- **Not bit-identical to the SDK.** The starting noise is torch's CPU-seeded randn, but the other draws are native. It
+  is the same model, sampled differently. TensorFold's `docs/recipes/idol.md` compares the two as distributions. The
+  predicted camera can differ too: for the avocado at seed 42 the SDK predicts a distant (orthographic) camera and the
+  native run a near one, 130 units away at 0.8 degrees.
+- **Opacity varies by seed, on both backends.** The avocado at seed 42 is 90% opaque splats (alpha > 0.5) on
+  PyTorch and 42% native, with the skin thin from behind and below. That gap is the noise draw, not the port.
+  TensorFold's recipe gives the SDK the same features and the CPU-seeded noise, and it also gets 42%. Over other seeds,
+  through the daemon at 262,144, PyTorch gives 49%, 71% and 51% (seeds 1–3) and native gives 74%, 49%, 56%, 51% and
+  49% (seeds 1–5).
+- **Progress** comes by phase, not by step: `encode` when the child starts, then `denoise` after the encoders,
+  `decode` after the denoiser and `write` after the decoders. The child prints its stages only as each one ends.
+- **Cancel.** SIGUSR1 terminates the child within 50 ms. The worker removes the work directory and replies
+  `cancelled`, and it stays loaded. Measured: 0.1 s from the signal to the reply.
+- **Errors.** A child that exits non-zero gives `server_error` with its last lines. Zig's `OutOfMemory` gives
+  `service_unavailable`.
+- **Options.** `tf_idol_generate` (required) is the binary's path. `preprocess` is `pytorch`, the only value until
+  TensorFold's BiRefNet lands. Then `Preprocess` in `worker.py` is the one class that changes, and the torch import
+  and venv go with it. The child needs the timm `dinov3/config.json` (pinned in `pins.json`) beside
+  `model.safetensors`.
+- **Which binary.** `tf-idol-generate` is not in a TensorFold release yet. It is in TensorFold PR #1780, a draft stacked
+  on #1766, #1773, #1774 and #1775. The numbers below come from a build of `192c4e902`
+  (`zig build tf-idol-generate -Dcpu=apple_m1 -Doptimize=ReleaseFast`). The Mac install (`deploy/mac/config.json.in`)
+  keeps the PyTorch `idol` until a release ships it.
+
+**Switching.** `config.example.json` lists both. `idol` (PyTorch) is the `image_to_3d` default. `idol-native` has
+`residency` `disabled`, because no TensorFold release ships `tf-idol-generate` yet; set its `tf_idol_generate` to a
+built binary first. To opt in, turn the native one on and the PyTorch one off, either in the config or live:
+
+```sh
+curl -s localhost:8190/v1/tools/idol-native/settings -d '{"residency":"on_demand"}'
+curl -s localhost:8190/v1/tools/idol/settings -d '{"residency":"disabled"}'
+```
+
+A request that names no model goes to the next enabled `image_to_3d` model. `{"residency":"on_demand"}` alone, without
+disabling `idol`, lets a request pick `idol-native` by name. To go back, reverse the two (or send `{"reset":true}` to
+each). Once a release ships the binary, a follow-up makes the native backend the default.
+
+### Measured (native, M5 Ultra, 96 GiB)
+
+The binary was built from TensorFold `192c4e902`; preprocessing used torch 2.13.0 MPS. Footprint is
+`ri_phys_footprint` of the worker plus its child, sampled every 25 ms by a driver over the protocol. Inputs: the
+avocado (`synthetic`) and a real photo (`real`), seed 42, 50 steps, guidance 3.
+
+| Gaussians | Resident after load | Peak footprint (worker + child) | Working (peak − resident) | Child peak | Time (pre / child / write) |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 32,768 (first job) | 2.77 GB | 7.12 GB | 4.35 GB | 2.71 GB | 29.4 s (0.47 / 28.9 / 0.02) |
+| 262,144 (avocado) | 2.77 GB | 6.48 GB | 3.71 GB | 2.71 GB | 29.7 s (0.42 / 29.2 / 0.02) |
+| 262,144 (real photo) | 2.77 GB | 6.65 GB | 3.88 GB | 2.71 GB | 29.8 s (0.44 / 29.3 / 0.03) |
+| 1,048,576 | 2.77 GB | 6.50 GB | 3.73 GB | 2.71 GB | 31.4 s (0.41 / 30.9 / 0.05) |
+
+- **Load** takes 1.4–1.9 s (BiRefNet only). The child loads its weights in each job, in about 0.7 s.
+- **The peak is BiRefNet**, not the child. It peaks highest on the first job after load. The child peaks at 2.71 GB
+  at every count. Before the worker emptied the MPS cache ahead of the child, the two peaks stacked to 9.41 GB.
+- **Bookings in `config.example.json` (`idol-native`):** `resident_bytes` is 3 GiB (2.77 GB measured, plus 16%). `working_bytes` is
+  4.5 GiB at every count (4.35 GB worst, plus 11%). The total is 7.5 GiB, against 12.5 GiB for the PyTorch `idol`.
 
 ## Spark (GB10, sm_121, aarch64)
 
@@ -188,4 +266,7 @@ $UV_PROJECT_ENVIRONMENT/bin/python -I tools/asset3d/idol/test_worker.py
 
 The tests use a fake engine. They cover load and refused loads (missing weights, bad config), every refusal, defaults,
 `guidance` 0, cancel mid-denoise followed by a working generate, an idle SIGUSR1 being ignored, server and OOM errors,
-the manifest's shape, camera math, the DINOv3 key map, and stdout carrying protocol lines only.
+the manifest's shape, camera math, the DINOv3 key map, and stdout carrying protocol lines only. For the `tensorfold`
+backend, a fake `tf-idol-generate` script covers: option checks, a non-executable binary, the child's arguments and
+picture, the work directory's removal, the far-camera convention, a failing child (`OutOfMemory` gives
+`service_unavailable`), and cancel ending the child mid-run followed by a working generate.

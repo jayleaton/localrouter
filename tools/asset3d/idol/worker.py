@@ -26,7 +26,18 @@ request gives the SDK's own PLY bit for bit. Two loader differences, neither in 
   BF16 state is bit-identical to FLUX.2-dev's vae/, the precision Idol runs it at.
 Nothing contacts the network: HF_HUB_OFFLINE is forced and every path is local.
 
+Backends (option `backend`):
+- pytorch (default): all of the above in this process.
+- tensorfold: the SDK's preprocess (BiRefNet background removal and the crop) runs here in PyTorch; everything after it
+  (both encoders, the denoiser, the decoders, the PLY) runs in TensorFold's native Metal `tf-idol-generate`, one process
+  a job (option `tf_idol_generate`: its path), from the same weights. Only BiRefNet stays loaded here. SIGUSR1 ends the
+  child at once; progress comes by phase (the child reports its stages, not its steps). Its starting noise is torch's
+  CPU-seeded randn and its other draws are native, so its PLY is not the SDK's bit for bit: the same model, sampled
+  differently (TensorFold docs/recipes/idol.md compares the two). Option `preprocess` names where preprocessing runs:
+  pytorch, the only one until TensorFold's BiRefNet lands; `Preprocess` is the one place that changes then.
+
 Config (LOCALROUTER_TOOL): `weights` is the directory fetch.sh fills (idol/, dinov3/, flux2-vae/; pins.json). Options:
+backend, tf_idol_generate, preprocess (above),
 device (auto: cuda, else mps), optimize (false; CUDA only: the SDK's compiled denoiser + batched CFG), min_gaussians,
 max_gaussians, gaussian_multiple, default_gaussians, default_steps, default_guidance, max_steps, max_guidance,
 input_modes, formats, verify (size: every pinned file present with its size; none), memory_stats (false: sample the
@@ -40,7 +51,9 @@ import math
 import os
 import platform
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -84,7 +97,7 @@ DINOV3_CONFIG = {
 CROP_MARGIN = {"synthetic": 1.2, "real": 1.7}  # idol.preprocess.CROP_MARGIN, the SDK's `mode`
 RESCALE_T = 3.0
 FILES = ["asset.ply", "asset.json", "input.png"]
-OPTIONS = {"weights", "device", "optimize", "min_gaussians", "max_gaussians", "gaussian_multiple",
+OPTIONS = {"weights", "backend", "tf_idol_generate", "preprocess", "device", "optimize", "min_gaussians", "max_gaussians", "gaussian_multiple",
            "default_gaussians", "default_steps", "default_guidance", "max_steps", "max_guidance", "input_modes",
            "formats", "verify", "memory_stats"}
 DAEMON_OPTIONS = {"working_bytes_by_gaussians"}  # the scheduler reads it; the worker leaves it alone
@@ -534,6 +547,175 @@ class IdolEngine:
         gaussian.save_ply(path)
 
 
+# -- the native engine: PyTorch preprocess, then TensorFold's tf-idol-generate ---------------------------------------------
+
+class Preprocess:
+    """Background removal and the crop to the 1,024 x 1,024 picture Idol sees: the SDK's own preprocess with its
+    BiRefNet, in PyTorch. The one piece of the native backend still in PyTorch; when TensorFold's BiRefNet lands, a
+    `native` kind replaces this class and the torch import with it."""
+
+    def __init__(self, weights, device_name):
+        self.weights, self.device_name = weights, device_name
+        self.p = None
+
+    def load(self):
+        import torch
+        from idol.models import BiRefNet
+        from idol.pipeline import IdolPipeline
+        from safetensors.torch import load_file
+        self.torch = torch
+        name = self.device_name
+        if name == "auto":
+            name = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+        device = torch.device(name)
+        idol_dir = os.path.join(self.weights, "idol")
+        with open(os.path.join(idol_dir, "config.json")) as f:
+            config = json.load(f)
+        p = object.__new__(IdolPipeline)  # IdolPipeline.preprocess needs only these two and the background remover
+        p.device, p.config = device, config
+        m = BiRefNet()
+        m.load_state_dict(load_file(os.path.join(idol_dir, "birefnet.safetensors")), strict=True)
+        p.background_remover = m.eval().requires_grad_(False).to(device)
+        if device.type == "cuda":
+            p.background_remover.half()
+        self.p = p
+
+    def __call__(self, image, mode):
+        with self.torch.no_grad():
+            prepared = self.p.preprocess(image, mode=mode)  # ValueError on an empty alpha
+        self.sync()
+        return prepared
+
+    def sync(self):
+        if self.p.device.type == "mps":
+            self.torch.mps.synchronize()
+
+    def release(self):
+        gc.collect()
+        if self.p is not None and self.p.device.type == "mps":
+            self.torch.mps.empty_cache()
+
+
+# tf-idol-generate prints a line as each stage ends (zig/tests/idol_generate.zig): the line that ends one stage starts
+# the next phase. VAE: the encoders are done, so denoising starts; denoiser: decoding starts; decoders: writing.
+_TF_NEXT = (("VAE:", "denoise"), ("features: given", "denoise"), ("denoiser:", "decode"), ("decoders:", "write"))
+
+
+class NativeEngine:
+    """backend tensorfold. Same interface as IdolEngine where the worker shares code; `make` runs the child."""
+
+    def __init__(self, weights, binary, preprocess):
+        self.weights, self.binary = weights, binary
+        self.pre = preprocess
+        self.p = None  # the Worker clears it after a failed load
+        self.mem_peak = 0
+        self.child_peak = 0
+
+    def load(self):
+        if not self.binary or not os.path.isfile(self.binary) or not os.access(self.binary, os.X_OK):
+            raise RuntimeError(f"tf_idol_generate {self.binary!r} is not an executable file (TensorFold's tf-idol-generate)")
+        self.pre.load()
+        self.p = self.pre.p
+        self.release()
+
+    @property
+    def device(self):
+        return "metal"
+
+    @property
+    def optimize(self):
+        return False
+
+    def release(self):
+        self.pre.release()
+
+    def resident(self):
+        return footprint()[0]
+
+    def torch_version(self):
+        return self.pre.torch.__version__
+
+    def start_sampling(self):
+        self.mem_peak = 0
+
+    def stop_sampling(self):
+        pass
+
+    def allocator_bytes(self):
+        return 0
+
+    def prepare(self, image, mode):
+        return self.pre(image, mode)
+
+    def make(self, prepared, s, job, progress):
+        """The picture through tf-idol-generate: (the PLY's path in `job`, the camera dict, the child's own seconds).
+        Cancellable: SIGUSR1 ends the child within 50 ms."""
+        import numpy as np
+        from safetensors.numpy import save_file
+        work = os.path.join(job, ".tf-idol")
+        os.makedirs(work, exist_ok=True)
+        picture = os.path.join(work, "picture.safetensors")
+        save_file({"image": np.asarray(prepared, dtype=np.float32) / 255.0}, picture)  # [1024, 1024, 3] in [0, 1]
+        w = self.weights
+        argv = [self.binary, os.path.join(w, "idol"), os.path.join(w, "flux2-vae", "vae"), os.path.join(w, "dinov3"),
+                picture, work, "--seed", str(s["seed"]), "--steps", str(s["steps"]), "--cfg", repr(s["guidance"]),
+                "--gaussians", str(s["num_gaussians"])]
+        self.release()  # BiRefNet's activations go back before the child allocates, so the two peaks do not stack
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1)
+        tail = []
+        self.child_peak = 0
+
+        def read():
+            for line in child.stdout:
+                line = line.rstrip()
+                tail.append(line)
+                del tail[:-20]
+                for key, phase in _TF_NEXT:
+                    if line.startswith(key):
+                        if phase == "decode":  # the denoiser reports its steps only when it is done
+                            progress({"phase": "denoise", "step": s["steps"], "of": s["steps"]})
+                        progress({"phase": phase, "step": 0, "of": s["steps"] if phase == "denoise" else 1})
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        progress({"phase": "encode", "step": 0, "of": 1})
+        try:
+            while child.poll() is None:
+                if CANCEL.is_set():
+                    child.terminate()
+                    child.wait()
+                    raise Cancelled()
+                self.child_peak = max(self.child_peak, footprint(child.pid)[0])
+                time.sleep(0.05)
+        except BaseException:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            shutil.rmtree(work, ignore_errors=True)
+            raise
+        finally:
+            reader.join(timeout=5)
+            child.stdout.close()
+        if child.returncode != 0:
+            shutil.rmtree(work, ignore_errors=True)
+            raise RuntimeError(f"tf-idol-generate exited {child.returncode}: {' | '.join(tail[-4:])}")
+        with open(os.path.join(work, "camera.json")) as f:
+            cam = json.load(f)
+        # decode_camera's convention, as gaussian.camera writes it: radius 1000 when the inverse distance is under 1e-3
+        cam["inverse_distance"] = 0.0 if cam["radius"] >= 1000 else 1.0 / cam["radius"]
+        stages = {}
+        try:
+            with open(os.path.join(work, "tf-idol-generate.json")) as f:
+                stages = {k: v for k, v in json.load(f).items() if k.endswith("_s") or k == "metal_peak_allocated_gb"}
+        except (OSError, ValueError):
+            pass
+        ply = os.path.join(job, "asset.ply")
+        os.replace(os.path.join(work, "generate.ply"), ply)
+        shutil.rmtree(work, ignore_errors=True)
+        return ply, cam, stages
+
+
 # -- the worker -------------------------------------------------------------------------------------------------------
 
 def _int(v, name):
@@ -558,6 +740,15 @@ class Options:
         self.weights = tool.get("weights") or o.get("weights") or ""
         if not self.weights:
             raise ValueError("weights (the directory fetch.sh fills: idol/, dinov3/, flux2-vae/) is required")
+        self.backend = o.get("backend", "pytorch")
+        if self.backend not in ("pytorch", "tensorfold"):
+            raise ValueError("backend must be pytorch or tensorfold")
+        self.tf_idol_generate = o.get("tf_idol_generate", "")
+        if self.backend == "tensorfold" and not self.tf_idol_generate:
+            raise ValueError("backend tensorfold needs tf_idol_generate: the path of TensorFold's tf-idol-generate")
+        self.preprocess = o.get("preprocess", "pytorch")
+        if self.preprocess != "pytorch":
+            raise ValueError("preprocess must be pytorch (TensorFold's BiRefNet is not ported yet)")
         self.device = o.get("device", "auto")
         if self.device not in ("auto", "mps", "cuda", "cpu"):
             raise ValueError("device must be auto, mps, cuda or cpu")
@@ -593,7 +784,11 @@ class Options:
 class Worker:
     def __init__(self, tool, engine=None):
         self.opts = Options(tool)
-        self.engine = engine or IdolEngine(self.opts.weights, self.opts.device, self.opts.optimize)
+        o = self.opts
+        if engine is None:
+            engine = (NativeEngine(o.weights, o.tf_idol_generate, Preprocess(o.weights, o.device)) if o.backend == "tensorfold"
+                      else IdolEngine(o.weights, o.device, o.optimize))
+        self.engine = engine
         self.loaded = False
 
     # -- load ----------------------------------------------------------------------------------------------------
@@ -706,6 +901,8 @@ class Worker:
             raise Refused(f"no object found in the image: {err}")
         phase_done("preprocess")
         check_cancel()
+        if self.opts.backend == "tensorfold":
+            return self.finish(cmd, job, prepared, s, start, timing, phase_done, progress)
 
         progress({"phase": "encode", "step": 0, "of": 1})
         state = e.encode(prepared, s["seed"])
@@ -742,10 +939,31 @@ class Worker:
         log(f"{cmd.get('id', '')}: {count} Gaussians in {timing['total'] / 1000:.1f} s {timing}")
         return {"ok": True, "files": list(FILES), "seed": s["seed"], "ms": timing["total"]}
 
+    def finish(self, cmd, job, prepared, s, start, timing, phase_done, progress):
+        """backend tensorfold: the rest in tf-idol-generate, then the same files and manifest as the PyTorch path."""
+        e = self.engine
+        ply, cam, stages = e.make(prepared, s, job, progress)
+        phase_done("generate")
+        progress({"phase": "write", "step": 0, "of": 1})
+        prepared.save(os.path.join(job, "input.png"))
+        count, lo, hi, xyz, opacity = ply_summary(ply)
+        phase_done("write")
+        timing["total"] = round((time.monotonic() - start) * 1000)
+        doc = manifest(count=count, ply_bytes=os.path.getsize(ply), lo=lo, hi=hi, cam=cam, settings=s,
+                       runtime={"backend": "tensorfold", "device": "metal", "preprocess": f"pytorch {e.torch_version()}",
+                                "binary": os.path.basename(e.binary), "stages_s": stages,
+                                "child_peak_footprint": e.child_peak}, timing=timing, xyz=xyz, opacity=opacity)
+        with open(os.path.join(job, "asset.json"), "w") as f:
+            json.dump(doc, f, indent=1)
+        log(f"{cmd.get('id', '')}: {count} Gaussians in {timing['total'] / 1000:.1f} s {timing}; child peak "
+            f"{e.child_peak / 2**30:.2f} GiB")
+        return {"ok": True, "files": list(FILES), "seed": s["seed"], "ms": timing["total"]}
+
     def stats(self):
         now, peak = footprint()
         return {"ok": True, "footprint": now, "footprint_peak": peak, "resident": self.engine.resident(),
-                "allocator": self.engine.allocator_bytes(), "allocator_peak_last_generate": self.engine.mem_peak}
+                "allocator": self.engine.allocator_bytes(), "allocator_peak_last_generate": self.engine.mem_peak,
+                "child_peak_last_generate": getattr(self.engine, "child_peak", 0)}
 
 
 def send(obj):
@@ -784,7 +1002,7 @@ def _generate(worker, cmd, out):
     except Exception as e:  # noqa: BLE001  the model failed: the reply says why, the worker stays up
         msg = f"{type(e).__name__}: {e}"
         log(f"generate failed: {msg}")
-        if "out of memory" in str(e).lower():
+        if any(k in str(e).lower() for k in ("out of memory", "outofmemory")):  # torch's words, or Zig's error name
             return {"ok": False, "type": "service_unavailable", "error": msg}
         return {"ok": False, "type": "server_error", "error": msg}
 

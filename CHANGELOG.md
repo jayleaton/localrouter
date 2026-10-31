@@ -14,6 +14,17 @@
   on the Mac (about 100 s an asset, 5 + 7.5 GiB) and disabled, untested, on the GB10. The `/voice` page and the
   companion show an asset as a card with the input, an orbit view (Spark 2.4.0, self-hosted under `/voice/vendor/`,
   loaded on first use) and Download PLY.
+- Idol on TensorFold Metal: the asset3d worker's `backend: tensorfold` keeps only BiRefNet background removal in
+  PyTorch and runs the rest in TensorFold's native `tf-idol-generate`, one child process a job (phase progress,
+  SIGUSR1 ends the child). On the M5 Ultra it takes about 30 s an asset instead of about 100 s, and its measured peak
+  is 7.12 GB instead of 12.64 GB. It books 3 + 4.5 GiB instead of 5 + 7.5 GiB. It is opt-in: `config.example.json`
+  keeps the PyTorch `idol` as the `image_to_3d` default and adds `idol-native`, disabled, switched on live with
+  `POST /v1/tools/idol-native/settings`. `pins.json` adds the timm `dinov3/config.json`
+  that the native loader reads. The Mac install keeps the PyTorch worker until a TensorFold release ships
+  `tf-idol-generate`.
+- `/voice`'s 3D view shows a perspective camera more than 20 bounds-radii away as an orthographic one with the same
+  frame. Idol can predict a camera 130 units off at half a degree, and the splats' depth order banded across the
+  model.
 
 - Kandinsky-6 Pro distilled (`kandinsky6`): text to video at 832x480 landscape only (what a request naming no size
   gets, through the engine's `Entry.defaults`; any other size or orientation is refused before any GPU work), 121
