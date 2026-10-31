@@ -9,7 +9,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, sep } from 'node:path'
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell, systemPreferences, Tray } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, WebContents } from 'electron'
-import { AddressError, callRefusal, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
+import { AddressError, allows, callRefusal, classify, CodeError, connectionOf, connectView, mcpLauncher, normalizeCode, parsePairLink, peerBases, peerNameFor, serverOf, supportsApp, tailnetPeers, tailscaleCandidates, tooOld } from './connect.ts'
 import type { ConnectError, Connection, Draft } from './connect.ts'
 import { controlBox, controlTicked, everPaired, migrationDecision, StoredStanding } from './standing.ts'
 import { PRESENCE_HELPER, TouchIdHelper } from './touchId.ts'
@@ -18,6 +18,8 @@ import type { Migration, Secrets } from './secrets.ts'
 import { grantStates, micAskAtStart, micResetBeforeAsk, signingId } from './grants.ts'
 import type { Permission } from './grants.ts'
 import { failure, json, mediaAllowed, ORIGIN, proxy } from './passthrough.ts'
+import { callLoading, modelNames, modelsView, settingsChange, settingsRefusal, toolsOf } from './models.ts'
+import type { Tools } from './models.ts'
 import { DEFAULT_LANGUAGE, heardLanguages, languageChoices, parseSettings, settingsText, sttLanguage, type Heard } from './settings.ts'
 import { createLogger } from '../../../desktop-helper/src/log.ts'
 import { assistantNameProblem, assistantOf, DEFAULT_ASSISTANT, tidyAssistantName, voiceHint } from '../harness/assistant.ts'
@@ -547,6 +549,11 @@ function registerIpc() {
         if (owner.isDestroyed() || !pageView(ev)) return
         // When this process had each piece of speech, so the page can tell a slow box from a slow hop to it.
         if (ev.type === 'response.audio.delta') ev.lr_main_ms = performance.timeOrigin + performance.now()
+        // A call whose voice models load when it starts: the shim's banner, estimated from each model's last load.
+        if (ev.type === 'localrouter.session.loading' || ev.type === 'localrouter.session.ready') {
+          if (!lastTools) void readModels()
+          ev.lr_loading = callLoading(ev, Object.fromEntries((lastTools?.entries ?? []).map((t) => [t.id, t.last_load_ms])), names)
+        }
         owner.send('rt:event', id, JSON.stringify(ev))
       },
       onClose: (reason) => {
@@ -838,6 +845,23 @@ function registerIpc() {
     writeFileSync(r.filePath, `${JSON.stringify({ format: 'localrouter-conversations/1', conversations: j.list().map((id) => j.export(id)) }, null, 1)}\n`, { mode: 0o600 })
     return r.filePath
   })
+  // Settings › Models: read while the card shows (the page polls), changed one model at a time.
+  setup('setup:models', () => readModels())
+  setup('setup:modelSettings', async (id, change) => {
+    if (!runtime) throw new Error('LocalRouter is not paired with a Spark yet')
+    const body = settingsChange(change)
+    const token = loadSecrets().token
+    try {
+      await new Spark(settings.base, token, timed(CHECK_S)).toolSettings(String(id), body)
+      log.info('models.settings', { id: String(id), ...body })
+      return { view: await readModels(), error: null }
+    } catch (error) {
+      const why = settingsRefusal(error)
+      if (why.denied) manageRefused = token
+      log.warn('models.settings_refused', { id: String(id), error: error instanceof Error ? error.message : String(error) })
+      return { view: await readModels(), error: why.message }
+    }
+  })
   setup('setup:openVoice', () => {
     showMain()
     setupWindow?.close()
@@ -979,6 +1003,38 @@ async function checkConnection() {
     connection = { ok: false, at: Date.now(), error: classify(error, 'connection', CHECK_S) }
   }
   log.info('connect.check', { ok: connection.ok, ...(connection.ok ? {} : { kind: connection.error.kind, detail: connection.error.detail }) })
+}
+
+// ------------------------------------------------------------------ models: which stay loaded (kept on the Spark)
+
+/** The last `/v1/tools` read (a call's loading banner estimates from its load times), and model names from `/v1/models`. */
+let lastTools: Tools | null = null
+let names: Record<string, string> = {}
+let namesAt = 0
+/** The token the box refused a model change for (no `manage` scope): the card is read-only until it changes. */
+let manageRefused = ''
+
+/** Whether this pairing may change models: its scopes (when the box requires pairing), unless the box said no. */
+function mayManage(token: string): boolean {
+  if (token && manageRefused === token) return false
+  if (!connection?.ok || !connection.pairing_required) return true
+  return allows(connection.scopes.map((s) => s.name), 'manage')
+}
+
+async function readModels() {
+  const at = Date.now()
+  if (!runtime) return modelsView({ tools: null, names, manage: false, problem: 'Pair with a Spark to see its models.', at })
+  const token = loadSecrets().token
+  const spark = new Spark(settings.base, token, timed(CHECK_S))
+  try {
+    const fresh = Date.now() - namesAt < 60_000
+    const [tools, models] = await Promise.all([spark.tools(), fresh ? null : spark.models().catch(() => null)])
+    if (models) [names, namesAt] = [modelNames(models), Date.now()]
+    lastTools = toolsOf(tools)
+    return modelsView({ tools: lastTools, names, manage: mayManage(token), at })
+  } catch (error) {
+    return modelsView({ tools: null, names, manage: false, problem: `The Spark did not answer: ${error instanceof Error ? error.message : String(error)}`, at })
+  }
 }
 
 // ------------------------------------------------------------------ the assistant's name (kept on the Spark)

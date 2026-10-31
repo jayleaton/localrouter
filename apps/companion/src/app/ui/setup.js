@@ -399,6 +399,133 @@ $('export').onclick = async () => {
   $('exported').textContent = path ? `saved to ${path}` : '';
 };
 
+// ------------------------------------------------ Settings › Models (the view comes computed: src/app/models.ts)
+const modelRows = new Map();
+/** Each row's inline refusal (a 409's message, say), until that row is changed again. */
+const modelErrors = {};
+let modelsBusy = false;
+
+function modelRow(id) {
+  if (modelRows.has(id)) return modelRows.get(id);
+  const el = (tag, cls, text) => Object.assign(document.createElement(tag), cls ? { className: cls } : {}, text ? { textContent: text } : {});
+  const root = el('div', 'model');
+  root.dataset.id = id;
+  const head = el('div', 'mhead');
+  const pill = el('span', 'pill');
+  const state = el('span');
+  pill.append(el('span', 'dot'), state);
+  const name = el('span', 'mname');
+  const meta = el('span', 'mmeta');
+  head.append(name, meta, pill);
+  const ctl = el('div', 'mctl');
+  const select = el('select');
+  select.setAttribute('aria-label', 'How the Spark keeps this model');
+  const idle = el('label', 'idle');
+  const ttl = el('input');
+  Object.assign(ttl, { type: 'number', min: '0', step: '1', inputMode: 'numeric' });
+  idle.append('Unload after', ttl, 'seconds idle');
+  const reset = el('button', 'btn', 'Reset to default');
+  ctl.append(select, idle, reset);
+  const hint = el('p', 'note');
+  const err = el('div', 'alert');
+  err.setAttribute('role', 'alert');
+  const failure = el('p', 'note');
+  root.append(head, ctl, hint, err, failure);
+  const r = { root, pill, state, name, meta, select, idle, ttl, reset, hint, err, failure, pending: false };
+  const change = (body, control) => saveModel(id, body, r, control);
+  select.onchange = () => change({ residency: select.value }, select);
+  ttl.onchange = () => change({ idle_ttl_s: ttl.value }, ttl);
+  ttl.addEventListener('keydown', (e) => e.key === 'Enter' && ttl.blur());
+  reset.onclick = () => change({ reset: true }, reset);
+  modelRows.set(id, r);
+  return r;
+}
+
+async function saveModel(id, body, r, control) {
+  r.pending = true;
+  control.classList.add('busy');
+  try {
+    const out = await api.modelSettings(id, body);
+    if (out.error) modelErrors[id] = out.error;
+    else delete modelErrors[id];
+    renderModels(out.view);
+  } catch (error) {
+    modelErrors[id] = ipcMessage(error);
+  } finally {
+    r.pending = false;
+    control.classList.remove('busy');
+  }
+  // The box's own value again (a refused one included).
+  if (lastModels) renderModels(lastModels);
+}
+
+let lastModels = null;
+function renderModels(v) {
+  lastModels = v;
+  // Read-only: no change is pending, so no refusal is either.
+  if (v.read_only) for (const id of Object.keys(modelErrors)) delete modelErrors[id];
+  $('modelsProblem').hidden = !v.problem;
+  $('modelsProblem').textContent = v.problem;
+  $('modelsReadOnly').hidden = !v.read_only;
+  $('modelsReadOnly').textContent = v.read_only;
+  const b = v.budget;
+  $('memBar').hidden = !b;
+  if (b) {
+    $('memAlways').style.width = `${b.always_pct}%`;
+    $('memBooked').style.width = `${b.booked_pct}%`;
+    $('memBar').dataset.over = String(b.over);
+    $('memText').textContent = b.text;
+    $('memBarImg').setAttribute('aria-label', b.text);
+  }
+  const seen = new Set();
+  const nodes = v.rows.map((row) => {
+    seen.add(row.id);
+    const r = modelRow(row.id);
+    r.pill.dataset.s = row.dot;
+    r.state.textContent = row.state;
+    r.name.replaceChildren(Object.assign(document.createElement('b'), { textContent: row.name }), Object.assign(document.createElement('small'), { textContent: row.kind }));
+    r.name.title = row.id;
+    r.meta.textContent = `${row.memory} · ${row.loads}`;
+    const editable = !v.read_only;
+    // A row being saved, or a field being typed in, keeps what the person did until the box answers.
+    if (!r.pending) {
+      if (r.select.options.length !== row.choices.length || [...r.select.options].some((o, i) => o.value !== row.choices[i].value)) {
+        r.select.replaceChildren(...row.choices.map((c) => Object.assign(document.createElement('option'), { value: c.value, textContent: c.label })));
+      }
+      r.select.value = row.residency;
+      if (document.activeElement !== r.ttl) r.ttl.value = String(row.idle_ttl_s);
+    }
+    r.select.disabled = r.ttl.disabled = !editable;
+    r.reset.disabled = !editable || row.is_default;
+    r.idle.hidden = !row.idle_shown;
+    r.hint.textContent = row.idle_shown ? `0 unloads it right after each use. ${row.default_text}.` : `${row.default_text}.`;
+    alertCard(r.err, modelErrors[row.id] ? { title: modelErrors[row.id] } : null);
+    r.failure.hidden = !row.error;
+    r.failure.textContent = row.error ? `Last error: ${row.error}` : '';
+    return r.root;
+  });
+  for (const id of [...modelRows.keys()]) if (!seen.has(id)) modelRows.delete(id);
+  if ($('models').children.length !== nodes.length || nodes.some((n, i) => $('models').children[i] !== n)) $('models').replaceChildren(...nodes);
+  $('modelsAt').textContent = v.available ? `Read ${new Date(v.at).toLocaleTimeString()}` : '';
+}
+
+/** While the window shows, the models' state is read every few seconds (one read at a time). */
+async function pollModels() {
+  if (document.hidden || modelsBusy) return;
+  modelsBusy = true;
+  try {
+    renderModels(await api.models());
+  } catch (error) {
+    $('modelsProblem').hidden = false;
+    $('modelsProblem').textContent = ipcMessage(error);
+  } finally {
+    modelsBusy = false;
+  }
+}
+setInterval(pollModels, 3000);
+document.addEventListener('visibilitychange', pollModels);
+pollModels();
+
 // The connection is checked when the window opens and again on focus once it is a minute old.
 async function refresh() {
   const s = await guarded(() => api.state());

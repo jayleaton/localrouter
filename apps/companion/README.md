@@ -138,6 +138,16 @@ Settings (⌘,) also renames the assistant, shares folders it may read, adds oth
 Spark's own web page keep using this Mac through the same local rules (pair a second code with
 `--scopes desktop_helper`), and exports conversations for switching harness.
 
+**Settings › Models** chooses which models the Spark keeps loaded and which it shuts down. Each model shows its state,
+memory and how long it last took to load. You can choose **Always loaded**, **Load when a call starts** (chat, speech and
+transcription models only) or **Load when needed**, with **Unload after N seconds idle** (0 unloads it right after each
+use), and **Reset to default**. A bar at the top shows the memory the always-loaded models book against the Spark's
+ceiling. The Spark keeps these settings for every device (`GET /v1/tools`, `POST /v1/tools/{id}/settings`) and applies
+a change at once. When a change would not fit the budget, the row shows the Spark's message. A pairing without the
+`manage` scope sees the card read-only. The card refreshes every 3 seconds while the window shows. On a call whose voice
+models load when it starts, the call screen shows **Loading voice models…** with each model's progress until they are
+ready.
+
 If the old LaunchAgent helper (`apps/desktop-helper`, `com.localrouter.desktop`) is installed, remove it first
 (`node src/main.ts uninstall-agent` in its checkout), so two programs never drive the same Mac.
 

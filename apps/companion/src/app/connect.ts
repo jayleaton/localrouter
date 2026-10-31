@@ -164,7 +164,7 @@ export function scopeLabel(scope: string): string {
 }
 
 /** Whether a token with `scopes` may use a service scope: `all` (the default), `voice` or `mcp` (or none listed) grants every one. */
-function allows(scopes: string[], scope: string): boolean {
+export function allows(scopes: string[], scope: string): boolean {
   return scopes.length === 0 || scopes.includes('all') || scopes.includes('voice') || scopes.includes('mcp') || scopes.includes(scope)
 }
 

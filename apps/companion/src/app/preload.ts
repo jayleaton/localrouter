@@ -66,5 +66,7 @@ contextBridge.exposeInMainWorld('companion', {
     grantControl: (from: string) => ipcRenderer.invoke('setup:grantControl', from),
     exportConversations: () => ipcRenderer.invoke('setup:export'),
     openVoice: () => ipcRenderer.invoke('setup:openVoice'),
+    models: () => ipcRenderer.invoke('setup:models'),
+    modelSettings: (id: string, change: unknown) => ipcRenderer.invoke('setup:modelSettings', id, change),
   },
 })

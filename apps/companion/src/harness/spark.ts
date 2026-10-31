@@ -142,6 +142,20 @@ export class Spark {
     return assistantOf(await r.json())
   }
 
+  /** `/v1/tools`: each model's state and residency, and the memory budget (`read` scope). */
+  tools(): Promise<unknown> {
+    return this.json('/v1/tools')
+  }
+
+  /**
+   * Changes how the box keeps one model (`manage` scope): its residency, its idle time, or back to the defaults. The
+   * box applies it at once and keeps it; the answer is the model's entry. A 409 (the always-loaded set would not fit)
+   * throws a SparkError with the box's message.
+   */
+  toolSettings(id: string, change: { residency?: string; idle_ttl_s?: number; reset?: true }): Promise<unknown> {
+    return this.json(`/v1/tools/${encodeURIComponent(id)}/settings`, change)
+  }
+
   /** One Chat Completions request (not streamed): the whole completion. */
   chat(body: Record<string, unknown>, signal?: AbortSignal): Promise<{ choices: Array<{ message: { role: string; content: string | null; tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> }; finish_reason: string }> }> {
     return this.json('/v1/chat/completions', { ...body, stream: false }, signal)

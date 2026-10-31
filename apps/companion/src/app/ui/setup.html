@@ -189,6 +189,20 @@
     <p class="note">What you speak on a call. Auto-detect guesses it again on each turn. The call screen’s Settings › Voice changes the same setting.</p>
   </section>
 
+  <section class="card" id="modelsCard">
+    <h3>Models</h3>
+    <p class="note">Which models the Spark keeps loaded and which it shuts down to free memory. The Spark keeps these settings for every device, and a change applies at once.</p>
+    <div class="membar" id="memBar" hidden>
+      <div class="bar" role="img" id="memBarImg"><span class="always" id="memAlways"></span><span class="booked" id="memBooked"></span></div>
+      <p class="note legend"><span class="key always"></span>always loaded <span class="key booked"></span>loaded on demand <span class="key free"></span>free, up to the ceiling</p>
+      <p class="note" id="memText"></p>
+    </div>
+    <div class="alert warn" id="modelsReadOnly" hidden></div>
+    <p class="note" id="modelsProblem" hidden></p>
+    <div id="models"></div>
+    <p class="note" id="modelsAt"></p>
+  </section>
+
   <section class="card">
     <h3>Folders <span class="an">Jarvis</span> may read</h3>
     <ul class="list" id="folders"></ul>
