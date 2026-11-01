@@ -82,3 +82,36 @@ wait_warm() {
     sleep 5
   done
 }
+# Waits until no voice session is open, so a restart never cuts a live call: IDLE_WAIT_S at most (default 1800), then
+# fails with nothing changed. FORCE_RESTART=1 skips the wait.
+wait_idle() {
+  local t0 n
+  t0=$(date +%s)
+  while [ "${FORCE_RESTART:-0}" != 1 ]; do
+    n=$(lr_curl -fs -m 5 "$URL/v1/tools" | jq -r '.voice_sessions // 0' 2> /dev/null || echo 0)
+    [ "$n" = 0 ] && return 0
+    [ $(($(date +%s) - t0)) -lt "${IDLE_WAIT_S:-1800}" ] ||
+      die "$n voice session(s) still open after ${IDLE_WAIT_S:-1800} s: nothing changed (FORCE_RESTART=1 to restart anyway)"
+    echo "  waiting: $n voice session(s) open"
+    sleep 10
+  done
+}
+# swap_in BUILD CONFIG PLIST: makes src/<commit> (BUILD, relative to $DEPLOY), the config file CONFIG and the agent
+# file PLIST the deployed ones, keeping what they replace as current.prev, config.json.prev and $LABEL.plist.prev for
+# rollback.sh. An empty argument leaves that one as it is (and still saves it, so a rollback restores a whole state).
+swap_in() {
+  rm -f "$DEPLOY/current.prev" "$DEPLOY/config.json.prev" "$DEPLOY/$LABEL.plist.prev"
+  if [ -L "$DEPLOY/current" ]; then readlink "$DEPLOY/current" > "$DEPLOY/current.prev"; fi
+  if [ -f "$DEPLOY/config.json" ]; then cp -p "$DEPLOY/config.json" "$DEPLOY/config.json.prev"; fi
+  if [ -f "$PLIST" ]; then cp -p "$PLIST" "$DEPLOY/$LABEL.plist.prev"; fi
+  if [ -n "$1" ]; then ln -sfh "$1" "$DEPLOY/current"; fi   # -h: replace the link itself (BSD ln follows a link to a directory)
+  if [ -n "$2" ]; then mv "$2" "$DEPLOY/config.json"; fi
+  if [ -n "$3" ]; then mkdir -p "$(dirname "$PLIST")" && mv "$3" "$PLIST"; fi
+}
+# Loads the agent and waits until the daemon answers on $URL (30 s at most); $1 names what it runs, for the messages.
+agent_up() {
+  agent_load || die "launchctl bootstrap $DOMAIN $PLIST failed"
+  for _ in $(seq 150); do curl -fs -m 2 "$URL/health" > /dev/null && break; sleep 0.2; done
+  curl -fs -m 2 "$URL/health" > /dev/null || die "restarted $LABEL onto $1, but it does not answer on $URL: tail $LOG"
+  echo "== restarted $LABEL onto $1; it answers on $URL"
+}

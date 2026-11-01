@@ -14,6 +14,9 @@
   on the Mac (about 100 s an asset, 5 + 7.5 GiB) and disabled, untested, on the GB10. The `/voice` page and the
   companion show an asset as a card with the input, an orbit view (Spark 2.4.0, self-hosted under `/voice/vendor/`,
   loaded on first use) and Download PLY.
+- Mac deploy: `deploy/mac/redeploy.sh [COMMIT]` restarts onto a build already in `$J/deploy/src` and/or a hand-edited
+  `config.json.next`, and `deploy/mac/rollback.sh` goes back. `install.sh` and both scripts keep what they replace as
+  `current.prev`, `config.json.prev` and the agent's `.plist.prev`, and wait for no open voice session first.
 - Idol on TensorFold Metal: the asset3d worker's `backend: tensorfold` keeps only BiRefNet background removal in
   PyTorch and runs the rest in TensorFold's native `tf-idol-generate`, one child process a job (phase progress,
   SIGUSR1 ends the child). On the M5 Ultra it takes about 30 s an asset instead of about 100 s, and its measured peak

@@ -57,6 +57,8 @@ Drama 3 and Whisper are warm.
 | start, and wait until warm (`--no-wait`: until it answers) | `deploy/mac/start.sh` |
 | stop it and its models | `deploy/mac/stop.sh` |
 | state, build, models, memory | `deploy/mac/status.sh` |
+| restart onto a build already in `$J/deploy/src/` and/or a hand-edited config staged as `config.json.next` | `deploy/mac/redeploy.sh [COMMIT]` |
+| go back to what the last install, redeploy or rollback replaced | `deploy/mac/rollback.sh` |
 | pair a phone or the companion app (a code for 10 minutes) | `deploy/mac/pair.sh add "JJ's phone"` |
 | a token for an MCP client or a script | `deploy/mac/pair.sh token claude-code` |
 | what is missing, with its fix | `tools/install/doctor.sh --profile mac-apple-silicon` |
@@ -67,6 +69,25 @@ off until `PAIRING_REQUIRED=1 deploy/mac/install.sh`. After that, every route bu
 paired device's token, and the scripts use their own read-only token, `$J/deploy/operator.token`. With tailscale,
 the install also puts HTTPS for the tailnet on port 10443 (`--https-port`, 0 for none) in front of the loopback
 port.
+
+**Changing a running install.** `install.sh`, `redeploy.sh` and `rollback.sh` share these rules:
+
+- **Wait for calls.** Each one restarts only once no voice session is open (`IDLE_WAIT_S`, default 1800 s;
+  `FORCE_RESTART=1` skips the wait).
+- **Keep what it replaces.** Each one keeps the build link, config and agent it replaces as `$J/deploy/current.prev`,
+  `config.json.prev` and `com.localrouter.jarvis.plist.prev`. `rollback.sh` swaps them back, so a second rollback goes
+  forward again.
+- **Install vs redeploy.** `install.sh` builds this checkout and regenerates the config from the profile.
+  `redeploy.sh` regenerates nothing. Use it for a config edited by hand (copy `config.json` to `config.json.next`,
+  edit it, run it) or to go back to an older build. It checks the staged config is JSON with tools before stopping
+  anything.
+
+A hand-edited config can name venvs and weights outside `$J`. For example, the integration Mac runs Idol from
+`~/.cache/localrouter-asset3d/{venv,weights}`, and its `idol-native` entry passes `TENSORFOLD_LIBTURBOJPEG` with
+`/usr/bin/env` at the front of its `cmd`, because a `cmd` worker inherits the daemon's environment. A cache cleanup
+there removes those files. The daemon keeps running, but the tool fails at its next load, and `status.sh` shows it
+as `last error`. To restore it, run `uv sync --locked` and `fetch.sh` into the same paths (tools/asset3d/idol/README.md,
+Install).
 
 ## Per-model engines
 
