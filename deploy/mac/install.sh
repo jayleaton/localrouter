@@ -11,7 +11,8 @@
 #    profile, and the
 #    profile's deploy.daemon settings (reserve_bytes). The agent ~/Library/LaunchAgents/$LABEL.plist from
 #    localrouter.plist.in. A loaded agent is restarted onto the new build once no voice session is open; until then
-#    (and when a check fails) current, the config and the agent stay as they were.
+#    (and when a check fails) current, the config and the agent stay as they were. What a change replaces is kept as
+#    $DEPLOY/current.prev, config.json.prev and $LABEL.plist.prev: deploy/mac/rollback.sh goes back to it.
 # 4. tailscale serve: HTTPS on the tailnet at HTTPS_PORT to the daemon's loopback port (other serve entries are left
 #    as they are). The daemon itself listens on 127.0.0.1 only.
 # Settings: deploy/mac/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, UNIT or LABEL, the models' roots). Also TOOLS (the tool
@@ -132,31 +133,14 @@ if [ $loaded = 1 ] && [ "$(readlink "$DEPLOY/current")" = "src/$commit" ] && cmp
   loaded=unchanged
 fi
 if [ $loaded = 1 ]; then
-  # never under a live call: wait until no voice session is open, IDLE_WAIT_S at most (default 1800; FORCE_RESTART=1
-  # skips the wait)
-  t0=$(date +%s)
-  while [ "${FORCE_RESTART:-0}" != 1 ]; do
-    n=$(lr_curl -fs -m 5 "$URL/v1/tools" | jq -r '.voice_sessions // 0' 2> /dev/null || echo 0)
-    [ "$n" = 0 ] && break
-    [ $(($(date +%s) - t0)) -lt "${IDLE_WAIT_S:-1800}" ] ||
-      die "$n voice session(s) still open after ${IDLE_WAIT_S:-1800} s: nothing changed (FORCE_RESTART=1 to restart anyway)"
-    echo "  waiting: $n voice session(s) open"
-    sleep 10
-  done
+  wait_idle   # never under a live call
   echo "== stopping $LABEL to restart it onto $commit"
   agent_unload
 fi
 if [ $loaded != unchanged ]; then
-  ln -sfh "src/$commit" "$DEPLOY/current"   # -h: replace the link itself (BSD mv and ln follow a link to a directory)
-  mv "$DEPLOY/config.json.new" "$DEPLOY/config.json"
-  mv "$DEPLOY/$LABEL.plist.new" "$PLIST"
+  swap_in "src/$commit" "$DEPLOY/config.json.new" "$DEPLOY/$LABEL.plist.new"   # the replaced ones: *.prev (rollback.sh)
 fi
-if [ $loaded = 1 ]; then
-  agent_load
-  for _ in $(seq 150); do curl -fs -m 2 "$URL/health" > /dev/null && break; sleep 0.2; done
-  curl -fs -m 2 "$URL/health" > /dev/null || die "restarted $LABEL onto $commit, but it does not answer on $URL: tail $LOG"
-  echo "== restarted $LABEL onto $commit; it answers on $URL"
-fi
+if [ $loaded = 1 ]; then agent_up "$commit"; fi
 
 # ---- 4. HTTPS for the tailnet
 ts=$(tailscale_cli)

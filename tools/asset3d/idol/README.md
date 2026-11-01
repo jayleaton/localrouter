@@ -73,7 +73,9 @@ tools/asset3d/idol/fetch.sh ~/.cache/localrouter-asset3d/weights      # 6.2 GiB;
 
 `fetch.sh` downloads only the eleven pinned files from `https://huggingface.co/<repo>/resolve/<revision>/<path>`. It
 keeps any file already there with the pinned size, resumes partial downloads, and then checks every digest with
-`tools/package/verify_assets.py`. It works with bash 3.2. The worker sets `HF_HUB_OFFLINE=1`, so it never contacts the
+`tools/package/verify_assets.py`. It works with bash 3.2. The venv and the weights can live anywhere the tool entry
+names, including a cache directory such as the one above. In that case, clearing the cache breaks the tool's next
+load until both commands run again (docs/dev/MAC-PORT.md, Changing a running install). The worker sets `HF_HUB_OFFLINE=1`, so it never contacts the
 network. If a pinned file is missing or has the wrong size, `load` fails with a message naming the file.
 
 ## Protocol
