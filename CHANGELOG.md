@@ -18,7 +18,11 @@
   on the front's stand-in or fallback in the same request (`tool.Failure.rerun`, `Scheduler.Rerun`) instead of failing
   with a 503, and a node that comes back unloads its stand-in once no job uses it rather than after the stand-in's idle
   TTL. Re-timed on both Sparks: the chat right after spark-1 stops answers 200 from the 27B (first token 16 to 34 s,
-  its load), and the 27B unloads 1.5 s after spark-1's daemon is back.
+  its load), and the 27B unloads 1.5 s after spark-1's daemon is back. A node that is back but still loading the
+  tool does not serve it yet (`/v1/node/status` gives each tool's `rule`; the front's health check reads `state`
+  and `rule`): chat stays on the stand-in until the remote model is ready, and the stand-in unloads only then, once
+  idle, so a chat during the node's warm-up no longer waits for its load (about 170 s for Flash-Next). Not yet
+  re-timed live.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian
