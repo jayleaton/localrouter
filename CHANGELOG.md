@@ -13,7 +13,11 @@
   prints the config, `deploy/jarvis/test-topology.sh` checks the shipped topologies and their configs (in CI), and
   `leftovers.sh` stops the install's labelled containers. Booted on both Sparks on 2026-11-14 (docs/dev/MULTI-SPARK.md,
   Measured): smoke 33/33, voice first audio 983 ms median, stand-in failover. `check.sh` accepts the NVIDIA container
-  toolkit's hook or CDI spec (DGX-02 has no `nvidia` runtime), and the front's node token needs `inference,media,decisions,read,manage`.
+  toolkit's hook or CDI spec (DGX-02 has no `nvidia` runtime), and the front's node token needs
+  `inference,media,decisions,read,manage`. The request that finds a node gone, before any of its reply began, now runs
+  on the front's stand-in or fallback in the same request (`tool.Failure.rerun`, `Scheduler.Rerun`) instead of failing
+  with a 503, and a node that comes back unloads its stand-in once no job uses it rather than after the stand-in's idle
+  TTL (not yet re-measured on the Sparks).
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

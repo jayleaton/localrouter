@@ -37,7 +37,7 @@ each daemon's own `host` differ.
 | `nodes[].role` | exactly one `front`: it serves `/v1`, `/mcp`, `/v1/realtime` and `/voice` for every node |
 | `nodes[].models` | the tools that node runs. Every tool is on exactly one node |
 | `nodes[].fallback` | front only: tools of other nodes that the front runs itself while their node is down |
-| `nodes[].stand_in` | front only: `{"<another node's tool>": "<one of the front's own models>"}`. While that node is down, requests for the tool, whether named or by default (voice included), go to the stand-in. The stand-in is of the same kind; it is not kept loaded for itself, so it loads when first needed and idles out after its node is back. For a model too big to run on the front (a `fallback` runs the same model there) |
+| `nodes[].stand_in` | front only: `{"<another node's tool>": "<one of the front's own models>"}`. While that node is down, requests for the tool, whether named or by default (voice included), go to the stand-in. The stand-in is of the same kind; it is not kept loaded for itself, so it loads when first needed and is unloaded once idle when its node is back (unless it still stands in for a tool of another node that is down). For a model too big to run on the front (a `fallback` runs the same model there) |
 | `token_file` | the bearer token the front (and a tensor-parallel group's lead) sends to the other nodes: a device paired on each of them with `inference,media,decisions,read,manage` (when they require pairing; `manage` alone loads and unloads but cannot chat). Every node reads the file at start and stops (exit 2) without it, so it goes to the same path on each node |
 | `health_interval_ms`, `down_after` | the front asks each node how it is this often; this many unanswered checks in a row, or one request that fails to connect, and the node is down |
 
@@ -68,11 +68,14 @@ the block. A tool listed on several nodes is a tensor-parallel group, checked as
   a node guards the voice loop's models (chat) for the front's calls as it does for its own.
 - **Failover.** When the chat node is down, the chat model loads on the front from its `fallback` entry, where memory
   allows: ordinary admission, so it may evict the image model, and it is refused when even that does not make room.
-  When the node comes back, chat moves back. A request already streaming when its node dies fails with a 503.
+  When the node comes back, chat moves back. A request whose node turns out to be gone before its reply begins (the
+  connection, the request or the reply's status fails) marks the node down and runs again on the fallback, in the same
+  request. A request already streaming when its node dies ends with its error (a 503, or an error event mid-stream).
 - **Stand-in.** With a `stand_in` instead, chat requests go to the front's own smaller model while the node is down,
   and they say so: the reply's `model` is the stand-in's id. `/v1/tools` lists the remote model's `stand_in`. The
-  first request after the node goes down can still fail with a 503: the one whose failed connection marks the node
-  down. Once the node is back, requests go to it again, and the stand-in idles out on its `idle_ttl_s`.
+  request that finds the node gone is answered by the stand-in too, as long as nothing of its reply had begun: its
+  failed connection marks the node down, and the scheduler runs the job again on the stand-in (its `model` re-pointed),
+  once. Once the node is back, requests go to it again, and the stand-in is unloaded as soon as no job uses it.
 - **Not forwarded yet.** `unload_model` and the release of a remote model act on the front's handle only; the node
   keeps or drops the model by its own rules.
 
@@ -261,12 +264,16 @@ Failures and fixes found in the window:
 - The front's chat to spark-1 got 403 (`does not have the inference scope`): the documented token had `manage` only.
   It now gets `inference,media,decisions,read,manage` (changed live with `pair.sh scopes`, no restart).
 
-Open, not fixed here:
+Fixed after the window (CPU tests only, **not re-measured on the Sparks**):
 
-- The request that finds spark-1 gone fails (503) instead of going to the stand-in; the ones after it are served. A
-  retry on the stand-in when the connection fails before any byte would close that gap.
-- The stand-in stays loaded after spark-1 is back until it idles out (`idle_ttl_s`) or memory is needed; the front had
-  22.8 GiB free meanwhile.
+- The request that found spark-1 gone failed (503) instead of going to the stand-in. It now runs on the stand-in in the
+  same request (a fallback likewise) when nothing of its reply had begun. The failover time to the first answer is
+  then the stand-in's load (31.4 s for the 27B in the window), with no failed request before it.
+- The stand-in stayed loaded after spark-1 was back until it idled out (`idle_ttl_s`, 600 s in the deploy); the front
+  had 22.8 GiB free meanwhile. It is now unloaded as soon as no job uses it.
+
+Still open:
+
 - The booking: the measured peak (82.9 GiB) is well under the cap (103.5 + 8). A peak with eight streams and a full
   prompt cache would show whether `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` and the booking can come down.
 
@@ -615,7 +622,7 @@ server. A harness sees `node` only as an informational field ([HARNESS.md](../HA
 | Peer health check | The front polls `GET /health` and `/v1/tools` every 2 s over CX-7, and over the LAN when CX-7 fails. After 3 misses the peer is down and its tools are listed `unavailable` with the reason |
 | **Spark 1 down** | Chat goes to the fallback 27B on Spark 2. It loads on demand at a priority below voice and above image, and evicts image if needed (52 GiB headroom, section 3). It takes 12.5–29.9 s to load (M). The voice session says it is "recovering", as model reloads do today. Everything else keeps working |
 | A chat stream in flight when Spark 1 dies | Ends as a broken upstream stream does today: `data: {"error"}` then `[DONE]`. The voice turn fails like a 503 |
-| Spark 1 back | Health passes, and the remote model becomes the default again. The fallback idles out on its TTL |
+| Spark 1 back | Health passes, and the remote model becomes the default again. The fallback (or stand-in) is unloaded once no job uses it |
 | **Spark 2 (front) down** | The box is down, as today. To survive it, the same binary can also hold the front role on Spark 1, with clients pairing with both names. That is later work, and the phone and web clients currently store one box |
 | CX-7 cable down | Control and chat fall back to the LAN path (bandwidth is enough for (a)). (b) and (c) would stop |
 
