@@ -264,16 +264,29 @@ Failures and fixes found in the window:
 - The front's chat to spark-1 got 403 (`does not have the inference scope`): the documented token had `manage` only.
   It now gets `inference,media,decisions,read,manage` (changed live with `pair.sh scopes`, no restart).
 
-Fixed after the window (CPU tests only, **not re-measured on the Sparks**):
+Fixed after the window (`e38f9f62`), then re-timed on both Sparks on PR head `3df35168` (2026-11-14, 10:14Z to
+10:40Z; G down 25 min). Each round stopped spark-1's unit while idle (1.7 s), sent one streamed chat to the front right
+after, then started the unit again and asked a chat every second:
 
-- The request that found spark-1 gone failed (503) instead of going to the stand-in. It now runs on the stand-in in the
-  same request (a fallback likewise) when nothing of its reply had begun. The failover time to the first answer is
-  then the stand-in's load (31.4 s for the 27B in the window), with no failed request before it.
-- The stand-in stayed loaded after spark-1 was back until it idled out (`idle_ttl_s`, 600 s in the deploy); the front
-  had 22.8 GiB free meanwhile. It is now unloaded as soon as no job uses it.
+| Round | The chat right after the stop | First token after the stop began | spark-1's daemon answers | 27B stand-in unloaded | Flash-Next ready on spark-1 | Chat back on Flash-Next |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 200 from `qwen3.8-27b`, no error | 33.9 s (TTFT 32.2 s: the 27B's cold load) | 0.7 s | 2.2 s | 172.0 s | 171.5 s |
+| 2 | 200 from `qwen3.8-27b`, no error | 21.9 s (TTFT 20.1 s) | 0.4 s | 1.9 s | 169.9 s | 169.4 s |
+| 3 | 200 from `qwen3.8-27b`, no error | 15.6 s (TTFT 13.9 s) | 0.4 s | 1.9 s | 171.3 s | 171.2 s |
+
+Times in the last four columns are from the start command. The front logged each rerun (`node spark-1 ... is gone
+(ConnectFailed); job ... runs on qwen3.8-27b instead`) and each return (`back, so ... its stand-in is unloaded once
+idle`). The stand-in left 1.5 s after spark-1's daemon answered, in all three rounds, against 600 s of idle TTL before.
+The 27B's load got faster each round (32, 20, 14 s) as its weights stayed in the page cache. After the rounds:
+`smoke.sh --quick` 33 passed, 0 failed (voice first audio median 919 ms), and a voice e2e smoke (`voice_e2e.py --smoke`:
+turns, long reply, barge-in) passed. Thermal at most 71 C, no pause.
 
 Still open:
 
+- **Chat while spark-1 warms up waits for it.** The node counts as up as soon as its daemon answers (under 1 s), so
+  the stand-in unloads and the next chat goes to spark-1, where it waits for Flash-Next's load: about 170 s in each
+  round above. Keeping the stand-in answering until the remote model is ready (the node's `/v1/tools` state) would
+  close that gap.
 - The booking: the measured peak (82.9 GiB) is well under the cap (103.5 + 8). A peak with eight streams and a full
   prompt cache would show whether `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` and the booking can come down.
 

@@ -17,7 +17,8 @@
   `inference,media,decisions,read,manage`. The request that finds a node gone, before any of its reply began, now runs
   on the front's stand-in or fallback in the same request (`tool.Failure.rerun`, `Scheduler.Rerun`) instead of failing
   with a 503, and a node that comes back unloads its stand-in once no job uses it rather than after the stand-in's idle
-  TTL (not yet re-measured on the Sparks).
+  TTL. Re-timed on both Sparks: the chat right after spark-1 stops answers 200 from the 27B (first token 16 to 34 s,
+  its load), and the 27B unloads 1.5 s after spark-1's daemon is back.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian
