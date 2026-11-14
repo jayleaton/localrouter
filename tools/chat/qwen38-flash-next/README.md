@@ -15,7 +15,7 @@ two-Spark placement (`deploy/jarvis/topologies/flashnext-2spark.json`, [MULTI-SP
 | `pins.json` | recipe commit, engine base and tree, the image's labels, the checkpoint's repo and revision |
 | `tf.env` | the profile's `TF_*` lines, unchanged: the engine settings the measured boot passed to the container |
 | `serve.sh` | the server LocalRouter's `openai_server` engine runs: the recipe's `docker run` line in the foreground |
-| `check.sh` | install.sh's preflight: docker with the NVIDIA runtime, the pinned image, the checkpoint complete |
+| `check.sh` | install.sh's preflight: docker with the NVIDIA container toolkit (an `nvidia` runtime, or its hook or CDI spec under runc), the pinned image, the checkpoint complete |
 
 ## How it runs
 
@@ -82,7 +82,7 @@ not been measured yet.
   on disk. `FLASHNEXT_MODEL_DIR` (default `~/ai/models/qwen38-flash-next-mlx4-mtp`) names it. Reuse a copy that is
   already there, or copy one over the link; download it only when no node has it:
   `hf download TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --revision 2b170fa6309d5d1ee380b35636075fac7945f286 --local-dir DIR`.
-- **Docker** for the service's user, with the NVIDIA runtime (`check.sh` checks both).
+- **Docker** for the service's user, with the NVIDIA container toolkit, as `docker run --gpus all` needs it: an `nvidia` runtime, or the toolkit's hook or CDI spec under runc (`check.sh` checks both).
 
 Then `check.sh "$FLASHNEXT_IMAGE" "$FLASHNEXT_MODEL_DIR"`. `deploy/jarvis/install.sh` runs the same check for a node
 that runs this model.

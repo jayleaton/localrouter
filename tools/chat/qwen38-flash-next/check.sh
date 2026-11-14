@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Whether this machine can serve Qwen3.8-Flash-Next TP1 (pins.json), without starting it (no GPU, no download):
 #   check.sh IMAGE MODEL_DIR
-# docker runs for this user with the NVIDIA runtime; IMAGE is the recipe's TP1 image (its engine tree and runner assets
-# are the pinned ones); MODEL_DIR holds the pinned checkpoint: its config, its index and every shard the index names, of
-# the pinned count (and, when the download left a `.p0-source` naming its repo@revision, that one). One line a check;
-# exit 1 at the first that fails, with what to do. tools/chat/qwen38-flash-next/README.md says how to get each.
+# docker runs for this user with the NVIDIA container toolkit (a runtime, its hook or a CDI spec); IMAGE is the recipe's
+# TP1 image (its engine tree and runner assets are the pinned ones); MODEL_DIR holds the pinned checkpoint: its config,
+# its index and every shard the index names, of the pinned count (and, when the download left a `.p0-source` naming its
+# repo@revision, that one). One line a check; exit 1 at the first that fails, with what to do.
+# tools/chat/qwen38-flash-next/README.md says how to get each.
 set -euo pipefail
 [ $# = 2 ] || { echo "usage: check.sh IMAGE MODEL_DIR" >&2; exit 2; }
 image=$1 model=$2
@@ -12,9 +13,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 pins=$here/pins.json
 fail() { echo "qwen3.8-flash-next: $*" >&2; exit 1; }
 command -v docker > /dev/null || fail "no docker (install Docker with the NVIDIA container runtime)"
-runtimes=$(docker info --format '{{json .Runtimes}}' 2> /dev/null || true)
-grep -q nvidia <<< "$runtimes" ||
-  fail "docker does not answer for $(id -un), or has no nvidia runtime (add the user to the docker group; install nvidia-container-toolkit)"
+# `docker run --gpus all` (serve.sh) needs the NVIDIA container toolkit: a runtime named nvidia, or its hook or CDI
+# spec under runc (DGX-02, 2026-11-14: no nvidia runtime registered, GPUs through the toolkit's hook and CDI spec)
+runtimes=$(docker info --format '{{json .Runtimes}}' 2> /dev/null) ||
+  fail "docker does not answer for $(id -un) (add the user to the docker group)"
+toolkit=no
+if grep -q nvidia <<< "$runtimes" || command -v nvidia-container-runtime-hook > /dev/null; then toolkit=yes; fi
+for spec in /etc/cdi/nvidia*.yaml /var/run/cdi/nvidia*.yaml; do if [ -f "$spec" ]; then toolkit=yes; fi; done
+[ $toolkit = yes ] || fail "docker has no NVIDIA container toolkit (no nvidia runtime, hook or CDI spec): install nvidia-container-toolkit"
 labels=$(docker image inspect -f '{{json .Config.Labels}}' "$image" 2> /dev/null) ||
   fail "no image $image (build it with the recipe, or load it from another node: README.md, The image)"
 want=$(jq -c '.image.labels' "$pins")
