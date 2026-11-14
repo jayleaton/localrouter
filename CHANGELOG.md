@@ -11,7 +11,9 @@
   remote tool's `stand_in` in `/v1/tools`. A deploy topology file may set `defaults`. `config.json.in` marks tools
   that need a Spark of their own `own_spark` (one-box installs leave them out). `RENDER_ONLY=1 deploy/jarvis/install.sh`
   prints the config, `deploy/jarvis/test-topology.sh` checks the shipped topologies and their configs (in CI), and
-  `leftovers.sh` stops the install's labelled containers. Not booted yet (docs/dev/MULTI-SPARK.md has the window plan).
+  `leftovers.sh` stops the install's labelled containers. Booted on both Sparks on 2026-11-14 (docs/dev/MULTI-SPARK.md,
+  Measured): smoke 33/33, voice first audio 983 ms median, stand-in failover. `check.sh` accepts the NVIDIA container
+  toolkit's hook or CDI spec (DGX-02 has no `nvidia` runtime), and the front's node token needs `inference,media,decisions,read,manage`.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

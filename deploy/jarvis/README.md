@@ -112,7 +112,9 @@ onto a node"); install.sh checks both (`check.sh`).
   `--host all`) with pairing on serves `/voice` and `/v1/realtime` to other machines too (`voice.remote` unset is on
   then; set it `false` to keep calls local), each call needing a paired token.
 - **The front's token.** Turn on pairing on every node (`PAIRING_REQUIRED=1`). On each node that is not the front,
-  make a token with `deploy/jarvis/pair.sh token front --scopes manage`, and put it in the front's `token_file`.
+  make a token with `deploy/jarvis/pair.sh token front --scopes inference,media,decisions,read,manage` (the front chats, speaks, decides and
+  manages models there: `manage` alone is refused for chat), and put it at the topology's `token_file` path on every
+  node: each daemon reads it at start and stops without it.
 - **Defaults and stand-ins.** A topology file's `defaults` (capability to tool id) replace `config.json.in`'s on every
   node, and stay out of the daemon's `topology` block. A tool the front names as a `stand_in` is written with
   `keep_loaded` false: it loads while the node of the model it stands in for is down, and `start.sh` does not wait for

@@ -5,7 +5,7 @@
 | Topology | What it is | State |
 | --- | --- | --- |
 | `single` (the default) | one Spark, exactly as before | unchanged |
-| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured with the 27B ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)); configured with Qwen3.8-Flash-Next TP1 as the chat model, not yet booted ([Placement with Qwen3.8-Flash-Next](#placement-with-qwen38-flash-next-tp1-2026-11-14)) |
+| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured with the 27B ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)); with Qwen3.8-Flash-Next TP1 as the chat model, booted and measured on both Sparks on 2026-11-14 ([Placement with Qwen3.8-Flash-Next](#placement-with-qwen38-flash-next-tp1-2026-11-14), [Measured](#measured-first-boot-2026-11-14)) |
 | TP=2, TP=N | one model split across N Sparks over ConnectX-7, one rank a node | built and tested with the engines' rank contract ([Tensor parallel](#tensor-parallel)); the 27B has no CUDA ranks, and no CUDA-rank model's weights are on the boxes yet |
 
 The placement was measured with Qwen3.8-27B as the chat model. Its shipped topology
@@ -38,7 +38,7 @@ each daemon's own `host` differ.
 | `nodes[].models` | the tools that node runs. Every tool is on exactly one node |
 | `nodes[].fallback` | front only: tools of other nodes that the front runs itself while their node is down |
 | `nodes[].stand_in` | front only: `{"<another node's tool>": "<one of the front's own models>"}`. While that node is down, requests for the tool, whether named or by default (voice included), go to the stand-in. The stand-in is of the same kind; it is not kept loaded for itself, so it loads when first needed and idles out after its node is back. For a model too big to run on the front (a `fallback` runs the same model there) |
-| `token_file` | the bearer token the front sends to the other nodes: a device paired on each of them with `manage` (when they require pairing) |
+| `token_file` | the bearer token the front (and a tensor-parallel group's lead) sends to the other nodes: a device paired on each of them with `inference,media,decisions,read,manage` (when they require pairing; `manage` alone loads and unloads but cannot chat). Every node reads the file at start and stops (exit 2) without it, so it goes to the same path on each node |
 | `health_interval_ms`, `down_after` | the front asks each node how it is this often; this many unanswered checks in a row, or one request that fails to connect, and the node is down |
 
 The daemon checks the topology at start and stops with the reason (exit 2): no front or two fronts, an unknown or
@@ -128,8 +128,8 @@ memory table holds.
 
 ## Placement with Qwen3.8-Flash-Next TP1 (2026-11-14)
 
-**State: configured and checked on the CPU, not booted.** Both Sparks served another project's model when this was
-written. The window plan is below.
+**State: booted and measured on both Sparks in one window on 2026-11-14** ([Measured](#measured-first-boot-2026-11-14));
+not left running: both Sparks went back to another project's model after the window, which is below as it was planned.
 
 `deploy/jarvis/topologies/flashnext-2spark.json`:
 
@@ -158,8 +158,9 @@ installed, and the Mac deploy has its own config.
 
 ### Memory per node
 
-Spark 1, from the engine's own boot line on this image (two boots on node01, 2026-11-13/14). It is booked with the
-8 GiB policy margin until its per-process peak is measured in the window:
+Spark 1, from the engine's own boot line on this image (two boots on node01, 2026-11-13/14), booked with the 8 GiB
+policy margin. The window's measured per-process peak (82.9 GiB, [Measured](#measured-first-boot-2026-11-14)) is
+under the cap; the booking stays at the cap until a peak with every stream and the prompt cache full is measured:
 
 | Spark 1 (121.7 GiB `MemTotal`, about 116 GiB free at idle) | GiB |
 | --- | ---: |
@@ -199,8 +200,9 @@ and today's models and markers on spark-2:
 ```sh
 deploy/jarvis/kits.sh deploy/jarvis/topologies/flashnext-2spark.json kits/
 # spark-1 (node02) first, then spark-2 (node01); each from a checkout of the same commit
-set -a; . kits/spark-1/node.env; set +a; PAIRING_REQUIRED=1 deploy/jarvis/install.sh && deploy/jarvis/start.sh
-deploy/jarvis/pair.sh token front --scopes manage     # on spark-1: into the front's token_file
+set -a; . kits/spark-1/node.env; set +a; PAIRING_REQUIRED=1 deploy/jarvis/install.sh
+deploy/jarvis/pair.sh token front --scopes inference,media,decisions,read,manage   # on spark-1, before its start: into token_file on both nodes
+deploy/jarvis/start.sh                                 # spark-1
 set -a; . kits/spark-2/node.env; set +a; PAIRING_REQUIRED=1 deploy/jarvis/install.sh && deploy/jarvis/start.sh
 ```
 
@@ -229,6 +231,44 @@ Both Sparks must be free of other GPU jobs: the chat node needs 114.5 GiB free, 
 label=org.localrouter.owner=<DEPLOY>` must list nothing (`leftovers.sh` stops any container the server left). Then the
 other project restarts its model. Going back to the 27B placement is the topology of [Configuration](#configuration) (chat
 `qwen3.8-27b` on spark-1) through the same `install.sh` steps.
+
+### Measured (first boot, 2026-11-14)
+
+The window ran from PR head `17b85887` (the binary built from `9e2b4bec`, whose Zig sources are the same) on both
+Sparks: spark-1 as root on node02 (`/root/lr-flashnext`), the front on node01 beside the stopped production install
+(`~/jarvis/lr-flashnext`), both units `lr-flashnext` on port 8190. The other project's model was down 32 min
+(02:54:33Z to 03:26:55Z, its restore included) and came back on the same image and record.
+
+| | Measured |
+| --- | --- |
+| Flash-Next load on spark-1 | 170 to 176 s to ready (two loads) |
+| Front start | kept tools ready in 70 s (Drama 3, Whisper, image, KnowLine) |
+| **Spark-1 memory** | engine per-process peak (nvidia-smi `used_memory` + `RssAnon` + `RssShmem`) **82.9 GiB** (84,001 MiB on the GPU, 0.76 GiB anon) during the voice turns; 80.6 GiB after a 1,839-token reply; lowest `MemAvailable` 32.6 GiB (116 at idle). The booking (111.5) stays at the engine's cap |
+| **Front memory** | Drama 3 19.9 GiB GPU + 0.6 RSS, Whisper 2.0 + 1.4, KnowLine 9.3 + 1.5, the image model (in the daemon) 40.1 GiB; `MemAvailable` 42.2 GiB warm, 22.8 GiB with the 27B stand-in loaded (18.2 GiB GPU + 0.7) |
+| **Chat through the front** (3 runs a case, streamed; median) | thinking on, short: TTFT 0.19 s, 56 tok/s. Thinking off, short: 0.15 s, 52 tok/s. Thinking off, prose: 0.17 s, 44 tok/s. Thinking on, prose: 0.19 s, 44 tok/s. A 1,839-token reply (thinking off): engine TTFT 0.13 s, 45.5 tok/s |
+| Maths with the lane (`7^22 mod 1000003`, 30584) | exact in 3 of 4 (the in-model runner owned the cell, 6 ms): TTFT 0.08 to 0.17 s, 57 to 60 tok/s. The first streamed run answered `[reasoning failed: connection refused]`, the engine's own text (LocalRouter has no such string); the next three, streamed and not, were exact |
+| `tools/jarvis/smoke.sh --quick` on the front | **33 passed, 0 failed** (116.9 s): chat, stream (first content 0.13 s), tool call, STT, Drama 3 and its six voices, decide, image, image edit, no evictions |
+| **Voice** (the smoke's warm turns) | first audio median **983 ms** (turns 744, 865, 983 ms; budget 1,400); the long reply's speech started 0.66 s in, before its text was done, without underruns; every voice turn reached the engine with `thinking=False` |
+| **Failover** (spark-1's unit stopped) | the first request after the stop got a 503 (`node spark-1 ... is gone (ConnectFailed)`) and marked the node down; the next one was answered by `qwen3.8-27b` **34.8 s after the stop** (TTFT 31.4 s: the stand-in's cold load). While down, requests naming `qwen3.8-flash-next` were answered by the 27B at 0.08 to 0.11 s TTFT. Spark-1 started again and was warm in 170 s; the next request was answered by Flash-Next (TTFT 0.15 s) |
+| Thermal | hottest 73 C (node01, during the smoke); no pause |
+
+Failures and fixes found in the window:
+
+- `check.sh` refused node02: its Docker has no runtime named `nvidia`, and GPU containers run under runc through the
+  NVIDIA container toolkit's hook and CDI spec. `check.sh` now accepts any of the three (`17b85887`).
+- spark-1 stopped at start (`topology.token_file ...: FileNotFound`): every node reads `token_file`. The docs now say
+  to put it on every node.
+- The front's chat to spark-1 got 403 (`does not have the inference scope`): the documented token had `manage` only.
+  It now gets `inference,media,decisions,read,manage` (changed live with `pair.sh scopes`, no restart).
+
+Open, not fixed here:
+
+- The request that finds spark-1 gone fails (503) instead of going to the stand-in; the ones after it are served. A
+  retry on the stand-in when the connection fails before any byte would close that gap.
+- The stand-in stays loaded after spark-1 is back until it idles out (`idle_ttl_s`) or memory is needed; the front had
+  22.8 GiB free meanwhile.
+- The booking: the measured peak (82.9 GiB) is well under the cap (103.5 + 8). A peak with eight streams and a full
+  prompt cache would show whether `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` and the booking can come down.
 
 ## Tensor parallel
 

@@ -62,8 +62,10 @@ with more free memory then gets the same 8 streams and 8 GiB prompt cache; a nod
 
 The node loads it only with `MemAvailable` at least 114.5 GiB: the booking plus the daemon's 3 GiB reserve. An idle
 Spark has about 116 GiB, so nothing else may hold GPU memory on the chat node (another project's benchmark there
-refuses the load). The per-process peak has not been measured: nvidia-smi `used_memory` plus `RssAnon` and `RssShmem`
-of the server, through a long reply. Once it is, the 8 GiB policy margin becomes that peak plus a small margin.
+refuses the load). Measured on node02 (2026-11-14, nvidia-smi `used_memory` plus `RssAnon` and `RssShmem` of the server,
+through a 1,839-token reply and the voice smoke): a peak of 82.9 GiB, under the engine's 103.5 GiB cap with up to two
+streams busy. The booking stays at the cap plus the 8 GiB margin until a peak with every stream and the prompt cache
+full is measured (docs/dev/MULTI-SPARK.md, Measured).
 
 ## Speed (the recipe's figures, one Spark)
 
