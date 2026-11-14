@@ -468,6 +468,41 @@ pub fn standIn(app: *const App, i: usize) usize {
     return s;
 }
 
+/// `Scheduler.Rerun` on the front: job `j` failed because the node of its remote tool could not be reached before any
+/// of its reply began (that failure marked the node down). It runs again in the same request: on the tool's stand-in,
+/// its chat or decision body re-pointed at the stand-in (`model`), or on the same tool when that falls back to running
+/// here. Null: neither, and the job fails as it is.
+pub fn rerunOn(ctx: *anyopaque, j: *jobs.Job) ?usize {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const p = app.plan orelse return null;
+    const cluster = app.cluster orelse return null;
+    const i = j.tool;
+    if (i >= p.places.len) return null;
+    const to = standIn(app, i);
+    if (to == i) return switch (p.places[i]) {
+        .fallback => |n| if (cluster.up(n)) null else i,
+        else => null,
+    };
+    const id = app.scheduler.slots[to].tool.config().id;
+    app.table.mutex.lockUncancelable(app.io); // the job's arena
+    defer app.table.mutex.unlock(app.io);
+    const a = j.arena.allocator();
+    switch (j.request) {
+        .chat => |*v| v.body = repoint(a, v.body, id) catch return null,
+        .decision => |*v| v.body = repoint(a, v.body, id) catch return null,
+        else => {},
+    }
+    return to;
+}
+
+/// A JSON request object with its `model` set to `id`.
+fn repoint(a: std.mem.Allocator, body: []const u8, id: []const u8) ![]const u8 {
+    var v = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
+    if (v != .object) return error.NotAnObject;
+    try v.object.put(a, "model", .{ .string = id });
+    return std.json.Stringify.valueAlloc(a, v, .{});
+}
+
 /// The tool that stands in for tool `i` while its node is down, or null (none, or not the front).
 fn standInOf(app: *const App, i: usize) ?usize {
     const p = app.plan orelse return null;

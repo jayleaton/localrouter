@@ -10,6 +10,10 @@
 //! how many voice calls the front has open, so its scheduler guards the voice loop's models there too); after
 //! `down_after` missed answers in a row, or a connection that fails mid-request, the node is down. When a node goes
 //! down or comes back, its tools are unloaded on the scheduler (`Scheduler.refresh`) and load on their new side.
+//!
+//! A job that fails because its node cannot be reached, before any of its reply began, says so (`tool.Failure.rerun`):
+//! the scheduler runs it again on the front's stand-in or fallback in the same request. When the node comes back, the
+//! stand-in that answered for it is unloaded once no job uses it (unless another down node's tool still needs it).
 
 const std = @import("std");
 const posix = std.posix;
@@ -123,13 +127,28 @@ pub const Cluster = struct {
     }
 
     /// `p` went down or came back: each of its tools that is loaded, or that falls back here, starts again on its new side.
+    /// A node that came back also frees the stand-ins that answered for its tools (unloaded once no job uses them), unless
+    /// a tool of another node that is still down has the same stand-in.
     fn moved(c: *Cluster, p: *Peer) void {
         const r = c.refresh orelse return;
+        const back = p.up.load(.acquire);
         for (c.tools.items) |t| {
             if (&c.peers[t.node] != p) continue;
-            if (t.fallback == null and t.st.load(.acquire) == .unloaded) continue;
+            if (back) if (t.stand_in) |s| if (c.standInFree(s)) {
+                std.log.info("node {s}: back, so '{s}' runs there again and its stand-in is unloaded once idle", .{ p.node.id, t.cfg.id });
+                r.f(r.ctx, s);
+            };
+            // gone down: only a tool still loaded on its node moves (a fallback the job that found it gone loaded here
+            // already, `Scheduler.again`, stays); back: a fallback running here unloads, to load there next
+            if (t.st.load(.acquire) == .unloaded and (t.fallback == null or !back)) continue;
             r.f(r.ctx, t.slot);
         }
+    }
+
+    /// Whether stand-in slot `s` answers for no tool whose node is down.
+    fn standInFree(c: *const Cluster, s: usize) bool {
+        for (c.tools.items) |t| if (t.stand_in == s and !c.up(t.node)) return false;
+        return true;
     }
 
     /// GET /v1/node/status on `p`, telling it this front's open calls; true on a 200.
@@ -196,6 +215,7 @@ pub const NodeTool = struct {
     node: usize, // the node that runs it
     slot: usize = 0, // its scheduler slot, for `Scheduler.refresh`
     fallback: ?*process.ProcessTool = null, // runs it here while its node is down
+    stand_in: ?usize = null, // the front's slot that answers for it while its node is down (`topology.Plan.stand_ins`)
     mode: std.atomic.Value(Mode) = .init(.remote), // where the loaded tool runs
     st: std.atomic.Value(tool.State) = .init(.unloaded), // remote: as the front sees it
     aborted: std.atomic.Value(bool) = .init(false),
@@ -266,7 +286,7 @@ pub const NodeTool = struct {
                 t.mode.store(.local, .release);
                 return fb.asTool().load();
             }
-            return t.failed(.unloaded, tool.Error.LoadFailed, "model '{s}' runs on node {s}, which is down: its daemon has not answered its health checks", .{ t.cfg.id, t.peer().node.id });
+            return t.unreached(tool.Error.LoadFailed, "model '{s}' runs on node {s}, which is down: its daemon has not answered its health checks", .{ t.cfg.id, t.peer().node.id });
         }
         t.mode.store(.remote, .release);
         t.st.store(.loading, .release);
@@ -282,7 +302,7 @@ pub const NodeTool = struct {
                 t.mode.store(.local, .release);
                 return fb.asTool().load();
             }
-            return t.failed(.unloaded, tool.Error.LoadFailed, "model '{s}' runs on node {s}, which did not answer: {s}", .{ t.cfg.id, t.peer().node.id, @errorName(err) });
+            return t.unreached(tool.Error.LoadFailed, "model '{s}' runs on node {s}, which did not answer: {s}", .{ t.cfg.id, t.peer().node.id, @errorName(err) });
         };
         if (r.status != 200) return t.failed(.unloaded, tool.Error.LoadFailed, "node {s} could not load '{s}': {s}", .{ t.peer().node.id, t.cfg.id, upstream.errorMessage(a, r.body) });
         t.st.store(.ready, .release);
@@ -327,15 +347,17 @@ pub const NodeTool = struct {
         const v = job.request.chat;
         const name = if (v.stream) "completion.sse" else "completion.json";
         const start = Io.Clock.awake.now(t.cluster.io);
-        const fd = t.cluster.connect(t.peer(), 3000) catch |err| return t.lost(err);
+        // until the reply's status arrives nothing reaches the client (`api/chat.zig` waits for the file): a lost node
+        // lets the job run again elsewhere (`lostBefore`)
+        const fd = t.cluster.connect(t.peer(), 3000) catch |err| return t.lostBefore(err);
         defer _ = std.c.close(fd);
         t.upstream_fd.store(fd, .seq_cst);
         defer t.upstream_fd.store(-1, .seq_cst);
         if (t.aborted.load(.seq_cst)) return t.lost(error.Closed);
-        upstream.sendWith(fd, "POST", "/v1/chat/completions", v.body, t.cluster.head(t.peer(), null)) catch |err| return t.lost(err);
+        upstream.sendWith(fd, "POST", "/v1/chat/completions", v.body, t.cluster.head(t.peer(), null)) catch |err| return t.lostBefore(err);
         const buf = arena.alloc(u8, 64 << 10) catch return tool.Error.OutOfMemory;
         var r: upstream.Reader = .{ .fd = fd, .buf = buf, .timeout_ms = timeoutMs(t.cfg.generate_timeout_s) };
-        const status = r.head() catch |err| return t.lost(err);
+        const status = r.head() catch |err| return t.lostBefore(err);
         if (status != 200) return t.refused(status, r.rest(arena, 64 << 10) catch "", arena);
         const path = std.fs.path.join(arena, &.{ job.dir, name }) catch return tool.Error.OutOfMemory;
         const file = Io.Dir.cwd().createFile(t.cluster.io, path, .{}) catch return t.failed(.ready, tool.Error.GenerateFailed, "could not write {s}", .{name});
@@ -366,7 +388,7 @@ pub const NodeTool = struct {
             }
         }
         const body = std.json.Stringify.valueAlloc(arena, .{ .tool = t.cfg.id, .request = job.request, .files = files.items }, .{ .emit_null_optional_fields = false }) catch return tool.Error.OutOfMemory;
-        const created = t.call(arena, "POST", "/v1/node/jobs", body, 60) catch |err| return t.lost(err);
+        const created = t.call(arena, "POST", "/v1/node/jobs", body, 60) catch |err| return t.lostBefore(err);
         if (created.status != 200) return t.refused(created.status, created.body, arena);
         const id = (std.json.parseFromSliceLeaky(struct { id: []const u8 }, arena, created.body, .{ .ignore_unknown_fields = true }) catch return t.failed(.ready, tool.Error.GenerateFailed, "node {s} answered the job with no id", .{t.peer().node.id})).id;
         const status_path = std.fmt.allocPrint(arena, "/v1/node/jobs/{s}", .{id}) catch return tool.Error.OutOfMemory;
@@ -471,6 +493,20 @@ pub const NodeTool = struct {
         if (err == error.Timeout) return t.failed(.ready, tool.Error.Timeout, "node {s} sent nothing for {d} s", .{ t.peer().node.id, t.cfg.generate_timeout_s });
         t.cluster.suspect(t.node);
         return t.failed(.unloaded, tool.Error.WorkerDied, "node {s}, which runs '{s}', is gone ({s})", .{ t.peer().node.id, t.cfg.id, @errorName(err) });
+    }
+
+    /// `lost` before any of the reply began: nothing reached the client, so the job may run again elsewhere.
+    fn lostBefore(t: *NodeTool, err: upstream.Error) tool.Error {
+        const e = t.lost(err);
+        if (e == tool.Error.WorkerDied) t.fail.rerun = true;
+        return e;
+    }
+
+    /// The node cannot be reached before the job began: it is down, and the job may run again elsewhere.
+    fn unreached(t: *NodeTool, err: tool.Error, comptime fmt: []const u8, args: anytype) tool.Error {
+        const e = t.failed(.unloaded, err, fmt, args);
+        t.fail.rerun = true;
+        return e;
     }
 
     fn failed(t: *NodeTool, to: tool.State, err: tool.Error, comptime fmt: []const u8, args: anytype) tool.Error {
