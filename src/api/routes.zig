@@ -43,6 +43,7 @@ pub const App = struct {
     cloned: @import("../voices.zig").Store = .{}, // cloned voices (`voices.zig`, `api/voices.zig`)
     assistant: @import("../assistant.zig").Store = .{}, // the assistant's name (`assistant.zig`, `api/assistant.zig`)
     plan: ?*const @import("../topology.zig").Plan = null, // where each tool runs (a multi-node topology); null: here
+    cluster: ?*const @import("../tool/node.zig").Cluster = null, // the front's view of the other nodes; null: not the front
 
     /// Why tool `c` is refused on this machine until it is qualified here (`engine.unqualified`), or null; a tool that
     /// runs on another node now is that node's to check.
@@ -238,6 +239,7 @@ pub const ToolEntry = struct {
     license: ?@import("../config.zig").License,
     node: ?[]const u8 = null,
     local: bool = true,
+    stand_in: ?[]const u8 = null, // the front's model that answers for it while its node is down (`topology.nodes[].stand_in`)
 };
 
 const voice_residency = [_][]const u8{ "always", "call", "on_demand", "disabled" };
@@ -276,6 +278,7 @@ pub fn toolEntry(app: *App, a: std.mem.Allocator, i: usize) !ToolEntry {
         .capabilities = try engine.capabilityList(a, c),
         .last_error = slot.tool.failure().message,
         .license = engine.license(c),
+        .stand_in = if (standInOf(app, i)) |s| app.scheduler.slots[s].tool.config().id else null,
     };
 }
 
@@ -447,8 +450,32 @@ pub fn toolIndex(app: *App, id: []const u8) ?usize {
 /// else the first tool that can do it, else the first of its kind (so `enqueue`'s refusal names a model); a disabled
 /// tool is skipped unless named (a disabled default: the next enabled tool of its kind). Null with `why` set when the
 /// named model is unknown (404), of another kind (400) or disabled (409), or no enabled model of the kind exists (404,
-/// or 409 when the only ones are disabled).
+/// or 409 when the only ones are disabled). On the front, a tool whose node is down resolves to its stand-in (`standIn`).
 pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Refusal) ?usize {
+    return standIn(app, resolveHere(app, model, cap, why) orelse return null);
+}
+
+/// The tool that answers for tool `i` now: its stand-in (`topology.nodes[].stand_in`) while the node that runs `i` is
+/// down and the stand-in is enabled, else `i` itself.
+pub fn standIn(app: *const App, i: usize) usize {
+    const s = standInOf(app, i) orelse return i;
+    const p = app.plan.?;
+    const node_index = switch (p.places[i]) {
+        .remote => |k| k,
+        else => return i,
+    };
+    if (app.cluster.?.up(node_index) or app.scheduler.residency(s).rule == .disabled) return i;
+    return s;
+}
+
+/// The tool that stands in for tool `i` while its node is down, or null (none, or not the front).
+fn standInOf(app: *const App, i: usize) ?usize {
+    const p = app.plan orelse return null;
+    if (app.cluster == null or i >= p.stand_ins.len) return null;
+    return p.stand_ins[i];
+}
+
+fn resolveHere(app: *App, model: ?[]const u8, cap: request.Capability, why: *Refusal) ?usize {
     const kind = @tagName(cap.kind());
     if (model orelse app.cfg.defaults.get(cap)) |m| named: {
         const i = toolIndex(app, m) orelse {

@@ -16,28 +16,29 @@
 # DRAMA_PORT).
 # Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), BUILD_ONLY=1 (preflight of the tools and step 2 only: the
 # binary that the models' qualify.sh runs), TOOLS (the tool ids to serve, space separated; default: every tool in
-# config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: every route but /health and pairing needs a paired device with
-# the scope it needs, and the scripts get $DEPLOY/operator.token (scope read); 0: not; unset:
-# as the deployed config has it).
+# config.json.in but those that need a Spark of their own, `own_spark`), NVCC, SM (121), PAIRING_REQUIRED (1: every
+# route but /health and pairing needs a paired device with the scope it needs, and the scripts get
+# $DEPLOY/operator.token (scope read); 0: not; unset: as the deployed config has it), RENDER_ONLY=1 (print the config
+# this install would write and stop: no preflight, build or change; runs on any machine with jq).
 # Several Sparks (README.md): TOPOLOGY (a topology file, topology.sh) and NODE (this machine's node in it). TOOLS then
 # defaults to the node's models (and on the front its fallback ones), and only those are checked; the config lists
 # every node's tools, the `topology` block with `self` NODE, `machine` NODE, and `host` HOST, where the unit listens:
 # on a node that is not the front, by default its first address (a ConnectX-7 link), where the front reaches it; on
-# the front 127.0.0.1, as on one box. PORT defaults to the node's port. Only the front gets tailscale serve.
+# the front 127.0.0.1, as on one box. PORT defaults to the node's port. Only the front gets tailscale serve. The
+# topology file's `defaults` replace config.json.in's for those capabilities, and a stand-in (the front's `stand_in`)
+# is not kept loaded: it loads while the node of the model it stands in for is down.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 source "$here/env.sh"
 source "$here/topology.sh"
 
-# ---- 1. preflight
-[ "$(uname -m)" = aarch64 ] || die "not aarch64"
-nvidia-smi -L | grep -q GB10 || die "no GB10"
-for t in jq curl python3 sha256sum systemctl systemd-run zig; do command -v $t > /dev/null || die "needs $t (zig: under $J/bin)"; done
-nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
-[ -x "$nvcc" ] || die "no nvcc at $nvcc"
-all=$(sed -e 's/@DRAMA_PORT@/0/' -e 's/@DRAMA_RESIDENT@/0/' "$here/config.json.in" | jq -r '[.tools[].id] | join(" ")')
-listen=127.0.0.1 topo=null front=1
+# ---- 1. preflight (the tools first: RENDER_ONLY needs them and nothing of the machine)
+render_only=${RENDER_ONLY:-0}
+all=$(topo_tool_ids)
+# one box: every tool but those that need a Spark of their own (`own_spark`, e.g. a chat model that fills a GB10)
+one_box=$(sed -e 's/@DRAMA_PORT@/0/' -e 's/@DRAMA_RESIDENT@/0/' "$here/config.json.in" | jq -r '[.tools[] | select(.own_spark != true) | .id] | join(" ")')
+listen=127.0.0.1 topo=null front=1 topo_defaults='{}' stand_ins='[]'
 if [ -n "$TOPOLOGY" ]; then # one node of several: its tools checked, every node's in the config
   [ -n "$NODE" ] || die "TOPOLOGY needs NODE, this machine's node in it"
   TOPOLOGY=$(realpath -m "$TOPOLOGY")
@@ -48,19 +49,53 @@ if [ -n "$TOPOLOGY" ]; then # one node of several: its tools checked, every node
   for t in $TOOLS; do [[ " $mine " == *" $t "* ]] || die "TOOLS has '$t'; node $NODE runs: $mine"; done
   [ "$PORT" = "$(topo_port "$TOPOLOGY" "$NODE")" ] || die "PORT is $PORT; the topology gives node $NODE port $(topo_port "$TOPOLOGY" "$NODE")"
   topo=$(topo_block "$TOPOLOGY" "$NODE")
+  topo_defaults=$(jq -c '.defaults // {}' "$TOPOLOGY")
+  stand_ins=$(jq -c '[.nodes[] | select(.role == "front") | .stand_in // {} | .[]]' "$TOPOLOGY")
   # the front listens on loopback (nothing but tailscale serve connects to it); any other node on its first address,
   # where the front reaches it. With HOST beyond loopback and pairing on, /v1/realtime answers other machines too
   # (voice.remote unset: config.voiceRemote), each call with a paired token
   [ "$(topo_role "$TOPOLOGY" "$NODE")" = front ] || { front=0; listen=$(topo_addr "$TOPOLOGY" "$NODE"); }
   listen=${HOST:-$listen}
   addrs=$(ip -o -4 addr show 2> /dev/null || true)
-  [ "$listen" = 127.0.0.1 ] || [[ " $(awk '{print $4}' <<< "$addrs" | cut -d/ -f1 | tr '\n' ' ') " == *" $listen "* ]] ||
+  [ "$render_only" = 1 ] || [ "$listen" = 127.0.0.1 ] || [[ " $(awk '{print $4}' <<< "$addrs" | cut -d/ -f1 | tr '\n' ' ') " == *" $listen "* ]] ||
     die "no interface of this machine has $listen (node $NODE's address; HOST overrides it)"
 fi
-TOOLS=${TOOLS:-$all}
+TOOLS=${TOOLS:-$one_box}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; config.json.in has: $all"; done
 keep=$TOOLS; [ "$topo" = null ] || keep=$(topo_all "$TOPOLOGY")   # the tools the config lists
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
+whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1' || true)   # none yet: fine for BUILD_ONLY
+whisper=${whisper%/}
+
+# the config: rendered from config.json.in for the selected tools (in a topology every node's), the voice and defaults
+# that name them (the topology's defaults first), the topology block, and pairing as the deployed config has it
+render() {
+  sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
+      -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
+      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" \
+      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" -e "s|@HOST@|$listen|g" \
+      -e "s|@FLASHNEXT_IMAGE@|$FLASHNEXT_IMAGE|g" -e "s|@FLASHNEXT_MODEL_DIR@|$FLASHNEXT_MODEL_DIR|g" "$1"
+}
+# pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
+pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')
+case ${PAIRING_REQUIRED:-} in 1) pairing='{"required":true}' ;; 0) pairing='{}' ;; esac
+config_json() {
+  render "$here/config.json.in" | jq --arg t " $keep " --argjson pairing "$pairing" --argjson topo "$topo" --arg node "$NODE" --arg host "$listen" \
+    --argjson tdef "$topo_defaults" --argjson stand "$stand_ins" '
+    def kept: . as $id | $t | contains(" " + $id + " ");
+    .tools |= map(select(.id | kept) | del(.own_spark) | if (.id as $i | $stand | index($i)) then .keep_loaded = false else . end)
+    | .voice.speech_models |= map(select(kept))
+    | .defaults = (.defaults + $tdef | with_entries(select(.value | kept)))
+    | if $pairing == {} then . else .pairing = $pairing end
+    | if $topo == null then . else .machine = $node | .host = $host | .topology = $topo end'
+}
+if [ "$render_only" = 1 ]; then config_json; exit 0; fi
+
+[ "$(uname -m)" = aarch64 ] || die "not aarch64"
+nvidia-smi -L | grep -q GB10 || die "no GB10"
+for t in jq curl python3 sha256sum systemctl systemd-run zig; do command -v $t > /dev/null || die "needs $t (zig: under $J/bin)"; done
+nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
+[ -x "$nvcc" ] || die "no nvcc at $nvcc"
 # marker FILE PINS NAME: qualified, and qualified with this tree's pins
 marker() {
   [ -f "$1" ] || die "$3: no qualification marker $1 (run its qualify.sh on this machine)"
@@ -80,13 +115,14 @@ marker() {
   fi
   echo "  $3: qualified ($(basename "$1") sha256 $(sha256sum "$1" | cut -c1-12), pins match)"
 }
-whisper=$(ls -d "$J"/models/whisper/whisper-large-v3-turbo/*/ 2> /dev/null | awk 'NR == 1' || true)   # none yet: fine for BUILD_ONLY
-whisper=${whisper%/}
 if [ "${BUILD_ONLY:-0}" != 1 ]; then
   echo "== preflight: $TOOLS"
   if wanted qwen3.8-27b; then
     marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
     [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
+  fi
+  if wanted qwen3.8-flash-next; then # tools/chat/qwen38-flash-next: the pinned image and checkpoint, docker for this user
+    bash "$repo/tools/chat/qwen38-flash-next/check.sh" "$FLASHNEXT_IMAGE" "$FLASHNEXT_MODEL_DIR" || die "qwen3.8-flash-next is not set up here"
   fi
   if wanted fishaudio/drama-3; then
     marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3" "$DRAMA_VARIANT"
@@ -138,22 +174,7 @@ sha256sum "$src/zig-out/bin/localrouter"
 [ "${BUILD_ONLY:-0}" = 1 ] && { echo "built $commit: $src/zig-out/bin/localrouter (BUILD_ONLY=1: nothing else changed)"; exit 0; }
 
 # ---- 3. config and unit, rendered and checked first; nothing the running service uses changes until it is idle
-render() {
-  sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
-      -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
-      -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" \
-      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" -e "s|@HOST@|$listen|g" "$1"
-}
-# pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
-pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')
-case ${PAIRING_REQUIRED:-} in 1) pairing='{"required":true}' ;; 0) pairing='{}' ;; esac
-# the selected tools only (TOOLS; in a topology every node's), the voice and defaults that name them, and the topology
-render "$here/config.json.in" | jq --arg t " $keep " --argjson pairing "$pairing" --argjson topo "$topo" --arg node "$NODE" --arg host "$listen" '
-  def kept: . as $id | $t | contains(" " + $id + " ");
-  .tools |= map(select(.id | kept)) | .voice.speech_models |= map(select(kept))
-  | .defaults |= with_entries(select(.value | kept))
-  | if $pairing == {} then . else .pairing = $pairing end
-  | if $topo == null then . else .machine = $node | .host = $host | .topology = $topo end' > "$DEPLOY/config.json.new"
+config_json > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
 # with pairing required, these scripts' own token (read only: models and residency, env.sh), made once

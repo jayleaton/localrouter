@@ -2,7 +2,9 @@
 //! topology names its nodes, their addresses and the tools each one hosts (`config.Topology`); every node's daemon gets
 //! the same topology and tools, and `self` (or `serve --node`) says which node it is. A node serves the tools it hosts;
 //! the front also serves every other node's, as remote tools it sends to their node (`tool/node.zig`), and runs a
-//! remote tool itself while its node is down when it lists the tool under its `fallback`.
+//! remote tool itself while its node is down when it lists the tool under its `fallback`. A remote tool too big for the
+//! front can name a `stand_in` instead: one of the front's own models of the same kind, which answers its requests while
+//! its node is down (`api/routes.zig` `resolve`) and otherwise loads only when asked for by name.
 //!
 //! A tool hosted by several nodes is one model split across them: a tensor-parallel group of ranks, one on each. Rank 0
 //! is the front when it hosts the model, else the first of its nodes in topology order; the others follow in that
@@ -41,6 +43,13 @@ pub const Plan = struct {
     nodes: []const config.Node = &.{},
     tools: []const ToolConfig, // the tools this daemon serves, in config order
     places: []const Place, // where each of them runs, beside `tools`
+    stand_ins: []const ?usize = &.{}, // the front only, beside `tools`: the tool (an index into `tools`) that answers for a remote one while its node is down
+
+    /// Whether tool `i` (an index into `tools`) stands in for another node's tool: it is not kept loaded for itself.
+    pub fn standsIn(p: *const Plan, i: usize) bool {
+        for (p.stand_ins) |s| if (s == i) return true;
+        return false;
+    }
 
     /// The node that hosts tool `id`, or null for a tool of this node (or of a single topology).
     pub fn hostOf(p: *const Plan, id: []const u8) ?*const config.Node {
@@ -77,7 +86,9 @@ pub fn plan(a: std.mem.Allocator, cfg: *const Config, self_flag: ?[]const u8, wh
         if (n.role == .front) {
             if (front) |f| return refuse(why, "topology: nodes '{s}' and '{s}' are both the front; exactly one serves the API", .{ t.nodes[f].id, n.id });
             front = i;
-        } else if (n.fallback.len > 0) return refuse(why, "topology: node '{s}' lists fallback models, which only the front runs", .{n.id});
+        } else if (n.fallback.len > 0) {
+            return refuse(why, "topology: node '{s}' lists fallback models, which only the front runs", .{n.id});
+        } else if (n.stand_in.map.count() > 0) return refuse(why, "topology: node '{s}' lists stand_in models, which only the front runs", .{n.id});
     }
     const f = front orelse return refuse(why, "topology: no node has role front; exactly one serves the API", .{});
     const self_id = self_flag orelse t.self;
@@ -107,6 +118,19 @@ pub fn plan(a: std.mem.Allocator, cfg: *const Config, self_flag: ?[]const u8, wh
         const ti = toolIndex(cfg, m) orelse return refuse(why, "topology: the front's fallback '{s}' is not a configured tool", .{m});
         if (hosts[ti].items[0] == f) return refuse(why, "topology: the front's fallback '{s}' is one of its own models", .{m});
     }
+    // a stand-in: another node's tool (one node, not a group, without a fallback) -> one of the front's own, same kind
+    var sit = t.nodes[f].stand_in.map.iterator();
+    while (sit.next()) |kv| {
+        const m = kv.key_ptr.*;
+        const by = kv.value_ptr.*;
+        const ti = toolIndex(cfg, m) orelse return refuse(why, "topology: the front's stand_in names '{s}', which is not a configured tool", .{m});
+        const si = toolIndex(cfg, by) orelse return refuse(why, "topology: the front's stand-in for '{s}' is '{s}', which is not a configured tool", .{ m, by });
+        if (hosts[ti].items[0] == f) return refuse(why, "topology: the front's stand_in names '{s}', one of its own models: a stand-in answers for another node's", .{m});
+        if (hosts[ti].items.len > 1) return refuse(why, "topology: '{s}' is tensor parallel over {d} nodes and has no stand-in: losing a rank's node stops the group, and its requests are refused naming that node", .{ m, hosts[ti].items.len });
+        if (listed(t.nodes[f].fallback, m)) return refuse(why, "topology: '{s}' is under the front's fallback and its stand_in: the front runs it itself, or another model for it, not both", .{m});
+        if (hosts[si].items.len != 1 or hosts[si].items[0] != f) return refuse(why, "topology: the stand-in for '{s}' is '{s}', which is not one of the front's own models (list it under the front's models)", .{ m, by });
+        if (cfg.tools[si].kind != cfg.tools[ti].kind) return refuse(why, "topology: the stand-in for '{s}' ({s}) is '{s}', a {s} model: it must be of the same kind", .{ m, @tagName(cfg.tools[ti].kind), by, @tagName(cfg.tools[si].kind) });
+    }
 
     var tools: std.ArrayList(ToolConfig) = .empty;
     var places: std.ArrayList(Place) = .empty;
@@ -119,7 +143,23 @@ pub fn plan(a: std.mem.Allocator, cfg: *const Config, self_flag: ?[]const u8, wh
         try tools.append(a, tl);
         try places.append(a, pl);
     }
-    return .{ .multi = true, .self = self, .front = self == f, .nodes = t.nodes, .tools = tools.items, .places = places.items };
+    const stand_ins: []const ?usize = if (self == f) try standIns(a, t.nodes[f], tools.items) else &.{};
+    return .{ .multi = true, .self = self, .front = self == f, .nodes = t.nodes, .tools = tools.items, .places = places.items, .stand_ins = stand_ins };
+}
+
+/// Beside `served` (the front's tools): the index of the tool that stands in for each one, or null.
+fn standIns(a: std.mem.Allocator, front: config.Node, served: []const ToolConfig) ![]const ?usize {
+    const out = try a.alloc(?usize, served.len);
+    for (out, served) |*o, tl| {
+        const by = front.stand_in.map.get(tl.id) orelse {
+            o.* = null;
+            continue;
+        };
+        o.* = for (served, 0..) |other, k| {
+            if (std.mem.eql(u8, other.id, by)) break k;
+        } else unreachable; // `plan` checked it: one of the front's own models, so served here
+    }
+    return out;
 }
 
 /// A node daemon that is not the front serves only its own tools: its defaults keep only those (a default for a tool
@@ -263,6 +303,112 @@ test "multi: invalid topologies are refused with the reason" {
     try std.testing.expect((try planOf(a, "{\"topology\": {\"mode\": \"multi\", \"nodes\": [{\"id\": \"x\", \"addresses\": [\"10.0.0.1\"]}]}}", null, &why)) == null);
     try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "at least two nodes") != null);
     try std.testing.expect((try planOf(a, "{\"topology\": {\"nodes\": [{\"id\": \"x\", \"addresses\": [\"10.0.0.1\"]}]}}", null, &why)) == null);
+}
+
+const stand_in_nodes =
+    \\{"tools": [{"id": "big", "kind": "chat", "engine": "openai_server"}, {"id": "small", "kind": "chat", "engine": "openai_server"},
+    \\           {"id": "tts", "kind": "speech", "engine": "testpattern"}],
+    \\ "topology": {"mode": "multi", "self": "s2", "nodes": [
+    \\  {"id": "s1", "addresses": ["192.168.100.11"], "models": ["big"]},
+    \\  {"id": "s2", "addresses": ["192.168.100.10"], "role": "front", "models": ["small", "tts"], "stand_in": {"big": "small"}}]}}
+;
+
+test "stand_in: the front names one of its own models to answer for another node's while that node is down" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [512]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    const front = (try planOf(a, stand_in_nodes, null, &why)).?;
+    try std.testing.expectEqual(Place{ .remote = 0 }, front.places[0]); // big: on s1, no fallback of its own
+    try std.testing.expect(front.places[1] == .local);
+    try std.testing.expectEqual(@as(?usize, 1), front.stand_ins[0]); // small answers for big
+    try std.testing.expectEqual(@as(?usize, null), front.stand_ins[1]);
+    try std.testing.expect(front.standsIn(1) and !front.standsIn(0) and !front.standsIn(2));
+    const node = (try planOf(a, stand_in_nodes, "s1", &why)).?; // the node knows nothing of it
+    try std.testing.expectEqual(@as(usize, 1), node.tools.len);
+    try std.testing.expectEqual(@as(usize, 0), node.stand_ins.len);
+    try std.testing.expect(!node.standsIn(0));
+    // a single topology has none
+    const single = (try planOf(a, "{}", null, &why)).?;
+    try std.testing.expectEqual(@as(usize, 0), single.stand_ins.len);
+}
+
+test "the two-Spark placement of deploy/jarvis/topologies/flashnext-2spark.json plans on both nodes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [512]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    // the tools and the block as install.sh writes them (the file's `defaults` go to the config's defaults)
+    const text =
+        \\{"defaults": {"chat_completion": "qwen3.8-flash-next"},
+        \\ "tools": [{"id": "qwen3.8-27b", "kind": "chat", "engine": "openai_server", "keep_loaded": false},
+        \\           {"id": "qwen3.8-flash-next", "kind": "chat", "engine": "openai_server", "keep_loaded": true},
+        \\           {"id": "fishaudio/drama-3", "kind": "speech", "cmd": ["x"]}, {"id": "whisper-large-v3-turbo", "kind": "transcription", "cmd": ["x"]},
+        \\           {"id": "qwen-image-2.1-turbo", "kind": "image", "engine": "testpattern"}, {"id": "minimax-h3", "kind": "video", "engine": "testpattern"},
+        \\           {"id": "knowline-4b", "kind": "decision", "engine": "openai_server"}, {"id": "idol", "kind": "asset3d", "cmd": ["x"]}],
+        \\ "topology": {"mode": "multi", "token_file": "/home/dgx01/jarvis/lr/node-token", "health_interval_ms": 2000, "down_after": 3, "self": "spark-2",
+        \\  "nodes": [{"id": "spark-1", "addresses": ["192.168.100.11", "192.168.101.11"], "port": 8190, "role": "node", "models": ["qwen3.8-flash-next"]},
+        \\            {"id": "spark-2", "addresses": ["192.168.100.10", "192.168.101.10"], "port": 8190, "role": "front",
+        \\             "models": ["qwen3.8-27b", "fishaudio/drama-3", "whisper-large-v3-turbo", "qwen-image-2.1-turbo", "minimax-h3", "knowline-4b", "idol"],
+        \\             "stand_in": {"qwen3.8-flash-next": "qwen3.8-27b"}}]}}
+    ;
+    const front = (try planOf(a, text, null, &why)) orelse {
+        std.debug.print("{s}\n", .{why.buffered()});
+        return error.TestUnexpectedResult;
+    };
+    try std.testing.expectEqual(@as(usize, 8), front.tools.len);
+    try std.testing.expectEqual(Place{ .remote = 0 }, front.places[1]); // Flash-Next on spark-1
+    try std.testing.expectEqual(@as(?usize, 0), front.stand_ins[1]); // the 27B answers for it while spark-1 is down
+    try std.testing.expect(front.standsIn(0));
+    for (front.places, 0..) |pl, i| if (i != 1) try std.testing.expect(pl == .local);
+    const chat_node = (try planOf(a, text, "spark-1", &why)).?;
+    try std.testing.expectEqual(@as(usize, 1), chat_node.tools.len);
+    try std.testing.expectEqualStrings("qwen3.8-flash-next", chat_node.tools[0].id);
+    var d: config.Defaults = .{ .chat_completion = "qwen3.8-flash-next", .text_to_speech = "fishaudio/drama-3" };
+    trimDefaults(&chat_node, &d);
+    try std.testing.expectEqualStrings("qwen3.8-flash-next", d.chat_completion.?);
+    try std.testing.expect(d.text_to_speech == null);
+}
+
+test "stand_in: refused unless it is the front's own model of the same kind, for one remote tool without a fallback" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { from: []const u8, to: []const u8, reason: []const u8 }{
+        .{ .from = "{\"big\": \"small\"}", .to = "{\"nope\": \"small\"}", .reason = "stand_in names 'nope', which is not a configured tool" },
+        .{ .from = "{\"big\": \"small\"}", .to = "{\"big\": \"nope\"}", .reason = "stand-in for 'big' is 'nope', which is not a configured tool" },
+        .{ .from = "{\"big\": \"small\"}", .to = "{\"small\": \"tts\"}", .reason = "one of its own models" },
+        .{ .from = "{\"big\": \"small\"}", .to = "{\"big\": \"tts\"}", .reason = "a speech model: it must be of the same kind" },
+        .{ .from = "\"models\": [\"small\", \"tts\"]", .to = "\"models\": [\"tts\"]", .reason = "tool 'small' is on no node" },
+        .{ .from = "\"models\": [\"big\"]}", .to = "\"models\": [\"big\", \"small\"]}", .reason = "tensor parallel" },
+        .{ .from = "\"stand_in\"", .to = "\"fallback\": [\"big\"], \"stand_in\"", .reason = "under the front's fallback and its stand_in" },
+        .{ .from = "\"models\": [\"big\"]}", .to = "\"models\": [\"big\"], \"stand_in\": {\"small\": \"big\"}}", .reason = "lists stand_in models, which only the front runs" },
+    };
+    for (cases) |c| {
+        var buf: [512]u8 = undefined;
+        var why: std.Io.Writer = .fixed(&buf);
+        const text = try std.mem.replaceOwned(u8, a, stand_in_nodes, c.from, c.to);
+        try std.testing.expect(!std.mem.eql(u8, text, stand_in_nodes)); // the case changed something
+        try std.testing.expect((try planOf(a, text, null, &why)) == null);
+        std.testing.expect(std.mem.indexOf(u8, why.buffered(), c.reason) != null) catch |err| {
+            std.debug.print("case {s} -> {s}: {s}\n", .{ c.from, c.to, why.buffered() });
+            return err;
+        };
+    }
+    // a group has none: a stand-in is refused for a tool on several nodes
+    var buf: [512]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    const group =
+        \\{"tools": [{"id": "big", "kind": "chat", "engine": "openai_server", "options": {"rank_env": {"R": "{rank}"}}},
+        \\           {"id": "small", "kind": "chat", "engine": "openai_server"}],
+        \\ "topology": {"mode": "multi", "nodes": [
+        \\  {"id": "n1", "addresses": ["10.0.0.2"], "models": ["big"]}, {"id": "n2", "addresses": ["10.0.0.3"], "models": ["big"]},
+        \\  {"id": "f", "addresses": ["10.0.0.1"], "role": "front", "models": ["small"], "stand_in": {"big": "small"}}]}}
+    ;
+    try std.testing.expect((try planOf(a, group, "f", &why)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "tensor parallel over 2 nodes and has no stand-in") != null);
 }
 
 test "tensor parallel: a model on several nodes is a group; the front is rank 0 when it hosts it, else the first node" {

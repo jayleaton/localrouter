@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Two Sparks with Qwen3.8-Flash-Next: `deploy/jarvis/topologies/flashnext-2spark.json` puts the new chat tool
+  `qwen3.8-flash-next` (TensorFold TP1 from jayleaton/qwen4-tensorfold-spark `f0002f9`, compute lane and runner on,
+  in its Docker image through `tools/chat/qwen38-flash-next/serve.sh`; booked 111.5 GiB) alone on spark-1 (node02), and
+  everything else on the front spark-2 (node01), with `qwen3.8-27b` standing in. A topology's front can name a
+  `stand_in` for another node's tool: one of its own models of the same kind, which answers that tool's requests (by
+  name and by default, voice included) while its node is down, is not kept loaded otherwise, and is listed as the
+  remote tool's `stand_in` in `/v1/tools`. A deploy topology file may set `defaults`. `config.json.in` marks tools
+  that need a Spark of their own `own_spark` (one-box installs leave them out). `RENDER_ONLY=1 deploy/jarvis/install.sh`
+  prints the config, `deploy/jarvis/test-topology.sh` checks the shipped topologies and their configs (in CI), and
+  `leftovers.sh` stops the install's labelled containers. Not booted yet (docs/dev/MULTI-SPARK.md has the window plan).
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

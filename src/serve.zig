@@ -68,6 +68,10 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             t.residency = null;
             t.idle_ttl_s = std.math.maxInt(u32);
         }
+        if (plan.standsIn(k) and config.residencyOf(t) == .always) { // a stand-in: it loads when its remote tool's node is down, or when asked for
+            t.keep_loaded = false;
+            t.residency = null;
+        }
     }
     cfg.tools = tools;
     if (!engine.checkDefaults(&cfg, &why)) {
@@ -147,6 +151,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     defer app.cloned.deinit();
     app.assistant.init(io, gpa, cfg.data_dir, cfg.assistant.name); // the assistant's name (assistant.zig)
     app.plan = &plan;
+    if (plan.multi and plan.front) app.cluster = &cluster; // whether a node is up, for stand-ins (`routes.standIn`)
     if (plan.multi and plan.front) {
         cluster.refresh = .{ .ctx = &scheduler, .f = refreshSlot };
         cluster.calls = .{ .ctx = &app, .f = openCalls };

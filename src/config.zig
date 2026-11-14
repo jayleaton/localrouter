@@ -174,6 +174,9 @@ pub const Node = struct {
     role: enum { front, node } = .node,
     models: []const []const u8 = &.{}, // the tools it runs (ids in `tools`)
     fallback: []const []const u8 = &.{}, // front only: tools of other nodes it runs itself while their node is down
+    // front only: another node's tool -> one of the front's own models of the same kind that answers its requests
+    // while that node is down (a smaller model, where the tool itself does not fit on the front)
+    stand_in: std.json.ArrayHashMap([]const u8) = .{},
 };
 
 pub const Config = struct {

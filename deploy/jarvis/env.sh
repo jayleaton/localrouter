@@ -21,6 +21,10 @@ case $DRAMA_VARIANT in
   *) echo "env.sh: DRAMA_VARIANT must be nvfp4 or full, not '$DRAMA_VARIANT'" >&2; exit 2 ;;
 esac
 DRAMA_PORT=${DRAMA_PORT:-$((PORT + 10603))}   # the Drama 3 server, on 127.0.0.1 (18793 beside the default PORT)
+# Qwen3.8-Flash-Next TP1 (tools/chat/qwen38-flash-next): the recipe's image (its engine tree must match pins.json) and
+# the checkpoint at the pinned revision. A chat model that needs a Spark of its own (`own_spark`): a topology installs it.
+FLASHNEXT_IMAGE=${FLASHNEXT_IMAGE:-qwen4-tensorfold-f0002f9:tp1}
+FLASHNEXT_MODEL_DIR=${FLASHNEXT_MODEL_DIR:-$HOME/ai/models/qwen38-flash-next-mlx4-mtp}
 KNOWLINE_REV=779944d2cc8ffa19cef386aee83c83bcb967ade2   # PelaAI/KnowLine-4B-Gen5.5, the decision model (tools/decide/knowline)
 # where the deployed daemon listens: 127.0.0.1, or in a topology its node's address (install.sh writes it as `host`)
 LISTEN=$(jq -r '.host // "127.0.0.1"' "$DEPLOY/config.json" 2> /dev/null) || LISTEN=127.0.0.1
