@@ -528,7 +528,8 @@ same), `residency` and `idle_ttl_s` (in effect now), `residency_default` and
 `loaded_since` (unix seconds; both null when unknown), `supported` and `unsupported_reason` (false with a reason when
 the tool cannot run on this host: its engine is not built for this OS, its program or weights are not installed, it
 has not passed its qualification, or no capability is left with its weights; it stays listed for diagnosis, and its
-settings are refused with a 400), and at the top `budget`: `ceiling_bytes` (`budget_bytes`, else
+settings are refused with a 400), in a multi-node topology `node`, `local` and, on the front, `stand_in` (the front's
+model that answers for a remote one while its node is down, docs/dev/MULTI-SPARK.md), and at the top `budget`: `ceiling_bytes` (`budget_bytes`, else
 the machine's memory less `reserve_bytes`), `booked_bytes` (loaded and admitted now) and `always_bytes` (what the
 `always` tools take: their resident bytes, measured once loaded, plus one job's working bytes each). A call's models
 load in parallel when they fit together, and every load of a speech model (at start, a reload, an API load, a call's,

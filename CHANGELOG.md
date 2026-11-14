@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Two Sparks with Qwen3.8-Flash-Next: `deploy/jarvis/topologies/flashnext-2spark.json` puts the new chat tool
+  `qwen3.8-flash-next` (TensorFold TP1 from jayleaton/qwen4-tensorfold-spark `f0002f9`, compute lane and runner on,
+  in its Docker image through `tools/chat/qwen38-flash-next/serve.sh`; booked 111.5 GiB) alone on spark-1 (node02), and
+  everything else on the front spark-2 (node01), with `qwen3.8-27b` standing in. A topology's front can name a
+  `stand_in` for another node's tool: one of its own models of the same kind, which answers that tool's requests (by
+  name and by default, voice included) while its node is down, is not kept loaded otherwise, and is listed as the
+  remote tool's `stand_in` in `/v1/tools`. A deploy topology file may set `defaults`. `config.json.in` marks tools
+  that need a Spark of their own `own_spark` (one-box installs leave them out). `RENDER_ONLY=1 deploy/jarvis/install.sh`
+  prints the config, `deploy/jarvis/test-topology.sh` checks the shipped topologies and their configs (in CI), and
+  `leftovers.sh` stops the install's labelled containers. Booted on both Sparks on 2026-11-14 (docs/dev/MULTI-SPARK.md,
+  Measured): smoke 33/33, voice first audio 983 ms median, stand-in failover. `check.sh` accepts the NVIDIA container
+  toolkit's hook or CDI spec (DGX-02 has no `nvidia` runtime), and the front's node token needs
+  `inference,media,decisions,read,manage`. The request that finds a node gone, before any of its reply began, now runs
+  on the front's stand-in or fallback in the same request (`tool.Failure.rerun`, `Scheduler.Rerun`) instead of failing
+  with a 503, and a node that comes back unloads its stand-in once no job uses it rather than after the stand-in's idle
+  TTL. Re-timed on both Sparks: the chat right after spark-1 stops answers 200 from the 27B (first token 16 to 34 s,
+  its load), and the 27B unloads 1.5 s after spark-1's daemon is back. A node that is back but still loading the
+  tool does not serve it yet (`/v1/node/status` gives each tool's `rule`; the front's health check reads `state`
+  and `rule`): chat stays on the stand-in until the remote model is ready, and the stand-in unloads only then, once
+  idle, so a chat during the node's warm-up no longer waits for its load (about 170 s for Flash-Next). Not yet
+  re-timed live.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

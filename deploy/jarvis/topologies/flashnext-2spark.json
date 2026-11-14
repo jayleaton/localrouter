@@ -1,0 +1,11 @@
+{
+ "mode": "multi", "token_file": "/home/dgx01/jarvis/lr/node-token", "health_interval_ms": 2000, "down_after": 3,
+ "defaults": {"chat_completion": "qwen3.8-flash-next"},
+ "nodes": [
+  {"id": "spark-1", "addresses": ["192.168.100.11", "192.168.101.11"], "port": 8190, "role": "node",
+   "models": ["qwen3.8-flash-next"]},
+  {"id": "spark-2", "addresses": ["192.168.100.10", "192.168.101.10"], "port": 8190, "role": "front",
+   "models": ["qwen3.8-27b", "fishaudio/drama-3", "whisper-large-v3-turbo", "qwen-image-2.1-turbo", "minimax-h3",
+              "knowline-4b", "idol"],
+   "stand_in": {"qwen3.8-flash-next": "qwen3.8-27b"}}]
+}

@@ -123,6 +123,14 @@ pub const Notify = struct {
     sessions: *const fn (ctx: *anyopaque) usize,
 };
 
+/// A job whose tool failed before any of it reached its client (`tool.Failure.rerun`: a remote tool whose node could not
+/// be reached): the tool to run it on now, with its request pointed at that tool, or null to fail it as it is. Called
+/// once a job, outside every lock, on the job's lane thread (`api/routes.zig`'s `rerunOn`: the stand-in or fallback).
+pub const Rerun = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, j: *jobs.Job) ?usize,
+};
+
 /// The most models one reservation unloads (a box has a handful).
 pub const max_victims = 16;
 
@@ -201,6 +209,7 @@ pub const Scheduler = struct {
     hold_until_ns: i96 = 0, // displaced tools wait until this (a reservation's job ends it early); under `gate`
     notify: ?Notify = null, // voice sessions, told of voice models leaving and coming back
     loaded: ?Loaded = null, // a kept speech tool loaded: its voice is warmed (`api/voice_local.zig`)
+    rerun: ?Rerun = null, // a job its remote tool's node never got runs again on the front (`api/routes.zig`)
     voice_paused: std.atomic.Value(bool) = .init(false), // a voice model is displaced: sessions wait for it
     settings: Io.Mutex = .init, // a residency change and its write to residency.json, one at a time (`api/routes.zig`)
     call_end_ns: i96 = 0, // the last open call ended: `call` tools count their idle TTL from here too; under `gate`
@@ -1109,6 +1118,7 @@ pub const Scheduler = struct {
             s.setPhase(j, "load");
             s.loadInstance(slot) catch |err| {
                 if (err == error.GpuLockHeld) return s.finish(j, .failed, 503, "server_error", s.lockMessage(), null);
+                if (s.again(j, slot)) return;
                 return s.finishError(j, slot, @errorCast(err));
             };
         }
@@ -1127,6 +1137,7 @@ pub const Scheduler = struct {
                 spoke(slot, &j.request.speech, false);
                 s.gate.unlock(s.io);
             }
+            if (err == error.WorkerDied and s.again(j, slot)) return;
             return s.finishError(j, slot, err);
         };
         s.gate.lockUncancelable(s.io);
@@ -1145,6 +1156,27 @@ pub const Scheduler = struct {
             s.gate.unlock(s.io);
         }
         s.finish(j, .completed, 200, "", "", out);
+    }
+
+    /// `slot`'s tool failed `j` before any of it reached the client (`tool.Failure.rerun`): once a job, `rerun` may give it
+    /// another tool (the stand-in or fallback); then it is queued first on that tool's lane, not failed. True when it was.
+    fn again(s: *Scheduler, j: *jobs.Job, slot: *Slot) bool {
+        if (!slot.tool.failure().rerun or j.rerun or j.cancel.load(.acquire)) return false;
+        const r = s.rerun orelse return false;
+        j.rerun = true;
+        const to = r.f(r.ctx, j) orelse return false;
+        s.mutex.lockUncancelable(s.io); // lock order: mutex, then the table's (as `next`)
+        defer s.mutex.unlock(s.io);
+        const l = &s.lanes[index(s.laneOfTool(to))];
+        if (s.stopping) return false;
+        l.queue.pushFront(s.gpa, .{ .job = j }) catch return false;
+        s.table.mutex.lockUncancelable(s.io);
+        j.tool = to;
+        j.status = .queued;
+        s.table.mutex.unlock(s.io);
+        l.cond.signal(s.io);
+        std.log.info("{s}: {s}; job {s} runs on {s} instead", .{ slot.tool.config().id, slot.tool.failure().message, j.id, s.slots[to].tool.config().id });
+        return true;
     }
 
     /// The worker died or was killed: it holds no memory now.

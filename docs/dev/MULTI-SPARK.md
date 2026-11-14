@@ -5,11 +5,12 @@
 | Topology | What it is | State |
 | --- | --- | --- |
 | `single` (the default) | one Spark, exactly as before | unchanged |
-| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)) |
+| placement (`multi`) | the chat model on one Spark; voice, image, video and KnowLine on another; one front serves the API | built and measured with the 27B ([Configuration](#configuration), [Measured](#measured-placement-against-a-single-box-2026-10-25)); with Qwen3.8-Flash-Next TP1 as the chat model, booted and measured on both Sparks on 2026-11-14 ([Placement with Qwen3.8-Flash-Next](#placement-with-qwen38-flash-next-tp1-2026-11-14), [Measured](#measured-first-boot-2026-11-14)) |
 | TP=2, TP=N | one model split across N Sparks over ConnectX-7, one rank a node | built and tested with the engines' rank contract ([Tensor parallel](#tensor-parallel)); the 27B has no CUDA ranks, and no CUDA-rank model's weights are on the boxes yet |
 
-The multi-node modes run today's Qwen3.8-27B as the chat model. The chat model is config: swapping in a bigger one
-on Spark 1 later changes the tool entry, not the code.
+The placement was measured with Qwen3.8-27B as the chat model. Its shipped topology
+(`deploy/jarvis/topologies/flashnext-2spark.json`) puts Qwen3.8-Flash-Next TP1 on Spark 1 instead, with the 27B on
+the front as its stand-in. The chat model is config: a swap changes the tool entry and the topology, not the code.
 
 ## Configuration
 
@@ -36,12 +37,19 @@ each daemon's own `host` differ.
 | `nodes[].role` | exactly one `front`: it serves `/v1`, `/mcp`, `/v1/realtime` and `/voice` for every node |
 | `nodes[].models` | the tools that node runs. Every tool is on exactly one node |
 | `nodes[].fallback` | front only: tools of other nodes that the front runs itself while their node is down |
-| `token_file` | the bearer token the front sends to the other nodes: a device paired on each of them with `manage` (when they require pairing) |
+| `nodes[].stand_in` | front only: `{"<another node's tool>": "<one of the front's own models>"}`. While that node does not serve the tool (down, or back but still loading it), requests for the tool, whether named or by default (voice included), go to the stand-in. The stand-in is of the same kind; it is not kept loaded for itself, so it loads when first needed and is unloaded once idle when its node serves the tool again (unless it still stands in for a tool of another node that is not served). For a model too big to run on the front (a `fallback` runs the same model there) |
+| `token_file` | the bearer token the front (and a tensor-parallel group's lead) sends to the other nodes: a device paired on each of them with `inference,media,decisions,read,manage` (when they require pairing; `manage` alone loads and unloads but cannot chat). Every node reads the file at start and stops (exit 2) without it, so it goes to the same path on each node |
 | `health_interval_ms`, `down_after` | the front asks each node how it is this often; this many unanswered checks in a row, or one request that fails to connect, and the node is down |
 
 The daemon checks the topology at start and stops with the reason (exit 2): no front or two fronts, an unknown or
 duplicate node, an address that is not IPv4, a tool on no node, a model that is not a tool, a fallback that is the
-front's own, or a node `self` does not name. A tool listed on several nodes is a tensor-parallel group, checked as
+front's own, or a node `self` does not name. A stand-in is refused on a node that is not the front, for one of the
+front's own models, for a tensor-parallel group, for a tool that is also under `fallback`, and when it is not one of
+the front's models or not of the same kind.
+
+A topology file for `deploy/jarvis` (`topology.sh`) is this block without `self`. It may also hold `defaults`
+(capability to tool id), which `install.sh` writes into each node's `defaults` over `config.json.in`'s, and not into
+the block. A tool listed on several nodes is a tensor-parallel group, checked as
 [Tensor parallel](#tensor-parallel) says.
 
 **What runs where.**
@@ -60,7 +68,17 @@ front's own, or a node `self` does not name. A tool listed on several nodes is a
   a node guards the voice loop's models (chat) for the front's calls as it does for its own.
 - **Failover.** When the chat node is down, the chat model loads on the front from its `fallback` entry, where memory
   allows: ordinary admission, so it may evict the image model, and it is refused when even that does not make room.
-  When the node comes back, chat moves back. A request already streaming when its node dies fails with a 503.
+  When the node comes back, chat moves back. A request whose node turns out to be gone before its reply begins (the
+  connection, the request or the reply's status fails) marks the node down and runs again on the fallback, in the same
+  request. A request already streaming when its node dies ends with its error (a 503, or an error event mid-stream).
+- **Stand-in.** With a `stand_in` instead, chat requests go to the front's own smaller model while the node is down,
+  and they say so: the reply's `model` is the stand-in's id. `/v1/tools` lists the remote model's `stand_in`. The
+  request that finds the node gone is answered by the stand-in too, as long as nothing of its reply had begun: its
+  failed connection marks the node down, and the scheduler runs the job again on the stand-in (its `model` re-pointed),
+  once. A node that is back but still loading the tool does not serve it yet: each health check reads the node's
+  status, where the tool's `state` is `loading`, or it is kept warm (`rule` `always`) and not yet `ready`, and until
+  that ends chat stays on the stand-in. Once the node serves the tool, requests go to it again, and the stand-in is
+  unloaded as soon as no job uses it.
 - **Not forwarded yet.** `unload_model` and the release of a remote model act on the front's handle only; the node
   keeps or drops the model by its own rules.
 
@@ -113,6 +131,169 @@ another project's `tf-cuda-test` kernel benchmarks on DGX-02's GPU through both 
 **Memory.** The chat node books the 27B's 22.13 GiB. The front books Drama 3 (20.56 GiB) and Whisper (3.75 GiB), plus
 the image model, video model and KnowLine once they are listed there. This is section 3's placement (a), and its
 memory table holds.
+
+## Placement with Qwen3.8-Flash-Next TP1 (2026-11-14)
+
+**State: booted and measured on both Sparks in one window on 2026-11-14** ([Measured](#measured-first-boot-2026-11-14));
+not left running: both Sparks went back to another project's model after the window, which is below as it was planned.
+
+`deploy/jarvis/topologies/flashnext-2spark.json`:
+
+```json
+{
+ "mode": "multi", "token_file": "/home/dgx01/jarvis/lr/node-token", "health_interval_ms": 2000, "down_after": 3,
+ "defaults": {"chat_completion": "qwen3.8-flash-next"},
+ "nodes": [
+  {"id": "spark-1", "addresses": ["192.168.100.11", "192.168.101.11"], "port": 8190, "role": "node",
+   "models": ["qwen3.8-flash-next"]},
+  {"id": "spark-2", "addresses": ["192.168.100.10", "192.168.101.10"], "port": 8190, "role": "front",
+   "models": ["qwen3.8-27b", "fishaudio/drama-3", "whisper-large-v3-turbo", "qwen-image-2.1-turbo", "minimax-h3",
+              "knowline-4b", "idol"],
+   "stand_in": {"qwen3.8-flash-next": "qwen3.8-27b"}}]
+}
+```
+
+| Node | Machine | Runs |
+| --- | --- | --- |
+| spark-1 | node02 (DGX-02), `192.168.100.11` / `192.168.101.11` | `qwen3.8-flash-next` alone: TensorFold TP1 in the recipe's Docker image, compute lane and runner on ([tools/chat/qwen38-flash-next](../../tools/chat/qwen38-flash-next/README.md)) |
+| spark-2, the front | node01 (DGX-01) | Drama 3 (NVFP4), Whisper, Qwen-Image, MiniMax-H3, KnowLine, Idol (disabled), and `qwen3.8-27b` as Flash-Next's stand-in |
+
+Clients see one API on the front, as before. The chat default is Flash-Next, and voice, MCP and `/v1` use it through
+the front. A one-box install is unchanged: `qwen3.8-flash-next` is marked `own_spark` and needs a topology to be
+installed, and the Mac deploy has its own config.
+
+### Memory per node
+
+Spark 1, from the engine's own boot line on this image (two boots on node01, 2026-11-13/14), booked with the 8 GiB
+policy margin. The window's measured per-process peak (82.9 GiB, [Measured](#measured-first-boot-2026-11-14)) is
+under the cap; the booking stays at the cap until a peak with every stream and the prompt cache full is measured:
+
+| Spark 1 (121.7 GiB `MemTotal`, about 116 GiB free at idle) | GiB |
+| --- | ---: |
+| Flash-Next weights | 77.15 (M) |
+| 8 streams at a 65,536-token window (2.28 each) and an 8 GiB prompt cache | 26.3 (M) |
+| Engine CUDA budget, capped (`TENSORFOLD_CUDA_MEMORY_LIMIT_GB`) | 103.5 |
+| **Booked** (the cap plus the 8 GiB policy margin for the host side) | **111.5** |
+| Needed free at load (booking plus the daemon's 3 GiB reserve) | 114.5 |
+| Left after load (the engine keeps its 12.2 GiB reserve unallocated) | about 11 (E) |
+
+The chat node holds nothing else. A foreign GPU job on node02 (another project's kernel benchmarks have run there)
+leaves less than 114.5 GiB free, and the load is refused rather than squeezed.
+
+Spark 2 keeps today's measured bookings (`deploy/jarvis/README.md`), less the chat model:
+
+| Spark 2 state | Loaded | Booked |
+| --- | --- | ---: |
+| Warm | Drama 3 NVFP4 20.78, Whisper 3.75, image 41.55, KnowLine 12.38 | 78.5 GiB |
+| A video job | image evicted (priority 10), H3 52.31 | 89.2 GiB |
+| **Spark 1 down: the 27B stands in** | warm set plus the 27B's 22.13 | 100.6 GiB, today's one-box warm set |
+| Spark 1 down and a video job | as one box today: image evicted, H3 loaded beside the 27B, voice and KnowLine (lowest `MemAvailable` measured 8.5 GiB, README) | 111.3 GiB |
+
+### Why the 27B stands in, not a Flash-Next fallback
+
+A `fallback` runs the same model on the front. Flash-Next books 111.5 GiB, which the front cannot hold beside
+anything: it would have to evict Drama 3 and Whisper (the voice loop) along with the image model and KnowLine. Even
+an idle front could not admit it, since the load needs 114.5 GiB free. The 27B is already installed and qualified on
+DGX-01 (`qualify-chat`, the marker install.sh checks). Beside the warm set it is exactly today's one-box Jarvis, whose
+memory, voice latency and video behaviour are measured. So while Spark 1 is down, chat, voice and every other model
+keep working on the 27B, and the reply's `model` says which model answered.
+
+### Install
+
+With the image and the checkpoint on spark-1 ([tools/chat/qwen38-flash-next](../../tools/chat/qwen38-flash-next/README.md#getting-it-onto-a-node))
+and today's models and markers on spark-2:
+
+```sh
+deploy/jarvis/kits.sh deploy/jarvis/topologies/flashnext-2spark.json kits/
+# spark-1 (node02) first, then spark-2 (node01); each from a checkout of the same commit
+set -a; . kits/spark-1/node.env; set +a; PAIRING_REQUIRED=1 deploy/jarvis/install.sh
+deploy/jarvis/pair.sh token front --scopes inference,media,decisions,read,manage   # on spark-1, before its start: into token_file on both nodes
+deploy/jarvis/start.sh                                 # spark-1
+set -a; . kits/spark-2/node.env; set +a; PAIRING_REQUIRED=1 deploy/jarvis/install.sh && deploy/jarvis/start.sh
+```
+
+`RENDER_ONLY=1 deploy/jarvis/install.sh` (with or without the kit's variables) prints the config a node would get
+without checking or changing anything. `deploy/jarvis/test-topology.sh` checks the shipped topologies and those
+configs on the CPU.
+
+### Window plan (first boot)
+
+Both Sparks must be free of other GPU jobs: the chat node needs 114.5 GiB free, and each node's build (`zig build
+-Doptimize=ReleaseSafe` with the CUDA kernels, `MemoryMax=24G`) needs memory the other project's ranks hold.
+
+| Step | Where | Time (E) |
+| --- | --- | ---: |
+| 0. Before the window: the PR merged; both checkouts at the merge commit; kits made | dev box | none |
+| 1. The other project's model stopped (the owner's procedure) | both | its own |
+| 2. The TP1 image copied to node02 over ConnectX-7 (`docker save … \| ssh … docker load`, about 2.5 GB) | node01 → node02 | 2 min |
+| 3. `install.sh` (build, config, unit) on both nodes in parallel; spark-1 started first | both | 15 min |
+| 4. Flash-Next loads on spark-1 (181 s in the recipe's smoke); the front warms Drama 3, Whisper, the image model and KnowLine | both | 5 min |
+| 5. Per-process memory on spark-1 (nvidia-smi `used_memory` + `RssAnon` + `RssShmem`, `MemAvailable`) through a long reply; the booking set to the peak plus a margin in a follow-up | spark-1 | 10 min |
+| 6. `tools/jarvis/smoke.sh`, a voice e2e (thinking off: the server logs `thinking=False`), `chat_bench.py` with the cached next turn | front | 15 min |
+| 7. Failover: stop spark-1's service; chat answers from the 27B on the front (time to its first token); start it again; chat is back on Flash-Next | both | 10 min |
+| **Total with the other model down** | | **about 60 min, plus its own stop and start** |
+
+**Rollback.** `deploy/jarvis/stop.sh` on both nodes stops every model. `docker ps --filter
+label=org.localrouter.owner=<DEPLOY>` must list nothing (`leftovers.sh` stops any container the server left). Then the
+other project restarts its model. Going back to the 27B placement is the topology of [Configuration](#configuration) (chat
+`qwen3.8-27b` on spark-1) through the same `install.sh` steps.
+
+### Measured (first boot, 2026-11-14)
+
+The window ran from PR head `17b85887` (the binary built from `9e2b4bec`, whose Zig sources are the same) on both
+Sparks: spark-1 as root on node02 (`/root/lr-flashnext`), the front on node01 beside the stopped production install
+(`~/jarvis/lr-flashnext`), both units `lr-flashnext` on port 8190. The other project's model was down 32 min
+(02:54:33Z to 03:26:55Z, its restore included) and came back on the same image and record.
+
+| | Measured |
+| --- | --- |
+| Flash-Next load on spark-1 | 170 to 176 s to ready (two loads) |
+| Front start | kept tools ready in 70 s (Drama 3, Whisper, image, KnowLine) |
+| **Spark-1 memory** | engine per-process peak (nvidia-smi `used_memory` + `RssAnon` + `RssShmem`) **82.9 GiB** (84,001 MiB on the GPU, 0.76 GiB anon) during the voice turns; 80.6 GiB after a 1,839-token reply; lowest `MemAvailable` 32.6 GiB (116 at idle). The booking (111.5) stays at the engine's cap |
+| **Front memory** | Drama 3 19.9 GiB GPU + 0.6 RSS, Whisper 2.0 + 1.4, KnowLine 9.3 + 1.5, the image model (in the daemon) 40.1 GiB; `MemAvailable` 42.2 GiB warm, 22.8 GiB with the 27B stand-in loaded (18.2 GiB GPU + 0.7) |
+| **Chat through the front** (3 runs a case, streamed; median) | thinking on, short: TTFT 0.19 s, 56 tok/s. Thinking off, short: 0.15 s, 52 tok/s. Thinking off, prose: 0.17 s, 44 tok/s. Thinking on, prose: 0.19 s, 44 tok/s. A 1,839-token reply (thinking off): engine TTFT 0.13 s, 45.5 tok/s |
+| Maths with the lane (`7^22 mod 1000003`, 30584) | exact in 3 of 4 (the in-model runner owned the cell, 6 ms): TTFT 0.08 to 0.17 s, 57 to 60 tok/s. The first streamed run answered `[reasoning failed: connection refused]`, the engine's own text (LocalRouter has no such string); the next three, streamed and not, were exact |
+| `tools/jarvis/smoke.sh --quick` on the front | **33 passed, 0 failed** (116.9 s): chat, stream (first content 0.13 s), tool call, STT, Drama 3 and its six voices, decide, image, image edit, no evictions |
+| **Voice** (the smoke's warm turns) | first audio median **983 ms** (turns 744, 865, 983 ms; budget 1,400); the long reply's speech started 0.66 s in, before its text was done, without underruns; every voice turn reached the engine with `thinking=False` |
+| **Failover** (spark-1's unit stopped) | the first request after the stop got a 503 (`node spark-1 ... is gone (ConnectFailed)`) and marked the node down; the next one was answered by `qwen3.8-27b` **34.8 s after the stop** (TTFT 31.4 s: the stand-in's cold load). While down, requests naming `qwen3.8-flash-next` were answered by the 27B at 0.08 to 0.11 s TTFT. Spark-1 started again and was warm in 170 s; the next request was answered by Flash-Next (TTFT 0.15 s) |
+| Thermal | hottest 73 C (node01, during the smoke); no pause |
+
+Failures and fixes found in the window:
+
+- `check.sh` refused node02: its Docker has no runtime named `nvidia`, and GPU containers run under runc through the
+  NVIDIA container toolkit's hook and CDI spec. `check.sh` now accepts any of the three (`17b85887`).
+- spark-1 stopped at start (`topology.token_file ...: FileNotFound`): every node reads `token_file`. The docs now say
+  to put it on every node.
+- The front's chat to spark-1 got 403 (`does not have the inference scope`): the documented token had `manage` only.
+  It now gets `inference,media,decisions,read,manage` (changed live with `pair.sh scopes`, no restart).
+
+Fixed after the window (`e38f9f62`), then re-timed on both Sparks on PR head `3df35168` (2026-11-14, 10:14Z to
+10:40Z; G down 25 min). Each round stopped spark-1's unit while idle (1.7 s), sent one streamed chat to the front right
+after, then started the unit again and asked a chat every second:
+
+| Round | The chat right after the stop | First token after the stop began | spark-1's daemon answers | 27B stand-in unloaded | Flash-Next ready on spark-1 | Chat back on Flash-Next |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 200 from `qwen3.8-27b`, no error | 33.9 s (TTFT 32.2 s: the 27B's cold load) | 0.7 s | 2.2 s | 172.0 s | 171.5 s |
+| 2 | 200 from `qwen3.8-27b`, no error | 21.9 s (TTFT 20.1 s) | 0.4 s | 1.9 s | 169.9 s | 169.4 s |
+| 3 | 200 from `qwen3.8-27b`, no error | 15.6 s (TTFT 13.9 s) | 0.4 s | 1.9 s | 171.3 s | 171.2 s |
+
+Times in the last four columns are from the start command. The front logged each rerun (`node spark-1 ... is gone
+(ConnectFailed); job ... runs on qwen3.8-27b instead`) and each return (`back, so ... its stand-in is unloaded once
+idle`). The stand-in left 1.5 s after spark-1's daemon answered, in all three rounds, against 600 s of idle TTL before.
+The 27B's load got faster each round (32, 20, 14 s) as its weights stayed in the page cache. After the rounds:
+`smoke.sh --quick` 33 passed, 0 failed (voice first audio median 919 ms), and a voice e2e smoke (`voice_e2e.py --smoke`:
+turns, long reply, barge-in) passed. Thermal at most 71 C, no pause.
+
+Still open:
+
+- **Chat while spark-1 warms up waited for it** (fixed, not re-timed live). The node counted as up as soon as its
+  daemon answered (under 1 s), so the stand-in unloaded and the next chat went to spark-1, where it waited for
+  Flash-Next's load: about 170 s in each round above. Now the front reads Flash-Next's state and rule from spark-1's
+  `/v1/node/status` on each health check, keeps chat on the 27B while Flash-Next is still loading, and unloads the
+  27B only once Flash-Next is ready and no job uses it. The two-daemon test (`tests/nodes.zig`) covers it; the live
+  numbers wait for a window.
+- The booking: the measured peak (82.9 GiB) is well under the cap (103.5 + 8). A peak with eight streams and a full
+  prompt cache would show whether `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` and the booking can come down.
 
 ## Tensor parallel
 
@@ -459,7 +640,7 @@ server. A harness sees `node` only as an informational field ([HARNESS.md](../HA
 | Peer health check | The front polls `GET /health` and `/v1/tools` every 2 s over CX-7, and over the LAN when CX-7 fails. After 3 misses the peer is down and its tools are listed `unavailable` with the reason |
 | **Spark 1 down** | Chat goes to the fallback 27B on Spark 2. It loads on demand at a priority below voice and above image, and evicts image if needed (52 GiB headroom, section 3). It takes 12.5–29.9 s to load (M). The voice session says it is "recovering", as model reloads do today. Everything else keeps working |
 | A chat stream in flight when Spark 1 dies | Ends as a broken upstream stream does today: `data: {"error"}` then `[DONE]`. The voice turn fails like a 503 |
-| Spark 1 back | Health passes, and the remote model becomes the default again. The fallback idles out on its TTL |
+| Spark 1 back | Health passes; once the remote model is ready there (not while it loads), it becomes the default again, and the stand-in is unloaded once no job uses it. A fallback moves back when health passes |
 | **Spark 2 (front) down** | The box is down, as today. To survive it, the same binary can also hold the front role on Spark 1, with clients pairing with both names. That is later work, and the phone and web clients currently store one box |
 | CX-7 cable down | Control and chat fall back to the LAN path (bandwidth is enough for (a)). (b) and (c) would stop |
 

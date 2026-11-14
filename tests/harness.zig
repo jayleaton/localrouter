@@ -18,6 +18,13 @@ pub const Daemon = struct {
     client: std.http.Client,
 
     pub fn start(gpa: std.mem.Allocator, io: Io, name: []const u8, cfg_json: []const u8) !Daemon {
+        return startOn(gpa, io, name, cfg_json, 0);
+    }
+
+    /// `start` on `port` (0: an ephemeral one), e.g. a node that comes back where its front expects it.
+    pub fn startOn(gpa: std.mem.Allocator, io: Io, name: []const u8, cfg_json: []const u8, port_wanted: u16) !Daemon {
+        var port_arg: [8]u8 = undefined;
+        const port_text = std.fmt.bufPrint(&port_arg, "{d}", .{port_wanted}) catch unreachable;
         var rnd: [8]u8 = undefined; // unique per run: another user's leftovers or a parallel run cannot collide
         io.random(&rnd);
         const dir = try std.fmt.allocPrint(gpa, "/tmp/localrouter-it-{s}-{x:0>16}", .{ name, std.mem.readInt(u64, &rnd, .little) });
@@ -28,7 +35,7 @@ pub const Daemon = struct {
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = cfg_json });
         const data = try std.fmt.allocPrint(gpa, "{s}/data", .{dir});
         defer gpa.free(data);
-        var child = try std.process.spawn(io, .{ .argv = &.{ opts.localrouter_exe, "serve", "--config", cfg_path, "--host", "127.0.0.1", "--port", "0", "--data", data }, .stdout = .pipe, .stderr = .inherit });
+        var child = try std.process.spawn(io, .{ .argv = &.{ opts.localrouter_exe, "serve", "--config", cfg_path, "--host", "127.0.0.1", "--port", port_text, "--data", data }, .stdout = .pipe, .stderr = .inherit });
         var buf: [256]u8 = undefined;
         var r = child.stdout.?.reader(io, &buf);
         const line = try r.interface.takeDelimiterExclusive('\n');

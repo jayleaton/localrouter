@@ -66,6 +66,9 @@ pub const Error = error{
 pub const Failure = struct {
     message: []const u8 = "",
     type: []const u8 = "server_error",
+    // Nothing of the job reached its client (a remote tool whose node could not be reached before its reply began):
+    // the scheduler may run it once more elsewhere (`Scheduler.Rerun`), the front's stand-in or fallback.
+    rerun: bool = false,
 };
 
 pub const Tool = struct {

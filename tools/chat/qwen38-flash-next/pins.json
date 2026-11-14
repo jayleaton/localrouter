@@ -1,0 +1,13 @@
+{
+ "model": "qwen3.8-flash-next",
+ "recipe": {"repo": "https://github.com/jayleaton/qwen4-tensorfold-spark", "commit": "f0002f90714b",
+            "profile": "qwen38-flash-next-tp1-tool-full", "build": "scripts/build.sh tp1"},
+ "engine": {"upstream": "https://github.com/ashhart/TensorFold", "base": "aaac299d1d90c2625e54cb50f3f0d1494c1c33ea",
+            "patches": "patches/series.tp1 (0001-0083)", "tree": "ce0da63db420e3e20fbf13e5bef1ead3c2f20010"},
+ "image": {"labels": {"org.tensorfold.engine-tree": "ce0da63db420e3e20fbf13e5bef1ead3c2f20010",
+                      "org.tensorfold.runner.assets": "runner-assets-20261107 b5c40d32bcab"},
+           "built_on_node01": "qwen4-tensorfold-f0002f9:tp1 (image b7da2151b4d2, 2026-11-14)"},
+ "checkpoint": {"repo": "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP", "revision": "2b170fa6309d5d1ee380b35636075fac7945f286",
+                "format": "MLX 4-bit (affine, group 32) with MTP heads", "files": 22},
+ "serve": {"context": 65536, "thinking_budget": 8192, "cuda_memory_limit_gib": 103.5}
+}

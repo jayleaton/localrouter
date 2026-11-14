@@ -31,6 +31,7 @@ pub const Job = struct {
     completed_at: i64 = 0,
     keep_s: ?u32 = null, // overrides keep_outputs_s (the voice loop: its audio is gone at the next expiry tick)
     cancel: std.atomic.Value(bool) = .init(false),
+    rerun: bool = false, // the scheduler's own: it was given another tool once already (`Scheduler.again`)
     done: Io.Event = .unset,
 
     pub fn kind(j: *const Job) Kind {

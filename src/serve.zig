@@ -68,6 +68,10 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             t.residency = null;
             t.idle_ttl_s = std.math.maxInt(u32);
         }
+        if (plan.standsIn(k) and config.residencyOf(t) == .always) { // a stand-in: it loads when its remote tool's node is down, or when asked for
+            t.keep_loaded = false;
+            t.residency = null;
+        }
     }
     cfg.tools = tools;
     if (!engine.checkDefaults(&cfg, &why)) {
@@ -120,7 +124,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
                 s.* = .{ .tool = l.asTool() };
             },
             .remote, .fallback => |n| {
-                r.* = .{ .cluster = &cluster, .cfg = t, .node = n, .slot = k, .fallback = if (pl == .fallback) p else null };
+                const stand_in: ?usize = if (k < plan.stand_ins.len) plan.stand_ins[k] else null;
+                r.* = .{ .cluster = &cluster, .cfg = t, .node = n, .slot = k, .fallback = if (pl == .fallback) p else null, .stand_in = stand_in };
                 try cluster.tools.append(gpa, r);
                 s.* = .{ .tool = r.asTool() };
             },
@@ -147,6 +152,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     defer app.cloned.deinit();
     app.assistant.init(io, gpa, cfg.data_dir, cfg.assistant.name); // the assistant's name (assistant.zig)
     app.plan = &plan;
+    if (plan.multi and plan.front) app.cluster = &cluster; // whether a node is up, for stand-ins (`routes.standIn`)
+    if (plan.multi and plan.front) scheduler.rerun = .{ .ctx = &app, .f = routes.rerunOn }; // a job its node never got: the stand-in or fallback
     if (plan.multi and plan.front) {
         cluster.refresh = .{ .ctx = &scheduler, .f = refreshSlot };
         cluster.calls = .{ .ctx = &app, .f = openCalls };

@@ -1,7 +1,9 @@
 //! A multi-node topology on two real daemons (docs/dev/MULTI-SPARK.md): node `s1` runs the chat model (the fake
 //! TensorFold server, tests/fixtures/chat_server.py) and the testpattern image model; the front `s2` runs the
 //! testpattern speech model, serves every model through one API, and falls back to running the chat model itself
-//! while `s1` is down.
+//! while `s1` is down. A second pair shows a stand-in: the front's own smaller model answering for the node's while
+//! that node is down, from the very request that finds the node gone, and while the node, back, is still loading its
+//! model; unloaded once the node serves it again.
 
 const std = @import("std");
 const opts = @import("build_options");
@@ -97,21 +99,12 @@ test "multi-node: one front serves every node's models; a node admits its own; c
     try testing.expectEqual(std.http.Status.ok, sp.status);
     try testing.expectEqualSlices(u8, "RIFF", sp.body[0..4]);
 
-    // s1 goes down: chat comes back on the front (fallback), image is refused naming the node
+    // s1 goes down: chat comes back on the front (fallback) from the first request after it, image is refused naming the node
     n1.stop();
     n1_alive = false;
-    var answered = false;
-    for (0..80) |_| {
-        const r = try ask(&front, a, "still there", false);
-        if (r.status == .ok) {
-            try testing.expect(std.mem.indexOf(u8, r.body, "echo: still there") != null);
-            answered = true;
-            break;
-        }
-        try testing.expectEqual(std.http.Status.service_unavailable, r.status);
-        sleepMs(testing.io, 100);
-    }
-    try testing.expect(answered);
+    const after = try ask(&front, a, "still there", false);
+    try testing.expectEqual(std.http.Status.ok, after.status);
+    try testing.expect(std.mem.indexOf(u8, after.body, "echo: still there") != null);
     try testing.expect(entry(try listed(&front, a, "/v1/tools"), "chat").?.local);
     try testing.expectEqual(@as(usize, 1), (try front.workers(a)).len); // the chat server, here now
     const down = try harness.image(&front, a, "img", "");
@@ -131,4 +124,109 @@ test "multi-node: an invalid topology stops the daemon at start with the reason"
     const r = try std.process.run(a, testing.io, .{ .argv = &.{ opts.localrouter_exe, "serve", "--config", dir ++ "/config.json", "--port", "0", "--data", dir ++ "/data" } });
     try testing.expectEqual(@as(u8, 2), r.term.exited);
     try testing.expect(std.mem.indexOf(u8, r.stderr, "node 's9', which is not one of its nodes (s1, s2)") != null);
+}
+
+test "multi-node: a stand-in on the front answers for a remote model while its node is down or still loading it, from the request that finds it gone; it is unloaded once the node serves it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // the big chat model only fits its own node, and takes 4 s to load there; the front's small one stands in for it
+    // (both kept loaded in the config)
+    const t = try std.fmt.allocPrint(a,
+        \\"defaults": {{"chat_completion": "big"}},
+        \\"tools": [{{"id": "big", "kind": "chat", "engine": "openai_server", "resident_bytes": 41943040, "keep_loaded": true,
+        \\            "options": {{"server": ["python3", "{s}", "--port", "{{port}}", "--name", "{{id}}", "--start-delay-ms", "4000"]}}}},
+        \\          {{"id": "small", "kind": "chat", "engine": "openai_server", "resident_bytes": 41943040, "keep_loaded": true,
+        \\            "options": {{"server": ["python3", "{s}", "--port", "{{port}}", "--name", "{{id}}"]}}}},
+        \\          {{"id": "tts", "kind": "speech", "engine": "testpattern", "idle_ttl_s": 0}}]
+    , .{ opts.chat_server, opts.chat_server });
+    // health checks never mark s1 down within the test (`down_after`): only the request that cannot reach it does, and
+    // the first successful check brings it back
+    const topo_fmt =
+        \\"topology": {{"mode": "multi", "self": "{s}", "health_interval_ms": 150, "down_after": 1000, "nodes": [
+        \\  {{"id": "s1", "addresses": ["127.0.0.1"], "port": {d}, "models": ["big"]}},
+        \\  {{"id": "s2", "addresses": ["127.0.0.1"], "port": 9, "role": "front", "models": ["small", "tts"], "stand_in": {{"big": "small"}}}}]}}
+    ;
+    const n1_cfg = try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", {s}, " ++ topo_fmt ++ "}}", .{ t, "s1", 9 });
+    var n1 = try Daemon.start(testing.allocator, testing.io, "standin-s1", n1_cfg);
+    var n1_alive = true;
+    defer if (n1_alive) n1.stop();
+    var loaded = false;
+    for (0..150) |_| {
+        if (std.mem.eql(u8, try n1.toolState(a, "big"), "ready")) {
+            loaded = true;
+            break;
+        }
+        sleepMs(testing.io, 100);
+    }
+    try testing.expect(loaded);
+    var front = try Daemon.start(testing.allocator, testing.io, "standin-s2", try std.fmt.allocPrint(a, "{{" ++ reserve ++ ", {s}, " ++ topo_fmt ++ "}}", .{ t, "s2", n1.port }));
+    defer front.stop();
+
+    // node up: the default and the named model are the big one, on s1; the stand-in is listed but not loaded
+    const first = try front.call(a, .POST, "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+    try testing.expectEqual(std.http.Status.ok, first.status);
+    try testing.expect(std.mem.indexOf(u8, first.body, "\"big\"") != null);
+    try testing.expectEqualStrings("ready", try n1.toolState(a, "big"));
+    try testing.expectEqualStrings("unloaded", try front.toolState(a, "small"));
+    try testing.expectEqual(@as(usize, 0), (try front.workers(a)).len);
+    const ToolList = struct { data: []const struct { id: []const u8, stand_in: ?[]const u8 = null } };
+    const r = try front.call(a, .GET, "/v1/tools", null);
+    const tl = try std.json.parseFromSliceLeaky(ToolList, a, r.body, .{ .ignore_unknown_fields = true });
+    for (tl.data) |e| {
+        if (std.mem.eql(u8, e.id, "big")) try testing.expectEqualStrings("small", e.stand_in.?) else try testing.expect(e.stand_in == null);
+    }
+
+    // node down: the very request that finds it gone (streamed, nothing sent yet) is answered by the small one here, as
+    // are the next ones, by default and by name
+    n1.stop();
+    n1_alive = false;
+    const first_down = try front.call(a, .POST, "/v1/chat/completions", "{\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"still there\"}]}");
+    try testing.expectEqual(std.http.Status.ok, first_down.status);
+    try testing.expect(std.mem.indexOf(u8, first_down.body, "still") != null); // streamed a word a chunk
+    try testing.expect(std.mem.indexOf(u8, first_down.body, "\"small\"") != null);
+    try testing.expect(std.mem.indexOf(u8, first_down.body, "data: [DONE]") != null);
+    const by_default = try front.call(a, .POST, "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"by default\"}]}");
+    try testing.expectEqual(std.http.Status.ok, by_default.status);
+    try testing.expect(std.mem.indexOf(u8, by_default.body, "\"small\"") != null);
+    const named = try front.call(a, .POST, "/v1/chat/completions", "{\"model\":\"big\",\"messages\":[{\"role\":\"user\",\"content\":\"by name\"}]}");
+    try testing.expectEqual(std.http.Status.ok, named.status);
+    try testing.expect(std.mem.indexOf(u8, named.body, "\"small\"") != null);
+    try testing.expectEqualStrings("ready", try front.toolState(a, "small"));
+    try testing.expectEqual(@as(usize, 1), (try front.workers(a)).len); // the small model's server, loaded on demand
+
+    // node back where the front expects it, still loading the big model (4 s): the front has seen its daemon answer,
+    // yet chat stays on the small one, at once, and the small one stays loaded
+    n1 = try Daemon.startOn(testing.allocator, testing.io, "standin-s1b", n1_cfg, n1.port);
+    n1_alive = true;
+    sleepMs(testing.io, 600); // several health checks (150 ms) answered
+    const t0 = std.Io.Clock.awake.now(testing.io);
+    const warming = try front.call(a, .POST, "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"while it loads\"}]}");
+    const waited_ms = t0.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
+    try testing.expectEqual(std.http.Status.ok, warming.status);
+    try testing.expect(std.mem.indexOf(u8, warming.body, "\"small\"") != null);
+    try testing.expect(waited_ms < 2000); // not the big model's load
+    try testing.expectEqualStrings("ready", try front.toolState(a, "small"));
+
+    // once the big model is ready there: chat goes to it again, and the stand-in is unloaded at once (not after its idle
+    // TTL, 120 s by default)
+    var back = false;
+    for (0..100) |_| {
+        const b = try front.call(a, .POST, "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"back\"}]}");
+        if (b.status == .ok and std.mem.indexOf(u8, b.body, "\"big\"") != null) {
+            back = true;
+            break;
+        }
+        sleepMs(testing.io, 100);
+    }
+    try testing.expect(back);
+    var unloaded = false;
+    for (0..30) |_| {
+        if (std.mem.eql(u8, try front.toolState(a, "small"), "unloaded") and (try front.workers(a)).len == 0) {
+            unloaded = true;
+            break;
+        }
+        sleepMs(testing.io, 100);
+    }
+    try testing.expect(unloaded);
 }

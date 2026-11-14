@@ -92,6 +92,16 @@ deploy/jarvis/kits.sh topology.json kits/      # kits/NODE/: topology.json and n
 set -a; . kits/spark-1/node.env; set +a; deploy/jarvis/install.sh && deploy/jarvis/start.sh
 ```
 
+**The shipped two-Spark topology** is `topologies/flashnext-2spark.json`
+([MULTI-SPARK.md](../../docs/dev/MULTI-SPARK.md#placement-with-qwen38-flash-next-tp1-2026-11-14)). Spark 1 (node02)
+runs `qwen3.8-flash-next`, Qwen3.8-Flash-Next TP1 in the recipe's Docker image
+([tools/chat/qwen38-flash-next](../../tools/chat/qwen38-flash-next/README.md)), booked 111.5 GiB, alone. Spark 2
+(node01) is the front with everything else, and with `qwen3.8-27b` as its `stand_in`: while Spark 1 is down, chat and
+voice use the 27B on the front, which is today's one-box set. The file's `defaults` make Flash-Next the chat default.
+`qwen3.8-flash-next` is marked `own_spark` in `config.json.in`, so a one-box install (no `TOPOLOGY`) leaves it out
+unless `TOOLS` names it. Its image and checkpoint are set up by hand, not by `bootstrap.sh` (its README, "Getting it
+onto a node"); install.sh checks both (`check.sh`).
+
 - **What install.sh does with `TOPOLOGY` and `NODE`.** It checks the topology (mode `multi`, the node in it, one front,
   every model a tool of `config.json.in`). It preflights only the node's tools (`TOOLS`: its own, and on the front its
   `fallback` ones). The config lists every node's tools and keeps `defaults` (a node that is not the front drops the
@@ -102,9 +112,20 @@ set -a; . kits/spark-1/node.env; set +a; deploy/jarvis/install.sh && deploy/jarv
   `--host all`) with pairing on serves `/voice` and `/v1/realtime` to other machines too (`voice.remote` unset is on
   then; set it `false` to keep calls local), each call needing a paired token.
 - **The front's token.** Turn on pairing on every node (`PAIRING_REQUIRED=1`). On each node that is not the front,
-  make a token with `deploy/jarvis/pair.sh token front --scopes manage`, and put it in the front's `token_file`.
+  make a token with `deploy/jarvis/pair.sh token front --scopes inference,media,decisions,read,manage` (the front chats, speaks, decides and
+  manages models there: `manage` alone is refused for chat), and put it at the topology's `token_file` path on every
+  node: each daemon reads it at start and stops without it.
+- **Defaults and stand-ins.** A topology file's `defaults` (capability to tool id) replace `config.json.in`'s on every
+  node, and stay out of the daemon's `topology` block. A tool the front names as a `stand_in` is written with
+  `keep_loaded` false: it loads while the node of the model it stands in for is down, and `start.sh` does not wait for
+  it.
+- **Containers.** A model served from Docker (`qwen3.8-flash-next`) runs outside the unit's cgroup and its
+  `MemoryMax`. Its server stops its container, and `leftovers.sh` stops any container labelled with this install
+  (`org.localrouter.owner=$DEPLOY`) after the service stops.
 - **Checks.** `tools/install/doctor.sh --profile jarvis-gb10 --topology FILE --node ID` checks the link and the other
-  nodes ([INSTALL.md](../../INSTALL.md#several-sparks)).
+  nodes ([INSTALL.md](../../INSTALL.md#several-sparks)). `RENDER_ONLY=1 deploy/jarvis/install.sh` prints the config
+  a node would get (with the kit's variables) without checking or changing anything, and `deploy/jarvis/test-topology.sh`
+  checks the shipped topologies and the configs they render, on any machine with bash and jq.
 
 ## Reaching it
 
