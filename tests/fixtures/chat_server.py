@@ -2,7 +2,8 @@
 starts, in plain Python with no dependencies. It answers deterministically from the last user (or tool) message, so a
 test can check what LocalRouter forwarded (`received` echoes the parsed request body) and how it relays replies.
 
-CLI: --port N --name ID [--hold-mib 8] [--fail-start]. Binds 127.0.0.1, logs to stderr, exits 0 on SIGTERM.
+CLI: --port N --name ID [--hold-mib 8] [--fail-start] [--start-delay-ms N] (N ms before it binds: a slow load).
+Binds 127.0.0.1, logs to stderr, exits 0 on SIGTERM.
 Refusals: n != 1 and logprobs (400), a model other than --name (404). Test hooks by message text: "overload" (503),
 "explode" (500), "die" (exits without replying), "slow" (40 words streamed 0.25 s apart), "midfail" (two content
 chunks streamed, then the process exits mid-stream), "parallel" (with tools: two calls of the first tool). With tools,
@@ -50,11 +51,11 @@ def error(message, kind):
 
 
 def parse_args(argv):
-    out = {"port": None, "name": None, "hold_mib": 8, "fail_start": False}
+    out = {"port": None, "name": None, "hold_mib": 8, "fail_start": False, "start_delay_ms": 0}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ("--port", "--name", "--hold-mib") and i + 1 < len(argv):
+        if arg in ("--port", "--name", "--hold-mib", "--start-delay-ms") and i + 1 < len(argv):
             key = arg[2:].replace("-", "_")
             out[key] = argv[i + 1] if key == "name" else int(argv[i + 1])
             i += 2
@@ -330,6 +331,9 @@ def main():
         log("--fail-start: refusing to start")
         sys.exit(3)
     held = bytearray(args["hold_mib"] << 20)
+    if args["start_delay_ms"]:
+        log(f"--start-delay-ms: loading for {args['start_delay_ms']} ms")
+        time.sleep(args["start_delay_ms"] / 1000)
     group()
     server = ThreadingHTTPServer(("127.0.0.1", args["port"]), Handler)
     server.daemon_threads = True

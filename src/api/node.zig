@@ -10,6 +10,7 @@
 const std = @import("std");
 const h = @import("http.zig");
 const routes = @import("routes.zig");
+const sched = @import("../sched/scheduler.zig");
 const pair = @import("pair.zig");
 const request = @import("../tool/request.zig");
 const inputs = @import("inputs.zig");
@@ -37,11 +38,12 @@ fn status(app: *routes.App, req: *h.Request, a: std.mem.Allocator) !void {
         const n = std.fmt.parseInt(u32, std.mem.trim(u8, hd.value, " "), 10) catch 0;
         app.voice.remoteCalls(app.io, n, 3 * @as(i64, @max(app.cfg.topology.health_interval_ms, 1000)));
     };
-    const Entry = struct { id: []const u8, state: []const u8, resident_bytes: u64, last_error: []const u8 };
+    // `rule`: its residency now; with `always` the node brings it up itself, so a front's stand-in answers meanwhile
+    const Entry = struct { id: []const u8, state: []const u8, rule: []const u8, resident_bytes: u64, last_error: []const u8 };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots) |*e, slot| {
         const c = slot.tool.config();
-        e.* = .{ .id = c.id, .state = @tagName(slot.tool.state()), .resident_bytes = slot.resident, .last_error = slot.tool.failure().message };
+        e.* = .{ .id = c.id, .state = @tagName(slot.tool.state()), .rule = @tagName(sched.Scheduler.ruleOf(&slot)), .resident_bytes = slot.resident, .last_error = slot.tool.failure().message };
     }
     const mem = @import("../sched/memory.zig").available() orelse 0;
     try h.jsonValue(req, a, .ok, .{ .node = app.cfg.machine, .tools = list, .mem_available_bytes = mem, .reserve_bytes = app.cfg.reserve_bytes, .voice_sessions = app.voice.count(app.io) });

@@ -12,8 +12,10 @@
 //! down or comes back, its tools are unloaded on the scheduler (`Scheduler.refresh`) and load on their new side.
 //!
 //! A job that fails because its node cannot be reached, before any of its reply began, says so (`tool.Failure.rerun`):
-//! the scheduler runs it again on the front's stand-in or fallback in the same request. When the node comes back, the
-//! stand-in that answered for it is unloaded once no job uses it (unless another down node's tool still needs it).
+//! the scheduler runs it again on the front's stand-in or fallback in the same request. A node that is back serves a
+//! tool only once it has brought it up: while the health check says it is loading there, or kept (`always`) and not
+//! loaded yet, its stand-in keeps answering (`Cluster.serves`). Once it serves the tool again, the stand-in is unloaded
+//! as soon as no job uses it (unless it still answers for another tool that is not served).
 
 const std = @import("std");
 const posix = std.posix;
@@ -68,6 +70,17 @@ pub const Cluster = struct {
         return c.peers[node].up.load(.acquire);
     }
 
+    /// Whether `t`'s node serves it now: up, and not still bringing it up (`NodeTool.warming`).
+    pub fn serves(c: *const Cluster, t: *const NodeTool) bool {
+        return c.up(t.node) and !t.warming.load(.acquire);
+    }
+
+    /// `serves` for the remote tool in scheduler slot `slot` (`api/routes.zig`'s stand-ins); a slot that is not one: up.
+    pub fn servesSlot(c: *const Cluster, slot: usize, node: usize) bool {
+        for (c.tools.items) |t| if (t.slot == slot) return c.serves(t);
+        return c.up(node);
+    }
+
     /// Asks every other node once, before anything loads, so a tool starts on the right side.
     pub fn probeAll(c: *Cluster) void {
         for (c.peers, 0..) |*p, i| {
@@ -79,6 +92,7 @@ pub const Cluster = struct {
     }
 
     pub fn start(c: *Cluster) !void {
+        for (c.tools.items) |t| t.served = c.serves(t);
         c.thread = try std.Thread.spawn(.{}, run, .{c});
     }
 
@@ -102,6 +116,7 @@ pub const Cluster = struct {
         var next = nowMs(c.io);
         while (!c.stopping.load(.acquire)) {
             for (c.peers) |*p| if (p.changed.swap(false, .acq_rel)) c.moved(p);
+            c.freeStandIns();
             if (nowMs(c.io) >= next) {
                 next = nowMs(c.io) + c.interval_ms;
                 for (c.peers, 0..) |*p, i| if (i != c.self) c.check(p);
@@ -127,17 +142,11 @@ pub const Cluster = struct {
     }
 
     /// `p` went down or came back: each of its tools that is loaded, or that falls back here, starts again on its new side.
-    /// A node that came back also frees the stand-ins that answered for its tools (unloaded once no job uses them), unless
-    /// a tool of another node that is still down has the same stand-in.
     fn moved(c: *Cluster, p: *Peer) void {
         const r = c.refresh orelse return;
         const back = p.up.load(.acquire);
         for (c.tools.items) |t| {
             if (&c.peers[t.node] != p) continue;
-            if (back) if (t.stand_in) |s| if (c.standInFree(s)) {
-                std.log.info("node {s}: back, so '{s}' runs there again and its stand-in is unloaded once idle", .{ p.node.id, t.cfg.id });
-                r.f(r.ctx, s);
-            };
             // gone down: only a tool still loaded on its node moves (a fallback the job that found it gone loaded here
             // already, `Scheduler.again`, stays); back: a fallback running here unloads, to load there next
             if (t.st.load(.acquire) == .unloaded and (t.fallback == null or !back)) continue;
@@ -145,13 +154,29 @@ pub const Cluster = struct {
         }
     }
 
-    /// Whether stand-in slot `s` answers for no tool whose node is down.
+    /// A tool its node serves again (`serves` rose): its stand-in is unloaded once no job uses it, unless it still answers
+    /// for another tool that is not served.
+    fn freeStandIns(c: *Cluster) void {
+        const r = c.refresh orelse return;
+        for (c.tools.items) |t| {
+            const now = c.serves(t);
+            defer t.served = now;
+            if (!now or t.served) continue;
+            const s = t.stand_in orelse continue;
+            if (!c.standInFree(s)) continue;
+            std.log.info("node {s}: serves '{s}' again, so its stand-in is unloaded once idle", .{ c.peers[t.node].node.id, t.cfg.id });
+            r.f(r.ctx, s);
+        }
+    }
+
+    /// Whether stand-in slot `s` answers for no tool that its node does not serve now.
     fn standInFree(c: *const Cluster, s: usize) bool {
-        for (c.tools.items) |t| if (t.stand_in == s and !c.up(t.node)) return false;
+        for (c.tools.items) |t| if (t.stand_in == s and !c.serves(t)) return false;
         return true;
     }
 
-    /// GET /v1/node/status on `p`, telling it this front's open calls; true on a 200.
+    /// GET /v1/node/status on `p`, telling it this front's open calls; true on a 200. Its tool list says which of `p`'s
+    /// tools it is still bringing up (`NodeTool.warming`), set before the caller marks `p` up.
     fn probe(c: *Cluster, p: *Peer) bool {
         const timeout: i32 = @intCast(@min(c.interval_ms, 2000));
         const fd = c.connect(p, timeout) catch return false;
@@ -161,8 +186,29 @@ pub const Cluster = struct {
         var buf: [16 << 10]u8 = undefined;
         var r: upstream.Reader = .{ .fd = fd, .buf = &buf, .timeout_ms = timeout };
         const status = r.head() catch return false;
-        while (r.next() catch return false) |_| {}
-        return status == 200;
+        var arena: std.heap.ArenaAllocator = .init(c.gpa);
+        defer arena.deinit();
+        const body = r.rest(arena.allocator(), 4 << 20) catch return false;
+        if (status != 200) return false;
+        c.warmingFrom(p, arena.allocator(), body);
+        return true;
+    }
+
+    /// `NodeTool.warming` for `p`'s tools from its status: a tool it is loading, or one it keeps (`always`) that is not
+    /// loaded yet (its load is coming, or failed and is retried). A tool it loads on demand is not: a request loads it.
+    fn warmingFrom(c: *Cluster, p: *Peer, a: std.mem.Allocator, body: []const u8) void {
+        const Status = struct { tools: []const struct { id: []const u8, state: []const u8 = "", rule: []const u8 = "" } = &.{} };
+        const st = std.json.parseFromSliceLeaky(Status, a, body, .{ .ignore_unknown_fields = true }) catch Status{};
+        for (c.tools.items) |t| {
+            if (&c.peers[t.node] != p) continue;
+            var w = false;
+            for (st.tools) |e| if (std.mem.eql(u8, e.id, t.cfg.id)) {
+                const loaded = std.mem.eql(u8, e.state, "ready") or std.mem.eql(u8, e.state, "busy");
+                w = std.mem.eql(u8, e.state, "loading") or (std.mem.eql(u8, e.rule, "always") and !loaded);
+            };
+            if (t.warming.swap(w, .acq_rel) != w and t.stand_in != null)
+                std.log.info("node {s}: '{s}' {s}", .{ p.node.id, t.cfg.id, if (w) "is still loading there: its stand-in answers" else "is ready there" });
+        }
     }
 
     /// A connection to `p`'s daemon: the address that answered last first, then the others in order.
@@ -216,6 +262,8 @@ pub const NodeTool = struct {
     slot: usize = 0, // its scheduler slot, for `Scheduler.refresh`
     fallback: ?*process.ProcessTool = null, // runs it here while its node is down
     stand_in: ?usize = null, // the front's slot that answers for it while its node is down (`topology.Plan.stand_ins`)
+    warming: std.atomic.Value(bool) = .init(false), // its node is up but still bringing it up (the last health check)
+    served: bool = false, // `Cluster.serves` as `Cluster.run` last saw it (its thread only): a rise frees the stand-in
     mode: std.atomic.Value(Mode) = .init(.remote), // where the loaded tool runs
     st: std.atomic.Value(tool.State) = .init(.unloaded), // remote: as the front sees it
     aborted: std.atomic.Value(bool) = .init(false),

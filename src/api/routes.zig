@@ -450,13 +450,14 @@ pub fn toolIndex(app: *App, id: []const u8) ?usize {
 /// else the first tool that can do it, else the first of its kind (so `enqueue`'s refusal names a model); a disabled
 /// tool is skipped unless named (a disabled default: the next enabled tool of its kind). Null with `why` set when the
 /// named model is unknown (404), of another kind (400) or disabled (409), or no enabled model of the kind exists (404,
-/// or 409 when the only ones are disabled). On the front, a tool whose node is down resolves to its stand-in (`standIn`).
+/// or 409 when the only ones are disabled). On the front, a tool its node does not serve now (down, or still bringing it
+/// up) resolves to its stand-in (`standIn`).
 pub fn resolve(app: *App, model: ?[]const u8, cap: request.Capability, why: *Refusal) ?usize {
     return standIn(app, resolveHere(app, model, cap, why) orelse return null);
 }
 
-/// The tool that answers for tool `i` now: its stand-in (`topology.nodes[].stand_in`) while the node that runs `i` is
-/// down and the stand-in is enabled, else `i` itself.
+/// The tool that answers for tool `i` now: its stand-in (`topology.nodes[].stand_in`) while the node that runs `i` does
+/// not serve it (down, or back but still bringing it up: `node.Cluster.serves`) and the stand-in is enabled, else `i`.
 pub fn standIn(app: *const App, i: usize) usize {
     const s = standInOf(app, i) orelse return i;
     const p = app.plan.?;
@@ -464,7 +465,7 @@ pub fn standIn(app: *const App, i: usize) usize {
         .remote => |k| k,
         else => return i,
     };
-    if (app.cluster.?.up(node_index) or app.scheduler.residency(s).rule == .disabled) return i;
+    if (app.cluster.?.servesSlot(i, node_index) or app.scheduler.residency(s).rule == .disabled) return i;
     return s;
 }
 
