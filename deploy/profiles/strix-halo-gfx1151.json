@@ -23,7 +23,10 @@
   "TTS_DIR": "${TTS_DIR:-$J/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}",
   "ASR_DIR": "${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}",
   "LLAMA_BIN": "${LLAMA_BIN:-$J/llama.cpp/bin}",
-  "GUFO_IMAGE": "${GUFO_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}"
+  "GUFO_IMAGE": "${GUFO_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}",
+  "COMFY_ROOT": "${COMFY_ROOT:-$J/comfy}",
+  "COMFY_HF": "${COMFY_HF:-$COMFY_ROOT/hf}",
+  "COMFY_INSTALL": "bash $REPO/deploy/strix-halo/comfyui/install.sh"
  },
  "prereqs": [
   {
@@ -277,6 +280,44 @@
      "run": "python3 -I $REPO/tools/speech/whisper/fetch_model.py --root $J/models/whisper",
      "done": "python3 -I $REPO/tools/speech/whisper/fetch_model.py --verify $J/models/whisper/whisper-large-v3-turbo/41f01f3fe87f28c78e2fbf8b568835947dd65ed9 > /dev/null",
      "fix": "network: run again"
+    }
+   ]
+  },
+  {
+   "key": "minimax",
+   "id": "minimax-h3",
+   "warm": false,
+   "title": "MiniMax H3 (text/image to video with audio) and H3-Image (text to image, edits) through ComfyUI with PyTorch ROCm; tools minimax-h3 and minimax-h3-image, each booked at the whole GTT budget",
+   "licence": {
+    "name": "MiniMax H3 / H3-Image Community License Agreements (not licensed in the US, EU, UK or South Korea)",
+    "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
+   },
+   "accept": [
+    "the MiniMax H3 and MiniMax H3-Image Community Licenses (links below and https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE): they grant nothing in the United States, the European Union, the United Kingdom or South Korea, and set an Acceptable Use Policy and disclosure duties elsewhere"
+   ],
+   "download_bytes": 75770603344,
+   "disk_bytes": 88035835419,
+   "memory_bytes": 38654705664,
+   "steps": [
+    {
+     "id": "comfyui",
+     "download_bytes": 6000000000,
+     "disk_bytes": 17765232075,
+     "needs_accept": true,
+     "title": "ComfyUI e9afbcc and ComfyUI-GGUF 6ea2651 (pinned), a Python 3.13 venv with PyTorch 2.14.1+rocm7.2, and the H3-Image GGUF loader node",
+     "run": "$COMFY_INSTALL comfyui",
+     "done": "$COMFY_INSTALL ok-comfyui",
+     "fix": "network to github.com / download.pytorch.org / pypi.org: run again; a checkout with local changes is left alone (it says which)"
+    },
+    {
+     "id": "weights",
+     "download_bytes": 69770603344,
+     "disk_bytes": 69770603344,
+     "needs_accept": true,
+     "title": "Comfy-Org/MiniMax-H3 (int8 fl2va DiT, Qwen3-VL 32B int8 text encoder, video/audio VAEs, 4-step turbo LoRA), unsloth/MiniMax-H3-Image-GGUF Q4_K_M, the H3-Image VAE (pinned revisions), linked into ComfyUI/models",
+     "run": "$COMFY_INSTALL models",
+     "done": "$COMFY_INSTALL ok-models",
+     "fix": "network to huggingface.co: run again (hf resumes); COMFY_HF=DIR reuses an existing download"
     }
    ]
   }
