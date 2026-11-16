@@ -35,7 +35,7 @@ deploy/strix-halo/comfyui/install.sh models      # their weights (about 90 GB, i
 
 Every download is pinned: the Gufo runtime by digest (`tools/gufo/IMAGE`; `start.sh` passes it into the unit, so the
 workers run the image bootstrap pulled), the Hugging Face weights by commit with every file's size and sha256
-(`pins/*.json`, fetched and checked by `tools/install/hf_pinned.py`), the Whisper venv by `uv.lock` hashes, llama.cpp
+(`pins/*.json`, fetched and checked by `tools/install/hf_pinned.py`), the Whisper venv by `uv.lock` hashes, the ComfyUI venv by a hashed requirements file, llama.cpp
 and the host tools by sha256. `gufo diagnose` is a GPU step of its own (`--no-gpu` skips it).
 
 `env.sh` holds every default (prefix `$J`, ports, model directories, measured memory); a site file sourced after it
@@ -61,9 +61,11 @@ overrides any of them. `tools/install/doctor.sh --profile strix-halo-gfx1151 --u
 
 MiniMax through ComfyUI. `comfyui/install.sh` (the profile's `minimax` model: steps `comfyui` and `weights`) installs,
 without sudo and idempotently, ComfyUI and ComfyUI-GGUF at pinned commits under `$COMFY_ROOT` (`$J/comfy`), a Python
-3.13 venv with PyTorch 2.14.1+rocm7.2, `comfyui/nodes/minimax_h3_image_gguf.py` (loads the Unsloth GGUF with the PDD
-config ComfyUI's detection needs), and the weights at pinned revisions, linked into `ComfyUI/models`. A step whose
-pins match is skipped; a checkout with local changes is left alone. Edits auto-select by whether a mask is supplied (a request may still set size, steps or guidance). A masked or local
+3.13 venv with PyTorch 2.14.1+rocm7.2 from `comfyui/requirements-rocm7.2.txt` (every package by sha256, installed with
+`--require-hashes`), `comfyui/nodes/minimax_h3_image_gguf.py` (loads the Unsloth GGUF with the PDD config ComfyUI's
+detection needs), and the weights at pinned revisions (`pins/minimax-*.json`: every file's size and sha256, checked in
+full before a manifest is marked done), linked into `ComfyUI/models`. A step whose pins match is skipped; a checkout
+with local changes is left alone. Edits auto-select by whether a mask is supplied (a request may still set size, steps or guidance). A masked or local
 edit uses `comfyui/minimax-h3-image-edit.json`: Q4_K_M, the first input image scaled to about 1 MP on the 32-pixel grid
 (unless the request names a size), 6 steps, cfg 1.0; further images (up to 5 in all) are references (`<Picture 2>` ...),
 and the mask keeps the input's pixels wherever it is opaque (`ImageCompositeMasked`). A whole-scene edit (no mask) uses
