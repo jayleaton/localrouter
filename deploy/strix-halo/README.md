@@ -24,6 +24,11 @@ deploy/strix-halo/stop.sh                        # stop the daemon (its workers 
 SITE=path/to/site.env deploy/strix-halo/start.sh           # with a site file (paths, voice, which model does what)
 ```
 
+Every download is pinned: the Gufo runtime by digest (`tools/gufo/IMAGE`; `start.sh` passes it into the unit, so the
+workers run the image bootstrap pulled), the Hugging Face weights by commit with every file's size and sha256
+(`pins/*.json`, fetched and checked by `tools/install/hf_pinned.py`), the Whisper venv by `uv.lock` hashes, llama.cpp
+and the host tools by sha256. `gufo diagnose` is a GPU step of its own (`--no-gpu` skips it).
+
 `env.sh` holds every default (prefix `$J`, ports, model directories, measured memory); a site file sourced after it
 overrides any of them. `tools/install/doctor.sh --profile strix-halo-gfx1151 --unit localrouter-amd` checks the box
 (GPU, ROCm, GTT, Podman, the steps, the service); export the site file's variables first when it moves model paths.

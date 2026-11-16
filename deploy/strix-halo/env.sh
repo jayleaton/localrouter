@@ -14,6 +14,7 @@ TTS_DIR=${TTS_DIR:-$J/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}
 ASR_DIR=${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}
 WHISPER_DIR=${WHISPER_DIR:-$J/models/whisper/whisper-large-v3-turbo/41f01f3fe87f28c78e2fbf8b568835947dd65ed9}
 LLAMA_BIN=${LLAMA_BIN:-$J/llama.cpp/bin}                            # a llama.cpp build with llama-server
+GUFO_IMAGE=${GUFO_IMAGE:-$(cat "$REPO/tools/gufo/IMAGE")}           # the Gufo runtime, pinned by digest; start.sh passes it to the unit
 # which model serves what
 CHAT_DEFAULT=${CHAT_DEFAULT:-qwen3.8-flash-next}
 VOICE_CHAT=${VOICE_CHAT:-qwen3.8-flash-next-q3}  # Q3 + TTS + ASR fit the 96 GiB GTT together; Q4 + both do not

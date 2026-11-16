@@ -12,8 +12,10 @@ supervise it: the `openai_server` engine for chat, `tools/speech/openai_audio` f
   `lr-gufo-*` left over.
 - `/dev/kfd` and `/dev/dri` are passed with the `video` and `render` groups by name: Gufo's docs use
   `--group-add keep-groups`, which needs the crun runtime, and many hosts run runc.
-- `GUFO_IMAGE` picks the image (default `ghcr.io/gufo-org/toolboxes/gufo-runtime:latest`; pin a version for
-  reproducible installs).
+- The image is pinned by digest in `IMAGE` (`gufo-runtime:0.34.0@sha256:49b1fce4…`, Gufo engine 2845939b), the
+  build these figures were measured on; podman checks the pulled manifest against the digest. `GUFO_IMAGE` overrides
+  it with another `name@sha256:…` (a reference without a digest is refused unless `GUFO_ALLOW_UNPINNED=1`).
+  `deploy/strix-halo/start.sh` passes the chosen image into the daemon's unit, so the workers run what bootstrap pulled.
 
 Measured on a Radeon 8060S with 96 GiB GTT (2026-11-15): Flash-Next UD-Q4_K_XL with the MTP head peaks at 88 GiB GTT
 serving 32k context with 2 sessions (pp512 1196 tok/s, decode 60-78 tok/s with MTP); Qwen3-TTS CustomVoice 6.5 GiB, about

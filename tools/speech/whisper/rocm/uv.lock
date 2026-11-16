@@ -381,7 +381,7 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/rocm7.2/torch-2.13.0%2Brocm7.2-cp312-cp312-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:26:11Z" },
+    { url = "https://download-r2.pytorch.org/whl/rocm7.2/torch-2.13.0%2Brocm7.2-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:2ad8066cb9d3c00b2dc77ec5af998eed495e7240e724e8c28124d4d5faba52f0", size = 6227849000, upload-time = "2026-07-08T11:26:11Z" },
 ]
 
 [[package]]

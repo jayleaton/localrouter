@@ -23,7 +23,10 @@
   "TTS_DIR": "${TTS_DIR:-$J/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}",
   "ASR_DIR": "${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}",
   "LLAMA_BIN": "${LLAMA_BIN:-$J/llama.cpp/bin}",
-  "GUFO_IMAGE": "${GUFO_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}"
+  "GUFO_IMAGE": "${GUFO_IMAGE:-$(cat $REPO/tools/gufo/IMAGE)}",
+  "PINS": "$REPO/deploy/strix-halo/pins",
+  "HF_PINNED": "python3 -I $REPO/tools/install/hf_pinned.py",
+  "HF": "$J/bin/uvx --from huggingface_hub==2.4.0 hf"
  },
  "prereqs": [
   {
@@ -133,10 +136,21 @@
     "id": "gufo-image",
     "download_bytes": 3490000000,
     "disk_bytes": 3490000000,
-    "title": "the Gufo runtime image (ghcr.io/gufo-org/toolboxes/gufo-runtime, MIT; ROCm 10.1 inside)",
-    "run": "podman pull $GUFO_IMAGE && podman run --rm --device /dev/kfd --device /dev/dri --group-add video --group-add render $GUFO_IMAGE gufo diagnose",
-    "done": "podman image exists $GUFO_IMAGE",
-    "fix": "network to ghcr.io: run again; gufo diagnose says what the host lacks"
+    "title": "the Gufo runtime image (ghcr.io/gufo-org/toolboxes/gufo-runtime 0.34.0, MIT; ROCm 10.1 inside), pinned by digest in tools/gufo/IMAGE",
+    "run": "case $GUFO_IMAGE in *@sha256:*) ;; *) echo \"GUFO_IMAGE $GUFO_IMAGE is not pinned by digest\" >&2; exit 1 ;; esac; podman pull $GUFO_IMAGE && [ \"$(podman image inspect --format '{{.Digest}}' $GUFO_IMAGE)\" = \"${GUFO_IMAGE##*@}\" ]",
+    "done": "podman image exists $GUFO_IMAGE && [ \"$(podman image inspect --format '{{.Digest}}' $GUFO_IMAGE)\" = \"${GUFO_IMAGE##*@}\" ]",
+    "fix": "network to ghcr.io: run again; a digest mismatch means the registry served other bytes than the pin (podman refuses those too)"
+   },
+   {
+    "id": "gufo-diagnose",
+    "gpu": true,
+    "min_free_gib": 8,
+    "download_bytes": 0,
+    "disk_bytes": 0,
+    "title": "gufo diagnose in the pinned image: the host's GPU devices, groups and GTT as Gufo sees them",
+    "run": "podman run --rm --device /dev/kfd --device /dev/dri --group-add video --group-add render $GUFO_IMAGE gufo diagnose && mkdir -p $J/install/state && echo $GUFO_IMAGE > $J/install/state/gufo-diagnose",
+    "done": "[ \"$(cat $J/install/state/gufo-diagnose 2> /dev/null)\" = \"$GUFO_IMAGE\" ]",
+    "fix": "gufo diagnose says what the host lacks (the gpu-devices and gtt prerequisites above)"
    }
   ]
  },
@@ -158,12 +172,13 @@
      "id": "weights",
      "download_bytes": 115028765978,
      "disk_bytes": 115100000000,
-     "title": "unsloth/Qwen3.8-Flash-Next-GGUF: UD-Q4_K_XL (4 shards), MTP/mtp-...-shared-Q8_0.gguf, mmproj-BF16.gguf",
-     "run": "$J/bin/uvx --from huggingface_hub==2.4.0 hf download unsloth/Qwen3.8-Flash-Next-GGUF --local-dir $FLASHNEXT_DIR --include 'UD-Q4_K_XL/*' --include 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' --include 'mmproj-BF16.gguf'",
-     "done": "[ -s $FLASHNEXT_DIR/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf ] && [ -s $FLASHNEXT_DIR/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf ] && [ -s $FLASHNEXT_DIR/mmproj-BF16.gguf ]",
-     "fix": "network to huggingface.co: run again (hf resumes)"
+     "title": "unsloth/Qwen3.8-Flash-Next-GGUF at f5d175de: UD-Q4_K_XL (4 shards), MTP/mtp-...-shared-Q8_0.gguf, mmproj-BF16.gguf; every file by sha256 (deploy/strix-halo/pins/flash-next-q4.json)",
+     "run": "$HF_PINNED download $PINS/flash-next-q4.json $FLASHNEXT_DIR --hf '$HF' && $STEPS stamp flash-next-q4 $PINS/flash-next-q4.json",
+     "done": "$STEPS stamped flash-next-q4 $PINS/flash-next-q4.json && $HF_PINNED verify $PINS/flash-next-q4.json $FLASHNEXT_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
     }
-   ]
+   ],
+   "pins": "deploy/strix-halo/pins/flash-next-q4.json"
   },
   {
    "key": "chat-q3",
@@ -191,12 +206,13 @@
      "id": "weights",
      "download_bytes": 89464948506,
      "disk_bytes": 89500000000,
-     "title": "unsloth/Qwen3.8-Flash-Next-GGUF: UD-Q3_K_XL (4 shards) and the shared MTP head",
-     "run": "$J/bin/uvx --from huggingface_hub==2.4.0 hf download unsloth/Qwen3.8-Flash-Next-GGUF --local-dir $FLASHNEXT_DIR --include 'UD-Q3_K_XL/*' --include 'MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'",
-     "done": "[ -s $FLASHNEXT_DIR/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00004-of-00004.gguf ] && [ -s $FLASHNEXT_DIR/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf ]",
-     "fix": "network to huggingface.co: run again (hf resumes)"
+     "title": "unsloth/Qwen3.8-Flash-Next-GGUF at f5d175de: UD-Q3_K_XL (4 shards) and the shared MTP head; every file by sha256 (deploy/strix-halo/pins/flash-next-q3.json)",
+     "run": "$HF_PINNED download $PINS/flash-next-q3.json $FLASHNEXT_DIR --hf '$HF' && $STEPS stamp flash-next-q3 $PINS/flash-next-q3.json",
+     "done": "$STEPS stamped flash-next-q3 $PINS/flash-next-q3.json && $HF_PINNED verify $PINS/flash-next-q3.json $FLASHNEXT_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
     }
-   ]
+   ],
+   "pins": "deploy/strix-halo/pins/flash-next-q3.json"
   },
   {
    "key": "tts",
@@ -215,12 +231,13 @@
      "id": "weights",
      "download_bytes": 4544233100,
      "disk_bytes": 4600000000,
-     "title": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-     "run": "$J/bin/uvx --from huggingface_hub==2.4.0 hf download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --local-dir $TTS_DIR",
-     "done": "[ -s $TTS_DIR/config.json ] && ls $TTS_DIR/*.safetensors > /dev/null 2>&1",
-     "fix": "network to huggingface.co: run again"
+     "title": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice at 0c0e3051, every file by sha256 (deploy/strix-halo/pins/qwen3-tts-customvoice.json)",
+     "run": "$HF_PINNED download $PINS/qwen3-tts-customvoice.json $TTS_DIR --hf '$HF' && $STEPS stamp qwen3-tts-customvoice $PINS/qwen3-tts-customvoice.json",
+     "done": "$STEPS stamped qwen3-tts-customvoice $PINS/qwen3-tts-customvoice.json && $HF_PINNED verify $PINS/qwen3-tts-customvoice.json $TTS_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
     }
-   ]
+   ],
+   "pins": "deploy/strix-halo/pins/qwen3-tts-customvoice.json"
   },
   {
    "key": "stt",
@@ -239,12 +256,13 @@
      "id": "weights",
      "download_bytes": 4703117477,
      "disk_bytes": 4750000000,
-     "title": "Qwen/Qwen3-ASR-1.7B",
-     "run": "$J/bin/uvx --from huggingface_hub==2.4.0 hf download Qwen/Qwen3-ASR-1.7B --local-dir $ASR_DIR",
-     "done": "[ -s $ASR_DIR/config.json ] && ls $ASR_DIR/*.safetensors > /dev/null 2>&1",
-     "fix": "network to huggingface.co: run again"
+     "title": "Qwen/Qwen3-ASR-1.7B at 7278e1e7, every file by sha256 (deploy/strix-halo/pins/qwen3-asr.json)",
+     "run": "$HF_PINNED download $PINS/qwen3-asr.json $ASR_DIR --hf '$HF' && $STEPS stamp qwen3-asr $PINS/qwen3-asr.json",
+     "done": "$STEPS stamped qwen3-asr $PINS/qwen3-asr.json && $HF_PINNED verify $PINS/qwen3-asr.json $ASR_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
     }
-   ]
+   ],
+   "pins": "deploy/strix-halo/pins/qwen3-asr.json"
   },
   {
    "key": "whisper",
