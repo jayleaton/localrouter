@@ -43,13 +43,52 @@ hw_os() {
   if [ $darwin = 1 ]; then echo "macos $(sw_vers -productVersion | cut -d. -f1)"; return; fi
   (. /etc/os-release 2> /dev/null && echo "${ID:-unknown} ${VERSION_ID:-}")
 }
+# ---- AMD (amdgpu + ROCm), used only when nvidia-smi sees no GPU: the first amdgpu card in sysfs
+hw_nvidia() { [ $darwin = 0 ] && nvidia-smi -L 2> /dev/null | grep -q GPU; }
+amd_card() {   # the sysfs device directory of the first AMD (vendor 0x1002) DRM card with a GTT counter
+  local d
+  for d in /sys/class/drm/card[0-9]*/device; do
+    [ "$(cat "$d/vendor" 2> /dev/null)" = 0x1002 ] && [ -r "$d/mem_info_gtt_total" ] && { echo "$d"; return; }
+  done
+  return 1
+}
+hw_amd() { [ $darwin = 0 ] && ! hw_nvidia && amd_card > /dev/null; }
+# the gfx target (gfx1151 on Strix Halo) and the marketing name, from rocminfo's first GPU agent
+amd_gfx() { rocminfo 2> /dev/null | awk '/^ *Name: *gfx[0-9a-f]+ *$/ {print $2; exit}'; }
+amd_name() {
+  local n
+  n=$(rocminfo 2> /dev/null | awk -F': *' '/Marketing Name:/ && $2 !~ /AMD (RYZEN|EPYC|Ryzen)/ {gsub(/ +$/, "", $2); print $2; exit}')
+  [ -n "$n" ] || n=$(cat "$(amd_card)/product_name" 2> /dev/null)
+  echo "${n:-AMD GPU} ($(amd_gfx || true))" | sed 's/ ()$//'
+}
+# ROCm's version (/opt/rocm/.info/version, else hipconfig); empty without ROCm
+hw_rocm() {
+  local r=${ROCM_PATH:-/opt/rocm}
+  { cat "$r/.info/version" 2> /dev/null || hipconfig --version 2> /dev/null; } | first | sed 's/-.*//'
+}
+# GTT: the system memory the GPU may map (the unified pool on an APU such as Strix Halo), total and in use, in bytes
+hw_gtt() { cat "$(amd_card)/mem_info_gtt_total" 2> /dev/null || echo 0; }
+hw_gtt_used() { cat "$(amd_card)/mem_info_gtt_used" 2> /dev/null || echo 0; }
 hw_gpu() {
   if [ $darwin = 1 ]; then echo "$(sysctl -n machdep.cpu.brand_string) GPU (Metal)"; return; fi   # Apple Silicon: on the SoC
+  if hw_amd; then amd_name; return; fi
   nvidia-smi --query-gpu=name --format=csv,noheader 2> /dev/null | first
 }
-hw_driver() { nvidia-smi --query-gpu=driver_version --format=csv,noheader 2> /dev/null | first; }
-# the GPU's own memory in bytes; 0 on a unified-memory GPU (GB10 reports none: its memory is the system's)
-hw_vram() { nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2> /dev/null | awk 'NR == 1 {v = $1 + 0} END {printf "%d", v * 1048576}'; }
+hw_driver() {
+  if hw_amd; then echo "amdgpu $(cat /sys/module/amdgpu/version 2> /dev/null || uname -r)"; return; fi
+  nvidia-smi --query-gpu=driver_version --format=csv,noheader 2> /dev/null | first
+}
+# the GPU's own memory in bytes; 0 on a unified-memory GPU (GB10 reports none: its memory is the system's; an AMD APU's
+# small BIOS carve-out is not counted when GTT, the shared pool, is larger)
+hw_vram() {
+  if hw_amd; then
+    local v g
+    v=$(cat "$(amd_card)/mem_info_vram_total" 2> /dev/null || echo 0); g=$(hw_gtt)
+    [ "$v" -lt "$g" ] && echo 0 || echo "$v"
+    return
+  fi
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2> /dev/null | awk 'NR == 1 {v = $1 + 0} END {printf "%d", v * 1048576}'
+}
 hw_mem() {
   if [ $darwin = 1 ]; then sysctl -n hw.memsize; return; fi
   awk '/^MemTotal:/{printf "%d", $2 * 1024}' /proc/meminfo
@@ -74,6 +113,10 @@ hw_disk_free() {
 version_ge() { [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | first)" = "$2" ]; }
 hw_summary() {
   [ $darwin = 1 ] && { echo "$(hw_arch), $(hw_os), GPU '$(hw_gpu)', memory $(gib "$(hw_mem)") GiB unified, $(gib "$(hw_avail)") GiB available"; return; }
+  if hw_amd; then
+    echo "$(hw_arch), $(hw_os), GPU '$(hw_gpu)' (driver $(hw_driver)), ROCm $(hw_rocm), memory $(gib "$(hw_mem)") GiB$([ "$(hw_vram)" = 0 ] && echo " unified"), GTT $(gib "$(hw_gtt)") GiB ($(gib "$(hw_gtt_used)") GiB in use), $(gib "$(hw_avail)") GiB available"
+    return
+  fi
   echo "$(hw_arch), $(hw_os), GPU '$(hw_gpu)' (driver $(hw_driver)), CUDA $(hw_cuda), memory $(gib "$(hw_mem)") GiB$([ "$(hw_vram)" = 0 ] && [ -n "$(hw_gpu)" ] && echo " unified"), $(gib "$(hw_avail)") GiB available"
 }
 
@@ -86,6 +129,10 @@ hw_match() {
   [ "$(hw_mem)" -ge $((want * 1073741824)) ] || echo "memory $(gib "$(hw_mem)") GiB, the profile needs $want GiB"
   want=$(jq -r '.hardware.min_driver // empty' "$p"); [ -z "$want" ] || version_ge "$(hw_driver)" "$want" || echo "NVIDIA driver '$(hw_driver)', the profile needs $want or newer"
   want=$(jq -r '.hardware.min_cuda // empty' "$p"); [ -z "$want" ] || version_ge "$(hw_cuda)" "$want" || echo "CUDA '$(hw_cuda)' (nvcc at ${NVCC:-/usr/local/cuda/bin/nvcc}), the profile needs $want or newer"
+  want=$(jq -r '.hardware.min_rocm // empty' "$p"); [ -z "$want" ] || version_ge "$(hw_rocm)" "$want" || echo "ROCm '$(hw_rocm)' (${ROCM_PATH:-/opt/rocm}), the profile needs $want or newer"
+  want=$(jq -r '.hardware.gfx // empty' "$p"); [ -z "$want" ] || [ "$(amd_gfx)" = "$want" ] || echo "GPU target '$(amd_gfx)' (rocminfo), the profile needs $want"
+  want=$(jq -r '.hardware.min_gtt_gib // empty' "$p")
+  [ -z "$want" ] || [ "$(hw_gtt)" -ge $((want * 1073741824)) ] || echo "GTT $(gib "$(hw_gtt)") GiB (the GPU's share of system memory, amdgpu.gttsize / ttm.pages_limit), the profile needs $want GiB"
   want=$(jq -r .hardware.os "$p"); [ "$(hw_os)" = "$want" ] || echo "warning: OS '$(hw_os)', the profile was tested on '$want'"
 }
 
