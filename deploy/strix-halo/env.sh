@@ -15,8 +15,9 @@ ASR_DIR=${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}
 WHISPER_DIR=${WHISPER_DIR:-$J/models/whisper/whisper-large-v3-turbo/41f01f3fe87f28c78e2fbf8b568835947dd65ed9}
 LLAMA_BIN=${LLAMA_BIN:-$J/llama.cpp/bin}                            # a llama.cpp build with llama-server
 GUFO_IMAGE=${GUFO_IMAGE:-$(cat "$REPO/tools/gufo/IMAGE")}           # the Gufo runtime, pinned by digest; start.sh passes it to the unit
-COMFY_DIR=${COMFY_DIR:-$J/comfy/ComfyUI}           # ComfyUI with the MiniMax H3 nodes, ComfyUI-GGUF and the H3 weights
-COMFY_PYTHON=${COMFY_PYTHON:-$J/comfy/venv/bin/python}                  # its PyTorch ROCm environment
+COMFY_ROOT=${COMFY_ROOT:-$J/comfy}                 # what comfyui/install.sh installs: ComfyUI/, venv/, hf/ (weights)
+COMFY_DIR=${COMFY_DIR:-$COMFY_ROOT/ComfyUI}        # ComfyUI with the MiniMax H3 nodes, ComfyUI-GGUF and the H3 weights
+COMFY_PYTHON=${COMFY_PYTHON:-$COMFY_ROOT/venv/bin/python}               # its PyTorch ROCm environment
 # which model serves what
 CHAT_DEFAULT=${CHAT_DEFAULT:-qwen3.8-flash-next}
 VOICE_CHAT=${VOICE_CHAT:-qwen3.8-flash-next-q3}  # Q3 + TTS + ASR fit the 96 GiB GTT together; Q4 + both do not
