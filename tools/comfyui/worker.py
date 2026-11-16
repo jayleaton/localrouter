@@ -32,9 +32,13 @@ The tool's config arrives as JSON in LOCALROUTER_TOOL. Options:
                 a LoadImage node it adds: its IMAGE output, or for `mask` its MASK output (1 where the mask is
                 transparent, which is where an edit goes)
   modes         per capability, what changes for it: {"image_edit": {...}, "image_to_video": {...}}, each with its
-                own `workflow` (absent: the tool's), `bindings` (merged over the tool's) and `output_nodes`. A request
-                with input images uses `image_edit`, a video request with a first frame `image_to_video`; a tool
-                without the mode refuses them
+                own `workflow` (absent: the tool's), `bindings` (merged over the tool's; a JSON null drops a binding)
+                and `output_nodes`. `defaults` fills steps, guidance or negative_prompt when the request leaves them
+                unset (0 or absent). image_edit may also set `unmasked` (the same fields), used when a request has
+                input images but no mask, so a whole-scene restyle can use heavier defaults than a masked local edit.
+                A request may still set size, steps or guidance. A request with input images uses `image_edit` (or
+                its unmasked overlay), a video request with a first frame `image_to_video`; a tool without the mode
+                refuses them
   output_nodes  ids of the nodes whose outputs are the result (default: every output node)
   size_multiple width and height must be multiples of this (default 8); min_side, max_side, max_pixels: limits
   frame_multiple, frame_offset  the model's frame grid: frames = the smallest offset + k*multiple >= seconds*fps
@@ -212,13 +216,20 @@ class Worker:
         for name, m in (self.opts.get("modes") or {}).items():
             if name not in ("image_edit", "image_to_video"):
                 raise RuntimeError(f"options.modes.{name}: only image_edit and image_to_video are known")
-            self.modes[name] = self.mode(m or {}, self.modes[""])
+            m = m or {}
+            self.modes[name] = self.mode({k: v for k, v in m.items() if k != "unmasked"}, self.modes[""])
+            if name == "image_edit" and m.get("unmasked") is not None:
+                self.modes["image_edit_unmasked"] = self.mode(m["unmasked"], self.modes["image_edit"])
 
     def mode(self, o, base):
-        """(workflow, bindings, output_nodes) for the tool, or for one of its modes over the tool's."""
+        """(workflow, bindings, output_nodes, defaults) for the tool, or for one of its modes over the tool's."""
         wf = self.load_workflow(o["workflow"]) if o.get("workflow") else (base[0] if base else self.load_workflow(""))
         bindings = dict(base[1]) if base else {}
-        bindings.update({k: ([v] if isinstance(v, str) else list(v)) for k, v in (o.get("bindings") or {}).items()})
+        for k, v in (o.get("bindings") or {}).items():
+            if v is None:
+                bindings.pop(k, None)
+            else:
+                bindings[k] = [v] if isinstance(v, str) else list(v)
         if "prompt" not in bindings:
             raise RuntimeError("options.bindings.prompt is required")
         for field, targets in bindings.items():
@@ -228,7 +239,12 @@ class Worker:
                 if node not in wf or not inp or (not loose and inp not in wf[node].get("inputs", {})):
                     raise RuntimeError(f"binding {field} -> {t}: no such node input in the workflow")
         outs = [str(n) for n in (o.get("output_nodes") or (base[2] if base else self.opts.get("output_nodes")) or [])]
-        return wf, bindings, outs
+        defaults = dict(base[3]) if base else {}
+        defaults.update(o.get("defaults") or {})
+        for field in defaults:
+            if field not in bindings:
+                raise RuntimeError(f"defaults.{field}: no binding")
+        return wf, bindings, outs, defaults
 
     def load_workflow(self, path):
         if not path:
@@ -330,6 +346,12 @@ class Worker:
             raise Unavailable(f"ComfyUI is not reachable: {e}")
 
     # ---- requests
+    def _defaults_note(self, mode):
+        d = mode[3] if len(mode) > 3 and mode[3] else {}
+        if not d:
+            return ""
+        return "; defaults " + ", ".join(f"{k}={v}" for k, v in d.items())
+
     def set(self, wf, bindings, field, value):
         for t in bindings.get(field, []):
             node, _, inp = t.partition(".")
@@ -349,12 +371,13 @@ class Worker:
     def fill(self, mode, r, seed, inputs):
         """The workflow for one run: a deep copy with the request's fields written into the bound inputs, and a
         LoadImage node for each input image (`inputs`: field -> list of names ComfyUI gave the uploaded files)."""
-        src, b, _ = mode
+        src, b, _, defaults = mode
         wf = json.loads(json.dumps(src))
         self.set(wf, b, "prompt", r.get("prompt") or "")
         for field in ("negative_prompt", "steps", "guidance"):
-            v = r.get(field)
-            if v and field not in b:
+            given = r.get(field)
+            v = given if given else defaults.get(field)
+            if given and field not in b:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' takes no {field.replace('_', ' ')}")
             if v:
                 self.set(wf, b, field, v)
@@ -428,7 +451,15 @@ class Worker:
             r = req["image"]
             if r.get("references") and "image_edit" not in self.modes:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' makes images from text only (no edits)")
-            mode = self.modes["image_edit" if r.get("references") else ""]
+            if r.get("references"):
+                if r.get("mask") or "image_edit_unmasked" not in self.modes:
+                    mode = self.modes["image_edit"]
+                    log("image_edit" + (" with a mask" if r.get("mask") else "") + self._defaults_note(mode))
+                else:
+                    mode = self.modes["image_edit_unmasked"]
+                    log("image_edit without a mask: unmasked workflow" + self._defaults_note(mode))
+            else:
+                mode = self.modes[""]
             inputs = self.inputs(mode, r, job_dir)
             seed = int(r.get("seed") or 0)
             n = max(1, int(r.get("n") or 1))
