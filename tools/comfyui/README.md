@@ -17,9 +17,12 @@ tools, scheduled and labelled like any other model. Standard library only: it ru
   (`/upload/image`, into the worker's private input directory) and wired in through a LoadImage node the worker adds:
   its IMAGE output, or for a mask its MASK output (1 where the mask is transparent, where an edit goes).
 - **modes**: `options.modes.image_edit` / `image_to_video` give a request with input images its own workflow and
-  bindings (merged over the tool's): `{"image_edit": {"workflow": "edit.json", "bindings": {"references": [...]}}}`.
-  A tool without the mode refuses such requests. An edit without a size keeps whatever size its workflow derives
-  from the input image.
+  bindings (merged over the tool's; a JSON `null` drops a binding): `{"image_edit": {"workflow": "edit.json",
+  "bindings": {"references": [...]}}}`. `defaults` fills `steps`, `guidance` or `negative_prompt` when the request
+  leaves them unset (0 or absent). `image_edit` may also set `unmasked` (the same fields), used when a request has
+  input images but no mask, so a whole-scene restyle can use heavier defaults than a masked local edit. A request
+  may still set size, steps or guidance. A tool without the mode refuses such requests. An edit without a size
+  keeps whatever size its workflow derives from the input image.
 - **cancel**: answers its load with `"cancel": "signal"`, so a cancel is SIGUSR1: the prompt is dropped from the queue,
   ComfyUI is interrupted, and the worker stays loaded.
 - **exit / unload**: SIGTERM to ComfyUI's process group, progress lines while it stops, SIGKILL after
@@ -44,4 +47,4 @@ requests without one: `default_width` and `default_height` (read by the daemon).
 ```
 
 Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
-ComfyUI, 24 checks): `python3 -I tools/comfyui/test_worker.py`.
+ComfyUI, 29 checks): `python3 -I tools/comfyui/test_worker.py`.

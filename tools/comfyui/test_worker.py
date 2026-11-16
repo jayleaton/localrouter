@@ -192,8 +192,45 @@ def main():
     check("more input images than bound slots are refused", r.get("type") == "invalid_request_error" and "at most 2" in r["error"])
     r = ed.ask({"op": "generate", "id": "img_e3", "dir": job, "request": {"image": {"prompt": "x", "references": ["../x.png"]}}})
     check("an input outside the job directory is refused", r.get("type") == "invalid_request_error")
+    r = ed.ask({"op": "generate", "id": "img_e4", "dir": job, "request": {"image": {"prompt": "x", "references": ["a.png"]}}})
+    check("edit without a mask still runs when there is no unmasked overlay", r.get("ok") and r.get("files") == ["0.png"])
     ed.p.stdin.close()
     ed.p.wait(timeout=20)
+
+    masked_wf = json.loads(json.dumps(edit_wf))
+    unmasked_wf = json.loads(json.dumps(edit_wf))
+    unmasked_wf["2"]["inputs"]["steps"] = 30
+    unmasked_wf.pop("6")  # no composite: this path is for whole-scene edits
+    json.dump(masked_wf, open(os.path.join(d, "edit-masked.json"), "w"))
+    json.dump(unmasked_wf, open(os.path.join(d, "edit-unmasked.json"), "w"))
+    ed2 = Proc({"id": "ed2", "options": dict(base, workflow=os.path.join(d, "img.json"),
+                                             bindings={"prompt": "1.prompt", "seed": "2.seed", "steps": "2.steps"},
+                                             modes={"image_edit": {"workflow": os.path.join(d, "edit-masked.json"),
+                                                                   "bindings": {"references": "5.image", "mask": "6.mask"},
+                                                                   "defaults": {"steps": 6},
+                                                                   "unmasked": {"workflow": os.path.join(d, "edit-unmasked.json"),
+                                                                                "bindings": {"mask": None},
+                                                                                "defaults": {"steps": 30}}}})})
+    check("edit tool with an unmasked overlay loads", ed2.ask({"op": "load"}).get("ok"))
+    r = ed2.ask({"op": "generate", "id": "img_u1", "dir": job, "request": {"image": {"prompt": "make it snow", "references": ["a.png"], "seed": 1}}})
+    wf = json.loads(open(os.path.join(job, "0.png"), "rb").read()[5:]) if r.get("ok") else {}
+    check("whole-scene edit (no mask) uses the unmasked workflow and default steps",
+          r.get("ok") and "6" not in wf and wf.get("2", {}).get("inputs", {}).get("steps") == 30)
+    r = ed2.ask({"op": "generate", "id": "img_u2", "dir": job,
+                 "request": {"image": {"prompt": "red umbrella", "references": ["a.png"], "mask": "m.png", "seed": 1}}})
+    wf = json.loads(open(os.path.join(job, "0.png"), "rb").read()[5:]) if r.get("ok") else {}
+    mask = wf.get("6", {}).get("inputs", {}).get("mask")
+    loads = {k: v["inputs"]["image"] for k, v in wf.items() if v.get("class_type") == "LoadImage"}
+    check("masked edit keeps the fast workflow and default steps",
+          r.get("ok") and wf.get("6", {}).get("class_type") == "Composite" and wf.get("2", {}).get("inputs", {}).get("steps") == 6
+          and mask and loads.get(mask[0], "").endswith("m.png") and mask[1] == 1)
+    r = ed2.ask({"op": "generate", "id": "img_u3", "dir": job,
+                 "request": {"image": {"prompt": "make it snow", "references": ["a.png"], "steps": 8}}})
+    wf = json.loads(open(os.path.join(job, "0.png"), "rb").read()[5:]) if r.get("ok") else {}
+    check("request steps override the unmasked default; the unmasked workflow is still used",
+          r.get("ok") and "6" not in wf and wf.get("2", {}).get("inputs", {}).get("steps") == 8)
+    ed2.p.stdin.close()
+    ed2.p.wait(timeout=20)
 
     i2v = Proc({"id": "i2v", "options": dict(base, workflow=os.path.join(d, "vid.json"), bindings={"prompt": "1.prompt", "frames": "1.length"},
                                              modes={"image_to_video": {"bindings": {"first_frame": "1.first_frame"}}})})
