@@ -31,7 +31,7 @@ WEIGHTS=(
      vae/minimax_h3_video_vae_fp16.safetensors vae/minimax_h3_audio_vae_fp32.safetensors
      loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
   "unsloth/MiniMax-H3-Image-GGUF 2eda8f761a1625818e2933e7e726e337d197bc27 unsloth-MiniMax-H3-Image-GGUF
-     minimax_h3_image_pruned-Q4_K_M.gguf"
+     minimax_h3_image_pruned-Q4_K_M.gguf minimax_h3_image_pruned-Q8_0.gguf"
   "Comfy-Org/MiniMax-H3-Image 0bb149f51e3156ed4b90dd45d5620346bfe1df8f Comfy-Org-MiniMax-H3-Image
      vae/minimax_h3_image_vae_fp16.safetensors"
 )
