@@ -15,6 +15,7 @@ import json, os, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 args = sys.argv[1:]
 port = int(args[args.index("--port") + 1]); out = args[args.index("--output-directory") + 1]
+inp = args[args.index("--input-directory") + 1]
 hist, seen = {}, []
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -34,7 +35,8 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/seen": return self.reply(200, seen)
         self.reply(404, {})
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.loads(raw) if raw[:1] == b"{" else {}
         if self.path == "/prompt":
             wf = body["prompt"]; pid = uuid.uuid4().hex; seen.append(wf)
             slow = "SLOW" in json.dumps(wf)
@@ -49,6 +51,14 @@ class H(BaseHTTPRequestHandler):
                              "outputs": {"9": {"images": [{"filename": name, "subfolder": "sub", "type": "output"}]}}}
             threading.Thread(target=run, daemon=True).start()
             return self.reply(200, {"prompt_id": pid, "node_errors": {}})
+        if self.path == "/upload/image":
+            from email.parser import BytesParser
+            msg = BytesParser().parsebytes(b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw)
+            f = {p.get_param("name", header="content-disposition"): p for p in msg.get_payload()}
+            sub = f["subfolder"].get_payload(decode=True).decode(); name = f["image"].get_filename()
+            os.makedirs(os.path.join(inp, sub), exist_ok=True)
+            open(os.path.join(inp, sub, name), "wb").write(f["image"].get_payload(decode=True))
+            return self.reply(200, {"name": name, "subfolder": sub, "type": "input"})
         if self.path == "/interrupt":
             pid = body.get("prompt_id")
             hist[pid] = {"status": {"status_str": "error", "completed": False, "messages": [["execution_interrupted", {}]]}, "outputs": {}}
@@ -123,7 +133,7 @@ def main():
     r = img.ask({"op": "generate", "id": "img_3", "dir": job, "request": {"image": {"prompt": "a", "negative_prompt": "b"}}})
     check("unbound negative prompt is refused, not ignored", r.get("type") == "invalid_request_error")
     r = img.ask({"op": "generate", "id": "img_4", "dir": job, "request": {"image": {"prompt": "a", "references": ["r.png"]}}})
-    check("edits are refused", r.get("type") == "invalid_request_error")
+    check("edits are refused by a tool without an image_edit mode", r.get("type") == "invalid_request_error")
     img.p.stdin.write(json.dumps({"op": "generate", "id": "img_5", "dir": job, "request": {"image": {"prompt": "SLOW"}}}) + "\n")
     img.p.stdin.flush()
     time.sleep(1.5)
@@ -157,6 +167,46 @@ def main():
     vid.p.stdin.close()
     vid.p.wait(timeout=20)
     check("EOF stops the worker", vid.p.returncode == 0)
+
+    edit_wf = dict(IMAGE_WF, **{"5": {"class_type": "Scale", "inputs": {"image": None}},
+                                "6": {"class_type": "Composite", "inputs": {"destination": ["5", 0]}}})
+    json.dump(edit_wf, open(os.path.join(d, "edit.json"), "w"))
+    ed = Proc({"id": "ed", "options": dict(base, workflow=os.path.join(d, "img.json"), bindings={"prompt": "1.prompt", "seed": "2.seed"},
+                                            modes={"image_edit": {"workflow": os.path.join(d, "edit.json"), "bindings": {
+                                                "references": ["5.image", "1.images.image_2"], "mask": "6.mask"}}})})
+    check("edit tool loads", ed.ask({"op": "load"}).get("ok"))
+    job = os.path.join(d, "job3")
+    os.makedirs(job)
+    for n in ("a.png", "b.png", "c.png", "m.png"):
+        open(os.path.join(job, n), "wb").write(b"PNG" + n.encode())
+    r = ed.ask({"op": "generate", "id": "img_e1", "dir": job,
+                "request": {"image": {"prompt": "make it night", "references": ["a.png", "b.png"], "mask": "m.png", "seed": 5}}})
+    wf = json.loads(open(os.path.join(job, "0.png"), "rb").read()[5:]) if r.get("ok") else {}
+    loads = {k: v["inputs"]["image"] for k, v in wf.items() if v["class_type"] == "LoadImage"}
+    ref1, ref2, mask = wf.get("5", {}).get("inputs", {}).get("image"), wf.get("1", {}).get("inputs", {}).get("images.image_2"), wf.get("6", {}).get("inputs", {}).get("mask")
+    check("edit: each input image becomes a LoadImage linked where bound (mask: its MASK output)",
+          r.get("ok") and len(loads) == 3 and loads.get(ref1[0], "").endswith("a.png") and ref1[1] == 0
+          and loads.get(ref2[0], "").endswith("b.png") and loads.get(mask[0], "").endswith("m.png") and mask[1] == 1)
+    check("edit: inputs uploaded under the job's subfolder", all(v.startswith("localrouter-") for v in loads.values()))
+    r = ed.ask({"op": "generate", "id": "img_e2", "dir": job, "request": {"image": {"prompt": "x", "references": ["a.png", "b.png", "c.png"]}}})
+    check("more input images than bound slots are refused", r.get("type") == "invalid_request_error" and "at most 2" in r["error"])
+    r = ed.ask({"op": "generate", "id": "img_e3", "dir": job, "request": {"image": {"prompt": "x", "references": ["../x.png"]}}})
+    check("an input outside the job directory is refused", r.get("type") == "invalid_request_error")
+    ed.p.stdin.close()
+    ed.p.wait(timeout=20)
+
+    i2v = Proc({"id": "i2v", "options": dict(base, workflow=os.path.join(d, "vid.json"), bindings={"prompt": "1.prompt", "frames": "1.length"},
+                                             modes={"image_to_video": {"bindings": {"first_frame": "1.first_frame"}}})})
+    check("i2v tool loads", i2v.ask({"op": "load"}).get("ok"))
+    r = i2v.ask({"op": "generate", "id": "v_i1", "dir": job, "request": {"video": {"prompt": "it moves", "seconds": 1, "fps": 24, "first_frame": "a.png"}}})
+    wf = json.loads(open(os.path.join(job, "video.mp4"), "rb").read()[5:]) if r.get("ok") else {}
+    ff = wf.get("1", {}).get("inputs", {}).get("first_frame")
+    check("image to video: the first frame is a LoadImage on the bound input", r.get("ok") and ff and wf[ff[0]]["class_type"] == "LoadImage"
+          and wf["1"]["inputs"]["length"] == 24)
+    r = i2v.ask({"op": "generate", "id": "v_i2", "dir": job, "request": {"video": {"prompt": "t2v", "seconds": 1, "fps": 24}}})
+    check("the same tool still makes text to video without the first frame", r.get("ok"))
+    i2v.p.stdin.close()
+    i2v.p.wait(timeout=20)
 
     bad = Proc({"id": "bad", "options": dict(base, workflow=os.path.join(d, "img.json"), bindings={"prompt": "7.prompt"})})
     r = bad.ask({"op": "load"})
