@@ -28,6 +28,8 @@ jobs:
           JARVIS=$RUNNER_TEMP/jarvis RENDER_ONLY=1 deploy/mac/install.sh | jq -e --slurpfile p deploy/profiles/mac-apple-silicon.json '
             ($p[0].models | map({key: .id, value: .}) | from_entries) as $m
             | (.tools | length) == ($m | length) and all(.tools[]; .resident_bytes == $m[.id].memory_bytes and .residency == (if $m[.id].warm == true then "always" else "on_demand" end))' > /dev/null
+      - name: the ComfyUI worker against a fake ComfyUI (no GPU)
+        run: python3 -I tools/comfyui/test_worker.py
       - run: zig build
       - run: zig build test
         timeout-minutes: 20

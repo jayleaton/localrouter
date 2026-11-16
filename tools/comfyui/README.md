@@ -41,10 +41,10 @@ requests without one: `default_width` and `default_height` (read by the daemon).
  "cmd": ["/usr/bin/python3", "-I", "tools/comfyui/worker.py"], "resident_bytes": 100931731456,
  "options": {"comfy_dir": "/opt/ComfyUI", "python": "/opt/ComfyUI/venv/bin/python", "port": 8189,
              "args": ["--disable-mmap", "--cache-none"],
-             "workflow": "deploy/strix-halo/comfyui/minimax-h3-image-t2i.json",
+             "workflow": "/opt/workflows/minimax-h3-image-t2i.json",
              "bindings": {"prompt": "4.prompt", "width": "4.width", "height": "4.height", "seed": "6.seed", "steps": "6.steps"},
              "size_multiple": 32, "min_side": 256, "max_side": 2048}}
 ```
 
-Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
+A workflow is ComfyUI's API format ("Export (API)"). Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
 ComfyUI, 29 checks): `python3 -I tools/comfyui/test_worker.py`.
