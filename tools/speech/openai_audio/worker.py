@@ -20,7 +20,9 @@ The tool's config arrives as JSON in LOCALROUTER_TOOL. Options:
   stream        true: speech is written to speech.wav as it arrives (the daemon forwards it as HTTP chunks)
   send_seed     true (default): pass the request's seed through (folded to 32 bits)
   extra         object merged into every speech request body (e.g. {"language": "English"})
-  transcription_format  json (default) or verbose_json
+  transcription_format  json (default) or verbose_json: what a request without timestamps asks the server for
+  timestamps    the timestamp_granularities the server returns: [] (default), ["segment"], ["segment", "word"]. A
+                request for a granularity listed here asks for verbose_json with it; "word" not listed is refused
   stop_timeout_s  seconds between SIGTERM and SIGKILL when stopping the server (default 15)
 Memory is the config's resident_bytes and working_bytes: measured figures, not guessed here.
 """
@@ -118,6 +120,7 @@ class Worker:
         self.proc = None
         self.base = None
         self.model = self.opts.get("model") or cfg.get("id") or ""
+        self.timestamps = [g for g in (self.opts.get("timestamps") or []) if g in ("segment", "word")]
 
     # ---- the server
     def healthy(self, timeout=2.0):
@@ -255,18 +258,42 @@ class Worker:
             f.write(wav_header(rate, n))
         return {"ok": True, "files": ["speech.wav"], "seed": seed}
 
+    def transcription_fields(self, q):
+        """The form fields of one transcription request: the request's options forwarded as asked, never replaced.
+        temperature goes through as given (a server that cannot honour it refuses, and that refusal is the caller's
+        400). timestamps: "none" asks for options.transcription_format; "segment" or "word" asks for verbose_json with
+        that timestamp_granularities[] when options.timestamps lists it. "word" without it is refused here, before the
+        server is asked. "segment" without it gets the whole clip as one segment (verbose_json, srt and vtt carry
+        segments, so the daemon asks every such request for them)."""
+        want = q.get("timestamps") or "none"
+        if want not in ("none", "segment", "word"):
+            raise InvalidRequest(f"timestamps must be none, segment or word, not {want!r}")
+        if want == "word" and "word" not in self.timestamps:
+            raise InvalidRequest("this tool has no word timestamps (its options.timestamps does not list word)")
+        try:
+            temperature = float(q.get("temperature") or 0)
+        except (TypeError, ValueError):
+            raise InvalidRequest("temperature must be a number")
+        fields = [("model", self.model), ("temperature", f"{temperature:g}")]
+        if want in self.timestamps:
+            fields.append(("response_format", "verbose_json"))
+            grans = ["segment", "word"] if want == "word" and "segment" in self.timestamps else [want]
+            fields += [("timestamp_granularities[]", g) for g in grans]
+        else:
+            fields.append(("response_format", self.opts.get("transcription_format", "json")))
+        for k in ("language", "prompt"):
+            if q.get(k):
+                fields.append((k, str(q[k])))
+        return fields
+
     def transcription(self, q, job_dir, timeout):
         audio = q.get("audio") or ""
         if not audio or os.path.basename(audio) != audio or audio.startswith("."):
             raise InvalidRequest("audio must name a file in the job directory")
-        fmt = self.opts.get("transcription_format", "json")
-        fields = {"model": self.model, "response_format": fmt, "temperature": "0"}
-        for k in ("language", "prompt"):
-            if q.get(k):
-                fields[k] = str(q[k])
+        fields = self.transcription_fields(q)
         b = uuid.uuid4().hex
         body = bytearray()
-        for k, v in fields.items():
+        for k, v in fields:
             body += f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
         with open(os.path.join(job_dir, audio), "rb") as f:
             data = f.read()
@@ -274,6 +301,11 @@ class Worker:
                  f'Content-Type: audio/wav\r\n\r\n').encode() + data + f"\r\n--{b}--\r\n".encode()
         with self.post("/v1/audio/transcriptions", bytes(body), f"multipart/form-data; boundary={b}", timeout) as r:
             res = json.loads(r.read())
+        want = q.get("timestamps") or "none"
+        if want in self.timestamps:
+            key = "words" if want == "word" else "segments"
+            if not res.get(key):
+                raise RuntimeError(f"the model's server returned no {key}, though the tool's options.timestamps lists {want}")
         duration = float(q.get("duration_ms") or 0) / 1000 or float(res.get("duration") or 0)
         text = (res.get("text") or "").strip()
         segments = res.get("segments") or [{"id": 0, "start": 0.0, "end": round(duration, 3), "text": text}]

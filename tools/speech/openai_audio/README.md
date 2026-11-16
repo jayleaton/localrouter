@@ -12,8 +12,14 @@ compiled-in `openai_server` engine does for chat. It is Python standard library 
   placeholder header, the samples, then the real sizes. With `"stream": true` in the tool's options the daemon forwards
   the audio as it grows (time to first audio is the server's). The rate is the server's `x-sample-rate` header, else
   `options.sample_rate` (24000). Seeds are folded to 32 bits.
-- **transcription**: posts `audio.wav` (16 kHz mono, prepared by the daemon) as multipart with `language` and `prompt`,
-  and writes `transcript.json` (`text`, `language`, `duration`, `segments`; one segment when the server gives none).
+- **transcription**: posts `audio.wav` (16 kHz mono, prepared by the daemon) as multipart with the request's
+  `language`, `prompt` and `temperature` as given (never replaced; a server that cannot honour one refuses it, and the
+  caller gets that 400), and writes `transcript.json` (`text`, `language`, `duration`, `segments`, and `words` when the
+  server returns them). Timestamps follow `options.timestamps`, the granularities the server returns (`[]` by default,
+  `["segment"]`, `["segment", "word"]`): a request for a listed granularity asks for `verbose_json` with that
+  `timestamp_granularities[]`, and a reply without them is an error. `word` not listed is refused (400) before the
+  server is asked. `segment` not listed gets the whole clip as one segment (the daemon asks for segments for every
+  `verbose_json`, `srt` and `vtt` reply). Without timestamps it asks for `options.transcription_format` (`json`).
 - **exit / unload**: SIGTERM to the server's process group, progress lines while it stops (so the daemon does not load
   anything into memory that is still held), SIGKILL after `options.stop_timeout_s` (15).
 - A server 4xx becomes `invalid_request_error` (400), a 503 or an unreachable server `service_unavailable` (503).
@@ -32,4 +38,4 @@ Declare the model's limits in `options` as for any speech tool (`voices`, `defau
              "voices": ["ryan", "serena"], "default_voice": "serena", "min_speed": 1, "max_speed": 1}}
 ```
 
-Tests (no GPU, a fake server): `python3 -I tools/speech/openai_audio/test_worker.py`.
+Tests (no GPU, a fake server that records what it was sent): `python3 -I tools/speech/openai_audio/test_worker.py`.
