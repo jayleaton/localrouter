@@ -47,7 +47,14 @@ while read -r line; do
 done < <(hw_match "$p")
 avail=$(hw_disk_free "$PREFIX")
 echo "        disk free under $PREFIX: $(gib "$avail") GiB"
-[ $darwin = 1 ] || [ $(($(hw_avail) / 1073741824)) -ge 88 ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to 88 GiB free and the warm models about 107 GiB" "see what holds it: nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv (INSTALL.md step 6)"
+# the free memory the GPU steps want: the profile's hardware.min_free_gib (default 88, the GB10 figure)
+need=$(jq -r '.hardware.min_free_gib // 88' "$p")
+if hw_amd; then
+  echo "        GTT in use: $(gib "$(hw_gtt_used)") of $(gib "$(hw_gtt)") GiB"
+  [ $(($(hw_avail) / 1073741824)) -ge "$need" ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to $need GiB free" "see what holds it: cat $(amd_card)/mem_info_gtt_used; podman ps; rocm-smi --showpids"
+else
+  [ $darwin = 1 ] || [ $(($(hw_avail) / 1073741824)) -ge "$need" ] || systemctl --user is-active -q "$UNIT" || warn "only $(gib "$(hw_avail)") GiB of memory is available: the GPU steps need up to $need GiB free and the warm models about 107 GiB" "see what holds it: nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv (INSTALL.md step 6)"
+fi
 
 echo "== prerequisites"
 while read -r q; do
@@ -78,6 +85,14 @@ if [ "$(jq -r '.deploy.service // "systemd"' "$p")" = launchd ]; then   # a laun
   else
     ok "launchd agent $label running, pid $(launchctl print "gui/$(id -u)/$label" | awk '$1 == "pid" {print $3; exit}'); it starts at login"
     up=1 logs="tail -50 $log; then bash $repo/$start"
+  fi
+elif [ "$(jq -r '.deploy.service // "systemd"' "$p")" = systemd-transient ]; then   # systemd-run --user (deploy/strix-halo)
+  echo "== service $UNIT (transient user unit) on $listen:$PORT"
+  if ! systemctl --user is-active -q "$UNIT"; then
+    miss "the transient unit $UNIT is not running" "bash $repo/$start   (why it stopped: journalctl --user -u $UNIT -n 50)"
+  else
+    ok "transient unit $UNIT active since $(systemctl --user show "$UNIT" -p ActiveEnterTimestamp --value) (not started at boot: run $start after a reboot)"
+    up=1 logs="journalctl --user -u $UNIT -n 50; then bash $repo/$start"
   fi
 else                       # a systemd user unit (deploy/jarvis)
   echo "== service $UNIT on $listen:$PORT"
