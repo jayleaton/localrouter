@@ -11,15 +11,23 @@ tools, scheduled and labelled like any other model. Standard library only: it ru
 - **generate**: copies the API-format workflow (`options.workflow`, "Export (API)" in ComfyUI), writes the request into
   the inputs `options.bindings` names, queues it on `/prompt`, reports progress from `/ws` (denoise steps, then each
   node), waits on `/history`, and fetches the result through `/view`: `0.png`, `1.png`, ... (one run per image, seed
-  +1 each) or `video.mp4`. A field the bindings do not name (negative prompt, steps, guidance) is refused, never
-  ignored, as are edits and image-to-video for now.
+  +1 each) or `video.mp4`. A field the bindings do not name (negative prompt, steps, guidance, input images) is
+  refused, never ignored.
+- **input images**: an edit's `references` and `mask` and a video's `first_frame` are uploaded to ComfyUI
+  (`/upload/image`, into the worker's private input directory) and wired in through a LoadImage node the worker adds:
+  its IMAGE output, or for a mask its MASK output (1 where the mask is transparent, where an edit goes).
+- **modes**: `options.modes.image_edit` / `image_to_video` give a request with input images its own workflow and
+  bindings (merged over the tool's): `{"image_edit": {"workflow": "edit.json", "bindings": {"references": [...]}}}`.
+  A tool without the mode refuses such requests. An edit without a size keeps whatever size its workflow derives
+  from the input image.
 - **cancel**: answers its load with `"cancel": "signal"`, so a cancel is SIGUSR1: the prompt is dropped from the queue,
   ComfyUI is interrupted, and the worker stays loaded.
 - **exit / unload**: SIGTERM to ComfyUI's process group, progress lines while it stops, SIGKILL after
   `stop_timeout_s` (30); the private output directory is removed.
 
-Bindings map a request field to `"node.input"` (or a list): `prompt` (required), `negative_prompt`, `width`, `height`,
-`seed`, `steps`, `guidance`, and for video `frames` (seconds x fps, snapped up to the model's grid with
+Bindings map a request field to `"node.input"` (or a list, every target set): `prompt` (required), `negative_prompt`,
+`width`, `height`, `seed`, `steps`, `guidance`, the file inputs `references` (a list: the n-th target takes the n-th
+image, so its length is the most a request may send), `mask` and `first_frame`, and for video `frames` (seconds x fps, snapped up to the model's grid with
 `frame_multiple` / `frame_offset`), `fps` and `audio` (the input removed when a request asks for no sound). Limits:
 `size_multiple` (8), `min_side`, `max_side`, `max_pixels`, `fps` (the rates it takes). A video tool's own size for
 requests without one: `default_width` and `default_height` (read by the daemon). Memory is the tool's measured
@@ -36,4 +44,4 @@ requests without one: `default_width` and `default_height` (read by the daemon).
 ```
 
 Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
-ComfyUI): `python3 -I tools/comfyui/test_worker.py`.
+ComfyUI, 24 checks): `python3 -I tools/comfyui/test_worker.py`.

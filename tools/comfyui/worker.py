@@ -3,7 +3,9 @@
 
 The worker starts its own ComfyUI (or uses one already running), fills a ComfyUI API-format workflow from the request
 through the tool's `bindings`, queues it, follows its progress, and copies the outputs into the job directory:
-`0.png`, `1.png`, ... for an image request (one workflow run per image), `video.mp4` for a video request.
+`0.png`, `1.png`, ... for an image request (one workflow run per image), `video.mp4` for a video request. Input images
+(an edit's references and mask, a video's first frame) are uploaded to ComfyUI and wired in through LoadImage nodes.
+An edit without a size keeps whatever size the workflow derives from its input image.
 
 Standard library only. One JSON object a line on stdin and stdout; stdout carries protocol lines only, logs go to stderr.
   {"op":"load"}      -> starts ComfyUI and waits for /system_stats -> {"ok":true,"resident":N,"cancel":"signal"}
@@ -25,6 +27,14 @@ The tool's config arrives as JSON in LOCALROUTER_TOOL. Options:
                   frames (video: the frame count), fps, audio ("node.input" removed when a request asks for no audio)
                 A request that sets a field the bindings do not name (a negative prompt, steps, guidance) is refused,
                 never ignored.
+                File inputs: references (a list: the n-th target takes the n-th input image; more images than
+                targets are refused), first_frame, mask. For each, the worker uploads the file to ComfyUI and links
+                a LoadImage node it adds: its IMAGE output, or for `mask` its MASK output (1 where the mask is
+                transparent, which is where an edit goes)
+  modes         per capability, what changes for it: {"image_edit": {...}, "image_to_video": {...}}, each with its
+                own `workflow` (absent: the tool's), `bindings` (merged over the tool's) and `output_nodes`. A request
+                with input images uses `image_edit`, a video request with a first frame `image_to_video`; a tool
+                without the mode refuses them
   output_nodes  ids of the nodes whose outputs are the result (default: every output node)
   size_multiple width and height must be multiples of this (default 8); min_side, max_side, max_pixels: limits
   frame_multiple, frame_offset  the model's frame grid: frames = the smallest offset + k*multiple >= seconds*fps
@@ -57,6 +67,7 @@ sys.stdout = sys.stderr
 PARENT = int(os.environ.get("LOCALROUTER_PARENT") or 0)
 CANCEL = [False]
 IMAGE_EXT = (".png",)
+FILE_FIELDS = ("references", "first_frame", "mask")
 VIDEO_EXT = (".mp4",)
 
 
@@ -196,18 +207,30 @@ class Worker:
         self.proc = None
         self.base = None
         self.out_dir = None  # the private --output-directory of the ComfyUI this worker started
-        self.workflow = self.load_workflow()
-        self.bindings = {k: ([v] if isinstance(v, str) else list(v)) for k, v in (self.opts.get("bindings") or {}).items()}
-        if "prompt" not in self.bindings:
+        self.in_dir = None   # and its --input-directory, where uploaded input images land
+        self.modes = {"": self.mode(self.opts, None)}
+        for name, m in (self.opts.get("modes") or {}).items():
+            if name not in ("image_edit", "image_to_video"):
+                raise RuntimeError(f"options.modes.{name}: only image_edit and image_to_video are known")
+            self.modes[name] = self.mode(m or {}, self.modes[""])
+
+    def mode(self, o, base):
+        """(workflow, bindings, output_nodes) for the tool, or for one of its modes over the tool's."""
+        wf = self.load_workflow(o["workflow"]) if o.get("workflow") else (base[0] if base else self.load_workflow(""))
+        bindings = dict(base[1]) if base else {}
+        bindings.update({k: ([v] if isinstance(v, str) else list(v)) for k, v in (o.get("bindings") or {}).items()})
+        if "prompt" not in bindings:
             raise RuntimeError("options.bindings.prompt is required")
-        for field, targets in self.bindings.items():
+        for field, targets in bindings.items():
             for t in targets:
                 node, _, inp = t.partition(".")
-                if node not in self.workflow or not inp or (field != "audio" and inp not in self.workflow[node].get("inputs", {})):
+                loose = field in FILE_FIELDS or field == "audio"  # optional inputs that may be unconnected
+                if node not in wf or not inp or (not loose and inp not in wf[node].get("inputs", {})):
                     raise RuntimeError(f"binding {field} -> {t}: no such node input in the workflow")
+        outs = [str(n) for n in (o.get("output_nodes") or (base[2] if base else self.opts.get("output_nodes")) or [])]
+        return wf, bindings, outs
 
-    def load_workflow(self):
-        path = self.opts.get("workflow") or ""
+    def load_workflow(self, path):
         if not path:
             raise RuntimeError("options.workflow is required")
         for p in [path]:
@@ -238,8 +261,12 @@ class Worker:
         if comfy:
             port = int(self.opts.get("port") or 0) or free_port()
             self.out_dir = tempfile.mkdtemp(prefix="lr-comfyui-")
+            self.in_dir = os.path.join(self.out_dir, "in")  # outside ComfyUI's own output folders
+            os.makedirs(self.in_dir)
+            os.makedirs(os.path.join(self.out_dir, "out"))
             argv = [self.opts.get("python") or "python3", "main.py", "--listen", "127.0.0.1", "--port", str(port),
-                    "--output-directory", self.out_dir] + [str(a) for a in self.opts.get("args") or []]
+                    "--output-directory", os.path.join(self.out_dir, "out"), "--input-directory", self.in_dir] + \
+                   [str(a) for a in self.opts.get("args") or []]
             env = dict(os.environ)
             env.update({k: str(v).replace("{port}", str(port)) for k, v in (self.opts.get("env") or {}).items()})
             log(f"starting ComfyUI ({comfy}) on 127.0.0.1:{port}")
@@ -283,7 +310,7 @@ class Worker:
                 p.wait()
         if self.out_dir:
             shutil.rmtree(self.out_dir, ignore_errors=True)
-            self.out_dir = None
+            self.out_dir = self.in_dir = None
 
     def ensure(self):
         if self.base is None or (self.proc is not None and self.proc.poll() is not None):
@@ -303,8 +330,8 @@ class Worker:
             raise Unavailable(f"ComfyUI is not reachable: {e}")
 
     # ---- requests
-    def set(self, wf, field, value):
-        for t in self.bindings.get(field, []):
+    def set(self, wf, bindings, field, value):
+        for t in bindings.get(field, []):
             node, _, inp = t.partition(".")
             wf[node]["inputs"][inp] = value
 
@@ -319,24 +346,76 @@ class Worker:
         if px and w * h > px:
             raise InvalidRequest(f"model '{self.cfg.get('id')}' takes at most {px} pixels, not {w}x{h}")
 
-    def fill(self, r, seed):
-        """The workflow for one run: a deep copy with the request's fields written into the bound inputs."""
-        wf = json.loads(json.dumps(self.workflow))
-        self.set(wf, "prompt", r.get("prompt") or "")
+    def fill(self, mode, r, seed, inputs):
+        """The workflow for one run: a deep copy with the request's fields written into the bound inputs, and a
+        LoadImage node for each input image (`inputs`: field -> list of names ComfyUI gave the uploaded files)."""
+        src, b, _ = mode
+        wf = json.loads(json.dumps(src))
+        self.set(wf, b, "prompt", r.get("prompt") or "")
         for field in ("negative_prompt", "steps", "guidance"):
             v = r.get(field)
-            if v and field not in self.bindings:
+            if v and field not in b:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' takes no {field.replace('_', ' ')}")
             if v:
-                self.set(wf, field, v)
+                self.set(wf, b, field, v)
         if r.get("width") and r.get("height"):
-            if "width" not in self.bindings or "height" not in self.bindings:
+            if "width" not in b or "height" not in b:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' has a fixed size")
             self.check_size(int(r["width"]), int(r["height"]))
-            self.set(wf, "width", int(r["width"]))
-            self.set(wf, "height", int(r["height"]))
-        self.set(wf, "seed", seed)
+            self.set(wf, b, "width", int(r["width"]))
+            self.set(wf, b, "height", int(r["height"]))
+        self.set(wf, b, "seed", seed)
+        nid = 900000
+        for field, names in inputs.items():
+            targets = b[field] if field == "references" else b[field] * len(names)
+            for name, t in zip(names, targets):
+                node, _, inp = t.partition(".")
+                while str(nid) in wf:
+                    nid += 1
+                wf[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
+                wf[node]["inputs"][inp] = [str(nid), 1 if field == "mask" else 0]
         return wf
+
+    def inputs(self, mode, r, job_dir):
+        """Checks and uploads a request's input images -> field -> the names ComfyUI stored them under."""
+        b = mode[1]
+        files = {"references": list(r.get("references") or []), "first_frame": [r["first_frame"]] if r.get("first_frame") else [],
+                 "mask": [r["mask"]] if r.get("mask") else []}
+        out = {}
+        for field, names in files.items():
+            if not names:
+                continue
+            if field not in b:
+                raise InvalidRequest(f"model '{self.cfg.get('id')}' takes no {field.replace('_', ' ')}")
+            if field == "references" and len(names) > len(b[field]):
+                raise InvalidRequest(f"model '{self.cfg.get('id')}' takes at most {len(b[field])} input images")
+            for n in names:
+                if os.path.basename(n) != n or n.startswith(".") or not os.path.isfile(os.path.join(job_dir, n)):
+                    raise InvalidRequest(f"{field} must name a file in the job directory")
+            out[field] = names
+        return out
+
+    def upload(self, job_dir, names, tag):
+        stored = []
+        for n in names:
+            with open(os.path.join(job_dir, n), "rb") as f:
+                data = f.read()
+            b = uuid.uuid4().hex
+            body = bytearray()
+            for k, v in (("type", "input"), ("subfolder", f"localrouter-{tag}"), ("overwrite", "true")):
+                body += f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+            body += (f'--{b}\r\nContent-Disposition: form-data; name="image"; filename="{n}"\r\n'
+                     f'Content-Type: application/octet-stream\r\n\r\n').encode() + data + f"\r\n--{b}--\r\n".encode()
+            req = urllib.request.Request(self.base + "/upload/image", bytes(body), {"Content-Type": f"multipart/form-data; boundary={b}"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    res = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                raise RuntimeError(f"ComfyUI /upload/image failed ({e.code}): {e.read()[:500].decode('utf-8', 'replace')}")
+            except (urllib.error.URLError, ConnectionError) as e:
+                raise Unavailable(f"ComfyUI is not reachable: {e}")
+            stored.append(f"{res['subfolder']}/{res['name']}" if res.get("subfolder") else res["name"])
+        return stored
 
     def generate(self, cmd):
         t0 = time.monotonic()
@@ -347,46 +426,62 @@ class Worker:
             raise InvalidRequest("job directory does not exist")
         if isinstance(req.get("image"), dict):
             r = req["image"]
-            if r.get("references") or r.get("mask"):
+            if r.get("references") and "image_edit" not in self.modes:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' makes images from text only (no edits)")
+            mode = self.modes["image_edit" if r.get("references") else ""]
+            inputs = self.inputs(mode, r, job_dir)
             seed = int(r.get("seed") or 0)
             n = max(1, int(r.get("n") or 1))
-            runs = [(self.fill(r, seed + i), f"{i}.png", IMAGE_EXT) for i in range(n)]
+            for i in range(n):  # check every run before anything loads or uploads
+                self.fill(mode, r, seed + i, {k: v for k, v in inputs.items()})
+            kind, ext, names = "image", IMAGE_EXT, [f"{i}.png" for i in range(n)]
         elif isinstance(req.get("video"), dict):
             r = req["video"]
-            if r.get("first_frame"):
+            if r.get("first_frame") and "image_to_video" not in self.modes:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' makes videos from text only (no first frame)")
+            mode = self.modes["image_to_video" if r.get("first_frame") else ""]
+            inputs = self.inputs(mode, r, job_dir)
             seed = int(r.get("seed") or 0)
-            wf = self.fill(r, seed)
+            wf = self.fill(mode, r, seed, inputs)
             fps = int(r.get("fps") or 24)
             allowed = self.opts.get("fps")
             if allowed and fps not in allowed:
                 raise InvalidRequest(f"model '{self.cfg.get('id')}' takes fps {', '.join(map(str, allowed))}, not {fps}")
-            self.set(wf, "fps", fps)
+            b = mode[1]
             frames = int(r.get("seconds") or 5) * fps
             mul, off = int(self.opts.get("frame_multiple") or 1), int(self.opts.get("frame_offset") or 0)
             if mul > 1:
                 frames = off + max(0, -(-(frames - off) // mul)) * mul
-            if "frames" not in self.bindings:
+            if "frames" not in b:
                 raise RuntimeError("options.bindings.frames is required for a video tool")
-            self.set(wf, "frames", frames)
-            if r.get("audio") is False:
-                if "audio" not in self.bindings:
-                    raise InvalidRequest(f"model '{self.cfg.get('id')}' always makes sound: leave audio on")
-                for t in self.bindings["audio"]:
-                    node, _, inp = t.partition(".")
-                    wf[node]["inputs"].pop(inp, None)
-            runs = [(wf, "video.mp4", VIDEO_EXT)]
+            if r.get("audio") is False and "audio" not in b:
+                raise InvalidRequest(f"model '{self.cfg.get('id')}' always makes sound: leave audio on")
+            kind, ext, names = "video", VIDEO_EXT, ["video.mp4"]
+
+            def video_wf(stored):
+                w = self.fill(mode, r, seed, stored)
+                self.set(w, b, "fps", fps)
+                self.set(w, b, "frames", frames)
+                if r.get("audio") is False:
+                    for t in b["audio"]:
+                        node, _, inp = t.partition(".")
+                        w[node]["inputs"].pop(inp, None)
+                return w
         else:
             raise InvalidRequest("this tool serves image and video requests only")
         self.ensure()
+        tag = (cmd.get("id") or uuid.uuid4().hex)[-24:]
+        stored = {field: self.upload(job_dir, names_, tag) for field, names_ in inputs.items()}
         files = []
-        for i, (wf, name, exts) in enumerate(runs):
-            self.run(wf, os.path.join(job_dir, name), exts, i, len(runs))
+        for i, name in enumerate(names):
+            wf = self.fill(mode, r, seed + i, stored) if kind == "image" else video_wf(stored)
+            self.run(wf, os.path.join(job_dir, name), ext, i, len(names), mode[2])
             files.append(name)
+        if self.in_dir:  # our own input directory: leave nothing behind
+            shutil.rmtree(os.path.join(self.in_dir, f"localrouter-{tag}"), ignore_errors=True)
         return {"ok": True, "files": files, "seed": seed, "ms": int((time.monotonic() - t0) * 1000)}
 
-    def run(self, wf, dest, exts, index, count):
+    def run(self, wf, dest, exts, index, count, output_nodes):
         client = uuid.uuid4().hex
         events = None
         try:
@@ -444,7 +539,7 @@ class Worker:
                     elif kind == "execution_interrupted":
                         raise Cancelled()
                 raise RuntimeError(f"ComfyUI: {why}"[:2000])
-            self.fetch(entry.get("outputs") or {}, dest, exts)
+            self.fetch(entry.get("outputs") or {}, dest, exts, output_nodes)
         finally:
             if events is not None:
                 events.close()
@@ -456,8 +551,7 @@ class Worker:
             except Exception as e:
                 log(f"cancel: {path}: {e}")
 
-    def fetch(self, outputs, dest, exts):
-        want = [str(n) for n in self.opts.get("output_nodes") or []]
+    def fetch(self, outputs, dest, exts, want):
         found = []
         for node, out in outputs.items():
             if want and node not in want:
@@ -480,7 +574,7 @@ class Worker:
             o.write(data)
         os.replace(tmp, dest)
         if self.out_dir:  # our own output directory: leave nothing behind
-            for p in glob.glob(os.path.join(self.out_dir, "*")):
+            for p in glob.glob(os.path.join(self.out_dir, "out", "*")):
                 shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.unlink(p)
 
 
