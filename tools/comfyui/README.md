@@ -46,5 +46,5 @@ requests without one: `default_width` and `default_height` (read by the daemon).
              "size_multiple": 32, "min_side": 256, "max_side": 2048}}
 ```
 
-A workflow is ComfyUI's API format ("Export (API)"). Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
+`comfy_events.py` is the worker's /ws progress client. Each tool runs its own ComfyUI (one model per process, unloaded as a whole by the scheduler). Tests (no GPU, a fake
 ComfyUI, 29 checks): `python3 -I tools/comfyui/test_worker.py`.
