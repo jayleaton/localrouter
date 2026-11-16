@@ -43,11 +43,12 @@ hw_os() {
   if [ $darwin = 1 ]; then echo "macos $(sw_vers -productVersion | cut -d. -f1)"; return; fi
   (. /etc/os-release 2> /dev/null && echo "${ID:-unknown} ${VERSION_ID:-}")
 }
-# ---- AMD (amdgpu + ROCm), used only when nvidia-smi sees no GPU: the first amdgpu card in sysfs
+# ---- AMD (amdgpu + ROCm), used only when nvidia-smi sees no GPU: the first amdgpu card in sysfs. LR_SYSFS (default /sys)
+# lets tools/install/test_amd.sh run these against the recorded trees in tests/fixtures/amd.
 hw_nvidia() { [ $darwin = 0 ] && nvidia-smi -L 2> /dev/null | grep -q GPU; }
 amd_card() {   # the sysfs device directory of the first AMD (vendor 0x1002) DRM card with a GTT counter
   local d
-  for d in /sys/class/drm/card[0-9]*/device; do
+  for d in "${LR_SYSFS:-/sys}"/class/drm/card[0-9]*/device; do
     [ "$(cat "$d/vendor" 2> /dev/null)" = 0x1002 ] && [ -r "$d/mem_info_gtt_total" ] && { echo "$d"; return; }
   done
   return 1
@@ -57,7 +58,9 @@ hw_amd() { [ $darwin = 0 ] && ! hw_nvidia && amd_card > /dev/null; }
 amd_gfx() { rocminfo 2> /dev/null | awk '/^ *Name: *gfx[0-9a-f]+ *$/ {print $2; exit}'; }
 amd_name() {
   local n
-  n=$(rocminfo 2> /dev/null | awk -F': *' '/Marketing Name:/ && $2 !~ /AMD (RYZEN|EPYC|Ryzen)/ {gsub(/ +$/, "", $2); print $2; exit}')
+  # the Marketing Name of the first agent whose Device Type is GPU (a CPU agent, AMD's or another vendor's, comes first)
+  n=$(rocminfo 2> /dev/null | awk -F': *' '/^\*+ *$/ {m = ""} /^ *Marketing Name:/ {m = $2}
+    /^ *Device Type:/ && $2 ~ /^GPU/ && m != "" {gsub(/ +$/, "", m); print m; exit}')
   [ -n "$n" ] || n=$(cat "$(amd_card)/product_name" 2> /dev/null)
   echo "${n:-AMD GPU} ($(amd_gfx || true))" | sed 's/ ()$//'
 }
@@ -75,7 +78,7 @@ hw_gpu() {
   nvidia-smi --query-gpu=name --format=csv,noheader 2> /dev/null | first
 }
 hw_driver() {
-  if hw_amd; then echo "amdgpu $(cat /sys/module/amdgpu/version 2> /dev/null || uname -r)"; return; fi
+  if hw_amd; then echo "amdgpu $(cat "${LR_SYSFS:-/sys}/module/amdgpu/version" 2> /dev/null || uname -r)"; return; fi
   nvidia-smi --query-gpu=driver_version --format=csv,noheader 2> /dev/null | first
 }
 # the GPU's own memory in bytes; 0 on a unified-memory GPU (GB10 reports none: its memory is the system's; an AMD APU's
