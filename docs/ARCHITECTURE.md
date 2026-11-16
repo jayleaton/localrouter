@@ -133,7 +133,8 @@ SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no r
 worker, or one that has not answered within 5 s, is cancelled by killing its process group.
 
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
-there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
+there too. A video tool's `options` may give its own size for requests that name none, `default_width` and
+`default_height` (both, else 1344x768). `tools/comfyui/worker.py` serves any ComfyUI workflow this way. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
 
 ### Speech tools

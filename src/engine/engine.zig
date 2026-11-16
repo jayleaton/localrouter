@@ -76,18 +76,21 @@ pub fn license(cfg: *const ToolConfig) ?config.License {
     return if (find(cfg.engine)) |e| e.license else null;
 }
 
-/// The size a video request without one gets when its engine has no `defaults`.
+/// The size a video request without one gets when its engine has no `defaults` and its options name none.
 pub const default_video_size = [2]u32{ 1344, 768 };
 
-/// Fills what `req` left to the model, before validation: the engine's `defaults`, then `default_video_size`; for a 3D
+/// Fills what `req` left to the model, before validation: the engine's `defaults`, then the tool's `default_width` and
+/// `default_height` options (both set: a `cmd` video model's own size), else `default_video_size`; for a 3D
 /// asset the tool's declared `default_gaussians` (a splat model), `default_steps` and `default_guidance`, so the job,
 /// its booking and its manifest say what runs.
 pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
     switch (req.*) {
         .video => |*v| if (v.width == 0 and v.height == 0) {
-            v.width = default_video_size[0];
-            v.height = default_video_size[1];
+            const w = std.math.cast(u32, optionInt(cfg, "default_width", 0)) orelse 0;
+            const h = std.math.cast(u32, optionInt(cfg, "default_height", 0)) orelse 0;
+            v.width = if (w > 0 and h > 0) w else default_video_size[0];
+            v.height = if (w > 0 and h > 0) h else default_video_size[1];
         },
         .asset3d => |*v| {
             if (v.num_gaussians == null and gaussianRange(cfg) != null) v.num_gaussians = std.math.cast(u32, optionInt(cfg, "default_gaussians", 0));
@@ -679,6 +682,28 @@ test "stream and references need the speech tool to offer them" {
     try std.testing.expectEqualStrings("model 'gated' takes no voice references", w.buffered());
     try std.testing.expectEqual(@as(?bool, true), audioInfo(gated).stream);
     try std.testing.expectEqual(@as(?bool, false), audioInfo(c.tool("plain").?).references);
+}
+
+test "a video request without a size gets the tool's default_width x default_height, else the shared default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "own", "kind": "video", "cmd": ["x"], "options": {"default_width": 512, "default_height": 288}},
+        \\           {"id": "half", "kind": "video", "cmd": ["x"], "options": {"default_width": 512}},
+        \\           {"id": "plain", "kind": "video", "cmd": ["y"]}]}
+    );
+    var r: Request = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("own").?, &r);
+    try std.testing.expectEqual([2]u32{ 512, 288 }, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("half").?, &r);
+    try std.testing.expectEqual(default_video_size, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448 } };
+    fill(c.tool("own").?, &r);
+    try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("plain").?, &r);
+    try std.testing.expectEqual(default_video_size, [2]u32{ r.video.width, r.video.height });
 }
 
 test "instructions are written into the text by a tool's template, after a leading tag; refused without one" {
