@@ -1,0 +1,35 @@
+ROCk module is loaded
+=====================
+HSA System Attributes
+=====================
+Runtime Version:         1.18
+*******
+Agent 1
+*******
+  Name:                    AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+  Uuid:                    CPU-XX
+  Marketing Name:          AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+  Vendor Name:             CPU
+  Device Type:             CPU
+*******
+Agent 2
+*******
+  Name:                    gfx1151
+  Uuid:                    GPU-XX
+  Marketing Name:          AMD Radeon 8060S Graphics
+  Vendor Name:             AMD
+  Device Type:             GPU
+  ISA Info:
+    ISA 1
+      Name:                    amdgcn-amd-amdhsa--gfx1151
+    ISA 2
+      Name:                    amdgcn-amd-amdhsa--gfx11-generic
+*******
+Agent 3
+*******
+  Name:                    aie2p
+  Uuid:                    AIE-XX
+  Marketing Name:          NPU Strix Halo
+  Vendor Name:             AMD
+  Device Type:             DSP
+*** Done ***
