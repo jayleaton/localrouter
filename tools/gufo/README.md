@@ -6,7 +6,9 @@ and 27B, Qwen3-TTS, Qwen3-ASR, Qwen-Image, MiniMax H3 and more behind OpenAI-com
 supervise it: the `openai_server` engine for chat, `tools/speech/openai_audio` for speech and transcription.
 
 - The container is `lr-gufo-NAME`, published on `127.0.0.1:PORT` only; `--host 0.0.0.0 --port 8080` are added after
-  `serve` inside the container.
+  `serve` inside the container. `TZ` is the host's zone (`$TZ`, else `/etc/timezone`, else the `/etc/localtime`
+  link). The image has no zoneinfo, so when the host has `/usr/share/zoneinfo` it is mounted read-only there;
+  otherwise the container stays on UTC.
 - SIGTERM or SIGINT (the worker unloading) runs `podman stop` and waits, so the GPU memory is free when the script exits.
   A SIGKILL of the worker's process group (the daemon's, on abort or timeout) skips that trap, and conmon keeps the
   container running outside the group, so a watcher in its own session removes this run's container (by its
