@@ -107,10 +107,15 @@ test "size_snap rounds onto the tool's grid and /v1/tools lists that grid" {
     try testing.expectEqual(@as(u32, 992), std.mem.readInt(u32, png[16..20], .big));
     try testing.expectEqual(@as(u32, 992), std.mem.readInt(u32, png[20..24], .big));
 
-    // 1280x720 is already a multiple of 16, so today's testpattern accepts it. On a 32 grid, size_snap makes it 1280x704.
+    // 1280x720 is a multiple of 16 and not of 32. The refusal names this tool's grid, before the tool loads.
     const as_is = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"grid\",\"prompt\":\"bars\",\"size\":\"1280x720\"}");
-    try testing.expectEqual(std.http.Status.ok, as_is.status);
-    try testing.expect(std.mem.indexOf(u8, as_is.body, "\"size\":\"1280x720\"") != null);
+    try testing.expectEqual(std.http.Status.bad_request, as_is.status);
+    try testing.expect(std.mem.indexOf(u8, as_is.body, "multiples of 32") != null);
+    try testing.expect(std.mem.indexOf(u8, as_is.body, "multiples of 16") == null);
+    const odd = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"grid\",\"prompt\":\"bars\",\"size\":\"1000x720\"}");
+    try testing.expectEqual(std.http.Status.bad_request, odd.status);
+    try testing.expect(std.mem.indexOf(u8, odd.body, "multiples of 32") != null);
+    try testing.expect(std.mem.indexOf(u8, odd.body, "multiples of 16") == null);
     const on_grid = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"grid\",\"prompt\":\"bars\",\"size\":\"1280x720\",\"size_snap\":true}");
     try testing.expectEqual(std.http.Status.ok, on_grid.status);
     try testing.expect(std.mem.indexOf(u8, on_grid.body, "\"size\":\"1280x704\"") != null);

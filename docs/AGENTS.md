@@ -99,7 +99,7 @@ curl -s -m 900 $BASE/images/generations -H 'content-type: application/json' -d '
 | Field | Notes |
 | --- | --- |
 | `size` | `WIDTHxHEIGHT`, 256 to 2048 a side, multiples of 16. A model's own grid can be stricter: `GET /v1/tools` lists it as `size` (`multiple`, `min_width`, `max_width`, `min_height`, `max_height`, and `max_pixels` when the model has one) |
-| `size_snap` | Extension, default false. `true` rounds width and height to the nearest size that model accepts (its `multiple`, inside its limits; a tie goes to the lower multiple) and the response's `size` is the size used. `false` refuses a size off the grid, as before. An edit that omits `size` still keeps the input's shape |
+| `size_snap` | Extension, default false. `true` rounds width and height to the nearest size that model accepts (its `multiple`, inside its limits; a tie goes to the lower multiple) and the response's `size` is the size used. `false` refuses a size off that model's grid before it loads, and the error names the grid (`multiples of 32` for MiniMax H3 and H3-Image, not the generic multiple of 16). An edit that omits `size` still keeps the input's shape |
 | `n` | 1 to 4 |
 | `seed` | Extension. Omit it for a random one; the response's `seed` reproduces the image |
 | `steps`, `guidance`, `negative_prompt` | Extensions; 0 or absent means the tool's default |
@@ -166,8 +166,9 @@ something else pulls the clip away from it.
 
 MiniMax H3 (`minimax-h3`) takes sizes up to its `max_width` x `max_height` and clips up to `max_seconds`, in multiples
 of 32 pixels (1280x720 is not one: send 1280x704, or `"size_snap": true` to have 1280x720 rounded to the nearest
-multiple inside those limits, which is 1280x704). A request past them is refused with the limits named, before
-anything loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
+multiple inside those limits, which is 1280x704). A request past them is refused with those limits named (a multiple
+of 32, not the generic multiple of 16), before anything loads. A `cmd` image tool that sets `size_multiple` (H3-Image
+does, to 32) is refused the same way, before its worker loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
 and 8 s, 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
 1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
 
@@ -594,7 +595,7 @@ informs and enforces nothing: check the terms before you use or publish what a m
 
 | Field | Meaning |
 | --- | --- |
-| `tools[].state` | `idle` (loaded, no job), `loading`, `committing` (the worker is ready and admitted bytes are still landing), `busy` or `unloaded` |
+| `tools[].state` | `idle` (loaded, no job; this is `ready` on `GET /v1/tools`), `loading`, `committing` (the worker is ready and admitted bytes are still landing), `busy` or `unloaded` |
 | `tools[].resident_bytes` | bytes that tool holds now (0 while unloaded) |
 | `tools[].queue_depth` | jobs waiting for it, not counting the one running |
 | `tools[].last_load_s` | unix seconds of its last successful load; absent until it has loaded, and kept after it unloads |

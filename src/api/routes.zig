@@ -678,7 +678,8 @@ pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const in
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' cannot do {s} (its capabilities: {s}); pick a model that lists {s} in list_models", .{ cfg.id, @tagName(r.capability()), capabilityNames(&why.buf, cfg), @tagName(r.capability()) }) catch "the model lacks a capability this request needs";
         return null;
     }
-    request.validate(r, .{}, &why.message) catch return null;
+    // An image or video tool names its own grid in `engine.check`. The generic "multiples of 16" would hide a 32-grid.
+    request.validate(r, .{ .grid = engine.sizeLimits(cfg) == null }, &why.message) catch return null;
     var w: Io.Writer = .fixed(why.buf[0..384]);
     if (!engine.check(cfg, &r, &w)) {
         why.message = if (w.end > 0) w.buffered() else "the model cannot serve this request";

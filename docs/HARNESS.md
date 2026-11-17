@@ -35,7 +35,8 @@ document says which of it a harness may rely on.
   exception is Chat Completions, whose body goes to the model's own server: a field that server does not know may be
   ignored there rather than refused (see [Chat](#chat-completions)). Image and video `size_snap: true` is the other:
   the caller asked for the nearest size the model accepts, and the response names the size used. Without it, an
-  off-grid size is still refused.
+  off-grid size is still refused, and the error names that model's grid (a 32-pixel tool does not say "multiples of 16").
+  A `cmd` tool that declares a size grid is refused before its worker loads.
 - **The service never executes the harness's tools.** Function calls a model makes for the caller's tools come back to
   the caller. The one exception is a realtime session left in its default `server` tool mode, where the box's
   built-ins (generation and computer tools) run on the box; a harness sets `client` mode and owns every tool.

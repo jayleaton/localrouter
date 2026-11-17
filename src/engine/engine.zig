@@ -293,15 +293,38 @@ pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
     }
 }
 
-/// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`; a `cmd` tool
-/// takes anything else that is valid.
+/// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`, then the
+/// size grid (`checkSize`). A `cmd` tool has no engine check; `checkSize` still refuses an off-grid size before the
+/// worker loads, using the tool's own `size_multiple` and limits rather than the generic multiple of 16.
 pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     if (req.* == .speech and !checkSpeech(cfg, req.speech, why)) return false;
     if (req.* == .transcription and !checkTranscription(cfg, req.transcription, why)) return false;
     if (req.* == .asset3d and !checkAsset3d(cfg, req.asset3d, why)) return false;
-    const e = find(cfg.engine) orelse return true;
-    const f = e.check orelse return true;
-    return f(cfg, req, why);
+    if (find(cfg.engine)) |e| if (e.check) |f| if (!f(cfg, req, why)) return false;
+    return checkSize(cfg, req, why);
+}
+
+/// The tool's own width and height (`sizeLimits`), refused before a load. 0 x 0 is an edit or a video whose size the
+/// model still chooses. An engine check that already refused (MiniMax H3's own message) is not replaced.
+pub fn checkSize(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
+    const lim = sizeLimits(cfg) orelse return true;
+    const wh: ?[2]u32 = switch (req.*) {
+        .image => |v| if (v.width == 0 and v.height == 0) null else .{ v.width, v.height },
+        .video => |v| if (v.width == 0 and v.height == 0) null else .{ v.width, v.height },
+        else => null,
+    };
+    const w, const h = wh orelse return true;
+    const m: u32 = if (lim.multiple == 0) 1 else lim.multiple;
+    const off = w < lim.min_width or h < lim.min_height or w > lim.max_width or h > lim.max_height or w % m != 0 or h % m != 0;
+    const px = lim.max_pixels orelse 0;
+    const too_many = px > 0 and @as(u64, w) * h > px;
+    if (!off and !too_many) return true;
+    if (too_many and !off) {
+        why.print("model '{s}' takes at most {d} pixels (width x height), not {d}x{d}", .{ cfg.id, px, w, h }) catch {};
+        return false;
+    }
+    why.print("model '{s}' takes sizes from {d}x{d} to {d}x{d} in multiples of {d}, not {d}x{d}", .{ cfg.id, lim.min_width, lim.min_height, lim.max_width, lim.max_height, m, w, h }) catch {};
+    return false;
 }
 
 /// A transcription tool's own limits, from its options: `languages` (the ISO-639-1 codes it hears; absent: any), so a
@@ -789,6 +812,22 @@ test "size limits come from the tool's options, and size_snap lands on that grid
     var say: Request = .{ .speech = .{ .input = "hi" } };
     snapRequest(c.tool("say").?, &say);
     try std.testing.expectEqualStrings("hi", say.speech.input);
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    const off: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 720 } };
+    try std.testing.expect(!check(c.tool("img").?, &off, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "not 1280x720") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 16") == null);
+    why = .fixed(&msg);
+    const on: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 704 } };
+    try std.testing.expect(check(c.tool("img").?, &on, &why));
+    // Not a multiple of 16 either: still the tool's 32, not the generic rule.
+    why = .fixed(&msg);
+    const odd: Request = .{ .image = .{ .prompt = "a fox", .width = 1000, .height = 720 } };
+    try std.testing.expect(!check(c.tool("img").?, &odd, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 16") == null);
 }
 
 test "instructions are written into the text by a tool's template, after a leading tag; refused without one" {
