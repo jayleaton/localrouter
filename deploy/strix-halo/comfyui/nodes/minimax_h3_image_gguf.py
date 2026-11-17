@@ -2,6 +2,7 @@
 # The unsloth/MiniMax-H3-Image-GGUF files carry the model's 6 PDD output heads but not the safetensors "config"
 # metadata ComfyUI's model detection reads (pdd_steps / pdd_sigmas). This node loads the GGUF through ComfyUI-GGUF
 # and supplies the config Comfy-Org's minimax_h3_image_pruned_* safetensors carry. It modifies no other files.
+# A monkey-patch for the length of one load: docs/dev/UPSTREAM.md, entry 13 (the planned upstream fix).
 import json
 _PDD = {"transformer": {"pdd_steps": 6, "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75,
                                                         0.5327739119529724, 0.23200887441635132, 0.0]}}

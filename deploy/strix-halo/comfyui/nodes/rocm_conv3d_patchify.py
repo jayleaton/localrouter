@@ -1,13 +1,13 @@
 # ROCm Conv3d workaround for ComfyUI (installed into custom_nodes by deploy/strix-halo/comfyui/install.sh).
-# On ROCm, MIOpen's 3-D convolution kills the ComfyUI process (SIGSEGV, no Python exception) on MiniMax H3's image to
-# video path: the Qwen3.5 vision tower that encodes the first frame embeds its patches with a Conv3d whose kernel equals
+# On ROCm (gfx1151, PyTorch 2.14.1+rocm7.2), PyTorch's 3-D convolution kills the ComfyUI process (SIGSEGV, no Python
+# exception) on MiniMax H3's image to video path: the Qwen3.5 vision tower that encodes the first frame embeds its patches with a Conv3d whose kernel equals
 # its stride (Qwen35VisionPatchEmbed). With no padding, unit dilation and one group, such a convolution reads disjoint
 # blocks of its input, one block per output position, so it is exactly the product of each flattened block with the
 # flattened weight: this computes those convolutions as that product (F.linear) and leaves every other one to PyTorch.
 # The results equal PyTorch's up to the order of the sums (test_conv3d_patchify.py).
 # At import it replaces comfy.ops' Conv3d._conv_forward (the classes every ComfyUI model's Conv3d derives from), only on a
 # ROCm build of PyTorch and only for tensors on the GPU; it modifies no files. LOCALROUTER_CONV3D_PATCHIFY=0 leaves
-# ComfyUI as it is; =1 takes the product on any build and device (the tests).
+# ComfyUI as it is; =1 takes the product on any build and device (the tests). docs/dev/UPSTREAM.md, entry 14.
 import logging
 import os
 
@@ -81,7 +81,7 @@ def install(cls=None, every=None):
 
 try:
     if install():
-        log.info("localrouter: Conv3d with kernel == stride runs as a matrix product on ROCm (MIOpen's 3-D kernel crashes)")
+        log.info("localrouter: Conv3d with kernel == stride runs as a matrix product on ROCm (its 3-D convolution crashes)")
 except Exception as e:  # never stop ComfyUI from starting: without it only the crash it avoids comes back
     log.warning("localrouter: Conv3d workaround not installed: %s", e)
 

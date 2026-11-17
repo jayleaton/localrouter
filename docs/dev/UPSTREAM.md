@@ -27,6 +27,8 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 10 | cuBLASLt with a recorded algorithm; driver identity check | ashhart/TensorFold | not upstreamable: LocalRouter's attestation policy | keep |
 | 11 | NVFP4 kernels copied from TensorFold v0.6.1 | ashhart/TensorFold v0.6.x | not upstreamable: unmodified copies of a frozen line | keep |
 | 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
+| 13 | MiniMax H3-Image GGUF loads without the `config` metadata ComfyUI's detection reads (ComfyUI node, monkey-patch) | comfyanonymous/ComfyUI (and city96/ComfyUI-GGUF, unsloth's GGUF) | planned, not opened yet (see entry) | drop `nodes/minimax_h3_image_gguf.py` and use `UnetLoaderGGUF` once the ComfyUI pin detects `pdd_steps` without metadata |
+| 14 | Conv3d with kernel == stride as a matrix product on ROCm (ComfyUI node, monkey-patch of `comfy.ops`) | pytorch/pytorch (ROCm), comfyanonymous/ComfyUI | planned, not opened yet (see entry) | drop `nodes/rocm_conv3d_patchify.py` once the PyTorch ROCm pin or the ComfyUI pin no longer crashes on image to video |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -178,3 +180,50 @@ Not ours, and not listed above:
   cast DINOv3's fp32 RoPE `inv_freq` and changed the PLY. No review yet.
 - **Next:** once #3 merges, repin idol-sdk and replace the hand-built pipeline with a `from_pretrained` call
   (`image_encoders` with the remapped DINOv3 and the local klein folder); `test_worker.py` covers the loaded graph.
+
+### 13. MiniMax H3-Image GGUF without the `config` metadata
+
+- **Here:** `deploy/strix-halo/comfyui/nodes/minimax_h3_image_gguf.py`, copied into `ComfyUI/custom_nodes` by
+  `deploy/strix-halo/comfyui/install.sh` (ComfyUI pinned at `e9afbccc`, ComfyUI-GGUF at `6ea2651e`). Its node
+  `UnetLoaderGGUFMiniMaxH3Image` replaces `comfy.sd.load_diffusion_model_state_dict` for the duration of one
+  `UnetLoaderGGUF.load_unet` call (a monkey-patch, restored in `finally`) so the metadata it passes carries a `config`
+  with `transformer.pdd_steps` 6 and `pdd_sigmas`, the values Comfy-Org's `minimax_h3_image_pruned_*` safetensors carry.
+  It modifies no files.
+- **What and why:** `comfy/model_detection.py` sizes the MiniMax final layer's stacked PDD heads from
+  `metadata["config"]` alone (`pdd_steps`, default 1). unsloth/MiniMax-H3-Image-GGUF (pinned `2eda8f76`) carries the 6
+  heads but not that metadata, and ComfyUI-GGUF forwards only the GGUF's own key-value fields, so the stock loader builds
+  a 1-head layer and the load fails on the head shapes.
+- **Upstream today:** the same at ComfyUI `e9afbccc`; no ComfyUI-GGUF option supplies a config.
+- **General?** Yes: any MiniMax H3-Image checkpoint converted without the safetensors metadata (GGUF or a stripped
+  safetensors) has the problem.
+- **PR (planned, not opened; public pull requests on other projects are reviewed by the maintainer first):** to
+  comfyanonymous/ComfyUI, in `detect_unet_config`: when a MiniMax state dict has no `config` metadata, take
+  `pdd_steps` from the final layer's head shape (`video_out.weight` rows / the video latent width), which is what the
+  metadata states for every published checkpoint; with a test on a metadata-less state dict. Asking unsloth to embed
+  the `config` field in their GGUF files would fix that repo alone, as a fallback.
+- **Next:** once the ComfyUI pin includes it, the workflows use `UnetLoaderGGUF` and the node goes.
+
+### 14. Conv3d with kernel == stride as a matrix product on ROCm
+
+- **Here:** `deploy/strix-halo/comfyui/nodes/rocm_conv3d_patchify.py`, copied into `ComfyUI/custom_nodes` by
+  `install.sh`. At import, on a ROCm build of PyTorch only, it replaces `comfy.ops.disable_weight_init.Conv3d._conv_forward`
+  (a monkey-patch; every ComfyUI Conv3d op class derives from it). For GPU tensors and a convolution whose kernel equals
+  its stride with no padding, unit dilation and one group, it computes the result as `F.linear` over the input's
+  blocks; everything else, including `autopad`, goes to the original. `LOCALROUTER_CONV3D_PATCHIFY=0` turns it off.
+- **What and why:** image to video with MiniMax H3 encodes the first frame with the Qwen3.5 vision tower, whose
+  `Qwen35VisionPatchEmbed` is such a Conv3d (kernel and stride 2x16x16, fp32, thousands of patches as the batch). On
+  the Strix Halo box (gfx1151, PyTorch 2.14.1+rocm7.2) that convolution kills ComfyUI with SIGSEGV, no Python exception,
+  on the first image-to-video job; text to video and the image tools never reach it. ComfyUI turns cudnn (MIOpen) off by
+  default on this architecture (`COMFYUI_ENABLE_MIOPEN`), so which ROCm convolution backend crashes is not pinned down
+  yet. The product is the same convolution, not an approximation: `deploy/strix-halo/comfyui/test_conv3d_patchify.py`
+  (CPU, in CI) compares it with `conv3d` in fp32 and fp16; on the GPU it agrees with CPU `conv3d` to a relative 1.6e-6
+  in fp32 at 16,384 patches, and the image-to-video job that crashed completes with the node and a stock `comfy/ops.py`.
+- **Upstream today:** the crash, at the pinned ComfyUI and PyTorch; ComfyUI carries a comparable vendor workaround in
+  the same method (`NVIDIA_MEMORY_CONV_BUG_WORKAROUND`).
+- **General?** The crash is a PyTorch ROCm bug and belongs there; the routing is general for any patch-embedding Conv3d.
+- **PR (planned, not opened):** first a standalone reproducer (one `conv3d` of that shape on gfx1151, with cudnn on and
+  off) filed with pytorch/pytorch (ROCm); then, if PyTorch has no fix soon, a pull request to comfyanonymous/ComfyUI
+  adding this path to `Conv3d._conv_forward` beside the NVIDIA workaround, on ROCm only, with the equivalence test.
+- **Next:** drop the node when the PyTorch ROCm pin is fixed or the ComfyUI pin carries the path; until then
+  `test_conv3d_patchify.py` guards it.
+

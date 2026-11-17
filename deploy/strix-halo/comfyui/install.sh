@@ -2,7 +2,7 @@
 # Installs ComfyUI for the MiniMax tools of deploy/strix-halo, without sudo, idempotently (a step whose stamp matches
 # its pins is skipped; downloads resume). Usage:
 #   install.sh comfyui      ComfyUI and ComfyUI-GGUF at pinned commits, a Python venv with PyTorch ROCm, our two nodes
-#                           (nodes/: the GGUF loader, and the Conv3d workaround for MIOpen's crash on image to video)
+#                           (nodes/: the GGUF loader, and the Conv3d workaround for the ROCm crash on image to video)
 #   install.sh models       the MiniMax H3 / H3-Image weights (pinned revisions, every file's size and sha256 checked)
 #                           and their links into ComfyUI/models
 #   install.sh ok-comfyui | ok-models    exit 0 when that step is done (the profile's "done" checks)
@@ -54,7 +54,7 @@ checkout() {  # DIR REPO REV: a clone of REPO at REV (an existing clone is moved
 }
 
 # ComfyUI custom nodes of ours (nodes/), each one file: the MiniMax H3-Image GGUF loader, and the ROCm Conv3d workaround
-# (MIOpen's 3-D convolution segfaults on the H3 vision tower's patch embedding, image to video; it computes those as a
+# (PyTorch ROCm's 3-D convolution segfaults on the H3 vision tower's patch embedding, image to video; it computes those as a
 # matrix product instead, and changes nothing on other builds)
 NODES=(minimax_h3_image_gguf.py rocm_conv3d_patchify.py)
 nodes_in_place() { local n; for n in "${NODES[@]}"; do cmp -s "$here/nodes/$n" "$COMFY_DIR/custom_nodes/$n" || return 1; done; }
