@@ -25,7 +25,9 @@ tools, scheduled and labelled like any other model. Standard library only: it ru
   keeps whatever size its workflow derives from the input image.
 - **cancel**: answers its load with `"cancel": "signal"`, so a cancel is SIGUSR1: the prompt is dropped from the queue,
   ComfyUI is interrupted, and the worker stays loaded.
-- **exit / unload**: SIGTERM to ComfyUI's process group, progress lines while it stops, SIGKILL after
+- **lifetime**: ComfyUI runs in the worker's process group (no session of its own), so the daemon's SIGKILL of that
+  group on abort or timeout takes it down too, and it gets SIGTERM if the worker dies alone (`PR_SET_PDEATHSIG`).
+- **exit / unload**: SIGTERM to ComfyUI and every process below it, progress lines while it stops, SIGKILL after
   `stop_timeout_s` (30); the private output directory is removed.
 
 Bindings map a request field to `"node.input"` (or a list, every target set): `prompt` (required), `negative_prompt`,

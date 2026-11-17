@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 args = sys.argv[1:]
 port = int(args[args.index("--port") + 1]); out = args[args.index("--output-directory") + 1]
 inp = args[args.index("--input-directory") + 1]
+open("fake.pid", "w").write(str(os.getpid()))  # in comfy_dir, the worker's cwd for it
 hist, seen = {}, []
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -88,8 +89,10 @@ def check(name, ok):
 class Proc:
     def __init__(self, cfg):
         env = dict(os.environ, LOCALROUTER_TOOL=json.dumps(cfg))
+        # its own process group, as the daemon starts a worker (spawn with pgid 0)
         self.p = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "worker.py")], stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True, bufsize=1)
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True, bufsize=1,
+                                  process_group=0)
 
     def ask(self, obj, timeout=20):
         if obj is not None:
@@ -106,6 +109,15 @@ class Proc:
                 m["_progress"] = progress
                 return m
         raise TimeoutError(obj)
+
+
+def alive(pid):
+    """Running (not a zombie: a killed server is reaped by init, or shows Z until it is)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
 
 
 def main():
@@ -244,6 +256,24 @@ def main():
     check("the same tool still makes text to video without the first frame", r.get("ok"))
     i2v.p.stdin.close()
     i2v.p.wait(timeout=20)
+
+    # the daemon's abort or timeout: SIGKILL to the worker's group mid-render; ComfyUI must not outlive it
+    os.remove(os.path.join(comfy, "fake.pid"))
+    kw = Proc({"id": "killed", "options": dict(base, workflow=os.path.join(d, "img.json"), bindings={"prompt": "1.prompt"})})
+    check("load (kill test)", kw.ask({"op": "load"}).get("ok"))
+    comfy_pid = int(open(os.path.join(comfy, "fake.pid")).read())
+    kw.p.stdin.write(json.dumps({"op": "generate", "id": "k1", "dir": job, "request": {"image": {"prompt": "SLOW"}}}) + "\n")
+    kw.p.stdin.flush()
+    time.sleep(1.5)  # the prompt is queued and "rendering" (30 s)
+    check("ComfyUI is rendering when the worker is killed", alive(comfy_pid))
+    os.killpg(kw.p.pid, signal.SIGKILL)
+    kw.p.wait(timeout=10)
+    end = time.time() + 10
+    while alive(comfy_pid) and time.time() < end:
+        time.sleep(0.05)
+    check("SIGKILL of the worker's group mid-render: ComfyUI is gone too", not alive(comfy_pid))
+    if alive(comfy_pid):
+        os.kill(comfy_pid, signal.SIGKILL)
 
     bad = Proc({"id": "bad", "options": dict(base, workflow=os.path.join(d, "img.json"), bindings={"prompt": "7.prompt"})})
     r = bad.ask({"op": "load"})
