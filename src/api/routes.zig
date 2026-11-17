@@ -763,12 +763,24 @@ fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8
     }
 }
 
+/// A failed or cancelled job's error, as the job, video and 3D asset objects show it. `type` is what an HTTP error for
+/// the same failure carries (a synchronous request that waited for the job answers `{"error": {"message", "type"}}`),
+/// `code` the same value (what these objects carried before), `message` is for people and may change. A client retries
+/// on `insufficient_memory` in `type` or `code`, never on the message: it reads "insufficient memory: ..." (2026-11:
+/// a client matching the HTTP spelling in the message missed a job that failed for want of room, and gave up).
+pub const JobError = struct { type: []const u8, code: []const u8, message: []const u8 };
+
+/// `JobError` of `j` in `status` (read under the table's lock), null unless it failed or was cancelled.
+pub fn jobError(a: std.mem.Allocator, j: *const jobs.Job, status: jobs.Status) !?JobError {
+    if (status != .failed and status != .cancelled) return null;
+    return .{ .type = j.error_type, .code = j.error_type, .message = try a.dupe(u8, j.error_message) };
+}
+
 /// GET /v1/jobs/{id}: any job's state and, once done, its output URLs (a client that lost a job's result event, such as a
 /// voice session that reconnected while its picture was made, asks here).
 fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, caller: pair.Caller) !void {
     const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such job");
     if (!caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such job"); // another device's: as if absent
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     defer app.table.mutex.unlock(app.io);
     const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
@@ -781,12 +793,11 @@ fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, c
         .progress = j.percent,
         .phase = try a.dupe(u8, j.phaseName()),
         .urls = urls,
-        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, j.status),
     });
 }
 
 fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !void {
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     const v = j.request.video;
     const obj = .{
@@ -801,7 +812,7 @@ fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !
         .size = try std.fmt.allocPrint(a, "{d}x{d}", .{ v.width, v.height }),
         .seconds = try std.fmt.allocPrint(a, "{d}", .{v.seconds}),
         .seed = v.seed,
-        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, j.status),
     };
     app.table.mutex.unlock(app.io);
     try h.jsonValue(req, a, .ok, obj);
@@ -919,7 +930,6 @@ pub fn assetOutput(app: *App, a: std.mem.Allocator, scheme: []const u8, host: []
 }
 
 fn assetObject(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const u8, host: []const u8, j: *jobs.Job) !void {
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     const v = j.request.asset3d;
     const status = j.status;
@@ -939,7 +949,7 @@ fn assetObject(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const
         .guidance = v.guidance,
         .num_gaussians = v.num_gaussians,
         .ms = if (status == .completed) @as(?u64, j.ms) else null,
-        .@"error" = if (status == .failed or status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, status),
     };
     app.table.mutex.unlock(app.io);
     const out = assetOutput(app, a, scheme, host, j); // reads files: outside the table's lock (a completed job's fields no longer change)
@@ -1020,4 +1030,29 @@ test "disabled tools: refused by name with 409 model_disabled, skipped for a def
     try t.expect(!(try toolEntry(&app, a, 2)).supported);
     const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"residency\": \"disabled\"}", .{});
     try t.expect(try applySettings(&app, a, 2, body) == .bad);
+}
+
+test "a job that failed for want of room says insufficient_memory in type and code, as its HTTP error says in type" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var j: jobs.Job = .{ .arena = .init(t.allocator), .id = "video_1", .tool = 0, .request = .{ .video = .{ .prompt = "x" } }, .dir = "", .created_at = 0 };
+    defer j.arena.deinit();
+    try t.expect(try jobError(a, &j, .in_progress) == null);
+    try t.expect(try jobError(a, &j, .completed) == null);
+    // What the scheduler leaves on a job refused for room (its test "a tool running a job is never a victim"); a
+    // request that waited for the job answers h.fail(j.http_status, j.error_type, j.error_message).
+    j.http_status = 503;
+    j.error_type = "insufficient_memory";
+    j.error_message = "insufficient memory: this request needs 96256 MiB more than is free within the budget";
+    const e = (try jobError(a, &j, .failed)).?;
+    try t.expectEqualStrings("insufficient_memory", e.type);
+    try t.expectEqualStrings("insufficient_memory", e.code);
+    try t.expectEqualStrings(j.error_message, e.message);
+    const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = e }, .{});
+    try t.expectEqualStrings("{\"error\":{\"type\":\"insufficient_memory\",\"code\":\"insufficient_memory\",\"message\":\"insufficient memory: this request needs 96256 MiB more than is free within the budget\"}}", text);
+    // A cancelled job: the same shape.
+    j.error_type = "cancelled";
+    try t.expectEqualStrings("cancelled", (try jobError(a, &j, .cancelled)).?.type);
 }
