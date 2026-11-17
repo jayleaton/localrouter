@@ -313,8 +313,8 @@
    "accept": [
     "the MiniMax H3 and MiniMax H3-Image Community Licenses (links below and https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE): they grant nothing in the United States, the European Union, the United Kingdom or South Korea, and set an Acceptable Use Policy and disclosure duties elsewhere"
    ],
-   "download_bytes": 75770603344,
-   "disk_bytes": 88035835419,
+   "download_bytes": 97797364272,
+   "disk_bytes": 109562596347,
    "memory_bytes": 38654705664,
    "steps": [
     {
@@ -322,17 +322,17 @@
      "download_bytes": 6000000000,
      "disk_bytes": 17765232075,
      "needs_accept": true,
-     "title": "ComfyUI e9afbcc and ComfyUI-GGUF 6ea2651 (pinned), a Python 3.13 venv with PyTorch 2.14.1+rocm7.2, and the H3-Image GGUF loader node",
+     "title": "ComfyUI e9afbcc and ComfyUI-GGUF 6ea2651 (pinned), a Python 3.13 venv with PyTorch 2.14.1+rocm7.2, and our two ComfyUI nodes (the H3-Image GGUF loader; the ROCm Conv3d workaround for image to video)",
      "run": "$COMFY_INSTALL comfyui",
      "done": "$COMFY_INSTALL ok-comfyui",
      "fix": "network to github.com / download.pytorch.org / pypi.org: run again; a checkout with local changes is left alone (it says which)"
     },
     {
      "id": "weights",
-     "download_bytes": 69770603344,
-     "disk_bytes": 69770603344,
+     "download_bytes": 91797364272,
+     "disk_bytes": 91797364272,
      "needs_accept": true,
-     "title": "Comfy-Org/MiniMax-H3 (int8 fl2va DiT, Qwen3-VL 32B int8 text encoder, video/audio VAEs, 4-step turbo LoRA), unsloth/MiniMax-H3-Image-GGUF Q4_K_M, the H3-Image VAE (pinned revisions), linked into ComfyUI/models",
+     "title": "Comfy-Org/MiniMax-H3 (int8 fl2va DiT, Qwen3-VL 32B int8 text encoder, video/audio VAEs, 4-step turbo LoRA), unsloth/MiniMax-H3-Image-GGUF Q4_K_M and Q8_0 (whole-scene edits), the H3-Image VAE (pinned revisions), linked into ComfyUI/models",
      "run": "$COMFY_INSTALL models",
      "done": "$COMFY_INSTALL ok-models",
      "fix": "network to huggingface.co: run again (hf resumes); COMFY_HF=DIR reuses an existing download"
