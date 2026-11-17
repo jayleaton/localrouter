@@ -108,6 +108,36 @@ def die_with_parent():
         pass
 
 
+def comfy_preexec():
+    """In ComfyUI's process, before exec: SIGTERM when this worker dies by any means (PR_SET_PDEATHSIG). ComfyUI also
+    stays in the worker's process group (no new session), so the daemon's SIGKILL of that group on abort or timeout
+    takes it down with the worker; this covers the worker dying alone."""
+    die_with_parent()
+
+
+def tree(pid):
+    """`pid` and every process below it (Linux: /proc/PID/task/TID/children), parents first."""
+    out, todo = [], [pid]
+    while todo:
+        p = todo.pop(0)
+        out.append(p)
+        try:
+            for t in os.listdir(f"/proc/{p}/task"):
+                with open(f"/proc/{p}/task/{t}/children") as f:
+                    todo += [int(c) for c in f.read().split()]
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def signal_tree(pids, sig):
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except ProcessLookupError:
+            pass
+
+
 _pending = bytearray()
 
 
@@ -220,8 +250,9 @@ class Worker:
             env = dict(os.environ)
             env.update({k: str(v).replace("{port}", str(port)) for k, v in (self.opts.get("env") or {}).items()})
             log(f"starting ComfyUI ({comfy}) on 127.0.0.1:{port}")
+            # in this worker's process group (the daemon kills the group on abort or timeout), dying with the worker
             self.proc = subprocess.Popen(argv, cwd=comfy, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr,
-                                         stderr=sys.stderr, start_new_session=True)
+                                         stderr=sys.stderr, preexec_fn=comfy_preexec)
             self.base = f"http://127.0.0.1:{port}"
         else:
             self.base = (self.opts.get("url") or "").rstrip("/")
@@ -243,20 +274,14 @@ class Worker:
     def stop(self):
         p, self.proc = self.proc, None
         if p is not None and p.poll() is None:
-            try:
-                os.killpg(p.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            signal_tree(tree(p.pid), signal.SIGTERM)  # ComfyUI and what it started (the group is this worker's too)
             deadline = time.monotonic() + float(self.opts.get("stop_timeout_s") or 30)
             while p.poll() is None and time.monotonic() < deadline:
                 send({"progress": {"phase": "unload", "step": 0, "of": 1}})  # the daemon waits while memory is still held
                 time.sleep(0.5)
             if p.poll() is None:
                 log("ComfyUI ignored SIGTERM; killing it")
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                signal_tree(tree(p.pid), signal.SIGKILL)
                 p.wait()
         if self.out_dir:
             shutil.rmtree(self.out_dir, ignore_errors=True)
