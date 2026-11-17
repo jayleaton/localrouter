@@ -26,6 +26,7 @@ pub const Job = struct {
     error_message: []const u8 = "",
     error_type: []const u8 = "",
     http_status: u16 = 200,
+    retry_after: u32 = 0, // seconds, when a refusal asks the client to retry; 0: none (`Retry-After`, `error.retry_after`)
     finish_reason: []const u8 = "", // why the audio ended, when the tool says (speech: stop, length, silence)
     segments: []const u8 = "", // a long-form reply's segment starts, when the tool says
     completed_at: i64 = 0,

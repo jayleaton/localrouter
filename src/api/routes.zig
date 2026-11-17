@@ -610,7 +610,7 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, sc
     const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const Item = struct { b64_json: ?[]const u8 = null, url: ?[]const u8 = null };
     const items = try a.alloc(Item, j.files.len);
     const as_url = eql(b.response_format, "url");
@@ -628,7 +628,7 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, sc
 }
 
 /// Why `enqueue` refused: the HTTP status, OpenAI's error type and a message (which may point into `buf`).
-pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_request_error", message: []const u8 = "", buf: [512]u8 = undefined };
+pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_request_error", message: []const u8 = "", retry_after: u32 = 0, buf: [512]u8 = undefined };
 
 /// Fills in the model's defaults, then validates and queues `asked` for `tool` on behalf of `owner` (a device id, or
 /// "": `pair.Caller.owner`; the HTTP routes, the MCP tools and voice sessions share it), saving `files` in its job
@@ -764,16 +764,18 @@ fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8
 }
 
 /// A failed or cancelled job's error, as the job, video and 3D asset objects show it. `type` is what an HTTP error for
-/// the same failure carries (a synchronous request that waited for the job answers `{"error": {"message", "type"}}`),
-/// `code` the same value (what these objects carried before), `message` is for people and may change. A client retries
-/// on `insufficient_memory` in `type` or `code`, never on the message: it reads "insufficient memory: ..." (2026-11:
-/// a client matching the HTTP spelling in the message missed a job that failed for want of room, and gave up).
-pub const JobError = struct { type: []const u8, code: []const u8, message: []const u8 };
+/// the same failure carries (a synchronous request that waited for the job answers `{"error": {"message", "type", "code"}}`),
+/// `code` the same value (what these objects carried before), `message` is for people and may change. `retry_after`
+/// (seconds) is set when the scheduler refused the job because a non-evictable job holds the memory; the HTTP error
+/// also sends it as `Retry-After`. A client retries on `insufficient_memory` in `type` or `code`, never on the message:
+/// it reads "insufficient memory: ..." (2026-11: a client matching the HTTP spelling in the message missed a job that
+/// failed for want of room, and gave up).
+pub const JobError = struct { type: []const u8, code: []const u8, message: []const u8, retry_after: ?u32 = null };
 
 /// `JobError` of `j` in `status` (read under the table's lock), null unless it failed or was cancelled.
 pub fn jobError(a: std.mem.Allocator, j: *const jobs.Job, status: jobs.Status) !?JobError {
     if (status != .failed and status != .cancelled) return null;
-    return .{ .type = j.error_type, .code = j.error_type, .message = try a.dupe(u8, j.error_message) };
+    return .{ .type = j.error_type, .code = j.error_type, .message = try a.dupe(u8, j.error_message), .retry_after = if (j.retry_after > 0) j.retry_after else null };
 }
 
 /// GET /v1/jobs/{id}: any job's state and, once done, its output URLs (a client that lost a job's result event, such as a
@@ -1042,7 +1044,7 @@ test "a job that failed for want of room says insufficient_memory in type and co
     try t.expect(try jobError(a, &j, .in_progress) == null);
     try t.expect(try jobError(a, &j, .completed) == null);
     // What the scheduler leaves on a job refused for room (its test "a tool running a job is never a victim"); a
-    // request that waited for the job answers h.fail(j.http_status, j.error_type, j.error_message).
+    // request that waited for the job answers h.failJob (type, code, and retry_after when set).
     j.http_status = 503;
     j.error_type = "insufficient_memory";
     j.error_message = "insufficient memory: this request needs 96256 MiB more than is free within the budget";
@@ -1050,8 +1052,13 @@ test "a job that failed for want of room says insufficient_memory in type and co
     try t.expectEqualStrings("insufficient_memory", e.type);
     try t.expectEqualStrings("insufficient_memory", e.code);
     try t.expectEqualStrings(j.error_message, e.message);
-    const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = e }, .{});
+    const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = e }, .{ .emit_null_optional_fields = false });
     try t.expectEqualStrings("{\"error\":{\"type\":\"insufficient_memory\",\"code\":\"insufficient_memory\",\"message\":\"insufficient memory: this request needs 96256 MiB more than is free within the budget\"}}", text);
+    j.retry_after = 30;
+    const hinted = (try jobError(a, &j, .failed)).?;
+    try t.expectEqual(@as(u32, 30), hinted.retry_after.?);
+    const hinted_text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = hinted }, .{ .emit_null_optional_fields = false });
+    try t.expect(std.mem.indexOf(u8, hinted_text, "\"retry_after\":30") != null);
     // A cancelled job: the same shape.
     j.error_type = "cancelled";
     try t.expectEqualStrings("cancelled", (try jobError(a, &j, .cancelled)).?.type);
