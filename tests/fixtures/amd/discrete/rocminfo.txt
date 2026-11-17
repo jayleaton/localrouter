@@ -1,0 +1,13 @@
+*******
+Agent 1
+*******
+  Name:                    Intel(R) Core(TM) i7-14700K
+  Marketing Name:          Intel(R) Core(TM) i7-14700K
+  Device Type:             CPU
+*******
+Agent 2
+*******
+  Name:                    gfx1100
+  Marketing Name:          Radeon RX 7900 XTX
+  Device Type:             GPU
+*** Done ***

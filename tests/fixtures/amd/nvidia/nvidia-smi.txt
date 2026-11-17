@@ -1,0 +1,4 @@
+-L=GPU 0: NVIDIA GB10 (UUID: GPU-XX)
+name=NVIDIA GB10
+driver_version=580.95.05
+memory.total=[N/A]
