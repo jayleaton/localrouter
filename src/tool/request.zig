@@ -42,6 +42,9 @@ pub const Image = struct {
     guidance: f32 = 0, // 0: the tool's default
     references: []const []const u8 = &.{}, // file names in the job directory (edits)
     mask: ?[]const u8 = null, // a file name in the job directory: an edit's mask (alpha 0 where the edit goes)
+    // Set by the API when the caller asked for `size_snap`, then cleared before the request is stored, so a worker
+    // never sees it. Null stays off the worker protocol (`emit_null_optional_fields` is false there).
+    size_snap: ?bool = null,
 };
 
 /// Video (optionally with audio). `seconds` x `fps` frames.
@@ -57,6 +60,7 @@ pub const Video = struct {
     guidance: f32 = 0,
     audio: bool = true,
     first_frame: ?[]const u8 = null, // file name in the job directory (image to video)
+    size_snap: ?bool = null, // as `Image.size_snap`: cleared before the worker sees the request
 };
 
 /// Text to speech. The tool writes `speech.wav`: mono 16-bit PCM at the model's own rate; the API encodes other formats.

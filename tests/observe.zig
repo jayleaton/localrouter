@@ -63,3 +63,58 @@ test "status and metrics describe tools and memory, and /health stays {\"ok\":tr
     }
     try testing.expect(saw_load);
 }
+
+test "size_snap rounds onto the tool's grid and /v1/tools lists that grid" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d = try Daemon.start(testing.allocator, io, "snap", "{" ++ harness.reserve ++
+        ", \"tools\": [" ++
+        "{\"id\": \"tp\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 5}}," ++
+        "{\"id\": \"grid\", \"kind\": \"image\", \"engine\": \"testpattern\", \"options\": {\"step_ms\": 5, \"size_multiple\": 32, \"min_side\": 256, \"max_side\": 2048}}," ++
+        "{\"id\": \"say\", \"kind\": \"speech\", \"engine\": \"testpattern\"}" ++
+        "]}");
+    defer d.stop();
+
+    const listed = try std.json.parseFromSliceLeaky(std.json.Value, a, (try d.call(a, .GET, "/v1/tools", null)).body, .{});
+    var grid_multiple: i64 = 0;
+    var saw_speech = false;
+    for (listed.object.get("data").?.array.items) |item| {
+        const o = item.object;
+        if (std.mem.eql(u8, o.get("id").?.string, "grid")) {
+            const sz = o.get("size").?.object;
+            grid_multiple = sz.get("multiple").?.integer;
+            try testing.expectEqual(@as(i64, 256), sz.get("min_width").?.integer);
+            try testing.expectEqual(@as(i64, 2048), sz.get("max_width").?.integer);
+        } else if (std.mem.eql(u8, o.get("id").?.string, "tp")) {
+            try testing.expectEqual(@as(i64, 16), o.get("size").?.object.get("multiple").?.integer);
+        } else if (std.mem.eql(u8, o.get("id").?.string, "say")) {
+            try testing.expect(o.get("size") == null);
+            saw_speech = true;
+        }
+    }
+    try testing.expectEqual(@as(i64, 32), grid_multiple);
+    try testing.expect(saw_speech);
+
+    // Off the 16 grid: refused unless size_snap is set, and then the response names the size used.
+    const refused = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"tp\",\"prompt\":\"bars\",\"size\":\"1000x1000\"}");
+    try testing.expectEqual(std.http.Status.bad_request, refused.status);
+    const snapped = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"tp\",\"prompt\":\"bars\",\"size\":\"1000x1000\",\"size_snap\":true}");
+    try testing.expectEqual(std.http.Status.ok, snapped.status);
+    try testing.expect(std.mem.indexOf(u8, snapped.body, "\"size\":\"992x992\"") != null);
+    const png = try harness.firstPng(a, snapped.body);
+    try testing.expectEqual(@as(u32, 992), std.mem.readInt(u32, png[16..20], .big));
+    try testing.expectEqual(@as(u32, 992), std.mem.readInt(u32, png[20..24], .big));
+
+    // 1280x720 is already a multiple of 16, so today's testpattern accepts it. On a 32 grid, size_snap makes it 1280x704.
+    const as_is = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"grid\",\"prompt\":\"bars\",\"size\":\"1280x720\"}");
+    try testing.expectEqual(std.http.Status.ok, as_is.status);
+    try testing.expect(std.mem.indexOf(u8, as_is.body, "\"size\":\"1280x720\"") != null);
+    const on_grid = try d.call(a, .POST, "/v1/images/generations", "{\"model\":\"grid\",\"prompt\":\"bars\",\"size\":\"1280x720\",\"size_snap\":true}");
+    try testing.expectEqual(std.http.Status.ok, on_grid.status);
+    try testing.expect(std.mem.indexOf(u8, on_grid.body, "\"size\":\"1280x704\"") != null);
+    const wide = try harness.firstPng(a, on_grid.body);
+    try testing.expectEqual(@as(u32, 1280), std.mem.readInt(u32, wide[16..20], .big));
+    try testing.expectEqual(@as(u32, 704), std.mem.readInt(u32, wide[20..24], .big));
+}

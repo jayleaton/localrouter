@@ -33,7 +33,9 @@ document says which of it a harness may rely on.
 - **Refuse, never approximate.** A field or value the daemon cannot honour is a 400 (an `error` event on the
   WebSocket, a tool error over MCP) naming it, before any model loads. Nothing is silently dropped or rounded. The one
   exception is Chat Completions, whose body goes to the model's own server: a field that server does not know may be
-  ignored there rather than refused (see [Chat](#chat-completions)).
+  ignored there rather than refused (see [Chat](#chat-completions)). Image and video `size_snap: true` is the other:
+  the caller asked for the nearest size the model accepts, and the response names the size used. Without it, an
+  off-grid size is still refused.
 - **The service never executes the harness's tools.** Function calls a model makes for the caller's tools come back to
   the caller. The one exception is a realtime session left in its default `server` tool mode, where the box's
   built-ins (generation and computer tools) run on the box; a harness sets `client` mode and owns every tool.

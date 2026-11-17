@@ -83,7 +83,7 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
         const schema = t.object.get("inputSchema").?.object;
         try testing.expectEqualStrings("prompt", schema.get("required").?.array.items[0].string);
         const props = schema.get("properties").?.object;
-        for ([_][]const u8{ "image", "images", "mask", "size", "n", "seed", "model", "inline_images", "wait_s" }) |k| try testing.expect(props.get(k) != null);
+        for ([_][]const u8{ "image", "images", "mask", "size", "size_snap", "n", "seed", "model", "inline_images", "wait_s" }) |k| try testing.expect(props.get(k) != null);
         try testing.expect(props.get("size").?.object.get("default") == null);
     };
 

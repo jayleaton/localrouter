@@ -8,6 +8,12 @@ const Request = request.Request;
 pub const Capability = request.Capability;
 const config = @import("../config.zig");
 const ToolConfig = config.ToolConfig;
+const size_grid = @import("../tool/size.zig");
+
+/// Width and height a tool accepts. `GET /v1/tools` lists it for image and video tools. `multiple` is the grid
+/// (16 for Qwen-Image, 32 for MiniMax H3 and a ComfyUI tool that sets `size_multiple`). `max_pixels` is absent when
+/// the tool has no pixel cap.
+pub const SizeLimits = size_grid.Limits;
 
 pub const Needs = tool.Needs;
 pub const Job = tool.Job;
@@ -68,6 +74,9 @@ pub const Entry = struct {
     defaults: ?*const fn (cfg: *const ToolConfig, req: *Request) void = null,
     /// The licence of the weights this engine runs, for a tool whose config names none. Null: unknown.
     license: ?config.License = null,
+    /// The sizes this engine accepts. Null: `sizesFromOptions` (a `cmd` tool's `size_multiple`, `min_side`, `max_side`,
+    /// `max_width`, `max_height` and `max_pixels`, else the API's 16-pixel grid from 256 to 2048).
+    sizes: ?*const fn (cfg: *const ToolConfig) SizeLimits = null,
 };
 
 /// The tool's licence: its config's, else its engine's; null when neither states one.
@@ -100,6 +109,59 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
             if (v.guidance == null and hasOption(cfg, "default_guidance")) v.guidance = optionFloat(cfg, "default_guidance", 0);
         },
         .image, .speech, .transcription, .chat, .decision => {},
+    }
+}
+
+/// Image and video tools only. The engine's `sizes` when it has one, else the tool's size options.
+pub fn sizeLimits(cfg: *const ToolConfig) ?SizeLimits {
+    switch (cfg.kind) {
+        .image, .video => {},
+        else => return null,
+    }
+    if (find(cfg.engine)) |e| if (e.sizes) |f| return f(cfg);
+    return sizesFromOptions(cfg);
+}
+
+/// A `cmd` tool's size options, and the default grid when an engine does not name its own. `size_multiple` defaults
+/// to 16, which is what `request.validate` already requires.
+pub fn sizesFromOptions(cfg: *const ToolConfig) SizeLimits {
+    const multiple: u32 = @intCast(@max(@min(optionInt(cfg, "size_multiple", 16), std.math.maxInt(u32)), 1));
+    const min_side: u32 = @intCast(@min(optionInt(cfg, "min_side", 256), std.math.maxInt(u32)));
+    const max_side = optionInt(cfg, "max_side", 0);
+    const max_w_raw: u32 = @intCast(@min(optionInt(cfg, "max_width", if (max_side > 0) max_side else 2048), std.math.maxInt(u32)));
+    const max_h_raw: u32 = @intCast(@min(optionInt(cfg, "max_height", if (max_side > 0) max_side else 2048), std.math.maxInt(u32)));
+    const min = size_grid.alignUp(min_side, multiple);
+    var max_w = size_grid.alignDown(max_w_raw, multiple);
+    var max_h = size_grid.alignDown(max_h_raw, multiple);
+    if (max_w < min) max_w = min;
+    if (max_h < min) max_h = min;
+    const px = optionInt(cfg, "max_pixels", 0);
+    return .{
+        .min_width = min,
+        .max_width = max_w,
+        .min_height = min,
+        .max_height = max_h,
+        .multiple = multiple,
+        .max_pixels = if (px > 0) px else null,
+    };
+}
+
+/// When the caller set `size_snap`, replace width and height with the nearest size this model accepts. A 0 x 0
+/// request is the model's own size and is left for `fill` and the model.
+pub fn snapRequest(cfg: *const ToolConfig, req: *Request) void {
+    const lim = sizeLimits(cfg) orelse return;
+    switch (req.*) {
+        .image => |*v| {
+            const s = size_grid.snap(v.width, v.height, lim);
+            v.width = s[0];
+            v.height = s[1];
+        },
+        .video => |*v| {
+            const s = size_grid.snap(v.width, v.height, lim);
+            v.width = s[0];
+            v.height = s[1];
+        },
+        else => {},
     }
 }
 
@@ -704,6 +766,29 @@ test "a video request without a size gets the tool's default_width x default_hei
     r = .{ .video = .{ .prompt = "waves" } };
     fill(c.tool("plain").?, &r);
     try std.testing.expectEqual(default_video_size, [2]u32{ r.video.width, r.video.height });
+}
+
+test "size limits come from the tool's options, and size_snap lands on that grid" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [
+        \\ {"id": "img", "kind": "image", "cmd": ["x"], "options": {"size_multiple": 32, "min_side": 256, "max_side": 2048}},
+        \\ {"id": "say", "kind": "speech", "cmd": ["y"]}
+        \\]}
+    );
+    const lim = sizeLimits(c.tool("img").?).?;
+    try std.testing.expectEqual(@as(u32, 32), lim.multiple);
+    try std.testing.expectEqual(@as(u32, 256), lim.min_width);
+    try std.testing.expectEqual(@as(u32, 2048), lim.max_width);
+    try std.testing.expect(sizeLimits(c.tool("say").?) == null);
+    var r: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 720 } };
+    snapRequest(c.tool("img").?, &r);
+    try std.testing.expectEqual([2]u32{ 1280, 704 }, [2]u32{ r.image.width, r.image.height });
+    // a speech request is not a size; snapping it changes nothing
+    var say: Request = .{ .speech = .{ .input = "hi" } };
+    snapRequest(c.tool("say").?, &say);
+    try std.testing.expectEqualStrings("hi", say.speech.input);
 }
 
 test "instructions are written into the text by a tool's template, after a leading tag; refused without one" {

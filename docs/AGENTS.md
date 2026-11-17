@@ -98,7 +98,8 @@ curl -s -m 900 $BASE/images/generations -H 'content-type: application/json' -d '
 
 | Field | Notes |
 | --- | --- |
-| `size` | `WIDTHxHEIGHT`, 256 to 2048 a side, multiples of 16 |
+| `size` | `WIDTHxHEIGHT`, 256 to 2048 a side, multiples of 16. A model's own grid can be stricter: `GET /v1/tools` lists it as `size` (`multiple`, `min_width`, `max_width`, `min_height`, `max_height`, and `max_pixels` when the model has one) |
+| `size_snap` | Extension, default false. `true` rounds width and height to the nearest size that model accepts (its `multiple`, inside its limits; a tie goes to the lower multiple) and the response's `size` is the size used. `false` refuses a size off the grid, as before. An edit that omits `size` still keeps the input's shape |
 | `n` | 1 to 4 |
 | `seed` | Extension. Omit it for a random one; the response's `seed` reproduces the image |
 | `steps`, `guidance`, `negative_prompt` | Extensions; 0 or absent means the tool's default |
@@ -164,7 +165,8 @@ size, so send one of that shape to keep all of it. Say what the image shows in t
 something else pulls the clip away from it.
 
 MiniMax H3 (`minimax-h3`) takes sizes up to its `max_width` x `max_height` and clips up to `max_seconds`, in multiples
-of 32 pixels (1280x720 is not one: send 1280x704); a request past them is refused with the limits named, before
+of 32 pixels (1280x720 is not one: send 1280x704, or `"size_snap": true` to have 1280x720 rounded to the nearest
+multiple inside those limits, which is 1280x704). A request past them is refused with the limits named, before
 anything loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
 and 8 s, 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
 1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
@@ -562,7 +564,10 @@ higher priority, nor a `call` tool of any priority (and a call's tools never unl
 before anything is unloaded, and the call keeps its voice. The chat model sees that message as the tool's result and
 says the machine is busy. Without a call, priority only orders the victims, as above. MCP `reserve_for` (which tells
 the session first and brings the voice back after the job) is unchanged.
-`GET /v1/tools` shows `priority`, `keep_loaded`, `residency`, `spare_room_only` and `capabilities`.
+`GET /v1/tools` shows `priority`, `keep_loaded`, `residency`, `spare_room_only` and `capabilities`, and for an image
+or video tool `size`: the width and height it accepts (`min_width`, `max_width`, `min_height`, `max_height`, `multiple`,
+and `max_pixels` when it has a pixel cap). A ComfyUI tool's `size_multiple`, `min_side`, `max_side`, `max_width`,
+`max_height` and `max_pixels` options are that grid (default multiple 16, sides 256 to 2048).
 
 ## Licences
 

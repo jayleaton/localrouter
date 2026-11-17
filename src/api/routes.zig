@@ -240,6 +240,8 @@ pub const ToolEntry = struct {
     capabilities: []const engine.Capability,
     last_error: []const u8,
     license: ?@import("../config.zig").License,
+    /// Width and height this tool accepts. Absent for a tool that does not take a size (speech, chat, ...).
+    size: ?engine.SizeLimits = null,
     node: ?[]const u8 = null,
     local: bool = true,
 };
@@ -280,6 +282,7 @@ pub fn toolEntry(app: *App, a: std.mem.Allocator, i: usize) !ToolEntry {
         .capabilities = try engine.capabilityList(a, c),
         .last_error = slot.tool.failure().message,
         .license = engine.license(c),
+        .size = engine.sizeLimits(c),
     };
 }
 
@@ -562,6 +565,7 @@ const ImageBody = struct {
     seed: ?u64 = null,
     steps: u32 = 0,
     guidance: f32 = 0,
+    size_snap: bool = false, // round width and height onto the model's grid; false keeps today's refusal
 };
 
 /// Parses a JSON or multipart body into `T` and collects the input images found under `keys` (multipart parts or JSON
@@ -611,7 +615,7 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, sc
     for (refs, refs_files) |*d, f| d.* = f.name;
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null, .size_snap = if (b.size_snap) true else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     j.done.wait(app.io) catch return;
     if (j.status != .completed) return h.failJob(req, a, j);
@@ -628,11 +632,30 @@ fn images(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, sc
             it.* = .{ .b64_json = enc.encode(try a.alloc(u8, enc.calcSize(png.len)), png) };
         }
     }
-    try h.jsonValue(req, a, .ok, .{ .created = j.created_at, .data = items, .model = app.scheduler.slots[tool].tool.config().id, .seed = j.seed });
+    const made = j.request.image;
+    const size_s: ?[]const u8 = if (made.width > 0 and made.height > 0) try std.fmt.allocPrint(a, "{d}x{d}", .{ made.width, made.height }) else null;
+    try h.jsonValue(req, a, .ok, .{ .created = j.created_at, .data = items, .model = app.scheduler.slots[tool].tool.config().id, .seed = j.seed, .size = size_s });
 }
 
 /// Why `enqueue` refused: the HTTP status, OpenAI's error type and a message (which may point into `buf`).
 pub const Refusal = struct { status: u16 = 400, typ: []const u8 = "invalid_request_error", message: []const u8 = "", retry_after: u32 = 0, buf: [512]u8 = undefined };
+
+/// True when the caller asked to round the size, and clears the flag so the stored request (and the worker) does not carry it.
+fn takeSizeSnap(r: *request.Request) bool {
+    switch (r.*) {
+        .image => |*v| {
+            const on = v.size_snap orelse false;
+            v.size_snap = null;
+            return on;
+        },
+        .video => |*v| {
+            const on = v.size_snap orelse false;
+            v.size_snap = null;
+            return on;
+        },
+        else => return false,
+    }
+}
 
 /// Fills in the model's defaults, then validates and queues `asked` for `tool` on behalf of `owner` (a device id, or
 /// "": `pair.Caller.owner`; the HTTP routes, the MCP tools and voice sessions share it), saving `files` in its job
@@ -648,7 +671,9 @@ pub fn enqueue(app: *App, tool: usize, asked: request.Request, files: []const in
         return null;
     }
     var r = asked;
+    const snap = takeSizeSnap(&r);
     engine.fill(cfg, &r); // what the request left to the model (a video's size)
+    if (snap) engine.snapRequest(cfg, &r); // after fill, so a named size is rounded and a default is already valid
     if (!engine.supports(cfg, r.capability())) {
         why.message = std.fmt.bufPrint(why.buf[0..384], "model '{s}' cannot do {s} (its capabilities: {s}); pick a model that lists {s} in list_models", .{ cfg.id, @tagName(r.capability()), capabilityNames(&why.buf, cfg), @tagName(r.capability()) }) catch "the model lacks a capability this request needs";
         return null;
@@ -727,6 +752,7 @@ const VideoBody = struct {
     steps: u32 = 0,
     guidance: f32 = 0,
     audio: bool = true,
+    size_snap: bool = false, // round width and height onto the model's grid; false keeps today's refusal
 };
 
 /// `input_reference` (OpenAI's name) is the first frame: a multipart file, or JSON base64, a data URL or a URL.
@@ -740,7 +766,7 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
+    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null, .size_snap = if (b.size_snap) true else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     try videoObject(app, req, a, j);
 }
