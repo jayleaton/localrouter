@@ -2,7 +2,7 @@
 //! a 3D asset, shaped like /v1/videos), /v1/audio (`speech.zig`) and
 //! /v1/chat/completions (`chat.zig`), /v1/responses (`responses.zig`, the Responses API over the chat path), /v1/systemone (`decide.zig`, typed decisions)
 //! (with a model gateway's `kind`, `running` and `machine` extras), output files, /v1/jobs/{id} (any job's state and outputs),
-//! /v1/tools for residency, /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
+//! /v1/tools for residency, /v1/status and /metrics (a scheduler snapshot, `status.zig`), /v1/pair (device pairing, `pair.zig`), /v1/capabilities (the harness contract,
 //! `capabilities.zig`), and /mcp
 //! (`mcp.zig`, the same jobs as MCP tools). Every request becomes a scheduler job. Edits and image to video take their input images as
 //! multipart files or JSON base64 / URLs (`inputs.zig`); they are saved in the job directory and named in the request.
@@ -27,6 +27,7 @@ const desktop = @import("desktop.zig");
 const voices = @import("voices.zig");
 const Need = @import("../pair.zig").Need;
 const asset3d = @import("../media/asset3d.zig");
+const status_api = @import("status.zig");
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -108,6 +109,8 @@ pub fn handle(app: *App, conn: *const h.Conn, req: *h.Request) !void {
     if (std.mem.startsWith(u8, p, "/v1/voices/")) return voices.route(app, req, a, host, ctype, p["/v1/voices/".len..], caller);
     if (eql(p, "/v1/assistant")) return @import("assistant.zig").route(app, req, a);
     if (m == .GET and eql(p, "/v1/tools")) return tools(app, req, a);
+    if (m == .GET and eql(p, "/v1/status")) return status_api.serve(app.scheduler, app.io, req, a);
+    if (m == .GET and eql(p, "/metrics")) return status_api.metrics(app.scheduler, app.io, req, a);
     if (m == .POST and std.mem.startsWith(u8, p, "/v1/tools/")) return toolControl(app, req, a, p["/v1/tools/".len..]);
     if (std.mem.startsWith(u8, p, "/v1/node/")) return @import("node.zig").route(app, req, a, p["/v1/node/".len..], caller);
     return h.fail(req, a, 404, "invalid_request_error", "no such route");
@@ -126,7 +129,7 @@ pub fn need(m: std.http.Method, p: []const u8) ?Need {
     if (eql(p, "/v1/desktop") or starts(u8, p, "/v1/computer/")) return null;
     if (eql(p, "/mcp")) return .mcp;
     if (eql(p, "/v1/realtime")) return .realtime;
-    if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/skills/model-manager"))) return .read;
+    if (m == .GET and (eql(p, "/v1/models") or eql(p, "/models") or eql(p, "/v1/tools") or eql(p, "/v1/status") or eql(p, "/metrics") or eql(p, "/v1/skills/model-manager"))) return .read;
     if (m == .GET and (eql(p, "/v1/voices") or starts(u8, p, "/v1/voices/"))) return .read; // creating, renaming and deleting a voice: manage
     if (m == .GET and eql(p, "/v1/assistant")) return .paired; // every client shows the name; renaming it: manage
     if (eql(p, "/v1/chat/completions") or eql(p, "/v1/responses") or starts(u8, p, "/v1/responses/")) return .inference;
@@ -145,6 +148,7 @@ test "every route class needs its scope; only the open routes need none; an unna
         .{ .POST, "/mcp", .mcp },                        .{ .GET, "/v1/realtime", .realtime },
         .{ .GET, "/v1/models", .read },                  .{ .GET, "/models", .read },
         .{ .GET, "/v1/tools", .read },                   .{ .GET, "/v1/skills/model-manager", .read },
+        .{ .GET, "/v1/status", .read },                  .{ .GET, "/metrics", .read },
         .{ .POST, "/v1/tools/release", .manage },        .{ .POST, "/v1/tools/x/load", .manage },
         .{ .POST, "/v1/tools/x/unload", .manage },       .{ .POST, "/v1/chat/completions", .inference },
         .{ .POST, "/v1/tools/x/settings", .manage },     .{ .POST, "/v1/responses", .inference },

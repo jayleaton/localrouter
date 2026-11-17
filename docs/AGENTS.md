@@ -583,6 +583,27 @@ informs and enforces nothing: check the terms before you use or publish what a m
 | `minimax-h3` | MiniMax H3 Community License | outside the excluded territories; commercial included (over USD 20 million yearly revenue: MiniMax's written authorization) | not licensed in the US, EU, UK or South Korea; public content disclosed as machine-generated; "MiniMax H3" on a commercial product's interface |
 | `idol` (Mac, on demand) | Apache-2.0 (Idol, its BiRefNet, the FLUX.2 autoencoder) + DINOv3 License (the image encoder) | any | DINOv3: redistribute only under its licence with a copy; acknowledge it in publications; no reverse engineering; trade controls; no military, nuclear, espionage or ITAR uses |
 
+## Status and metrics
+
+`GET /health` is unchanged: `{"ok":true}`. `GET /v1/status` (scope `read`) is a snapshot of the scheduler, and `GET /metrics` is the same figures as Prometheus text. Neither includes a path, a secret, a hostname or a log line.
+
+| Field | Meaning |
+| --- | --- |
+| `tools[].state` | `idle` (loaded, no job), `loading`, `committing` (the worker is ready and admitted bytes are still landing), `busy` or `unloaded` |
+| `tools[].resident_bytes` | bytes that tool holds now (0 while unloaded) |
+| `tools[].queue_depth` | jobs waiting for it, not counting the one running |
+| `tools[].last_load_s` | unix seconds of its last successful load; absent until it has loaded, and kept after it unloads |
+| `tools[].last_error` | `{type, code, time}` of its last failed job (`time` is unix seconds). `type` and `code` are the same token as an HTTP error's. Absent until one fails. The message is not included |
+| `memory` | `ceiling_bytes` (the budget), `used_bytes` (booked now), `free_bytes` |
+| `evictions` | how many times a tool was unloaded to make room for another. An idle-TTL unload or `POST /v1/tools/.../unload` is not one |
+
+```bash
+curl -s $BASE/status | jq '{memory, evictions, tools: [.tools[] | {id, state, queue_depth, last_error}]}'
+curl -s http://<host>:8190/metrics    # Prometheus text; the same gauges and counters
+```
+
+The Prometheus series are `localrouter_tool_resident_bytes`, `localrouter_tool_state`, `localrouter_memory_bytes` (`ceiling`, `used`, `free`), `localrouter_tool_queue_depth`, `localrouter_tool_last_load_timestamp_seconds`, `localrouter_evictions_total` and `localrouter_tool_last_error_timestamp_seconds`.
+
 ## Errors
 
 Errors use OpenAI's shape: `{"error": {"message", "type", "code"}}`. A failed job (`GET /v1/jobs/{id}`, `/v1/videos/{id}`,

@@ -62,7 +62,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
 | `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video`, `image_to_3d` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
-| `model_management` | the operator routes and the MCP tools that change what is loaded |
+| `model_management` | the operator routes and the MCP tools that change what is loaded. `GET /v1/status` and `GET /metrics` (scope `read`) are the scheduler snapshot; [AGENTS.md](AGENTS.md#status-and-metrics) |
 | `computer` | `enabled`, the helper and approval routes, and `placement` (`box_policy` today) |
 | `unsupported` | `[{feature, status, note}]`: `status` is `unsupported` or `coming`; `note` says what to use instead |
 
