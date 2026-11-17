@@ -39,6 +39,8 @@ jobs:
           python3 -I tools/install/test_hf_pinned.py
       - name: the Strix Halo unit passes the pinned Gufo image to its workers (no GPU, stub systemd-run and podman)
         run: bash deploy/strix-halo/test_start.sh
+      - name: a hard kill of serve.sh's process group removes its Gufo container (stub podman; no GPU)
+        run: bash tools/gufo/test_serve.sh
       - name: the MiniMax weights install checks every file against its pins (no network, stub hf)
         run: bash deploy/strix-halo/comfyui/test_install.sh
       - name: the ComfyUI worker against a fake ComfyUI (no GPU)
