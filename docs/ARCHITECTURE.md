@@ -41,7 +41,9 @@ adding a model, or a new kind of model, does not touch the orchestration.
 
 **One process a loaded model.** Each tool runs in its own worker process. Unloading is process exit, so every byte of
 GPU and host memory returns to the machine, and a crashing model fails one job, not the daemon. The idle daemon is a
-few MB and holds no GPU memory.
+few MB and holds no GPU memory. The worker's stderr is `<data_dir>/logs/<id>.log`. It rotates by size: once the file
+reaches `log_max_bytes` (default 8 MiB) the next append renames it to `<id>.log.1` and keeps `log_keep` older files
+(default 3). `log_max_bytes` 0 does not rotate.
 
 **Memory.** Every tool states what it needs before it is loaded (`needs(request)`: resident bytes while loaded, plus
 working bytes for this request). The scheduler admits a job only if it fits under the budget (the machine's available

@@ -20,6 +20,7 @@ const ToolConfig = @import("../config.zig").ToolConfig;
 const speech_gate = @import("../sched/speech_gate.zig");
 const yielder = @import("../sched/yielder.zig");
 const orphan = @import("../engine/orphan.zig");
+const logrotate = @import("logrotate.zig");
 
 pub const Setup = struct {
     gpa: std.mem.Allocator,
@@ -27,6 +28,8 @@ pub const Setup = struct {
     self_exe: []const u8, // this binary, for `localrouter worker`
     environ: *const std.process.Environ.Map,
     log_dir: []const u8,
+    log_max_bytes: u64 = 8 << 20, // 0: append forever. See `logrotate.zig`.
+    log_keep: u32 = 3,
     gpu_lock: []const u8 = "",
     speech_gate: []const u8 = "", // the file workers wait on while speech is made (sched/speech_gate.zig); "": none
     rank: ?Rank = null, // this node's rank of a tensor-parallel group (`topology.Group`); null: not one
@@ -58,6 +61,8 @@ pub const ProcessTool = struct {
     proxying: std.atomic.Value(bool) = .init(false), // a chat request is being proxied: abort ends it, not the worker
     upstream_fd: std.atomic.Value(posix.fd_t) = .init(-1), // that request's connection
     lock_path: [1024]u8 = undefined, // `ownLock`
+    log_thread: ?std.Thread = null, // copies the worker's stderr into its log, rotating as it goes
+    log_joined: std.atomic.Value(bool) = .init(true), // true: no thread to join
 
     pub fn init(setup: Setup, cfg: *const ToolConfig) !ProcessTool {
         return .{ .setup = setup, .cfg = cfg, .buf = try setup.gpa.alloc(u8, wire.max_line) };
@@ -368,13 +373,65 @@ pub const ProcessTool = struct {
         const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.log", .{ p.setup.log_dir, p.cfg.id });
         defer gpa.free(log_path);
         Io.Dir.cwd().createDirPath(p.setup.io, std.fs.path.dirname(log_path).?) catch {}; // ids such as fishaudio/drama-3
-        const log = try Io.Dir.cwd().createFile(p.setup.io, log_path, .{ .truncate = false });
-        defer log.close(p.setup.io);
-        _ = posix.system.lseek(log.handle, 0, posix.SEEK.END);
-        const child = try std.process.spawn(p.setup.io, .{ .argv = argv, .environ_map = &env, .stdin = .pipe, .stdout = .pipe, .stderr = .{ .file = log }, .pgid = 0 });
+        // stderr is a pipe the parent copies into the log, so a long-lived worker rotates without reopening its fd.
+        p.joinLog();
+        p.log_joined.store(false, .release);
+        const child = try std.process.spawn(p.setup.io, .{ .argv = argv, .environ_map = &env, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe, .pgid = 0 });
+        const err_file = child.stderr orelse return error.Pipe;
         p.child = child;
         p.pid.store(child.id.?, .release);
         p.lines = .{ .fd = child.stdout.?.handle, .buf = p.buf };
+        const owned = gpa.dupe(u8, log_path) catch |err| {
+            p.kill(); // child.wait closes the stderr pipe
+            return err;
+        };
+        // The thread must not close `err_file`: `child.wait` does, after the thread has seen EOF.
+        p.log_thread = std.Thread.spawn(.{}, logCopy, .{LogCopy{
+            .io = p.setup.io,
+            .file = err_file,
+            .path = owned,
+            .gpa = gpa,
+            .max_bytes = p.setup.log_max_bytes,
+            .keep = p.setup.log_keep,
+        }}) catch |err| {
+            gpa.free(owned);
+            p.kill();
+            return err;
+        };
+    }
+
+    const LogCopy = struct {
+        io: Io,
+        file: Io.File,
+        path: []u8,
+        gpa: std.mem.Allocator,
+        max_bytes: u64,
+        keep: u32,
+    };
+
+    /// Blocking read of the worker's stderr into its log. The write end closes when the worker exits. The read end
+    /// stays open: `child.wait` closes it, and only after this thread has returned.
+    fn logCopy(c: LogCopy) void {
+        defer c.gpa.free(c.path);
+        const fl = posix.system.fcntl(c.file.handle, posix.F.GETFL, @as(usize, 0));
+        if (posix.errno(fl) == .SUCCESS) _ = posix.system.fcntl(c.file.handle, posix.F.SETFL, fl & ~@as(@TypeOf(fl), 0o4000));
+        var buf: [8192]u8 = undefined;
+        while (true) {
+            const rc = posix.system.read(c.file.handle, &buf, buf.len);
+            if (posix.errno(rc) == .INTR) continue;
+            if (posix.errno(rc) != .SUCCESS) return;
+            const n: usize = @intCast(rc);
+            if (n == 0) return;
+            logrotate.append(c.io, c.path, .{ .max_bytes = c.max_bytes, .keep = c.keep }, buf[0..n]) catch {};
+        }
+    }
+
+    fn joinLog(p: *ProcessTool) void {
+        if (p.log_joined.swap(true, .acq_rel)) return;
+        if (p.log_thread) |*th| {
+            th.join();
+            p.log_thread = null;
+        }
     }
 
     /// This tool's own lock file, `<data>/locks/<id>.lock` ('/' in the id becomes '_'), created if missing: what the
@@ -397,8 +454,13 @@ pub const ProcessTool = struct {
 
     /// Kills the worker's group and reaps it; safe when it already exited.
     fn kill(p: *ProcessTool) void {
-        var child = p.child orelse return;
+        var child = p.child orelse {
+            p.joinLog();
+            return;
+        };
         _ = posix.system.kill(-child.id.?, posix.SIG.KILL);
+        // The worker's exit closes the stderr write end. Drain before wait closes the read end.
+        p.joinLog();
         _ = child.wait(p.setup.io) catch {};
         p.child = null;
         p.pid.store(0, .release);
@@ -527,6 +589,61 @@ test "a cancel before the generate reaches the worker is not lost: before the wr
     var never: std.atomic.Value(bool) = .init(false);
     const j3: tool.Job = .{ .id = "c", .dir = dir, .request = .{ .speech = .{ .input = "hi" } }, .cancelled = &never };
     _ = try t.generate(&j3, sink, arena.allocator());
+}
+
+const noisy_worker =
+    \\import json, sys
+    \\sys.stderr.write("A" * 300)
+    \\sys.stderr.flush()
+    \\for line in sys.stdin:
+    \\    op = json.loads(line)["op"]
+    \\    if op == "load":
+    \\        print(json.dumps({"ok": True, "resident": 1}), flush=True)
+    \\    elif op == "exit":
+    \\        break
+    \\
+;
+
+test "a worker's log rotates by size across loads and keeps N files" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "noisy.py", .data = noisy_worker });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const script = try std.fmt.allocPrint(gpa, "{s}/noisy.py", .{dir});
+    defer gpa.free(script);
+    var environ = std.process.Environ.Map.init(gpa);
+    defer environ.deinit();
+    if (std.c.getenv("PATH")) |v| try environ.put("PATH", std.mem.span(v));
+    const cfg: ToolConfig = .{ .id = "noisy", .kind = .speech, .cmd = &.{ "python3", script }, .resident_bytes = 1 };
+    var p = try ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = "/nonexistent", .environ = &environ, .log_dir = dir, .log_max_bytes = 100, .log_keep = 2, .guard = false }, &cfg);
+    defer p.deinit();
+    const tool_ = p.asTool();
+    for (0..3) |_| {
+        _ = try tool_.load();
+        tool_.unload();
+    }
+    const live = try std.fmt.allocPrint(gpa, "{s}/noisy.log", .{dir});
+    defer gpa.free(live);
+    const one = try std.fmt.allocPrint(gpa, "{s}/noisy.log.1", .{dir});
+    defer gpa.free(one);
+    const two = try std.fmt.allocPrint(gpa, "{s}/noisy.log.2", .{dir});
+    defer gpa.free(two);
+    const three = try std.fmt.allocPrint(gpa, "{s}/noisy.log.3", .{dir});
+    defer gpa.free(three);
+    const exists = struct {
+        fn f(io_: Io, path: []const u8) bool {
+            const file = Io.Dir.cwd().openFile(io_, path, .{}) catch return false;
+            file.close(io_);
+            return true;
+        }
+    }.f;
+    try std.testing.expect(exists(io, live));
+    try std.testing.expect(exists(io, one));
+    try std.testing.expect(exists(io, two));
+    try std.testing.expect(!exists(io, three));
 }
 
 test "an edit books reference_working_bytes for each reference image beside working_bytes" {
