@@ -4,12 +4,14 @@
 The worker starts the fake server itself through options.server (as it starts a real one), speaks the protocol on
 stdin/stdout, and stops the server on exit. The fake records every transcription request's form fields, so the tests
 see what the worker forwarded."""
-import json, os, subprocess, sys, tempfile, wave
+import json, os, signal, subprocess, sys, tempfile, time, wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = r'''
 import json, re, sys, http.server
+import os, time
 port, record = int(sys.argv[1]), sys.argv[2]
+open(record + ".pid", "w").write(str(os.getpid()))
 def fields(body, ctype):
     bound = ctype.split("boundary=")[1].encode()
     out = []
@@ -33,6 +35,10 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         if self.path == "/v1/audio/speech":
             req = json.loads(body)
+            with open(record + ".speech", "a") as r:
+                r.write(json.dumps(req) + "\n")
+            if req.get("voice") == "slow":
+                time.sleep(60)  # a generation the worker is killed in
             if req.get("seed", 0) > 0xFFFFFFFF or req.get("voice") == "bad":
                 return self.reply(400, {"error": {"message": "bad"}})
             pcm = b"\x01\x00" * 2400 + b"\x02"   # 0.1 s at 24 kHz plus one stray byte, sent chunked
@@ -74,8 +80,9 @@ class W:
         self.record = os.path.join(tmp, name + ".jsonl")
         fake = os.path.join(tmp, "fake.py")
         cfg = {"id": "fake-audio", "load_timeout_s": 20, "options": {"server": [sys.executable, "-I", fake, "{port}", self.record], **opts}}
+        # its own process group, as the daemon starts a worker (spawn with pgid 0)
         self.p = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "worker.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  env={**os.environ, "LOCALROUTER_TOOL": json.dumps(cfg)}, text=True)
+                                  env={**os.environ, "LOCALROUTER_TOOL": json.dumps(cfg)}, text=True, process_group=0)
     def call(self, obj):
         self.p.stdin.write(json.dumps(obj) + "\n"); self.p.stdin.flush()
         while True:
@@ -84,6 +91,11 @@ class W:
     def sent(self):
         """The form fields of the transcription requests the server got, oldest first ([[name, value], ...] each)."""
         return [json.loads(l) for l in open(self.record)] if os.path.exists(self.record) else []
+    def speech_sent(self):
+        p = self.record + ".speech"
+        return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+    def server_pid(self):
+        return int(open(self.record + ".pid").read())
     def exit(self):
         self.p.stdin.write(json.dumps({"op": "exit"}) + "\n"); self.p.stdin.flush()
         return self.p.wait(timeout=30)
@@ -93,6 +105,15 @@ def transcribe(w, job, n, **q):
     r = w.call({"op": "generate", "id": f"t{n}", "dir": job, "request": {"transcription": {"audio": "audio.wav", "language": "en", "duration_ms": 1500, **q}}})
     t = json.load(open(os.path.join(job, "transcript.json"))) if r.get("ok") else {}
     return r, t
+
+
+def alive(pid):
+    """Running (not a zombie: a killed server is reaped by init, or shows Z until it is)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
 
 
 def field(sent, name):
@@ -113,6 +134,11 @@ def main():
     with wave.open(os.path.join(job, "speech.wav")) as f:
         check("speech.wav: 24 kHz mono 16-bit, whole samples", (f.getframerate(), f.getnchannels(), f.getsampwidth(), f.getnframes()) == (24000, 1, 2, 2400),
               (f.getframerate(), f.getnchannels(), f.getsampwidth(), f.getnframes()))
+    check("the seed folded to 32 bits reaches the server", w.speech_sent()[-1].get("seed") == 5, w.speech_sent()[-1:])
+    r = w.call({"op": "generate", "id": "s0", "dir": job, "request": {"speech": {"input": "Hi.", "voice": "v", "seed": 0}}})
+    check("seed 0 is forwarded, not dropped", r.get("ok") is True and w.speech_sent()[-1].get("seed") == 0, (r, w.speech_sent()[-1:]))
+    r = w.call({"op": "generate", "id": "s00", "dir": job, "request": {"speech": {"input": "Hi.", "voice": "v"}}})
+    check("no seed: none sent", "seed" not in w.speech_sent()[-1], w.speech_sent()[-1:])
     r = w.call({"op": "generate", "id": "s2", "dir": job, "request": {"speech": {"input": "Hi.", "voice": "bad"}}})
     check("server 4xx is an invalid_request_error", r.get("type") == "invalid_request_error", r)
     r = w.call({"op": "generate", "id": "s3", "dir": job, "request": {"speech": {"input": "  "}}})
@@ -161,6 +187,30 @@ def main():
     r, t = transcribe(w, job, 14, timestamps="segment", prompt="nothing")
     check("segment, declared, none returned: a server error", r.get("ok") is False and r.get("type") == "server_error", r)
     check("exit 0 (timestamps worker)", w.exit() == 0)
+
+    # seed 0 with send_seed off: nothing sent
+    w = W(tmp, "noseed", send_seed=False)
+    r = w.call({"op": "generate", "id": "n1", "dir": job, "request": {"speech": {"input": "Hi.", "voice": "v", "seed": 0}}})
+    check("send_seed false: no seed sent", r.get("ok") is True and "seed" not in w.speech_sent()[-1], (r, w.speech_sent()[-1:]))
+    check("exit 0 (send_seed false)", w.exit() == 0)
+
+    # the daemon's abort or timeout: SIGKILL to the worker's group mid-generation; the server must not outlive it
+    w = W(tmp, "killed")
+    check("load (kill test)", w.call({"op": "load"}).get("ok") is True)
+    w.p.stdin.write(json.dumps({"op": "generate", "id": "k1", "dir": job, "request": {"speech": {"input": "Hi.", "voice": "slow"}}}) + "\n"); w.p.stdin.flush()
+    t = time.monotonic()
+    while not w.speech_sent() and time.monotonic() - t < 10:
+        time.sleep(0.05)
+    server = w.server_pid()
+    check("the server is generating when the worker is killed", len(w.speech_sent()) == 1 and alive(server))
+    os.killpg(w.p.pid, signal.SIGKILL)
+    w.p.wait(timeout=10)
+    t = time.monotonic()
+    while alive(server) and time.monotonic() - t < 10:
+        time.sleep(0.05)
+    check("SIGKILL of the worker's group mid-generation: the server is gone too", not alive(server))
+    if alive(server):
+        os.kill(server, signal.SIGKILL)
     print(f"{'FAILED' if fails else 'ok'}: {fails} failure(s)")
     sys.exit(1 if fails else 0)
 

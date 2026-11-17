@@ -24,6 +24,8 @@ The tool's config arrives as JSON in LOCALROUTER_TOOL. Options:
   timestamps    the timestamp_granularities the server returns: [] (default), ["segment"], ["segment", "word"]. A
                 request for a granularity listed here asks for verbose_json with it; "word" not listed is refused
   stop_timeout_s  seconds between SIGTERM and SIGKILL when stopping the server (default 15)
+The server runs in the worker's process group and gets SIGTERM if the worker dies: the daemon's SIGKILL of the group
+(abort, timeout) takes it down too. An unload stops the server and what it started, then the worker exits.
 Memory is the config's resident_bytes and working_bytes: measured figures, not guessed here.
 """
 import ctypes
@@ -72,6 +74,36 @@ def die_with_parent():
         ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG: stop the server first
     except (OSError, AttributeError):
         pass
+
+
+def server_preexec():
+    """In the server's process, before exec: SIGTERM when this worker dies by any means (PR_SET_PDEATHSIG). The server
+    also stays in the worker's process group (no new session), so the daemon's SIGKILL of that group on abort or
+    timeout takes it down with the worker; this covers the worker dying alone."""
+    die_with_parent()
+
+
+def tree(pid):
+    """`pid` and every process below it (Linux: /proc/PID/task/TID/children), parents first."""
+    out, todo = [], [pid]
+    while todo:
+        p = todo.pop(0)
+        out.append(p)
+        try:
+            for t in os.listdir(f"/proc/{p}/task"):
+                with open(f"/proc/{p}/task/{t}/children") as f:
+                    todo += [int(c) for c in f.read().split()]
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def signal_tree(pids, sig):
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except ProcessLookupError:
+            pass
 
 
 _pending = bytearray()
@@ -143,8 +175,9 @@ class Worker:
             env = dict(os.environ)
             env.update({k: sub(str(v)) for k, v in (self.opts.get("env") or {}).items()})
             log(f"starting {argv[0]} on 127.0.0.1:{port}")
+            # in this worker's process group (the daemon kills the group on abort or timeout), dying with the worker
             self.proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr,
-                                         start_new_session=True)
+                                         preexec_fn=server_preexec)
             self.base = f"http://127.0.0.1:{port}"
         else:
             self.base = (self.opts.get("url") or "").rstrip("/")
@@ -167,20 +200,15 @@ class Worker:
         p, self.proc = self.proc, None
         if p is None or p.poll() is not None:
             return
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
+        # the server and what it started (not the group: that is this worker's too)
+        signal_tree(tree(p.pid), signal.SIGTERM)
         deadline = time.monotonic() + float(self.opts.get("stop_timeout_s") or 15)
         while p.poll() is None and time.monotonic() < deadline:
             send({"progress": {"phase": "unload", "step": 0, "of": 1}})  # the daemon waits while memory is still held
             time.sleep(0.5)
         if p.poll() is None:
             log("server ignored SIGTERM; killing it")
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            signal_tree(tree(p.pid), signal.SIGKILL)
             p.wait()
 
     def ensure(self):
@@ -232,7 +260,7 @@ class Worker:
         if s.get("speed") not in (None, 0, 1, 1.0):
             body["speed"] = s["speed"]
         seed = int(s.get("seed") or 0)
-        if self.opts.get("send_seed", True) and seed:
+        if self.opts.get("send_seed", True) and s.get("seed") is not None:  # 0 is a seed too
             body["seed"] = seed & 0xFFFFFFFF  # the daemon's seeds are 64-bit; servers commonly take a uint32
         r = self.post("/v1/audio/speech", json.dumps(body).encode(), "application/json", timeout)
         rate = int(r.headers.get("x-sample-rate") or self.opts.get("sample_rate") or 24000)
