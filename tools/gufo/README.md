@@ -8,7 +8,11 @@ supervise it: the `openai_server` engine for chat, `tools/speech/openai_audio` f
 - The container is `lr-gufo-NAME`, published on `127.0.0.1:PORT` only; `--host 0.0.0.0 --port 8080` are added after
   `serve` inside the container.
 - SIGTERM or SIGINT (the worker unloading) runs `podman stop` and waits, so the GPU memory is free when the script exits.
-  `--replace` removes a container left by a worker that was killed outright; `deploy/strix-halo/stop.sh` also stops any
+  A SIGKILL of the worker's process group (the daemon's, on abort or timeout) skips that trap, and conmon keeps the
+  container running outside the group, so a watcher in its own session removes this run's container (by its
+  `--cidfile` id, never a later run's of the same name) once the script is gone (`test_serve.sh`, stub podman; checked
+  with real rootless Podman on the Strix Halo box: removed within the stop timeout).
+  `--replace` removes a container left by anything else; `deploy/strix-halo/stop.sh` also stops any
   `lr-gufo-*` left over.
 - `/dev/kfd` and `/dev/dri` are passed with the `video` and `render` groups by name: Gufo's docs use
   `--group-add keep-groups`, which needs the crun runtime, and many hosts run runc.
