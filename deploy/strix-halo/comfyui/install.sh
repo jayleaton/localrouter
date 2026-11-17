@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs ComfyUI for the MiniMax tools of deploy/strix-halo, without sudo, idempotently (a step whose stamp matches
 # its pins is skipped; downloads resume). Usage:
-#   install.sh comfyui      ComfyUI and ComfyUI-GGUF at pinned commits, a Python venv with PyTorch ROCm, the GGUF loader node
+#   install.sh comfyui      ComfyUI and ComfyUI-GGUF at pinned commits, a Python venv with PyTorch ROCm, our two nodes
+#                           (nodes/: the GGUF loader, and the Conv3d workaround for MIOpen's crash on image to video)
 #   install.sh models       the MiniMax H3 / H3-Image weights (pinned revisions, every file's size and sha256 checked)
 #                           and their links into ComfyUI/models
 #   install.sh ok-comfyui | ok-models    exit 0 when that step is done (the profile's "done" checks)
@@ -52,6 +53,12 @@ checkout() {  # DIR REPO REV: a clone of REPO at REV (an existing clone is moved
   say "$(basename "$d") at ${rev:0:12}"
 }
 
+# ComfyUI custom nodes of ours (nodes/), each one file: the MiniMax H3-Image GGUF loader, and the ROCm Conv3d workaround
+# (MIOpen's 3-D convolution segfaults on the H3 vision tower's patch embedding, image to video; it computes those as a
+# matrix product instead, and changes nothing on other builds)
+NODES=(minimax_h3_image_gguf.py rocm_conv3d_patchify.py)
+nodes_in_place() { local n; for n in "${NODES[@]}"; do cmp -s "$here/nodes/$n" "$COMFY_DIR/custom_nodes/$n" || return 1; done; }
+
 venv_stamp() {  # what the venv was built from: the Python version, the index and the hashed requirements
   { echo "$PYTHON_VERSION $TORCH_INDEX"; cat "$REQUIREMENTS"; } | sha256sum | cut -c1-64
 }
@@ -59,7 +66,7 @@ venv_stamp() {  # what the venv was built from: the Python version, the index an
 ok_comfyui() {
   [ "$(git -C "$COMFY_DIR" rev-parse HEAD 2>/dev/null)" = "$COMFYUI_REV" ] &&
   [ "$(git -C "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" rev-parse HEAD 2>/dev/null)" = "$GGUF_REV" ] &&
-  cmp -s "$here/nodes/minimax_h3_image_gguf.py" "$COMFY_DIR/custom_nodes/minimax_h3_image_gguf.py" &&
+  nodes_in_place &&
   [ -x "$COMFY_VENV/bin/python" ] && [ "$(cat "$COMFY_VENV/.localrouter-stamp" 2>/dev/null)" = "$(venv_stamp)" ]
 }
 
@@ -68,8 +75,10 @@ install_comfyui() {
   mkdir -p "$COMFY_ROOT"
   checkout "$COMFY_DIR" "$COMFYUI_REPO" "$COMFYUI_REV"
   checkout "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" "$GGUF_REPO" "$GGUF_REV"
-  cmp -s "$here/nodes/minimax_h3_image_gguf.py" "$COMFY_DIR/custom_nodes/minimax_h3_image_gguf.py" ||
-    install -m 644 "$here/nodes/minimax_h3_image_gguf.py" "$COMFY_DIR/custom_nodes/minimax_h3_image_gguf.py"
+  local n
+  for n in "${NODES[@]}"; do
+    cmp -s "$here/nodes/$n" "$COMFY_DIR/custom_nodes/$n" || install -m 644 "$here/nodes/$n" "$COMFY_DIR/custom_nodes/$n"
+  done
   local stamp; stamp=$(venv_stamp)
   if [ -x "$COMFY_VENV/bin/python" ] && [ "$(cat "$COMFY_VENV/.localrouter-stamp" 2>/dev/null)" = "$stamp" ]; then
     say "venv up to date ($COMFY_VENV)"
