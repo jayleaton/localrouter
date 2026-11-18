@@ -97,6 +97,35 @@ pub fn fits(l: Limits, width: u32, height: u32, frames: u32) bool {
     return sh.frames <= max.frames and sh.n_video <= max.n_video and sh.frame_bytes <= max.frame_bytes and sh.videoTokens() <= max.videoTokens();
 }
 
+/// The sampler's buffers for `l` (`max` its `ceiling`): the packed state, the velocities and the denoised in fp32, two bf16
+/// copies, the text context, the video latents in fp16 and the frames.
+fn bufferSizes(l: Limits, max: Shapes) [8]u64 {
+    const n: u64 = max.n_video + max.n_audio;
+    return .{ 4 * n, 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, l.tokens) * te32.dim * 2, 2 * max.n_video, max.frame_bytes };
+}
+
+/// The device bytes `create` allocates for `l` besides the weights: the DiT's, the text encoder's, the audio VAE's and the
+/// sampler's buffers. Weights are not counted: they are the checkpoints', whatever `l` is.
+pub fn scratchBytes(l: Limits) !u64 {
+    const max = try ceiling(l);
+    const rows = std.math.cast(u32, ditRows(l, max)) orelse return error.RequestTooLarge;
+    var total = dit_mod.Dit.scratchBytes(rows, l.tokens, max.audio_t) + dit_mod.sumBuffers(te32.TextEncoder.scratch(l.tokens)) + vae_audio.Decoder.scratchBytes(max.audio_t);
+    for (bufferSizes(l, max)) |n| total += n;
+    return total;
+}
+
+/// The device bytes a request takes beyond `scratchBytes` while it runs: the video VAE's decode and, with a first frame,
+/// the video encoder, the vision encoder, the frame's latent and its condition (which stays until the next first frame).
+pub fn requestBytes(width: u32, height: u32, frames: u32, first_frame: bool) !u64 {
+    const sh = try shapes(width, height, frames);
+    var total = vae_video.decodeBytes(sh.latent_t, sh.lh, sh.lw);
+    if (first_frame) {
+        const at_encode = vae_enc.Encoder.deviceBytes(height, width) + vision.VisionEncoder.deviceBytes(sh.lh * sh.lw) + 3 * @as(u64, width) * height * 4;
+        total = @max(total, at_encode) + 24 * @as(u64, sh.lh) * sh.lw * 4 + dit_mod.Dit.conditionBytes(sh.lh, sh.lw);
+    }
+    return total;
+}
+
 pub const Options = struct {
     /// Free the text encoder after each encode (see the memory note above).
     unload_te: bool = false,
@@ -321,8 +350,7 @@ pub const Pipeline = struct {
         p.vid = try vae_video.Decoder.init(gpa, io, &p.d, &p.v_ops, p.s, paths.vae_video, &up);
         errdefer p.vid.deinit();
 
-        const n: u64 = p.max.n_video + p.max.n_audio;
-        const sizes = [8]u64{ 4 * n, 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, limits.tokens) * te32.dim * 2, 2 * p.max.n_video, p.max.frame_bytes };
+        const sizes = bufferSizes(limits, p.max);
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, sizes) |*b, len| {

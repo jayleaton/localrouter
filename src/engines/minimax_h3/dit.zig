@@ -133,6 +133,13 @@ pub const Weights = struct {
 };
 
 /// Device scratch for sequences up to `max_s` tokens (text + audio + video) and text up to `max_l` tokens.
+/// The bytes of a table of buffer sizes (`Dit.Scratch` and the like) as allocated: each at least 256.
+pub fn sumBuffers(sizes: anytype) u64 {
+    var total: u64 = 0;
+    inline for (@typeInfo(@TypeOf(sizes)).@"struct".field_names) |name| total += @max(@field(sizes, name), 256);
+    return total;
+}
+
 pub const Dit = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
@@ -203,21 +210,8 @@ pub const Dit = struct {
             }
         }
         x.idx_host = try gpa.alloc(i32, max_s);
-        const r: u64 = max_s;
-        const bf = 2;
-        const qr = plan.rows(@intCast(r), ffn, plan.TB); // the widest quantized rows (K up to 14336)
-        inline for (.{
-            .{ "context", @as(u64, max_l) * dim * bf }, .{ "h", r * dim * bf },                  .{ "hn", r * dim * bf },
-            .{ "qkv", r * 3 * inner * bf },             .{ "heads_out", r * inner * bf },        .{ "att", r * inner * bf },
-            .{ "o", r * dim * bf },                     .{ "gu", r * 2 * ffn * bf },             .{ "act", r * ffn * bf },
-            .{ "q", @as(u64, max_l) * inner * bf },     .{ "kk", @as(u64, max_l) * inner * bf }, .{ "v", @as(u64, max_l) * inner * bf },
-            .{ "qc", qr.fp8_bytes },                    .{ "qs", qr.scales_bytes },              .{ "ws", launch.Kitchen.Plan.of(heads, max_s).total },
-            .{ "mod", 3 * ada_n * 4 },                  .{ "mod2", 3 * ada_n * 4 },              .{ "t_emb", 3 * t_dim * 4 },
-            .{ "idx", r * 4 },                          .{ "rope", r * 48 * 4 * bf },            .{ "a_in", audioInBytes(max_a) },
-            .{ "rows", r * 96 * 4 },                    .{ "arows", r * 32 * 4 },                .{ "emb", r * dim * 4 },
-            .{ "aemb", r * dim * 4 },                   .{ "fada", 3 * 2 * dim * 4 },            .{ "vout", r * 96 * 4 },
-            .{ "aout", r * 32 * 4 },
-        }) |e| @field(x, e[0]) = try x.alloc(e[1]);
+        const sizes = scratch(max_s, max_l, max_a);
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(x, name) = try x.alloc(@field(sizes, name));
         return x;
     }
 
@@ -240,6 +234,56 @@ pub const Dit = struct {
     /// The carried audio latents in bf16: 32 channels x 2 rows a latent frame, which a short sequence's `max_s` can be below.
     pub fn audioInBytes(max_a: u32) u64 {
         return 32 * 2 * @as(u64, max_a) * 2;
+    }
+
+    /// The bytes of each buffer `init` allocates for `max_s` rows, `max_l` text tokens and `max_a` audio latent frames.
+    pub const Scratch = struct { context: u64, h: u64, hn: u64, qkv: u64, heads_out: u64, att: u64, o: u64, gu: u64, act: u64, q: u64, kk: u64, v: u64, qc: u64, qs: u64, ws: u64, mod: u64, mod2: u64, t_emb: u64, idx: u64, rope: u64, a_in: u64, rows: u64, arows: u64, emb: u64, aemb: u64, fada: u64, vout: u64, aout: u64 };
+
+    pub fn scratch(max_s: u32, max_l: u32, max_a: u32) Scratch {
+        const r: u64 = max_s;
+        const bf = 2;
+        const qr = plan.rows(max_s, ffn, plan.TB); // the widest quantized rows (K up to 14336)
+        return .{
+            .context = @as(u64, max_l) * dim * bf,
+            .h = r * dim * bf,
+            .hn = r * dim * bf,
+            .qkv = r * 3 * inner * bf,
+            .heads_out = r * inner * bf,
+            .att = r * inner * bf,
+            .o = r * dim * bf,
+            .gu = r * 2 * ffn * bf,
+            .act = r * ffn * bf,
+            .q = @as(u64, max_l) * inner * bf,
+            .kk = @as(u64, max_l) * inner * bf,
+            .v = @as(u64, max_l) * inner * bf,
+            .qc = qr.fp8_bytes,
+            .qs = qr.scales_bytes,
+            .ws = launch.Kitchen.Plan.of(heads, max_s).total,
+            .mod = 3 * ada_n * 4,
+            .mod2 = 3 * ada_n * 4,
+            .t_emb = 3 * t_dim * 4,
+            .idx = r * 4,
+            .rope = r * 48 * 4 * bf,
+            .a_in = audioInBytes(max_a),
+            .rows = r * 96 * 4,
+            .arows = r * 32 * 4,
+            .emb = r * dim * 4,
+            .aemb = r * dim * 4,
+            .fada = 3 * 2 * dim * 4,
+            .vout = r * 96 * 4,
+            .aout = r * 32 * 4,
+        };
+    }
+
+    /// The device bytes `init` allocates (each buffer at least 256).
+    pub fn scratchBytes(max_s: u32, max_l: u32, max_a: u32) u64 {
+        return sumBuffers(scratch(max_s, max_l, max_a));
+    }
+
+    /// A first frame's condition rows and their embedding (`firstFrame`), for an `h` x `w` latent: kept until the next one.
+    pub fn conditionBytes(h: u32, w: u32) u64 {
+        const rows: u64 = @as(u64, h / 2) * (w / 2);
+        return 2 * rows * 96 * 4 + rows * dim * 4;
     }
 
     fn alloc(x: *Dit, n: u64) !u64 {

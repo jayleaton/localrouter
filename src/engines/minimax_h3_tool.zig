@@ -7,10 +7,12 @@
 //! of any shape within it, landscape or portrait; a larger one, up to the canvas's area, for a shorter clip), `max_side` (the long side, default
 //! the model's 1344), `max_seconds` (default 5), `default_size` (`WIDTHxHEIGHT`, what a request without a size gets;
 //! default the largest landscape), `steps` (default 8, the Turbo LoRA's), `unload_te` (1: free the 32B encoder after
-//! each encode), `resident_mb` (the scheduler's estimate). A config of `max_width` / `max_height` gets their product as
+//! each encode), `resident_mb` (a floor for the booking, which is otherwise the weights plus the buffers for the limits;
+//! a request adds its own scratch). A config of `max_width` / `max_height` gets their product as
 //! `max_pixels` and either of them as `max_side` where above 1344. The pipeline's buffers are sized at load for the
 //! largest clip, so the memory a job takes follows `max_pixels` and `max_seconds` (plus the video VAE's per-decode scratch,
-//! which follows the frame's area and width), while its time follows the clip asked for.
+//! which follows the frame's area and width), while its time follows the clip asked for. Limits outside the API's, or
+//! whose largest clip does not fit the daemon's memory budget, stop the daemon at start (`validate`).
 
 const std = @import("std");
 const engine = @import("../engine/engine.zig");
@@ -20,7 +22,7 @@ const h3 = @import("minimax_h3");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license };
+pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .validate = validate, .license = license };
 
 /// The weights' licence, unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{
@@ -38,28 +40,38 @@ const default_steps = 8;
 // Covers the measured engine peak (GB10, 2026-10-08): 36.7 GiB at 56 frames, 38.8 GiB for a 5 s clip, text encoder resident.
 const default_resident_mb = 40_000;
 
+const api: @import("../tool/request.zig").Limits = .{};
+
+/// An integer option as a u32, `ceiling` where it is larger (`validate` refuses that at load).
+fn option32(cfg: *const ToolConfig, key: []const u8, default: u32, ceiling: u32) u32 {
+    return @intCast(@min(engine.optionInt(cfg, key, default), ceiling));
+}
+
 /// A config's `max_width` x `max_height` (each rounded down to 32), 768 x 448 where one is not set.
 fn legacySize(cfg: *const ToolConfig) [2]u32 {
-    return .{ @intCast(engine.optionInt(cfg, "max_width", 768) / 32 * 32), @intCast(engine.optionInt(cfg, "max_height", 448) / 32 * 32) };
+    return .{ option32(cfg, "max_width", 768, api.max_side) / 32 * 32, option32(cfg, "max_height", 448, api.max_side) / 32 * 32 };
 }
 
 /// The largest request the pipeline is built for (its buffers are allocated at load for exactly this), from the options.
 fn limits(cfg: *const ToolConfig) P.Limits {
     const legacy = legacySize(cfg);
     return .{
-        .pixels = @intCast(engine.optionInt(cfg, "max_pixels", @as(u64, legacy[0]) * legacy[1]) / 1024 * 1024),
-        .frames = @intCast(engine.optionInt(cfg, "max_seconds", 5) * fps),
+        .pixels = option32(cfg, "max_pixels", legacy[0] * legacy[1], max_pixels) / 1024 * 1024,
+        .frames = option32(cfg, "max_seconds", 5, api.max_seconds) * fps,
     };
 }
 
-/// The long side a request may have.
+/// The long side a request may have: the option within the API's.
 fn maxSide(cfg: *const ToolConfig) u32 {
     const legacy = legacySize(cfg);
-    return @intCast(engine.optionInt(cfg, "max_side", @max(P.canvas_side, legacy[0], legacy[1])) / 32 * 32);
+    return option32(cfg, "max_side", @max(P.canvas_side, legacy[0], legacy[1]), api.max_side) / 32 * 32;
 }
 
+/// The largest `max_pixels`: a square frame at the API's longest side.
+const max_pixels = api.max_side * api.max_side;
+
 /// The API's shortest side, rounded up to the 32-pixel grid.
-const min_side = (@as(@import("../tool/request.zig").Limits, .{}).min_side + 31) / 32 * 32;
+const min_side = (api.min_side + 31) / 32 * 32;
 
 /// Whether `width` x `height` is on the 32-pixel grid within the API's sides and the long side, and fits the buffers for `frames`.
 fn takes(cfg: *const ToolConfig, width: u32, height: u32, frames: u32) bool {
@@ -143,16 +155,78 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     return true;
 }
 
+/// The device bytes besides the configured buffers (`P.scratchBytes`): the weights, the CUDA context and kernels. The rest
+/// of the measured peak (`default_resident_mb` for the default limits) once their buffers and a full clip's request
+/// scratch are taken out.
+fn fixedBytes() u64 {
+    const l: P.Limits = .{ .pixels = 768 * 448, .frames = 5 * fps };
+    const measured = (P.scratchBytes(l) catch unreachable) + (P.requestBytes(768, 448, l.frames, false) catch unreachable);
+    return (default_resident_mb << 20) - measured;
+}
+
+/// What the tool holds while loaded: the weights and the buffers for its limits, or `resident_mb` where that is more.
+fn residentBytes(cfg: *const ToolConfig) u64 {
+    const scratch = P.scratchBytes(limits(cfg)) catch std.math.maxInt(u64) / 2;
+    return @max(fixedBytes() +| scratch, engine.optionInt(cfg, "resident_mb", 0) <<| 20);
+}
+
+/// A request's memory besides `residentBytes`: the frames and the waveform on the host, ffmpeg's buffers and the
+/// pipeline's per-request device scratch.
+fn workingBytes(v: @import("../tool/request.zig").Video) u64 {
+    const sh = P.shapes(v.width, v.height, v.seconds * fps) catch return 0;
+    const device = P.requestBytes(v.width, v.height, v.seconds * fps, v.first_frame != null) catch return 0;
+    return sh.frame_bytes + sh.audioFloats() * 4 * 2 + (64 << 20) + device;
+}
+
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
         .image, .asset3d, .speech, .transcription, .chat, .decision => 0,
-        // the frames and the waveform on the host, plus ffmpeg's own buffers
-        .video => |v| blk: {
-            const sh = P.shapes(v.width, v.height, v.seconds * fps) catch break :blk 0;
-            break :blk sh.frame_bytes + sh.audioFloats() * 4 * 2 + (64 << 20);
-        },
+        .video => |v| workingBytes(v),
     };
-    return .{ .resident = engine.optionInt(cfg, "resident_mb", default_resident_mb) << 20, .working = working };
+    return .{ .resident = residentBytes(cfg), .working = working };
+}
+
+/// The most memory a request the tool takes can book: its resident bytes and the largest working set among the clips
+/// `check` admits (a first frame's included).
+fn peakBytes(cfg: *const ToolConfig) u64 {
+    const l = limits(cfg);
+    const side = maxSide(cfg);
+    var most: u64 = 0;
+    var w: u32 = min_side;
+    while (w <= side) : (w += 32) {
+        var h: u32 = min_side;
+        while (h <= side) : (h += 32) {
+            var seconds = l.frames / fps;
+            while (seconds > 0 and !takes(cfg, w, h, seconds * fps)) seconds -= 1;
+            if (seconds == 0) continue;
+            most = @max(most, workingBytes(.{ .prompt = "", .width = w, .height = h, .seconds = seconds, .first_frame = if (P.firstFrameFits(l, w, h)) "" else null }));
+        }
+    }
+    return residentBytes(cfg) +| most;
+}
+
+/// Refuses, when the daemon starts, limits outside what the API and the model take, and limits whose buffers and
+/// largest request do not fit `budget` (0: unknown, not checked).
+fn validate(cfg: *const ToolConfig, budget: u64, why: *std.Io.Writer) bool {
+    const Range = struct { key: []const u8, min: u64, max: u64 };
+    for ([_]Range{
+        .{ .key = "max_pixels", .min = min_side * min_side, .max = max_pixels },
+        .{ .key = "max_width", .min = min_side, .max = api.max_side },
+        .{ .key = "max_height", .min = min_side, .max = api.max_side },
+        .{ .key = "max_side", .min = min_side, .max = std.math.maxInt(i64) },
+        .{ .key = "max_seconds", .min = 1, .max = api.max_seconds },
+    }) |r| {
+        const v = engine.optionInt(cfg, r.key, r.min);
+        if (v < r.min or v > r.max) {
+            why.print("tool '{s}': options.{s} is {d}; it takes {d} to {d}", .{ cfg.id, r.key, v, r.min, r.max }) catch {};
+            return false;
+        }
+    }
+    if (budget == 0) return true;
+    const peak = peakBytes(cfg);
+    if (peak <= budget) return true;
+    why.print("tool '{s}': its limits need {d} MiB ({d} MiB loaded, the rest for its largest clip), more than the {d} MiB budget: lower max_pixels or max_seconds", .{ cfg.id, peak >> 20, residentBytes(cfg) >> 20, budget >> 20 }) catch {};
+    return false;
 }
 
 const MiniMaxH3 = struct {
@@ -175,7 +249,7 @@ const MiniMaxH3 = struct {
         t.p = try P.Pipeline.create(t.env.gpa, t.env.io, paths, limits(t.cfg), opts);
         // where the load went (the worker's log), as Qwen's: context, kernels, each component, read / wait / host time
         std.log.info("load ms: {s}", .{try std.json.Stringify.valueAlloc(a, t.p.?.load, .{})});
-        return engine.optionInt(t.cfg, "resident_mb", default_resident_mb) << 20;
+        return residentBytes(t.cfg);
     }
 
     fn generate(ptr: *anyopaque, job: *const engine.Job, sink: engine.Sink, arena: std.mem.Allocator) anyerror!engine.Output {
@@ -443,4 +517,61 @@ test "defaults: legacy limits keep their size where it fits; otherwise one the A
 fn refuse(comptime fmt: []const u8, args: anytype) engine.Refused {
     engine.explain(fmt, args);
     return engine.Refused.Refused;
+}
+
+test "the booking follows the configured buffers; limits past the API or the memory budget are refused at load" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try @import("../config.zig").parse(arena.allocator(),
+        \\{"tools": [{"id": "plain", "kind": "video", "engine": "minimax_h3"},
+        \\           {"id": "jarvis", "kind": "video", "engine": "minimax_h3", "options": {"max_pixels": 901120, "max_seconds": 8, "default_size": "768x448", "resident_mb": 53567}},
+        \\           {"id": "huge", "kind": "video", "engine": "minimax_h3", "options": {"max_side": 2048, "max_pixels": 4194304, "max_seconds": 20}},
+        \\           {"id": "wide", "kind": "video", "engine": "minimax_h3", "options": {"max_pixels": 4294967296}},
+        \\           {"id": "long", "kind": "video", "engine": "minimax_h3", "options": {"max_seconds": 9999999999999}}]}
+    );
+    const budget: u64 = 113 << 30; // a GB10's 121 GiB less the default reserve
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    const plain = c.tool("plain").?;
+    try std.testing.expectEqual(@as(u64, default_resident_mb << 20), residentBytes(plain) + try P.requestBytes(768, 448, 5 * fps, false)); // the measured peak
+    try std.testing.expect(validate(plain, budget, &why));
+    try std.testing.expect(validate(c.tool("jarvis").?, budget, &why));
+
+    const huge = c.tool("huge").?;
+    const clip: Request = .{ .video = .{ .prompt = "waves", .width = 2048, .height = 2048, .seconds = 20 } };
+    try std.testing.expect(check(huge, &clip, &why));
+    const n = needs(huge, &clip);
+    try std.testing.expect(n.resident + n.working > 135 << 30); // the DiT's and the pipeline's buffers alone
+    try std.testing.expect(!validate(huge, budget, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "more than the 115712 MiB budget") != null);
+
+    for ([_][]const u8{ "wide", "long" }) |id| {
+        const cfg = c.tool(id).?;
+        var r: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448, .seconds = 2 } };
+        engine.fill(cfg, &r);
+        why = .fixed(&msg);
+        _ = check(cfg, &r, &why);
+        _ = needs(cfg, &r);
+        why = .fixed(&msg);
+        try std.testing.expect(!validate(cfg, 0, &why));
+    }
+    try std.testing.expectEqualStrings("tool 'long': options.max_seconds is 9999999999999; it takes 1 to 20", why.buffered());
+}
+
+test "the default size is within the API's longest side, as checked sizes are" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try @import("../config.zig").parse(arena.allocator(),
+        \\{"tools": [{"id": "h3", "kind": "video", "engine": "minimax_h3", "options": {"max_side": 4096, "max_pixels": 532480, "default_size": "2080x256"}}]}
+    );
+    const cfg = c.tool("h3").?;
+    var r: Request = .{ .video = .{ .prompt = "waves" } };
+    engine.fill(cfg, &r);
+    var why_buf: []const u8 = "";
+    try @import("../tool/request.zig").validate(r, .{}, &why_buf);
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    try std.testing.expect(check(cfg, &r, &why));
+    const explicit: Request = .{ .video = .{ .prompt = "waves", .width = 2048, .height = 256 } };
+    try std.testing.expect(check(cfg, &explicit, &why));
 }

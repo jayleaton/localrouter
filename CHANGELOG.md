@@ -9,7 +9,10 @@
   (1344x768) against 445 MiB for 1280x704 at 8 s, inside its booking. A first frame whose canvas leaves the prompt no
   text tokens is refused before loading. A config of `max_width` / `max_height` gets their product and keeps that
   size as its default. The DiT's audio scratch is sized from the audio latents, not the sequence: a small budget's
-  could overrun. Jarvis: 1280x704 or 704x1248 for 8 s, 768x1344 for up to 6 s.
+  could overrun. Jarvis: 1280x704 or 704x1248 for 8 s, 768x1344 for up to 6 s. The booking is the weights plus the
+  buffers the limits allocate (`resident_mb` is a floor), and a request adds its decode and first-frame scratch, so a
+  larger `max_pixels` or `max_seconds` books what it takes. Limits outside the API's (2048 a side, 20 s) or whose
+  largest clip exceeds the memory budget stop the daemon at start, and the default size keeps within 2048 a side.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

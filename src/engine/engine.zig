@@ -66,6 +66,9 @@ pub const Entry = struct {
     check: ?*const fn (cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool = null,
     /// Fills what the request left to the model (a video's size, 0 x 0) with this model's own choice. See `fill`.
     defaults: ?*const fn (cfg: *const ToolConfig, req: *Request) void = null,
+    /// Refuses a tool config the engine cannot serve (options out of range, limits whose memory exceeds `budget`; 0:
+    /// unknown) when the daemon starts, writing why to `why`. Null: every config is taken.
+    validate: ?*const fn (cfg: *const ToolConfig, budget: u64, why: *std.Io.Writer) bool = null,
     /// The licence of the weights this engine runs, for a tool whose config names none. Null: unknown.
     license: ?config.License = null,
 };
@@ -226,6 +229,17 @@ pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
         for (declared) |c| if (f(io, t, c)) try kept.append(a, c) else std.log.info("tool '{s}': {s} is not available with its weights (see its engine's docs)", .{ t.id, @tagName(c) });
         t.capabilities = kept.items;
     }
+}
+
+/// Whether each tool's engine takes its config (`Entry.validate`) within `budget`, the bytes the daemon may book (0:
+/// unknown); the first refusal is written to `why`.
+pub fn validate(tools: []const ToolConfig, budget: u64, why: *std.Io.Writer) bool {
+    for (tools) |*t| {
+        const e = find(t.engine) orelse continue;
+        const f = e.validate orelse continue;
+        if (!f(t, budget, why)) return false;
+    }
+    return true;
 }
 
 /// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`; a `cmd` tool
