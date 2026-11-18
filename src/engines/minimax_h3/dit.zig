@@ -142,6 +142,7 @@ pub const Dit = struct {
     probe: ?Probe = null,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     max_s: u32,
+    max_a: u32, // audio latent frames
     max_l: u32,
     // the run's refined text [L, D] bf16
     context: u64 = 0,
@@ -192,8 +193,8 @@ pub const Dit = struct {
     idx_key: ?[9]u32 = null,
     extra_launches: u64 = 0, // the NVFP4 and row-copy launches (the H3 kernels count in `launch.count`)
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const Weights, s: cuda.Stream, max_s: u32, max_l: u32) !Dit {
-        var x: Dit = .{ .gpa = gpa, .d = d, .k = k, .w = w, .s = s, .max_s = max_s, .max_l = max_l };
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const Weights, s: cuda.Stream, max_s: u32, max_l: u32, max_a: u32) !Dit {
+        var x: Dit = .{ .gpa = gpa, .d = d, .k = k, .w = w, .s = s, .max_s = max_s, .max_l = max_l, .max_a = max_a };
         errdefer x.deinit();
         if (std.c.getenv("STK_H3_REF")) |v| {
             if (v[0] == '1') {
@@ -212,7 +213,7 @@ pub const Dit = struct {
             .{ "q", @as(u64, max_l) * inner * bf },     .{ "kk", @as(u64, max_l) * inner * bf }, .{ "v", @as(u64, max_l) * inner * bf },
             .{ "qc", qr.fp8_bytes },                    .{ "qs", qr.scales_bytes },              .{ "ws", launch.Kitchen.Plan.of(heads, max_s).total },
             .{ "mod", 3 * ada_n * 4 },                  .{ "mod2", 3 * ada_n * 4 },              .{ "t_emb", 3 * t_dim * 4 },
-            .{ "idx", r * 4 },                          .{ "rope", r * 48 * 4 * bf },            .{ "a_in", r * bf },
+            .{ "idx", r * 4 },                          .{ "rope", r * 48 * 4 * bf },            .{ "a_in", audioInBytes(max_a) },
             .{ "rows", r * 96 * 4 },                    .{ "arows", r * 32 * 4 },                .{ "emb", r * dim * 4 },
             .{ "aemb", r * dim * 4 },                   .{ "fada", 3 * 2 * dim * 4 },            .{ "vout", r * 96 * 4 },
             .{ "aout", r * 32 * 4 },
@@ -234,6 +235,11 @@ pub const Dit = struct {
     /// step's difference is the eager schedule's launch count (a graph replay is one launch).
     pub fn launches(x: *const Dit) u64 {
         return @atomicLoad(u64, &launch.count, .monotonic) + x.extra_launches;
+    }
+
+    /// The carried audio latents in bf16: 32 channels x 2 rows a latent frame, which a short sequence's `max_s` can be below.
+    pub fn audioInBytes(max_a: u32) u64 {
+        return 32 * 2 * @as(u64, max_a) * 2;
     }
 
     fn alloc(x: *Dit, n: u64) !u64 {
@@ -417,7 +423,7 @@ pub const Dit = struct {
             if (hw[0] != h or hw[1] != w) return error.BadCondition;
             ly = ly.withFirstFrame();
         }
-        if (ly.s > x.max_s) return error.VideoTooLong;
+        if (ly.s > x.max_s or a > x.max_a) return error.VideoTooLong;
         const key: [6]u32 = .{ L, t, h, w, a, ly.cond };
         if (x.layout_key == null or !std.mem.eql(u32, &x.layout_key.?, &key)) {
             const pos = try x.gpa.alloc([3]f64, ly.s);

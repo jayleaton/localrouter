@@ -165,7 +165,8 @@ something else pulls the clip away from it.
 
 MiniMax H3 (`minimax-h3`) takes a frame of any shape up to its `max_pixels` (landscape or portrait), at most 1344 a
 side (the model's canvas, 768x1344), in multiples of 32 pixels (1280x720 is not one: send 1280x704), for clips up to
-`max_seconds`; a frame larger than `max_pixels` is taken for a shorter clip that fits the same memory. A request past
+`max_seconds`; a frame larger than `max_pixels` (up to 768x1344's area) is taken for a shorter clip that fits the same
+buffers (the decode's scratch grows a little with the frame: on Jarvis at most 486 MiB against 445 MiB). A request past
 them is refused with the limits named (for a large frame, the longest clip it takes), before anything loads. Without
 `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: 901120 pixels and 8 s, so 1280x704 or
 704x1248 for 8 s and 768x1344 for up to 6 s; 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for

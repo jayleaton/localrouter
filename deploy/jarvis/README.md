@@ -25,7 +25,7 @@ bookings in `config.json.in` are each peak plus 256 MiB:
 | Drama 3, full (`DRAMA_VARIANT=full`) | 38.3 GiB GPU (the 36.9 GiB weights and the 1.7 GiB codec, nothing else) + 0.6 host | 39.47 GiB (39.25, plus the NVFP4 build's measured 224 MiB for cloned voices: the same prefix cache; not measured on these weights) |
 | Whisper | 2.0 GiB GPU + 1.5 host | 3.75 GiB, + 0.5 working |
 | Image | 41.3 GiB with the edit pack at `edit_refs` 2 (2026-10-24: edits of one and two 1024x1024 inputs, 1344x768 and 1024x576; 38.2 GiB at `edit_refs` 1, 44.1 at 3); 31.2 GiB without it | 41.55 GiB |
-| Video (on demand) | 52.06 GiB GPU + host at the caps 1280x704 and 8 s (2026-10-24: image to video at 1280x704, 8 s, the largest job); the buffers are sized at load for the caps, so a smaller clip takes as much | 52.3 GiB |
+| Video (on demand) | 52.06 GiB GPU + host at the caps 1280x704 and 8 s (2026-10-24: image to video at 1280x704, 8 s, the largest job); the buffers are sized at load for the caps, so a smaller clip takes as much; a portrait or 768x1344 frame uses the same buffers, and the decode's scratch at most 41 MiB more (1344x768) | 52.3 GiB |
 | Decisions | 10.6 GiB GPU + 1.5 host on the largest prompt (a 14 KB state read twice); 11.9 GiB while it loads | 12.4 GiB |
 
 - **The reserve is 3 GiB.** earlyoom sends SIGTERM below 2% `MemAvailable` (2.4 GiB on this box); the rest covers the

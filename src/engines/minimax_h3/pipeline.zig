@@ -62,16 +62,36 @@ fn openInputs(gpa: std.mem.Allocator, io: std.Io, paths: Paths) anyerror!Opened 
 /// and a frame larger than `pixels` for a clip short enough to fit the same buffers (`fits`).
 pub const Limits = struct { pixels: u32 = 768 * 448, frames: u32 = 56, tokens: u32 = 1536 };
 
-/// The model's official canvas: the long side up to 1344 (`adapt_canvas`, 768 x 1344).
+/// The model's official canvas (`adapt_canvas`, 768 x 1344): its long side, and its area, the largest frame a budget
+/// smaller than it trades clip length for (the video VAE's per-decode scratch follows the frame's area and columns).
 pub const canvas_side = 1344;
+pub const canvas_pixels = 768 * 1344;
+
+/// The text tokens a first frame's canvas takes besides its own (`<Picture 1>: ` and the vision markers), with room.
+const first_frame_tokens = 16;
+
+/// The most 32 x 32 cells a first frame's canvas may have (one text token each) and leave the prompt room in `l.tokens`.
+pub fn firstFrameCells(l: Limits) u32 {
+    return l.tokens -| (first_frame_tokens + 1);
+}
+
+pub fn firstFrameFits(l: Limits, width: u32, height: u32) bool {
+    return @as(u64, width / 32) * (height / 32) <= firstFrameCells(l);
+}
+
+/// The DiT's sequence rows for `l`: the text, the audio, the video and a first frame's condition.
+fn ditRows(l: Limits, max: Shapes) u64 {
+    return l.tokens + 2 * @as(u64, max.audio_t) + max.videoTokens();
+}
 
 /// The buffers `l` allocates, as the shapes of a 32-pixel-wide strip of the same area.
 fn ceiling(l: Limits) !Shapes {
     return shapes(32, l.pixels / 1024 * 32, l.frames);
 }
 
-/// Whether a clip fits the buffers allocated for `l`.
+/// Whether a clip fits the buffers allocated for `l`, its frame no larger than `l.pixels` or the canvas.
 pub fn fits(l: Limits, width: u32, height: u32, frames: u32) bool {
+    if (@as(u64, width) * height > @max(canvas_pixels, l.pixels)) return false;
     const sh = shapes(width, height, frames) catch return false;
     const max = ceiling(l) catch return false;
     return sh.frames <= max.frames and sh.n_video <= max.n_video and sh.frame_bytes <= max.frame_bytes and sh.videoTokens() <= max.videoTokens();
@@ -283,9 +303,9 @@ pub const Pipeline = struct {
         defer up.deinit();
         p.w = try dit_mod.Weights.load(gpa, io, &p.d, &p.pack, &p.nv, &up);
         errdefer p.w.deinit();
-        const max_s: u32 = @intCast(limits.tokens + 2 * p.max.audio_t + p.max.videoTokens());
+        const max_s: u32 = @intCast(ditRows(limits, p.max));
         const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = &p.nv, .major = p.major, .minor = p.minor };
-        p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens);
+        p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens, p.max.audio_t);
         errdefer p.dit.deinit();
         p.load.dit = clock.lap();
         if (!opts.unload_te) try p.loadTeWith(&up);
@@ -579,6 +599,48 @@ test "frame counts snap up to 17 k + 5 and the shapes follow" {
     try std.testing.expectEqual(@as(u64, 93 * 800), s.samples);
     try std.testing.expectEqual(@as(u32, 2), (try shapes(64, 64, 1)).latent_t);
     try std.testing.expectError(error.SizeNotMultipleOf32, shapes(770, 448, 56));
+}
+
+test "every clip `fits` admits fits the buffers, the DiT's rows and its audio scratch" {
+    const budgets = [_]Limits{
+        .{ .pixels = 768 * 448, .frames = 5 * 24 },
+        .{ .pixels = 512 * 512, .frames = 5 * 24 }, // a_in sized by rows alone was 23,356 bytes for 26,496 at 512x512, 5 s
+        .{ .pixels = 1280 * 704, .frames = 8 * 24 },
+        .{ .pixels = 768 * 1344, .frames = 5 * 24 },
+    };
+    for (budgets) |l| {
+        const max = try ceiling(l);
+        const n_max = max.n_video + max.n_audio;
+        var admitted: u32 = 0;
+        var w: u32 = 256;
+        while (w <= canvas_side) : (w += 32) {
+            var h: u32 = 256;
+            while (h <= canvas_side) : (h += 32) {
+                var s: u32 = 1;
+                while (s * 24 <= l.frames) : (s += 1) {
+                    if (!fits(l, w, h, s * 24)) continue;
+                    admitted += 1;
+                    const sh = try shapes(w, h, s * 24);
+                    const ly = layout.Layout.init(l.tokens, sh.latent_t, sh.lh, sh.lw, sh.audio_t).withFirstFrame();
+                    try std.testing.expect(ly.s <= ditRows(l, max));
+                    try std.testing.expect(@as(u64, w) * h <= @max(canvas_pixels, l.pixels));
+                    try std.testing.expect(sh.audio_t <= max.audio_t);
+                    try std.testing.expect(sh.n_audio * 2 <= dit_mod.Dit.audioInBytes(max.audio_t));
+                    try std.testing.expect(sh.n_video + sh.n_audio <= n_max and sh.frame_bytes <= max.frame_bytes);
+                }
+            }
+        }
+        try std.testing.expect(admitted > 0);
+    }
+    const small = try ceiling(budgets[1]);
+    try std.testing.expect(ditRows(budgets[1], small) * 2 < (try shapes(512, 512, 120)).n_audio * 2);
+}
+
+test "a first frame's canvas leaves the prompt room in the text budget" {
+    const l: Limits = .{ .pixels = 1280 * 704, .frames = 8 * 24 };
+    try std.testing.expect(firstFrameFits(l, 768, 1344));
+    try std.testing.expect(firstFrameFits(l, 704, 1248));
+    try std.testing.expect(!firstFrameFits(l, 1344, 1344)); // 1,764 image tokens for 1,536
 }
 
 test "sigmas of eight steps end in zero" {

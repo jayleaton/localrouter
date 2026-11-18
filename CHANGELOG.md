@@ -3,9 +3,13 @@
 ## Unreleased
 
 - MiniMax H3: portrait. The limit is a frame's area (`max_pixels`) and the long side (`max_side`, the model's 1344), not a
-  width and a height, so one config takes landscape and 9:16 portrait at the same memory; a frame past `max_pixels`
-  is taken for a clip short enough to fit the same buffers, and its refusal names that length. A config of
-  `max_width` / `max_height` gets their product. Jarvis: 1280x704 or 704x1248 for 8 s, 768x1344 for up to 6 s.
+  width and a height, so one config takes landscape and 9:16 portrait with the same load-time buffers; a frame past
+  `max_pixels` (up to the canvas's 768x1344 area) is taken for a clip short enough to fit them, and its refusal names
+  that length. The video VAE's per-decode scratch follows the frame's area and width: on Jarvis at most 486 MiB
+  (1344x768) against 445 MiB for 1280x704 at 8 s, inside its booking. A first frame whose canvas leaves the prompt no
+  text tokens is refused before loading. A config of `max_width` / `max_height` gets their product and keeps that
+  size as its default. The DiT's audio scratch is sized from the audio latents, not the sequence: a small budget's
+  could overrun. Jarvis: 1280x704 or 704x1248 for 8 s, 768x1344 for up to 6 s.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian
