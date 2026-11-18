@@ -63,6 +63,7 @@ pub const ProcessTool = struct {
     lock_path: [1024]u8 = undefined, // `ownLock`
     log_thread: ?std.Thread = null, // copies the worker's stderr into its log, rotating as it goes
     log_joined: std.atomic.Value(bool) = .init(true), // true: no thread to join
+    log_stop: std.atomic.Value(bool) = .init(false), // set by `joinLog`: the worker is gone, stop waiting for its stderr's EOF
 
     pub fn init(setup: Setup, cfg: *const ToolConfig) !ProcessTool {
         return .{ .setup = setup, .cfg = cfg, .buf = try setup.gpa.alloc(u8, wire.max_line) };
@@ -376,6 +377,7 @@ pub const ProcessTool = struct {
         // stderr is a pipe the parent copies into the log, so a long-lived worker rotates without reopening its fd.
         p.joinLog();
         p.log_joined.store(false, .release);
+        p.log_stop.store(false, .release);
         const child = try std.process.spawn(p.setup.io, .{ .argv = argv, .environ_map = &env, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe, .pgid = 0 });
         const err_file = child.stderr orelse return error.Pipe;
         p.child = child;
@@ -393,6 +395,7 @@ pub const ProcessTool = struct {
             .gpa = gpa,
             .max_bytes = p.setup.log_max_bytes,
             .keep = p.setup.log_keep,
+            .stop = &p.log_stop,
         }}) catch |err| {
             gpa.free(owned);
             p.kill();
@@ -407,16 +410,34 @@ pub const ProcessTool = struct {
         gpa: std.mem.Allocator,
         max_bytes: u64,
         keep: u32,
+        stop: *const std.atomic.Value(bool),
     };
 
-    /// Blocking read of the worker's stderr into its log. The write end closes when the worker exits. The read end
-    /// stays open: `child.wait` closes it, and only after this thread has returned.
+    /// How often the log thread looks at `log_stop` while the worker's stderr is quiet.
+    const log_poll_ms = 100;
+    /// After `log_stop`, how long a stderr that keeps talking (a descendant outliving the worker) is still copied.
+    const log_drain_ms = 1000;
+
+    /// Copies the worker's stderr into its log until EOF, which comes when the worker exits. A descendant that started
+    /// its own session survives the group kill and can hold the write end open, so EOF may never come: once `stop` is
+    /// set (`joinLog`, after the worker is gone) the thread returns at the first quiet poll, or after `log_drain_ms` if
+    /// the descendant keeps writing. The read end stays open: `child.wait` closes it, and only after this thread has
+    /// returned.
     fn logCopy(c: LogCopy) void {
         defer c.gpa.free(c.path);
         const fl = posix.system.fcntl(c.file.handle, posix.F.GETFL, @as(usize, 0));
         if (posix.errno(fl) == .SUCCESS) _ = posix.system.fcntl(c.file.handle, posix.F.SETFL, fl & ~@as(@TypeOf(fl), 0o4000));
         var buf: [8192]u8 = undefined;
+        var stopped_at: ?Io.Timestamp = null;
         while (true) {
+            if (stopped_at == null and c.stop.load(.acquire)) stopped_at = Io.Clock.awake.now(c.io);
+            if (stopped_at) |t0| if (t0.durationTo(Io.Clock.awake.now(c.io)).toMilliseconds() >= log_drain_ms) return;
+            var fds = [_]posix.pollfd{.{ .fd = c.file.handle, .events = posix.POLL.IN, .revents = 0 }};
+            const ready = posix.poll(&fds, log_poll_ms) catch return;
+            if (ready == 0) {
+                if (stopped_at != null) return; // the worker is gone and nothing is left to copy
+                continue;
+            }
             const rc = posix.system.read(c.file.handle, &buf, buf.len);
             if (posix.errno(rc) == .INTR) continue;
             if (posix.errno(rc) != .SUCCESS) return;
@@ -426,8 +447,10 @@ pub const ProcessTool = struct {
         }
     }
 
+    /// Waits for the log thread, at most about `log_drain_ms` + `log_poll_ms` once the worker is gone (`logCopy`).
     fn joinLog(p: *ProcessTool) void {
         if (p.log_joined.swap(true, .acq_rel)) return;
+        p.log_stop.store(true, .release);
         if (p.log_thread) |*th| {
             th.join();
             p.log_thread = null;
@@ -644,6 +667,58 @@ test "a worker's log rotates by size across loads and keeps N files" {
     try std.testing.expect(exists(io, one));
     try std.testing.expect(exists(io, two));
     try std.testing.expect(!exists(io, three));
+}
+
+const detaching_worker =
+    \\import json, subprocess, sys
+    \\# a descendant in its own session: the group kill misses it and it keeps the stderr pipe open
+    \\d = subprocess.Popen(["sleep", "30"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    \\open(sys.argv[1], "w").write(str(d.pid))
+    \\sys.stderr.write("worker up\\n")
+    \\sys.stderr.flush()
+    \\for line in sys.stdin:
+    \\    op = json.loads(line)["op"]
+    \\    if op == "load":
+    \\        print(json.dumps({"ok": True, "resident": 1}), flush=True)
+    \\    elif op == "exit":
+    \\        break
+    \\
+;
+
+test "unload is not held up by a descendant that outlives the worker and keeps its stderr open" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "detach.py", .data = detaching_worker });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const script = try std.fmt.allocPrint(gpa, "{s}/detach.py", .{dir});
+    defer gpa.free(script);
+    const pid_file = try std.fmt.allocPrint(gpa, "{s}/descendant.pid", .{dir});
+    defer gpa.free(pid_file);
+    var environ = std.process.Environ.Map.init(gpa);
+    defer environ.deinit();
+    if (std.c.getenv("PATH")) |v| try environ.put("PATH", std.mem.span(v));
+    const cfg: ToolConfig = .{ .id = "detach", .kind = .speech, .cmd = &.{ "python3", script, pid_file }, .resident_bytes = 1 };
+    var p = try ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = "/nonexistent", .environ = &environ, .log_dir = dir, .guard = false }, &cfg);
+    defer p.deinit();
+    const t = p.asTool();
+    _ = try t.load();
+    var pid_buf: [32]u8 = undefined;
+    const descendant = try std.fmt.parseInt(i32, try tmp.dir.readFile(io, "descendant.pid", &pid_buf), 10);
+    defer _ = posix.system.kill(descendant, posix.SIG.KILL);
+    const t0 = Io.Clock.awake.now(io);
+    t.unload();
+    // before the fix the log thread waited for an EOF that only comes when the descendant's 30 s sleep ends
+    try std.testing.expect(t0.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 3000);
+    try std.testing.expectEqual(tool.State.unloaded, t.state());
+    try std.testing.expectEqual(@as(c_int, 0), std.c.kill(descendant, @fromBackingInt(@intCast(0)))); // it really did outlive the worker
+    var log_buf: [256]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try tmp.dir.readFile(io, "detach.log", &log_buf), "worker up") != null);
+    // a second load and unload still work: the next spawn starts a fresh log thread
+    _ = try t.load();
+    t.unload();
 }
 
 test "an edit books reference_working_bytes for each reference image beside working_bytes" {
