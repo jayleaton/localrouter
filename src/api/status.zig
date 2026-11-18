@@ -14,7 +14,8 @@ pub const Tool = struct {
     state: []const u8,
     resident_bytes: u64,
     queue_depth: u32,
-    last_load_s: ?i64 = null,
+    last_load_unix_s: ?i64 = null, // when its last successful load finished (unix seconds)
+    last_load_ms: ?u64 = null, // how long that load took
     last_error: ?Error = null,
 };
 
@@ -42,7 +43,8 @@ pub fn view(s: *sched.Scheduler, io: Io, a: std.mem.Allocator) !View {
                 .state = sched.activity(slot.tool.state(), slot.phase),
                 .resident_bytes = slot.resident,
                 .queue_depth = 0,
-                .last_load_s = if (slot.last_load_s > 0) slot.last_load_s else null,
+                .last_load_unix_s = if (slot.last_load_s > 0) slot.last_load_s else null,
+                .last_load_ms = if (slot.last_load_s > 0) slot.last_load_ms else null,
                 .last_error = if (slot.last_error_s > 0) .{ .type = code, .code = code, .time = slot.last_error_s } else null,
             };
         }
@@ -117,7 +119,7 @@ pub fn writePrometheus(w: *std.Io.Writer, v: View) !void {
     for (v.tools) |t| {
         try w.writeAll("localrouter_tool_last_load_timestamp_seconds{tool=\"");
         try label(w, t.id);
-        try w.print("\"}} {d}\n", .{t.last_load_s orelse 0});
+        try w.print("\"}} {d}\n", .{t.last_load_unix_s orelse 0});
     }
     try w.writeAll(
         \\# HELP localrouter_evictions_total Tools unloaded to make room for another.
@@ -172,7 +174,7 @@ test "activity names the five states, and a bad error type is not published" {
 
 test "prometheus text has the gauges and counters and no path" {
     const tools = [_]Tool{
-        .{ .id = "tp", .state = "idle", .resident_bytes = 32, .queue_depth = 2, .last_load_s = 10, .last_error = .{ .type = "server_error", .code = "server_error", .time = 11 } },
+        .{ .id = "tp", .state = "idle", .resident_bytes = 32, .queue_depth = 2, .last_load_unix_s = 10, .last_load_ms = 2500, .last_error = .{ .type = "server_error", .code = "server_error", .time = 11 } },
         .{ .id = "a\"b", .state = "unloaded", .resident_bytes = 0, .queue_depth = 0, .last_error = .{ .type = "/var/log/x", .code = "/var/log/x", .time = 3 } },
     };
     const v: View = .{ .tools = &tools, .memory = .{ .ceiling_bytes = 100, .used_bytes = 32, .free_bytes = 68 }, .evictions = 4 };

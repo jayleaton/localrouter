@@ -34,7 +34,9 @@ test "status and metrics describe tools and memory, and /health stays {\"ok\":tr
     try testing.expectEqualStrings("unloaded", tool0.get("state").?.string);
     try testing.expectEqual(@as(i64, 0), tool0.get("resident_bytes").?.integer);
     try testing.expectEqual(@as(i64, 0), tool0.get("queue_depth").?.integer);
-    try testing.expect(tool0.get("last_load_s") == null);
+    try testing.expect(tool0.get("last_load_unix_s") == null);
+    try testing.expect(tool0.get("last_load_ms") == null);
+    try testing.expect(tool0.get("last_load_s") == null); // renamed: it was a timestamp, not a duration
     try testing.expect(tool0.get("last_error") == null);
 
     const metrics = try d.call(a, .GET, "/metrics", null);
@@ -52,8 +54,9 @@ test "status and metrics describe tools and memory, and /health stays {\"ok\":tr
         const body = (try d.call(a, .GET, "/v1/status", null)).body;
         const again = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
         const tp = again.object.get("tools").?.array.items[0].object;
-        if (tp.get("last_load_s") != null and std.mem.eql(u8, tp.get("state").?.string, "unloaded")) {
-            try testing.expect(tp.get("last_load_s").?.integer > 0);
+        if (tp.get("last_load_unix_s") != null and std.mem.eql(u8, tp.get("state").?.string, "unloaded")) {
+            try testing.expect(tp.get("last_load_unix_s").?.integer > 1_000_000_000); // a unix time, not a duration
+            try testing.expect(tp.get("last_load_ms").?.integer >= 0);
             try testing.expectEqual(@as(i64, 0), tp.get("resident_bytes").?.integer);
             try testing.expect(std.mem.indexOf(u8, body, d.dir) == null);
             saw_load = true;

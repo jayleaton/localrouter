@@ -598,7 +598,8 @@ informs and enforces nothing: check the terms before you use or publish what a m
 | `tools[].state` | `idle` (loaded, no job; this is `ready` on `GET /v1/tools`), `loading`, `committing` (the worker is ready and admitted bytes are still landing), `busy` or `unloaded` |
 | `tools[].resident_bytes` | bytes that tool holds now (0 while unloaded) |
 | `tools[].queue_depth` | jobs waiting for it, not counting the one running |
-| `tools[].last_load_s` | unix seconds of its last successful load; absent until it has loaded, and kept after it unloads |
+| `tools[].last_load_unix_s` | when its last successful load finished, in unix seconds; absent until it has loaded, and kept after it unloads |
+| `tools[].last_load_ms` | how long that load took, in milliseconds (the same figure as `last_load_ms` on `GET /v1/tools`); absent with `last_load_unix_s` |
 | `tools[].last_error` | `{type, code, time}` of its last failed job (`time` is unix seconds). `type` and `code` are the same token as an HTTP error's. Absent until one fails. The message is not included |
 | `memory` | `ceiling_bytes` (the budget), `used_bytes` (booked now), `free_bytes` |
 | `evictions` | how many times a tool was unloaded to make room for another. An idle-TTL unload or `POST /v1/tools/.../unload` is not one |
