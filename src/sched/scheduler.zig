@@ -103,6 +103,8 @@ pub const Slot = struct {
     call_ns: i96 = 0, // a call last asked for it (a `call` tool connecting while it was down)
     loaded_since_s: i64 = 0, // unix seconds of its current load; 0: not loaded
     last_load_ms: ?u64 = null, // how long its last load took
+    last_job_ms: ?u64 = null, // how long its last successful generate took (`retryAfter`'s estimate)
+    job_started_ns: i96 = 0, // when the generate now running began; 0: none (under `gate`)
     // A speech tool's voice warm in this load: the voice of the last speech job it completed since it loaded (`said`
     // bytes of `voice`), so a session knows whether its voice's first sentence is paid already (`speechWarm`). One voice:
     // the Mac Drama server keeps one reference prefix and rebuilds it on a switch (4 to 6 s on the M5 Ultra); a server
@@ -857,6 +859,7 @@ pub const Scheduler = struct {
         slot.in_use = false;
         slot.pending = 0;
         slot.phase = .free;
+        slot.job_started_ns = 0;
         if (slot.resident > 0 or slot.tool.state() == .ready) slot.last_used_ns = nowNs(s.io);
         if (slot.unload_after) {
             slot.unload_after = false;
@@ -1108,7 +1111,7 @@ pub const Scheduler = struct {
         s.setStatus(j, .in_progress);
         const n = slot.tool.needs(&j.request);
         s.gate.lockUncancelable(s.io);
-        const wait_s = s.retryAfter(j.tool);
+        const wait_s = s.settleWait(j.tool);
         s.gate.unlock(s.io);
         const deadline = nowNs(s.io) + @as(i96, wait_s) * std.time.ns_per_s;
         var cold: bool = true;
@@ -1187,6 +1190,10 @@ pub const Scheduler = struct {
         const speaking = j.request == .speech;
         if (speaking) s.speech.enter(s.io);
         defer if (speaking) s.speech.leave(s.io);
+        s.gate.lockUncancelable(s.io);
+        const gen_began = nowNs(s.io);
+        slot.job_started_ns = gen_began;
+        s.gate.unlock(s.io);
         const out = slot.tool.generate(&job, .{ .ctx = &pctx, .progress = ProgressCtx.report }, arena.allocator()) catch |err| {
             if (slot.tool.state() == .unloaded) s.forget(slot);
             if (speaking) {
@@ -1197,6 +1204,8 @@ pub const Scheduler = struct {
             return s.finishError(j, slot, err);
         };
         s.gate.lockUncancelable(s.io);
+        slot.last_job_ms = @intCast(@divTrunc(@max(nowNs(s.io) - gen_began, 0), std.time.ns_per_ms));
+        slot.job_started_ns = 0;
         if (ttlOf(slot) == 0 and keepOf(slot, s.inCall()) == .no) slot.unload_after = true;
         s.gate.unlock(s.io);
         // a 3D asset completes only with a manifest naming whole files (`media/asset3d.zig`)
@@ -1333,9 +1342,27 @@ pub const Scheduler = struct {
         return mayEvict(want, slot.tool.config(), keepOf(slot, in_call), take);
     }
 
-    /// Seconds a client should wait. The config's `retry_after_s` (30 when 0), or longer when a blocker has taken
-    /// longer than that to load before, capped at 10 minutes.
+    /// Under `gate`: the `retry_after` hint for a request refused for memory: when the memory it waits on should be free.
+    /// For each tool that cannot be evicted now: a running job's tool frees its memory when the job ends, estimated as
+    /// that tool's last job less the time this one has run; a loading or committing tool, after the rest of its load
+    /// (its last load less the time since admission) and then its job. The longest of those, at least the config's
+    /// `retry_after_s` (30 when unset or 0) and at most 600 s.
     fn retryAfter(s: *const Scheduler, target: usize) u32 {
+        var hint: u32 = if (s.cfg.retry_after_s == 0) 30 else s.cfg.retry_after_s;
+        const now = nowNs(s.io);
+        for (s.slots, 0..) |*slot, i| {
+            if (i == target or !protected(slot)) continue;
+            const ms = remainingMs(slot, now) orelse continue;
+            const sec: u32 = @intCast(@min(@max((ms + 999) / 1000, 1), 600));
+            if (sec > hint) hint = sec;
+        }
+        return hint;
+    }
+
+    /// Under `gate`: the longest a request waits for a load's overshoot to settle (`admission`'s `.wait`): the config's
+    /// `retry_after_s` (30 when 0), or a blocker's last load when longer, capped at 10 minutes. A blocker's job is not
+    /// counted: the wait ends when the load settles, not when the job does.
+    fn settleWait(s: *const Scheduler, target: usize) u32 {
         var hint: u32 = if (s.cfg.retry_after_s == 0) 30 else s.cfg.retry_after_s;
         for (s.slots, 0..) |*slot, i| {
             if (i == target or !protected(slot)) continue;
@@ -1344,6 +1371,26 @@ pub const Scheduler = struct {
             if (sec > hint) hint = sec;
         }
         return hint;
+    }
+
+    /// Under `gate`: how long until protected `slot` should be free again, from its last load and job; null: no history.
+    fn remainingMs(slot: *const Slot, now: i96) ?u64 {
+        const since = struct {
+            fn ms(t0: i96, t: i96) u64 {
+                return if (t0 == 0) 0 else @intCast(@divTrunc(@max(t - t0, 0), std.time.ns_per_ms));
+            }
+        }.ms;
+        if (slot.job_started_ns != 0) { // the generate is running
+            const job = slot.last_job_ms orelse return null;
+            return job -| since(slot.job_started_ns, now);
+        }
+        if (slot.phase == .loading or slot.phase == .committing) {
+            if (slot.last_load_ms == null and slot.last_job_ms == null) return null;
+            const load = (slot.last_load_ms orelse 0) -| since(slot.pending_ns, now);
+            return load +| (slot.last_job_ms orelse 0);
+        }
+        // in use but between phases (the lane holds it): its last job is the best guess
+        return slot.last_job_ms orelse slot.last_load_ms;
     }
 
     /// The request cannot run: `retry_after` is set, the pinned tools stay. `call` was read under `gate`.
@@ -2355,4 +2402,50 @@ test "a request that fits once a load's overshoot settles waits, and does not ev
     try t.expectEqual(@as(u64, 30 << 20), b.slots[0].resident);
     try t.expectEqual(tool_mod.State.ready, b.state(1));
     try t.expect(!std.mem.eql(u8, chat.error_type, "insufficient_memory"));
+}
+
+test "retry_after estimates when the blocker frees its memory: a running job from its tool's last job, a load from its last load and job" {
+    // 2026-11-18: a 10 s video render held the memory for 16 min while every refused chat request was told to retry
+    // in 30 s, so the agent asked about thirty times. The hint now follows the blocker's own history.
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "video", .kind = .video, .priority = 10 }, .bytes = 94 << 20 },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100 }, .bytes = 88 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var load: Control = .{ .op = .load, .tool = 0 };
+    b.s.runControl(&load);
+    b.s.gate.lockUncancelable(t.io);
+    b.s.reserve(&b.slots[0], 0);
+    // running, no history: the configured floor
+    b.slots[0].job_started_ns = nowNs(t.io);
+    try t.expectEqual(@as(u32, 30), b.s.retryAfter(1));
+    // its last job took 900 s and this one has run 300 s: about 600 s left (the cap)
+    b.slots[0].last_job_ms = 900_000;
+    b.slots[0].job_started_ns = nowNs(t.io) - 300 * std.time.ns_per_s;
+    const left = b.s.retryAfter(1);
+    try t.expect(left >= 599 and left <= 600);
+    // 240 s of a 300 s job: about 60 s
+    b.slots[0].last_job_ms = 300_000;
+    b.slots[0].job_started_ns = nowNs(t.io) - 240 * std.time.ns_per_s;
+    const near = b.s.retryAfter(1);
+    try t.expect(near >= 59 and near <= 61);
+    // past its estimate: the floor, never 0
+    b.slots[0].job_started_ns = nowNs(t.io) - 400 * std.time.ns_per_s;
+    try t.expectEqual(@as(u32, 30), b.s.retryAfter(1));
+    // loading: the rest of the load, then the job
+    b.slots[0].job_started_ns = 0;
+    b.slots[0].phase = .loading;
+    b.slots[0].last_load_ms = 60_000;
+    b.slots[0].last_job_ms = 120_000;
+    b.slots[0].pending_ns = nowNs(t.io) - 20 * std.time.ns_per_s;
+    const loading = b.s.retryAfter(1);
+    try t.expect(loading >= 159 and loading <= 161);
+    // the overshoot wait still counts the load only
+    try t.expectEqual(@as(u32, 60), b.s.settleWait(1));
+    b.s.gate.unlock(t.io);
+    b.s.done(&b.slots[0]);
+    try t.expectEqual(@as(i96, 0), b.slots[0].job_started_ns);
 }

@@ -543,8 +543,11 @@ bytes are still landing), or running a job is never unloaded, including for a jo
 orders the victims: a request is never refused while unloading idle tools, of any priority, would make room. A request
 that cannot fit while a non-evictable job holds its memory is refused at once with 503 `insufficient_memory` (`type`
 and `code` both `insufficient_memory`, and `retry_after` seconds, also the `Retry-After` header) instead of sitting
-until the client times out. `retry_after` is the config's `retry_after_s` (30 when unset or 0), or longer when that
-job's tool has taken longer than that to load before. A request that will fit once a load's temporary overshoot
+until the client times out. `retry_after` estimates when the tools that cannot be evicted will be free again: for
+one running a job, its last successful generate time less the time this job has run; for one loading, the rest of
+its last load time, then its last job time. The longest of those, at least the config's `retry_after_s` (30 when unset
+or 0), at most 600 s. With no history it is the configured floor. It is a hint, not a promise: a longer request or
+another job after it can keep the memory busy. A request that will fit once a load's temporary overshoot
 settles (the estimate is above the bytes the load will hold) waits for the load and does not unload that tool. An
 `always` (`keep_loaded`) tool is loaded when the daemon starts if it
 fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again as soon as the scheduler has been
