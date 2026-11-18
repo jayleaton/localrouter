@@ -690,6 +690,7 @@ fn abandon(app: *App, j: *jobs.Job, why: *Refusal, status: u16, msg: []const u8)
     j.status = .failed;
     j.completed_at = sched.nowUnix(app.io);
     app.table.mutex.unlock(app.io);
+    j.dropIfEmpty(app.io);
     why.* = .{ .status = status, .typ = "server_error", .message = msg };
     return null;
 }
