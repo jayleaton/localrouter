@@ -131,6 +131,8 @@ pub const Slot = struct {
     loaded_since_s: i64 = 0, // unix seconds of its current load; 0: not loaded
     last_load_s: i64 = 0, // unix seconds of its last successful load; kept after it unloads (0: never)
     last_load_ms: ?u64 = null, // how long its last load took
+    loads: u64 = 0, // successful loads since the daemon started (a model that keeps coming back shows here). Under `gate`.
+    refusals: u64 = 0, // its requests refused for memory (503 insufficient_memory) since start. Under `gate`.
     // The last failed job, under `gate`. `type` and `code` are the same token (`safeCode`: no paths, no messages).
     // `last_error_s` 0: none yet.
     last_error: [64]u8 = @splat(0),
@@ -1151,6 +1153,10 @@ pub const Scheduler = struct {
         slot.loaded_since_s = nowUnix(s.io);
         slot.last_load_s = slot.loaded_since_s;
         slot.resident = if (measured > 0) measured else estimate;
+        slot.loads +|= 1;
+        std.log.info("loaded {s} in {d} ms: {d} MiB booked, {d} MiB free in the budget (load {d} since start)", .{
+            slot.tool.config().id, slot.last_load_ms.?, slot.resident >> 20, s.budgetFree() >> 20, slot.loads,
+        });
         slot.pending -|= estimate; // now visible in MemAvailable
         slot.pending_ns = nowNs(s.io); // what is left (a job's working bytes) lands from here
         slot.pending_avail = memory.available() orelse 0;
@@ -1403,9 +1409,35 @@ pub const Scheduler = struct {
         return hint;
     }
 
+    /// Under `gate`: the ids of the tools that cannot be evicted now (loading, committing or running a job), comma
+    /// separated, into `buf` ("none" when there are none; truncated to fit).
+    fn holders(s: *const Scheduler, buf: []u8, except: *const Slot) []const u8 {
+        var n: usize = 0;
+        for (s.slots) |*slot| {
+            if (slot == except or !protected(slot)) continue;
+            const id = slot.tool.config().id;
+            const sep: []const u8 = if (n == 0) "" else ",";
+            if (n + sep.len + id.len > buf.len) break;
+            @memcpy(buf[n..][0..sep.len], sep);
+            n += sep.len;
+            @memcpy(buf[n..][0..id.len], id);
+            n += id.len;
+        }
+        return if (n == 0) "none" else buf[0..n];
+    }
+
     /// The request cannot run: `retry_after` is set, the pinned tools stay. `call` was read under `gate`.
     fn refuseMemory(s: *Scheduler, j: *jobs.Job, slot: *Slot, room: u64, extra: u64, hint: u32, call: bool) void {
         j.retry_after = hint;
+        {
+            // the journal says who holds the memory: on a shared box a refusal is otherwise only visible to its client
+            s.gate.lockUncancelable(s.io);
+            defer s.gate.unlock(s.io);
+            slot.refusals +|= 1;
+            var held: [256]u8 = undefined;
+            var line: [512]u8 = undefined;
+            std.log.info("{s}", .{refusalLine(&line, slot.tool.config().id, room, s.budgetFree(), s.holders(&held, slot), hint)});
+        }
         const spare = slot.tool.config().spare_room_only;
         var buf: [320]u8 = undefined;
         const msg = (if (call)
@@ -1860,6 +1892,14 @@ const FakeCalls = struct {
         return c.n.load(.acquire);
     }
 };
+
+/// The journal line for a request refused for memory: what it needed, what the budget has free, which tools hold the
+/// rest (they cannot be evicted while loading or running a job), and the `retry_after` the client was given.
+pub fn refusalLine(buf: []u8, id: []const u8, needs: u64, budget_free: u64, held_by: []const u8, retry_after_s: u32) []const u8 {
+    return std.fmt.bufPrint(buf, "refused {s}: it needs {d} MiB, {d} MiB free in the budget, held by {s}; retry_after {d} s", .{
+        id, needs >> 20, budget_free >> 20, held_by, retry_after_s,
+    }) catch buf[0..0];
+}
 
 /// The journal line for an eviction. "free in the budget" is the router's budget less what is booked (`budgetFree`); the
 /// host's MemAvailable and the reserve follow it, since they can differ a lot on a unified-memory machine (2026-11: the
@@ -2519,4 +2559,35 @@ test "a request that fits once a load's overshoot settles waits, and does not ev
     try t.expectEqual(@as(u64, 30 << 20), b.slots[0].resident);
     try t.expectEqual(tool_mod.State.ready, b.state(1));
     try t.expect(!std.mem.eql(u8, chat.error_type, "insufficient_memory"));
+}
+
+test "loads and refusals are counted per tool, and the refusal's journal line names who holds the memory" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "video", .kind = .video, .priority = 10 }, .bytes = 94 << 20 },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100 }, .bytes = 88 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var load: Control = .{ .op = .load, .tool = 0 };
+    b.s.runControl(&load);
+    try t.expectEqual(@as(u64, 1), b.slots[0].loads);
+    b.s.gate.lockUncancelable(t.io);
+    b.s.reserve(&b.slots[0], 0); // a render is running
+    var held: [256]u8 = undefined;
+    try t.expectEqualStrings("video", b.s.holders(&held, &b.slots[1]));
+    b.s.gate.unlock(t.io);
+    var chat = chatJob("c", 1);
+    defer chat.arena.deinit();
+    b.s.runJob(&chat);
+    try t.expectEqual(@as(u16, 503), chat.http_status);
+    try t.expectEqual(@as(u64, 1), b.slots[1].refusals);
+    try t.expectEqual(@as(u64, 0), b.slots[1].loads);
+    b.s.done(&b.slots[0]);
+    var line: [512]u8 = undefined;
+    try t.expectEqualStrings("refused chat: it needs 88 MiB, 6 MiB free in the budget, held by video; retry_after 30 s", refusalLine(&line, "chat", 88 << 20, 6 << 20, "video", 30));
+    var tiny: [8]u8 = undefined;
+    try t.expectEqualStrings("", refusalLine(&tiny, "chat", 1, 1, "video", 30)); // too long for the buffer: no line, no crash
+    try t.expectEqualStrings("none", b.s.holders(&held, &b.slots[1]));
 }

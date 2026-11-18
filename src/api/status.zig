@@ -16,6 +16,8 @@ pub const Tool = struct {
     queue_depth: u32,
     last_load_unix_s: ?i64 = null, // when its last successful load finished (unix seconds)
     last_load_ms: ?u64 = null, // how long that load took
+    loads: u64 = 0, // successful loads since the daemon started
+    refusals: u64 = 0, // its requests refused for memory (503 insufficient_memory) since start
     last_error: ?Error = null,
 };
 
@@ -45,6 +47,8 @@ pub fn view(s: *sched.Scheduler, io: Io, a: std.mem.Allocator) !View {
                 .queue_depth = 0,
                 .last_load_unix_s = if (slot.last_load_s > 0) slot.last_load_s else null,
                 .last_load_ms = if (slot.last_load_s > 0) slot.last_load_ms else null,
+                .loads = slot.loads,
+                .refusals = slot.refusals,
                 .last_error = if (slot.last_error_s > 0) .{ .type = code, .code = code, .time = slot.last_error_s } else null,
             };
         }
@@ -122,6 +126,37 @@ pub fn writePrometheus(w: *std.Io.Writer, v: View) !void {
         try w.print("\"}} {d}\n", .{t.last_load_unix_s orelse 0});
     }
     try w.writeAll(
+        \\# HELP localrouter_tool_last_load_duration_seconds How long the tool's last successful load took, or 0.
+        \\# TYPE localrouter_tool_last_load_duration_seconds gauge
+        \\
+    );
+    for (v.tools) |t| {
+        try w.writeAll("localrouter_tool_last_load_duration_seconds{tool=\"");
+        try label(w, t.id);
+        const ms = t.last_load_ms orelse 0;
+        try w.print("\"}} {d}.{d:0>3}\n", .{ ms / 1000, ms % 1000 });
+    }
+    try w.writeAll(
+        \\# HELP localrouter_tool_loads_total Successful loads of the tool since the daemon started.
+        \\# TYPE localrouter_tool_loads_total counter
+        \\
+    );
+    for (v.tools) |t| {
+        try w.writeAll("localrouter_tool_loads_total{tool=\"");
+        try label(w, t.id);
+        try w.print("\"}} {d}\n", .{t.loads});
+    }
+    try w.writeAll(
+        \\# HELP localrouter_tool_refusals_total The tool's requests refused for memory (503 insufficient_memory).
+        \\# TYPE localrouter_tool_refusals_total counter
+        \\
+    );
+    for (v.tools) |t| {
+        try w.writeAll("localrouter_tool_refusals_total{tool=\"");
+        try label(w, t.id);
+        try w.print("\"}} {d}\n", .{t.refusals});
+    }
+    try w.writeAll(
         \\# HELP localrouter_evictions_total Tools unloaded to make room for another.
         \\# TYPE localrouter_evictions_total counter
         \\
@@ -174,7 +209,7 @@ test "activity names the five states, and a bad error type is not published" {
 
 test "prometheus text has the gauges and counters and no path" {
     const tools = [_]Tool{
-        .{ .id = "tp", .state = "idle", .resident_bytes = 32, .queue_depth = 2, .last_load_unix_s = 10, .last_load_ms = 2500, .last_error = .{ .type = "server_error", .code = "server_error", .time = 11 } },
+        .{ .id = "tp", .state = "idle", .resident_bytes = 32, .queue_depth = 2, .last_load_unix_s = 10, .last_load_ms = 2500, .loads = 3, .refusals = 5, .last_error = .{ .type = "server_error", .code = "server_error", .time = 11 } },
         .{ .id = "a\"b", .state = "unloaded", .resident_bytes = 0, .queue_depth = 0, .last_error = .{ .type = "/var/log/x", .code = "/var/log/x", .time = 3 } },
     };
     const v: View = .{ .tools = &tools, .memory = .{ .ceiling_bytes = 100, .used_bytes = 32, .free_bytes = 68 }, .evictions = 4 };
@@ -188,6 +223,10 @@ test "prometheus text has the gauges and counters and no path" {
     try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_queue_depth{tool=\"tp\"} 2\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_last_load_timestamp_seconds{tool=\"tp\"} 10\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "localrouter_evictions_total 4\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_last_load_duration_seconds{tool=\"tp\"} 2.500\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_loads_total{tool=\"tp\"} 3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_refusals_total{tool=\"tp\"} 5\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "localrouter_tool_loads_total{tool=\"a\\\"b\"} 0\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "type=\"server_error\",code=\"server_error\"} 11\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "tool=\"a\\\"b\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "type=\"server_error\",code=\"server_error\"} 3\n") != null);

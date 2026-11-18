@@ -600,6 +600,8 @@ informs and enforces nothing: check the terms before you use or publish what a m
 | `tools[].queue_depth` | jobs waiting for it, not counting the one running |
 | `tools[].last_load_unix_s` | when its last successful load finished, in unix seconds; absent until it has loaded, and kept after it unloads |
 | `tools[].last_load_ms` | how long that load took, in milliseconds (the same figure as `last_load_ms` on `GET /v1/tools`); absent with `last_load_unix_s` |
+| `tools[].loads` | successful loads since the daemon started: a model that keeps being evicted and coming back shows a rising count |
+| `tools[].refusals` | its requests refused for memory (503 `insufficient_memory`) since the daemon started |
 | `tools[].last_error` | `{type, code, time}` of its last failed job (`time` is unix seconds). `type` and `code` are the same token as an HTTP error's. Absent until one fails. The message is not included |
 | `memory` | `ceiling_bytes` (the budget), `used_bytes` (booked now), `free_bytes` |
 | `evictions` | how many times a tool was unloaded to make room for another. An idle-TTL unload or `POST /v1/tools/.../unload` is not one |
@@ -609,7 +611,7 @@ curl -s $BASE/status | jq '{memory, evictions, tools: [.tools[] | {id, state, qu
 curl -s http://<host>:8190/metrics    # Prometheus text; the same gauges and counters
 ```
 
-The Prometheus series are `localrouter_tool_resident_bytes`, `localrouter_tool_state`, `localrouter_memory_bytes` (`ceiling`, `used`, `free`), `localrouter_tool_queue_depth`, `localrouter_tool_last_load_timestamp_seconds`, `localrouter_evictions_total` and `localrouter_tool_last_error_timestamp_seconds`.
+The Prometheus series are `localrouter_tool_resident_bytes`, `localrouter_tool_state`, `localrouter_memory_bytes` (`ceiling`, `used`, `free`), `localrouter_tool_queue_depth`, `localrouter_tool_last_load_timestamp_seconds`, `localrouter_tool_last_load_duration_seconds`, `localrouter_tool_loads_total`, `localrouter_tool_refusals_total`, `localrouter_evictions_total` and `localrouter_tool_last_error_timestamp_seconds`. The journal has a line for each load (`loaded <id> in <ms> ms: <MiB> MiB booked, <MiB> MiB free in the budget (load <n> since start)`) and each refusal for memory (`refused <id>: it needs <MiB> MiB, <MiB> MiB free in the budget, held by <ids>; retry_after <s> s`), beside the eviction line.
 
 ## Errors
 
