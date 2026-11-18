@@ -207,7 +207,7 @@ test "only the native request passes the check: 832x480, also when the size is o
     const cfg: ToolConfig = .{ .id = "kandinsky6-pro-distill", .kind = .video, .engine = "kandinsky6", .weights = "/nonexistent" };
     var buf: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&buf);
-    const ok: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480 } };
+    const ok: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .seconds = 5, .fps = 24 } };
     try std.testing.expect(check(&cfg, &ok, &why));
     // a request naming no size gets the model's own (engine.fill), which passes
     var dflt: Request = .{ .video = .{ .prompt = "waves" } };
@@ -218,16 +218,16 @@ test "only the native request passes the check: 832x480, also when the size is o
     // portrait, the generation size, other sizes and the API's generic default are refused before any GPU work
     for ([_][2]u32{ .{ 480, 832 }, .{ 864, 480 }, .{ 640, 480 }, .{ 0, 0 }, .{ 1344, 768 } }) |wh| {
         why = .fixed(&buf);
-        const r: Request = .{ .video = .{ .prompt = "waves", .width = wh[0], .height = wh[1] } };
+        const r: Request = .{ .video = .{ .prompt = "waves", .width = wh[0], .height = wh[1], .seconds = 5, .fps = 24 } };
         try std.testing.expect(!check(&cfg, &r, &why));
         try std.testing.expect(std.mem.startsWith(u8, why.buffered(), "Kandinsky-6 Pro distilled supports 832x480 landscape only"));
     }
     why = .fixed(&buf);
-    const silent: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .audio = false } };
+    const silent: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .seconds = 5, .fps = 24, .audio = false } };
     try std.testing.expect(!check(&cfg, &silent, &why));
-    const steps: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .steps = 25 } };
+    const steps: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .seconds = 5, .fps = 24, .steps = 25 } };
     try std.testing.expect(!check(&cfg, &steps, &why));
-    const i2v: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .first_frame = "0.png" } };
+    const i2v: Request = .{ .video = .{ .prompt = "waves", .width = 832, .height = 480, .seconds = 5, .fps = 24, .first_frame = "0.png" } };
     try std.testing.expect(!check(&cfg, &i2v, &why));
 }
 

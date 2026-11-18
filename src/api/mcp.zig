@@ -437,7 +437,7 @@ fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
     const cfg = app.scheduler.slots[i].tool.config();
     var r: request.Request = switch (cfg.kind) {
         .image => .{ .image = .{ .prompt = "" } },
-        .video => .{ .video = .{ .prompt = "", .seconds = if (b.seconds > 0) b.seconds else 5 } },
+        .video => .{ .video = .{ .prompt = "reserve", .seconds = b.seconds } },
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
@@ -459,6 +459,13 @@ fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(
         }
     }
     engine.fill(cfg, &r);
+    if (r == .video) { // a video job's size and length are refused here as its job would be, before anything is unloaded or loaded
+        var why_req: []const u8 = "";
+        request.validate(r, .{}, &why_req) catch return fail(a, out, "{s}", .{why_req});
+        var why_buf: [384]u8 = undefined;
+        var why: std.Io.Writer = .fixed(&why_buf);
+        if (!engine.check(cfg, &r, &why)) return fail(a, out, "{s}", .{if (why.end > 0) why.buffered() else "the model cannot serve this request"});
+    }
     const plan = if (b.dry_run) app.scheduler.plan(i, r) else blk: {
         std.log.info("reserve_for {s}: on request (hold {d} s)", .{ b.model, b.hold_s });
         const res = Pending.start(app, a, .{ .op = .reserve, .tool = i, .request = r, .hold_s = @min(b.hold_s, 3600) }, b.wait_s) catch return fail(a, out, "could not start the reservation", .{});
@@ -560,7 +567,7 @@ fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, ou
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: ?bool = null, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 0, fps: u32 = 0, seed: ?u64 = null, steps: u32 = 0, audio: ?bool = null, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
@@ -870,7 +877,7 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["model"],"properties":{
     \\"model":{"type":"string","description":"The model the job needs, from list_models (e.g. the video model)."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT of the job, to price it; omit for the model's default."},
-    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; default 5."},
+    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"A video job's length, to price it; omit for the model's default."},
     \\"num_gaussians":{"type":"integer","minimum":1,"description":"A 3D job's Gaussian count, to price it; omit for the model's default."},
     \\"dry_run":{"type":"boolean","default":false,"description":"true: unload nothing, only report what would go."},
     \\"hold_s":{"type":"integer","minimum":10,"maximum":3600,"default":180,"description":"The unloaded models come back after this even if the job never runs."},
@@ -932,8 +939,8 @@ const tool_list = [_]Tool{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omit it for the model's own size."},
-    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
-    \\"fps":{"type":"integer","default":24},
+    \\"seconds":{"type":"integer","minimum":1,"maximum":20,"description":"Omit it for the model's own: 5, or the model's max_seconds if shorter (list_models video)."},
+    \\"fps":{"type":"integer","minimum":1,"maximum":30,"description":"Omit it for the model's own: 24, or the first of the model's fps (list_models video)."},
     \\"seed":{"type":"integer","minimum":0},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
     \\"audio":{"type":"boolean","description":"Omit it for the model's own: an audio track when the model makes one (list_models audio). true for a model without audio is refused."},

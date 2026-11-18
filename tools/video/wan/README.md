@@ -8,10 +8,11 @@ capabilities are `text_to_video` and `image_to_video`. Setting up a desktop arou
 | File | Does |
 | --- | --- |
 | `worker.py` | the worker: `load`, `generate` (writes `video.mp4`), `exit`, soft cancel on SIGUSR1 |
-| `fetch.sh` | downloads the pinned weights (no token) and checks every digest (`pins.json`); `--venv` also builds the venv |
+| `fetch.sh` | downloads the pinned weights (no token) into `WEIGHTS.staging`, checks every digest (`pins.json`), then publishes them as `WEIGHTS`; `--venv` also builds the venv |
 | `pins.json` | each file's repo, revision, size and digest (`tools/package/verify_assets.py` form) |
 | `pyproject.toml`, `uv.lock` | the environment: x86_64 Linux and WSL2, PyTorch cu128 wheels (Blackwell sm_120 included) |
 | `test_worker.py` | protocol and unit tests against a fake engine (no weights, no GPU) |
+| `test_fetch.py` | `fetch.sh` against a stand-in curl: a file that fails its digest never reaches `WEIGHTS` |
 | `config.example.json` | the tool, its limits and its measured bookings, on a desktop |
 
 ## Source and licence
@@ -46,8 +47,10 @@ On a 16 GB card the worker keeps one of the three large modules on the GPU at a 
   token at cosine 0.62 against bf16).
 - `offload: model` moves each module to the GPU when it runs. Diffusers' own chain offloads only the module before
   it in its sequence, so the VAE, used first for the first frame, would stay through denoising, and on a 16 GB card
-  WDDM then pages GPU memory and a step takes 3x as long. The worker moves the other two off before any of them runs,
-  and frees the GPU after every job.
+  WDDM then pages GPU memory and a step takes 3x as long. The worker moves the other two off before any of them runs.
+- After every job (done, failed or cancelled) the worker replaces the scheduler, whose state holds the job's tensors,
+  moves the modules off and empties the CUDA cache, then logs the GPU memory it still holds (`idle: GPU … allocated, …
+  reserved`); it logs it again at exit (`unloaded:`).
 - `from_pipe` is not used: it copies the text encoder (30 GiB of host memory).
 
 Measured (RTX 5070 Ti, 704x1280, 5 s): 10.7 GiB peak GPU allocation, 21.6 GiB host memory resident, 26.5 GiB peak, about
@@ -64,4 +67,5 @@ GPU memory), `offload` (`model` or `none`: everything on the GPU, for a card wit
 
 ```bash
 ~/wan-venv/bin/python -I tools/video/wan/test_worker.py      # the worker's venv (numpy, Pillow) and ffmpeg; no GPU
+python3 -I tools/video/wan/test_fetch.py                     # bash; no network
 ```

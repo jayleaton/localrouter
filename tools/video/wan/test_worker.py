@@ -6,7 +6,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+import weakref
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -43,6 +46,35 @@ class FakeEngine:
         frames = np.zeros((made, v["height"], v["width"], 3), dtype=np.uint8)
         frames[:, :, :, 0] = np.arange(made, dtype=np.uint8)[:, None, None]
         return frames, 1 << 30
+
+
+class FakeTensor:
+    pass
+
+
+class FakeScheduler:
+    """UniPC's shape: built from its config, and it keeps the job's tensors (model outputs, last sample)."""
+
+    def __init__(self, config):
+        self.config, self.state = config, []
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(config)
+
+
+class FakePipe:
+    """A Diffusers pipeline that leaves its modules on the CPU, as the offload chain does at the end of a job."""
+
+    def __init__(self, scheduler, tensors):
+        self.scheduler, self.tensors = scheduler, tensors
+
+    def __call__(self, num_frames, height, width, callback_on_step_end, **_):
+        latents = FakeTensor()
+        self.tensors.append(weakref.ref(latents))
+        self.scheduler.state.append(latents)
+        callback_on_step_end(self, 0, 0, {})
+        return types.SimpleNamespace(frames=[np.zeros((num_frames, height, width, 3), np.float32)])
 
 
 def tool(**opts):
@@ -160,6 +192,45 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([x["ok"] for x in lines], [False, False])
         self.assertIn("run fetch.sh", lines[0]["error"])
         self.assertEqual(lines[1]["error"], "not a JSON line")
+
+
+class EngineReleaseTest(unittest.TestCase):
+    """Engine against stand-ins for torch and the pipelines: after a job, done or cancelled, no job tensor is left and
+    the CUDA cache is emptied once they are freed, though every module is already on the CPU."""
+
+    def setUp(self):
+        w.CANCEL.clear()
+        self.events, self.tensors = [], []
+        cuda = types.SimpleNamespace(empty_cache=lambda: self.events.append([r() is None for r in self.tensors]),
+                                     memory_allocated=lambda: 0, memory_reserved=lambda: 0,
+                                     reset_peak_memory_stats=lambda: None, max_memory_allocated=lambda: 0)
+        torch = types.SimpleNamespace(cuda=cuda, Generator=lambda _: types.SimpleNamespace(manual_seed=lambda _: None))
+        patch = mock.patch.dict(sys.modules, {"torch": torch})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.engine = w.Engine(WEIGHTS, {})
+        scheduler = FakeScheduler({"solver_order": 2})
+        self.engine.t2v, self.engine.i2v = FakePipe(scheduler, self.tensors), FakePipe(scheduler, self.tensors)
+        self.engine.big = [types.SimpleNamespace(device=types.SimpleNamespace(type="cpu")) for _ in range(3)]
+
+    def generate(self):
+        v = {"prompt": "x", "height": 32, "width": 32, "seed": 7}
+        return self.engine.generate(v, None, 5, 2, 5.0, "", lambda k: None)
+
+    def assert_released(self):
+        self.assertEqual(self.engine.t2v.scheduler.state, [])
+        self.assertIs(self.engine.i2v.scheduler, self.engine.t2v.scheduler)
+        self.assertEqual(self.events, [[True]])
+
+    def test_done(self):
+        self.generate()
+        self.assert_released()
+
+    def test_cancelled(self):
+        w.CANCEL.set()
+        with self.assertRaises(w.Cancelled):
+            self.generate()
+        self.assert_released()
 
 
 if __name__ == "__main__":

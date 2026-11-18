@@ -32,8 +32,13 @@ transformer were both resident.
    wsl --install -d Ubuntu-24.04 --no-launch
    wsl --manage Ubuntu-24.04 --move D:\WSL\Ubuntu-24.04      # optional: off a small system disk
    wsl -d Ubuntu-24.04 -u root -- bash -c "useradd -m -s /bin/bash localrouter; printf '[boot]\nsystemd=true\n[user]\ndefault=localrouter\n' > /etc/wsl.conf"
+   wsl --terminate Ubuntu-24.04                              # wsl.conf is read when the distro starts
+   wsl -d Ubuntu-24.04 -u root -- ps -p 1 -o comm=           # starts it again; prints systemd
+   wsl -d Ubuntu-24.04 -u root -- systemctl is-system-running --wait   # running or degraded, not offline
    wsl -d Ubuntu-24.04 -u root -- apt-get install -y ffmpeg git curl xz-utils python3-venv build-essential
    ```
+
+   If PID 1 is not systemd, the unit in step 4 cannot start: check `/etc/wsl.conf` and terminate the distro again.
 
    `nvidia-smi` inside the distro should list the card: the Windows driver provides CUDA to WSL; install no driver in
    the distro.
@@ -94,8 +99,9 @@ transformer were both resident.
    The MCP endpoint is then `https://<machine>.<tailnet>.ts.net:8190/mcp`. `--host tailscale` does not work inside
    WSL's NAT network: the tailnet address belongs to Windows.
 
-7. A token for each client ([MCP.md](../MCP.md#scopes)): `localrouter pair token NAME --scopes media,read --config
-   ~/localrouter-desktop/config.json`. The token goes to stdout once; write it straight into the client's secret store.
+7. A token for each client ([MCP.md](../MCP.md#scopes)), as `localrouter`: `~/src/localrouter/zig-out/bin/localrouter
+   pair token NAME --scopes media,read --config ~/localrouter-desktop/config.json`. The token goes to stdout once; write
+   it straight into the client's secret store.
 
 ## Start, stop, check
 

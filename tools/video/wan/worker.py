@@ -13,7 +13,7 @@ carries protocol lines only (anything else that writes to fd 1 goes to stderr), 
     {"op":"exit"} / EOF -> exit
 
 SIGUSR1 during a generate ends it at the next denoising step with {"ok":false,"type":"cancelled"}; the weights stay
-loaded.
+loaded. After every job and at exit the worker logs the GPU memory it still holds (allocated and reserved).
 
 The model runs through Diffusers' WanPipeline (text to video) and WanImageToVideoPipeline (a first frame), which share
 one set of modules. The model makes 4k+1 frames: a clip of `seconds` x 24 frames is made one frame longer and the last
@@ -29,6 +29,7 @@ as loaded), `offload` (`model`: each module moves to the GPU only while it runs;
 `size_multiple`, `default_size`, `max_seconds`, `fps`, `audio`) are checked again here.
 """
 
+import gc
 import json
 import math
 import os
@@ -175,8 +176,27 @@ class Engine:
             torch.cuda.empty_cache()
 
     def release_gpu(self):
+        """After every job, done, failed or cancelled: a fresh scheduler (UniPC keeps the job's tensors), the big
+        modules off the GPU with offload, and the cache emptied even when Diffusers has already moved them to the CPU."""
+        old = self.t2v.scheduler
+        self.t2v.scheduler = self.i2v.scheduler = type(old).from_config(old.config)
+        del old
         if self.opts.get("offload", "model") == "model":
             self.alone(None)
+        self.flush("idle")
+
+    def unload(self):
+        self.t2v = self.i2v = None
+        self.big = []
+        self.flush("unloaded")
+
+    def flush(self, when):
+        import torch
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        log(f"{when}: GPU {torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated, "
+            f"{torch.cuda.memory_reserved() / 2**30:.2f} GiB reserved")
 
     def resident(self):
         import torch
@@ -197,10 +217,14 @@ class Engine:
         args = dict(prompt=v["prompt"], negative_prompt=negative, height=v["height"], width=v["width"], num_frames=made,
                     num_inference_steps=steps, guidance_scale=guidance, output_type="np",
                     generator=torch.Generator("cpu").manual_seed(v["seed"]), callback_on_step_end=callback)
+        failed = None
         try:
             out = self.t2v(**args) if image is None else self.i2v(image=image, **args)
-        finally:
-            self.release_gpu()  # nothing stays on the GPU between jobs: the desktop shares it
+        except BaseException as e:  # noqa: BLE001  re-raised below, without the frames that hold the job's tensors
+            failed = e.with_traceback(None)
+        self.release_gpu()  # nothing stays on the GPU between jobs: the desktop shares it
+        if failed is not None:
+            raise failed
         frames = out.frames[0]
         return (frames * 255).round().clip(0, 255).astype("uint8"), torch.cuda.max_memory_allocated()
 
@@ -240,6 +264,11 @@ class Worker:
             self.loaded = True
             log(f"loaded in {time.monotonic() - t0:.1f}s")
         return {"ok": True, "resident": self.engine.resident(), "cancel": "signal"}
+
+    def unload(self):
+        if self.loaded:
+            self.engine.unload()
+            self.loaded = False
 
     def parse(self, cmd):
         req = (cmd.get("request") or {}).get("video")
@@ -365,7 +394,7 @@ def main():
             continue
         op = cmd.get("op")
         if op == "exit":
-            return
+            break
         if worker is None:
             send({"ok": False, "type": "server_error", "error": f"bad tool config: {problem}"})
         elif op == "load":
@@ -374,6 +403,8 @@ def main():
             send(run_generate(worker, cmd))
         else:
             send({"ok": False, "type": "invalid_request_error", "error": f"unknown op {op!r}"})
+    if worker is not None:
+        worker.unload()
 
 
 if __name__ == "__main__":

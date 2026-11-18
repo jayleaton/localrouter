@@ -81,6 +81,9 @@ pub fn license(cfg: *const ToolConfig) ?config.License {
 
 /// The size a video request without one gets when its engine has no `defaults` and its options name none.
 pub const default_video_size = [2]u32{ 1344, 768 };
+/// The length and frame rate a video request without them gets, within the tool's limits.
+pub const default_video_seconds = 5;
+pub const default_video_fps = 24;
 
 /// Fills what `req` left to the model, before validation: the engine's `defaults`, then the tool's `default_width` and
 /// `default_height` options (both set: a `cmd` video model's own size), else `default_video_size`; for a 3D
@@ -90,12 +93,15 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
     switch (req.*) {
         .video => |*v| {
+            const l = videoLimits(cfg);
             if (v.width == 0 and v.height == 0) {
-                const d = if (ownVideoLimits(cfg)) |l| l.defaultSize() else default_video_size;
+                const d = if (l) |x| x.default_size else default_video_size;
                 v.width = d[0];
                 v.height = d[1];
             }
-            if (v.audio == null) v.audio = optionBool(cfg, "audio", true);
+            if (v.seconds == 0) v.seconds = if (l) |x| x.default_seconds else @intCast(@min(default_video_seconds, @max(optionInt(cfg, "max_seconds", default_video_seconds), 1)));
+            if (v.fps == 0) v.fps = if (l) |x| x.default_fps else default_video_fps;
+            if (v.audio == null and l != null) v.audio = optionBool(cfg, "audio", true);
         },
         .asset3d => |*v| {
             if (v.num_gaussians == null and gaussianRange(cfg) != null) v.num_gaussians = std.math.cast(u32, optionInt(cfg, "default_gaussians", 0));
@@ -155,76 +161,101 @@ pub fn checkAsset3d(cfg: *const ToolConfig, v: request.Asset3d, why: *std.Io.Wri
     return true;
 }
 
-/// A video tool's limits when no engine checks them (a `cmd` worker), from its options: `max_pixels` (a frame's area),
-/// `max_side` (the long side), `size_multiple` (default 16), `default_size` (`WIDTHxHEIGHT`, what a request without a
-/// size gets; default the largest landscape 16:9 frame within the limits, else 1344x768), `max_seconds` and `fps` (the
-/// frame rates it makes; absent: any). Absent limits are not checked. Null for a tool whose engine has its own `check`.
+/// A video tool's limits when no engine checks them (a `cmd` worker): its options within the API's (`request.Limits`),
+/// so what `fill` gives a request that omits size, seconds or fps, what `check` takes and what the listings say are the
+/// same rules. `max_pixels` (a frame's area), `max_side` (the long side; the API's 2048 at most), `size_multiple` (the
+/// grid, made a multiple of the API's 16), `max_seconds` (the API's 20 at most), `fps` (the frame rates it makes; absent:
+/// any the API takes) and `default_size` (`WIDTHxHEIGHT`; else 1344x768 where taken, else the largest landscape frame
+/// near 16:9). A request without seconds gets 5 or `max_seconds` if shorter; without fps, 24 or the first listed.
 pub const VideoLimits = struct {
+    min_side: u32,
+    max_side: u32,
     max_pixels: ?u64 = null,
-    max_side: ?u64 = null,
-    size_multiple: u64 = 16,
-    max_seconds: ?u64 = null,
+    size_multiple: u32,
+    max_seconds: u32,
     fps: ?[]const std.json.Value = null,
-    default_size: ?[]const u8 = null,
+    default_size: [2]u32,
+    default_seconds: u32,
+    default_fps: u32,
 
     pub fn takes(l: VideoLimits, w: u64, h: u64) bool {
         if (w % l.size_multiple != 0 or h % l.size_multiple != 0) return false;
-        if (l.max_side) |m| if (w > m or h > m) return false;
+        if (@min(w, h) < l.min_side or @max(w, h) > l.max_side) return false;
         if (l.max_pixels) |m| if (w * h > m) return false;
         return true;
     }
 
-    pub fn defaultSize(l: VideoLimits) [2]u32 {
-        if (l.default_size) |s| if (request.parseSize(s)) |d| if (l.takes(d[0], d[1])) return d;
-        if (l.takes(default_video_size[0], default_video_size[1])) return default_video_size;
-        var w: u64 = l.max_side orelse default_video_size[0];
-        w = w / l.size_multiple * l.size_multiple;
-        while (w >= l.size_multiple) : (w -= l.size_multiple) {
-            const h = w * 9 / 16 / l.size_multiple * l.size_multiple;
-            if (h > 0 and l.takes(w, h)) return .{ @intCast(w), @intCast(h) };
+    pub fn takesFps(l: VideoLimits, fps: u64) bool {
+        const list = l.fps orelse return fps >= 1 and fps <= api_limits.max_fps;
+        for (list) |x| if (x == .integer and x.integer == fps) return true;
+        return false;
+    }
+
+    /// The largest landscape frame near 16:9 within the limits; the smallest square where none is.
+    fn widest(l: VideoLimits) [2]u32 {
+        var w = l.max_side;
+        while (w >= l.min_side) : (w -= l.size_multiple) {
+            const h = @max(l.min_side, w * 9 / 16 / l.size_multiple * l.size_multiple);
+            if (h <= w and l.takes(w, h)) return .{ w, h };
         }
-        return default_video_size;
+        return .{ l.min_side, l.min_side };
     }
 };
 
-pub fn ownVideoLimits(cfg: *const ToolConfig) ?VideoLimits {
+const api_limits: request.Limits = .{};
+
+/// A tool's effective video limits (`VideoLimits`); null for another kind, or a tool whose engine checks its own.
+pub fn videoLimits(cfg: *const ToolConfig) ?VideoLimits {
     if (cfg.kind != .video) return null;
     if (find(cfg.engine)) |e| if (e.check != null) return null;
-    const opt = struct {
-        fn int(c: *const ToolConfig, key: []const u8) ?u64 {
-            const n = optionInt(c, key, 0);
-            return if (n > 0) n else null;
-        }
+    const grid: u32 = @intCast(std.math.lcm(@min(@max(optionInt(cfg, "size_multiple", 16), 1), api_limits.max_side), 16));
+    const side: u64 = @min(optionInt(cfg, "max_side", api_limits.max_side), api_limits.max_side);
+    const pixels = optionInt(cfg, "max_pixels", 0);
+    const seconds: u32 = @intCast(@min(@max(optionInt(cfg, "max_seconds", api_limits.max_seconds), 1), api_limits.max_seconds));
+    var l: VideoLimits = .{
+        .min_side = (api_limits.min_side + grid - 1) / grid * grid,
+        .max_side = @intCast(side / grid * grid),
+        .max_pixels = if (pixels > 0) pixels else null,
+        .size_multiple = grid,
+        .max_seconds = seconds,
+        .fps = optionList(cfg, "fps"),
+        .default_size = undefined,
+        .default_seconds = @min(default_video_seconds, seconds),
+        .default_fps = default_video_fps,
     };
-    const s = optionString(cfg, "default_size", "");
-    return .{ .max_pixels = opt.int(cfg, "max_pixels"), .max_side = opt.int(cfg, "max_side"), .size_multiple = @max(optionInt(cfg, "size_multiple", 16), 1), .max_seconds = opt.int(cfg, "max_seconds"), .fps = optionList(cfg, "fps"), .default_size = if (s.len > 0) s else null };
+    const declared = request.parseSize(optionString(cfg, "default_size", ""));
+    l.default_size = for ([_]?[2]u32{ declared, default_video_size }) |d| {
+        if (d) |x| if (l.takes(x[0], x[1])) break x;
+    } else l.widest();
+    if (!l.takesFps(default_video_fps)) if (l.fps) |list| for (list) |x| if (x == .integer and x.integer >= 1 and x.integer <= api_limits.max_fps) {
+        l.default_fps = @intCast(x.integer);
+        break;
+    };
+    return l;
 }
 
-/// A video tool's own limits (`ownVideoLimits`) and its `audio` option (false: it makes no audio, so `audio: true` is
-/// refused rather than dropped), checked before it loads.
+/// A video tool's own limits (`videoLimits`) and its `audio` option (false: it makes no audio, so `audio: true` is
+/// refused rather than dropped), checked before it loads. A tool whose engine checks its own keeps its audio rules.
 pub fn checkVideo(cfg: *const ToolConfig, v: request.Video, why: *std.Io.Writer) bool {
+    const l = videoLimits(cfg) orelse return true;
     if ((v.audio orelse false) and !optionBool(cfg, "audio", true)) {
         why.print("model '{s}' makes no audio: omit audio or send false", .{cfg.id}) catch {};
         return false;
     }
-    const l = ownVideoLimits(cfg) orelse return true;
     if (!l.takes(v.width, v.height)) {
-        const d = l.defaultSize();
-        why.print("model '{s}' takes sizes in multiples of {d}", .{ cfg.id, l.size_multiple }) catch {};
+        why.print("model '{s}' takes sizes in multiples of {d}, {d} to {d} a side", .{ cfg.id, l.size_multiple, l.min_side, l.max_side }) catch {};
         if (l.max_pixels) |m| why.print(", up to {d} pixels", .{m}) catch {};
-        if (l.max_side) |m| why.print(", at most {d} a side", .{m}) catch {};
-        why.print(" (omit size for {d}x{d})", .{ d[0], d[1] }) catch {};
+        why.print(" (omit size for {d}x{d})", .{ l.default_size[0], l.default_size[1] }) catch {};
         return false;
     }
-    if (l.max_seconds) |m| if (v.seconds > m) {
-        why.print("model '{s}' takes clips up to {d} seconds", .{ cfg.id, m }) catch {};
+    if (v.seconds > l.max_seconds) {
+        why.print("model '{s}' takes clips up to {d} seconds", .{ cfg.id, l.max_seconds }) catch {};
         return false;
-    };
-    if (l.fps) |list| {
-        for (list) |x| if (x == .integer and x.integer == v.fps) return true;
+    }
+    if (!l.takesFps(v.fps)) {
         why.print("model '{s}' takes fps ", .{cfg.id}) catch {};
         var first = true;
-        for (list) |x| if (x == .integer) {
+        if (l.fps) |list| for (list) |x| if (x == .integer) {
             why.print("{s}{d}", .{ if (first) "" else ", ", x.integer }) catch {};
             first = false;
         };
@@ -429,7 +460,7 @@ pub fn audioInfo(cfg: *const ToolConfig) AudioInfo {
             .instructions = optionString(cfg, "instructions", "").len > 0,
         },
         .transcription => .{ .max_audio_s = @min(optionInt(cfg, "max_audio_s", 30 * 60), 30 * 60), .languages = optionList(cfg, "languages") },
-        .video => .{ .audio = optionBool(cfg, "audio", true), .video = ownVideoLimits(cfg) },
+        .video => if (videoLimits(cfg)) |l| .{ .audio = optionBool(cfg, "audio", true), .video = l } else .{},
         .asset3d => .{ .formats = optionList(cfg, "formats") orelse &ply_only, .input_modes = optionList(cfg, "input_modes") orelse &both_modes, .gaussians = gaussianRange(cfg) },
         else => .{},
     };
@@ -680,9 +711,9 @@ test "a cmd video tool's declared limits and audio: filled, listed and refused b
     var buf: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&buf);
     try std.testing.expect(check(wan, &r, &why));
-    try std.testing.expect(check(wan, &.{ .video = .{ .prompt = "a", .width = 704, .height = 1280, .audio = false } }, &why));
+    try std.testing.expect(check(wan, &.{ .video = .{ .prompt = "a", .width = 704, .height = 1280, .seconds = 5, .fps = 24, .audio = false } }, &why));
     const refusals = [_]struct { v: request.Video, msg: []const u8 }{
-        .{ .v = .{ .prompt = "a", .width = 1344, .height = 768 }, .msg = "model 'wan' takes sizes in multiples of 32, up to 901120 pixels, at most 1280 a side (omit size for 1280x704)" },
+        .{ .v = .{ .prompt = "a", .width = 1344, .height = 768 }, .msg = "model 'wan' takes sizes in multiples of 32, 256 to 1280 a side, up to 901120 pixels (omit size for 1280x704)" },
         .{ .v = .{ .prompt = "a", .width = 1280, .height = 704, .seconds = 8 }, .msg = "model 'wan' takes clips up to 5 seconds" },
         .{ .v = .{ .prompt = "a", .width = 1280, .height = 704, .fps = 16 }, .msg = "model 'wan' takes fps 24" },
         .{ .v = .{ .prompt = "a", .width = 1280, .height = 704, .audio = true }, .msg = "model 'wan' makes no audio: omit audio or send false" },
@@ -693,14 +724,71 @@ test "a cmd video tool's declared limits and audio: filled, listed and refused b
         try std.testing.expectEqualStrings(x.msg, why.buffered());
     }
     try std.testing.expectEqual(false, audioInfo(wan).audio.?);
-    try std.testing.expectEqual(@as(?u64, 5), audioInfo(wan).video.?.max_seconds);
+    try std.testing.expectEqual(@as(u32, 5), audioInfo(wan).video.?.max_seconds);
 
     const any = c.tool("any").?;
     var d: Request = .{ .video = .{ .prompt = "a" } };
     fill(any, &d);
     try std.testing.expectEqual(default_video_size[0], d.video.width);
     try std.testing.expectEqual(true, d.video.audio.?);
-    try std.testing.expect(check(any, &.{ .video = .{ .prompt = "a", .width = 1920, .height = 1088, .seconds = 20, .audio = true } }, &why));
+    try std.testing.expect(check(any, &.{ .video = .{ .prompt = "a", .width = 1920, .height = 1088, .seconds = 20, .fps = 30, .audio = true } }, &why));
+}
+
+test "a cmd video tool's defaults are what its limits and the API take; the listing says the same" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "small", "kind": "video", "cmd": ["x"], "options": {"max_side": 320}},
+        \\           {"id": "short", "kind": "video", "cmd": ["x"], "options": {"max_seconds": 3, "fps": [16]}},
+        \\           {"id": "grid", "kind": "video", "cmd": ["x"], "options": {"size_multiple": 24, "max_side": 1000}},
+        \\           {"id": "far", "kind": "video", "cmd": ["x"], "options": {"max_side": 4096, "max_seconds": 60, "default_size": "2080x256"}}]}
+    );
+    const Case = struct { id: []const u8, size: [2]u32, seconds: u32, fps: u32, grid: u32 };
+    for ([_]Case{
+        .{ .id = "small", .size = .{ 320, 256 }, .seconds = 5, .fps = 24, .grid = 16 },
+        .{ .id = "short", .size = .{ 1344, 768 }, .seconds = 3, .fps = 16, .grid = 16 },
+        .{ .id = "grid", .size = .{ 960, 528 }, .seconds = 5, .fps = 24, .grid = 48 },
+        .{ .id = "far", .size = .{ 1344, 768 }, .seconds = 5, .fps = 24, .grid = 16 },
+    }) |k| {
+        const cfg = c.tool(k.id).?;
+        var r: Request = .{ .video = .{ .prompt = "a" } };
+        fill(cfg, &r);
+        std.testing.expectEqual(k.size, [2]u32{ r.video.width, r.video.height }) catch |err| {
+            std.debug.print("{s}: {d}x{d}\n", .{ k.id, r.video.width, r.video.height });
+            return err;
+        };
+        try std.testing.expectEqual(k.seconds, r.video.seconds);
+        try std.testing.expectEqual(k.fps, r.video.fps);
+        var why_api: []const u8 = "";
+        try request.validate(r, .{}, &why_api);
+        var buf: [256]u8 = undefined;
+        var why: std.Io.Writer = .fixed(&buf);
+        try std.testing.expect(check(cfg, &r, &why));
+        const l = audioInfo(cfg).video.?;
+        try std.testing.expectEqual(k.grid, l.size_multiple);
+        try std.testing.expectEqual(k.size, l.default_size);
+        try std.testing.expect(l.max_side <= 2048 and l.max_seconds <= 20);
+    }
+    var buf: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(!check(c.tool("grid").?, &.{ .video = .{ .prompt = "a", .width = 720, .height = 504, .seconds = 1, .fps = 24 } }, &why)); // on the 24 grid, off the API's 16
+}
+
+test "a compiled-in engine keeps its own audio: the generic audio option is for cmd workers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "h3", "kind": "video", "engine": "minimax_h3", "options": {"audio": false}}]}
+    );
+    const h3 = c.tool("h3").?;
+    var r: Request = .{ .video = .{ .prompt = "a" } };
+    fill(h3, &r);
+    try std.testing.expect(r.video.audio orelse true);
+    r.video.audio = true;
+    var buf: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(check(h3, &r, &why));
+    try std.testing.expectEqual(@as(?bool, null), audioInfo(h3).audio);
 }
 
 test "a transcription model's declared languages: listed, and a language outside them refused before it loads" {

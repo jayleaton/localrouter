@@ -9,7 +9,9 @@ requires an entry and an upstream pull request for every new one.
 Audited 2026-10-31 against the latest upstream default branches:
 - [ashhart/TensorFold](https://github.com/ashhart/TensorFold) `main` at `acea3b52` (after v1.2.0);
 - [plotarmordev/drama-tensorfold](https://github.com/plotarmordev/drama-tensorfold) `main` at `4d9cfb2`;
-- [plotarmordev/TensorFold](https://github.com/plotarmordev/TensorFold) `drama-nvfp4` at `b1f4b9b4`.
+- [plotarmordev/TensorFold](https://github.com/plotarmordev/TensorFold) `drama-nvfp4` at `b1f4b9b4`;
+- [huggingface/diffusers](https://github.com/huggingface/diffusers) `main` at `8edb6d8c` on 2026-11-19 (the Wan worker
+  pins 0.43.0).
 
 ## Status
 
@@ -27,6 +29,8 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 10 | cuBLASLt with a recorded algorithm; driver identity check | ashhart/TensorFold | not upstreamable: LocalRouter's attestation policy | keep |
 | 11 | NVFP4 kernels copied from TensorFold v0.6.1 | ashhart/TensorFold v0.6.x | not upstreamable: unmodified copies of a frozen line | keep |
 | 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
+| 13 | Wan worker: one large module on the GPU at a time under model CPU offload (forward pre-hooks) | huggingface/diffusers | to open: an `enable_model_cpu_offload` option that offloads every other hooked module | drop the hooks and `Engine.alone` once the pin has the option |
+| 14 | Wan worker: the VAE's `encode` and `decode` wrapped to take the GPU alone | huggingface/diffusers | to open, with 13 | as 13 |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -178,3 +182,35 @@ Not ours, and not listed above:
   cast DINOv3's fp32 RoPE `inv_freq` and changed the PLY. No review yet.
 - **Next:** once #3 merges, repin idol-sdk and replace the hand-built pipeline with a `from_pretrained` call
   (`image_encoders` with the remapped DINOv3 and the local klein folder); `test_worker.py` covers the loaded graph.
+
+### 13. Wan worker: one large module on the GPU at a time
+
+- **Here:** `tools/video/wan/worker.py` (`Engine.load`, `Engine.alone`, `Engine.release_gpu`). After
+  `enable_model_cpu_offload`, a forward pre-hook on the text encoder and on the transformer moves the other large
+  modules (text encoder, transformer, VAE) to the CPU; Diffusers' hook then onloads the module. After every job the
+  worker moves all three off. Diffusers is pinned at 0.43.0.
+- **What and why:** `enable_model_cpu_offload` chains `accelerate.cpu_offload_with_hook(..., prev_module_hook=...)`
+  along `model_cpu_offload_seq`, so onloading a module offloads only the one before it in the sequence.
+  `WanImageToVideoPipeline`'s sequence is `text_encoder->image_encoder->transformer->transformer_2->vae`, but it runs
+  the VAE (to encode the first frame) before the transformer. The VAE stays on the GPU through denoising, and the text
+  encoder through that encode. On a 16 GB card WDDM then pages GPU memory and a step takes 85 s instead of 25 s
+  ([DESKTOP.md](DESKTOP.md#measured)).
+- **Upstream today:** the same chain on `main`. No issue or pull request found (searched 2026-11-19);
+  [#14304](https://github.com/huggingface/diffusers/pull/14304) adds offload strategies to modular pipelines'
+  `ComponentsManager` only.
+- **General?** Yes: any pipeline that calls a module out of its sequence order (image to video, which encodes first)
+  keeps it resident. An option such as `enable_model_cpu_offload(exclusive=True)` would offload every other hooked
+  module when one onloads.
+- **PR:** to open.
+- **Next:** once a pinned release has the option, replace the hooks and `Engine.alone` with it.
+
+### 14. Wan worker: VAE `encode` and `decode` wrapped
+
+- **Here:** `tools/video/wan/worker.py` (`Engine.load`): the VAE instance's `encode` and `decode` are replaced by
+  wrappers that call `Engine.alone(vae)`, then the original method.
+- **Why:** the pipelines call `vae.encode` and `vae.decode`, never `forward`, so 13's forward pre-hook never fires for
+  the VAE. Diffusers' `apply_forward_hook` onloads the VAE from those methods; the wrappers move the text encoder and
+  the transformer off first. Before `encode` the chain would leave the text encoder resident; before `decode` it
+  already offloads the transformer, and the wrapper keeps one rule for all three modules.
+- **General?** Part of 13: with that option, `apply_forward_hook` would apply it to `encode` and `decode` too.
+- **PR:** to open, in 13's pull request. The wrappers go with 13's hooks.

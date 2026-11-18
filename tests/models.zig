@@ -212,3 +212,18 @@ test "model tools: during a call a picture never unloads the voice models; it is
     if (made.status != .ok) std.debug.print("after the call: {d} {s}\n", .{ @backingInt(made.status), made.body });
     try testing.expectEqual(std.http.Status.ok, made.status);
 }
+
+test "model tools: reserve_for refuses a video job past the model's limits before anything loads" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg = try std.fmt.allocPrint(a, "{{{s}, \"tools\": [{{\"id\": \"vid\", \"kind\": \"video\", \"cmd\": [\"python3\", \"-c\", \"pass\"], \"options\": {{\"max_side\": 1280, \"max_seconds\": 5}}}}]}}", .{harness.reserve});
+    var d = try Daemon.start(testing.allocator, testing.io, "models-limits", cfg);
+    defer d.stop();
+    for ([_][]const u8{ "{\"model\":\"vid\",\"size\":\"2048x2048\",\"seconds\":20}", "{\"model\":\"vid\",\"seconds\":20,\"dry_run\":true}" }) |args| {
+        const res = try result(a, try mcpCall(&d, a, "reserve_for", args));
+        try testing.expect(!res.ok);
+        try testing.expect(std.mem.indexOf(u8, res.text, "model 'vid' takes") != null);
+    }
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "vid"));
+}
