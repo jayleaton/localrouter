@@ -57,8 +57,25 @@ fn openInputs(gpa: std.mem.Allocator, io: std.Io, paths: Paths) anyerror!Opened 
     return .{ .pack = pack, .te_pack = te_pack, .tok = tok };
 }
 
-/// The largest request this pipeline serves (width and height in pixels, multiples of 32; frames before alignment).
-pub const Limits = struct { width: u32 = 768, height: u32 = 448, frames: u32 = 56, tokens: u32 = 1536 };
+/// The largest request this pipeline serves: `pixels` a frame (width x height, sides in multiples of 32) for `frames`
+/// (before alignment). Every buffer follows the frame's area, not its sides, so one budget takes a frame of any shape,
+/// and a frame larger than `pixels` for a clip short enough to fit the same buffers (`fits`).
+pub const Limits = struct { pixels: u32 = 768 * 448, frames: u32 = 56, tokens: u32 = 1536 };
+
+/// The model's official canvas: the long side up to 1344 (`adapt_canvas`, 768 x 1344).
+pub const canvas_side = 1344;
+
+/// The buffers `l` allocates, as the shapes of a 32-pixel-wide strip of the same area.
+fn ceiling(l: Limits) !Shapes {
+    return shapes(32, l.pixels / 1024 * 32, l.frames);
+}
+
+/// Whether a clip fits the buffers allocated for `l`.
+pub fn fits(l: Limits, width: u32, height: u32, frames: u32) bool {
+    const sh = shapes(width, height, frames) catch return false;
+    const max = ceiling(l) catch return false;
+    return sh.frames <= max.frames and sh.n_video <= max.n_video and sh.frame_bytes <= max.frame_bytes and sh.videoTokens() <= max.videoTokens();
+}
 
 pub const Options = struct {
     /// Free the text encoder after each encode (see the memory note above).
@@ -112,6 +129,11 @@ pub const Shapes = struct {
     pub fn audioFloats(s: Shapes) u64 {
         return audio_channels * s.samples;
     }
+
+    /// The DiT's video rows: the latent frames and the reference frame, in 2x2 patches.
+    pub fn videoTokens(s: Shapes) u64 {
+        return (@as(u64, s.latent_t) + 1) * (s.lh / 2) * (s.lw / 2);
+    }
 };
 
 /// `align_frame_count(max(5, n))`: up to the next 17 k + 5.
@@ -153,7 +175,8 @@ pub const Pipeline = struct {
     io: std.Io,
     paths: Paths,
     opts: Options,
-    max: Shapes, // of `Limits`
+    limits: Limits,
+    max: Shapes, // the buffers' (`ceiling`)
     max_tokens: u32,
     d: cuda.Driver,
     ctx: cuda.Context,
@@ -201,7 +224,8 @@ pub const Pipeline = struct {
         p.load = .{};
         p.ids = &.{};
         p.te = null;
-        p.max = try shapes(limits.width, limits.height, limits.frames);
+        p.limits = limits;
+        p.max = try ceiling(limits);
         p.max_tokens = limits.tokens;
         var clock = qi.pipeline.LoadClock.start(io);
         // the pack and encoder headers and the tokenizer are plain file reads: they run alongside the driver, the
@@ -259,7 +283,7 @@ pub const Pipeline = struct {
         defer up.deinit();
         p.w = try dit_mod.Weights.load(gpa, io, &p.d, &p.pack, &p.nv, &up);
         errdefer p.w.deinit();
-        const max_s: u32 = limits.tokens + 2 * p.max.audio_t + (p.max.latent_t + 1) * (p.max.lh / 2) * (p.max.lw / 2);
+        const max_s: u32 = @intCast(limits.tokens + 2 * p.max.audio_t + p.max.videoTokens());
         const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = &p.nv, .major = p.major, .minor = p.minor };
         p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens);
         errdefer p.dit.deinit();
@@ -365,7 +389,7 @@ pub const Pipeline = struct {
     pub fn generateImage(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, rgb: ?[]const f32, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
         const sh = try shapes(width, height, frames);
         if (steps == 0) return error.NoSteps;
-        if (width > p.max_width() or height > p.max_height() or sh.frames > p.max.frames) return error.RequestTooLarge;
+        if (!fits(p.limits, width, height, frames)) return error.RequestTooLarge;
         if (frames_out.len != sh.frame_bytes) return error.BadFrameBuffer;
         if (audio_out.len != sh.audioFloats()) return error.BadAudioBuffer;
         const gpa = p.gpa;
@@ -519,14 +543,6 @@ pub const Pipeline = struct {
         }
         p.times.video = try clock.lap();
         return .{ .shapes = sh, .width = width, .height = height, .tokens = l };
-    }
-
-    fn max_width(p: *const Pipeline) u32 {
-        return p.max.lw * 16;
-    }
-
-    fn max_height(p: *const Pipeline) u32 {
-        return p.max.lh * 16;
     }
 };
 

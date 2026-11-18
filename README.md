@@ -11,7 +11,7 @@ interrupt it mid-sentence, and it can make a picture or a video while you talk. 
 - **Voice:** Fish Audio Drama 3, streamed as it speaks, with six fixed voices.
 - **Hearing:** Whisper large-v3-turbo with the Silero VAD.
 - **Images:** Qwen-Image 2.1 Turbo: text to image, and edits of one or two input images (an instruction, optionally a mask).
-- **Video with audio:** MiniMax H3: text to video, and image to video (the input image as the first frame), up to 1280x704 and 8 s.
+- **Video with audio:** MiniMax H3: text to video, and image to video (the input image as the first frame), up to 1280x704 or 704x1248 (9:16) and 8 s.
 
 One small Zig daemon owns the machine. It keeps the voice loop and chat warm, loads the other models when asked,
 makes room for them, and hands every tool to your agents over MCP and an OpenAI-compatible API.
@@ -161,7 +161,7 @@ The HTTP API, field by field, is in [docs/AGENTS.md](docs/AGENTS.md), and an age
     {"id": "qwen-image-2.1-nvfp4", "kind": "image", "engine": "qwen_image", "weights": "/models/qwen-image-2.1",
      "priority": 10, "options": {"precision": "nvfp4"}},
     {"id": "minimax-h3", "kind": "video", "engine": "minimax_h3", "weights": "/models/minimax-h3",
-     "idle_ttl_s": 30, "options": {"max_width": 768, "max_height": 448, "max_seconds": 5}}
+     "idle_ttl_s": 30, "options": {"max_pixels": 344064, "max_seconds": 5}}
   ]
 }
 ```

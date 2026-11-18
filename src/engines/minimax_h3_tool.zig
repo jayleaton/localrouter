@@ -3,11 +3,13 @@
 //! out like ComfyUI's models folder plus the pack: `<pack>/` (`python -m stk_twin.h3.build`: the DiT with the Turbo
 //! LoRA merged and `tokenizer.json`), `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`,
 //! `vae/minimax_h3_audio_vae_fp32.safetensors` and `vae/minimax_h3_video_vae_fp16.safetensors`, all as published.
-//! Options: `pack` (default h3-turbo-nvfp4), `max_width` / `max_height` (pixels, multiples of 32, default 768 x 448),
-//! `max_seconds` (default 5), `default_size` (`WIDTHxHEIGHT`, what a request without a size gets; default the largest),
-//! `steps` (default 8, the Turbo LoRA's), `unload_te` (1: free the 32B encoder after each encode), `resident_mb` (the
-//! scheduler's estimate). The pipeline's buffers are sized at load for the largest clip, so the memory a job takes
-//! follows `max_*`, while its time follows the clip asked for.
+//! Options: `pack` (default h3-turbo-nvfp4), `max_pixels` (a frame's area at `max_seconds`, default 768 x 448: a frame
+//! of any shape within it, landscape or portrait; a larger one for a shorter clip), `max_side` (the long side, default
+//! the model's 1344), `max_seconds` (default 5), `default_size` (`WIDTHxHEIGHT`, what a request without a size gets;
+//! default the largest landscape), `steps` (default 8, the Turbo LoRA's), `unload_te` (1: free the 32B encoder after
+//! each encode), `resident_mb` (the scheduler's estimate). A config of `max_width` / `max_height` gets their product as
+//! `max_pixels` and either of them as `max_side` where above 1344. The pipeline's buffers are sized at load for the
+//! largest clip, so the memory a job takes follows `max_pixels` and `max_seconds`, while its time follows the clip asked for.
 
 const std = @import("std");
 const engine = @import("../engine/engine.zig");
@@ -35,21 +37,50 @@ const default_steps = 8;
 // Covers the measured engine peak (GB10, 2026-10-08): 36.7 GiB at 56 frames, 38.8 GiB for a 5 s clip, text encoder resident.
 const default_resident_mb = 40_000;
 
+/// A config's `max_width` x `max_height` (each rounded down to 32), 768 x 448 where one is not set.
+fn legacySize(cfg: *const ToolConfig) [2]u32 {
+    return .{ @intCast(engine.optionInt(cfg, "max_width", 768) / 32 * 32), @intCast(engine.optionInt(cfg, "max_height", 448) / 32 * 32) };
+}
+
 /// The largest request the pipeline is built for (its buffers are allocated at load for exactly this), from the options.
 fn limits(cfg: *const ToolConfig) P.Limits {
+    const legacy = legacySize(cfg);
     return .{
-        .width = @intCast(engine.optionInt(cfg, "max_width", 768) / 32 * 32),
-        .height = @intCast(engine.optionInt(cfg, "max_height", 448) / 32 * 32),
+        .pixels = @intCast(engine.optionInt(cfg, "max_pixels", @as(u64, legacy[0]) * legacy[1]) / 1024 * 1024),
         .frames = @intCast(engine.optionInt(cfg, "max_seconds", 5) * fps),
     };
 }
 
-/// The size a video without one gets: `default_size` when it is within the limits, else the largest this model takes.
+/// The long side a request may have.
+fn maxSide(cfg: *const ToolConfig) u32 {
+    const legacy = legacySize(cfg);
+    return @intCast(engine.optionInt(cfg, "max_side", @max(P.canvas_side, legacy[0], legacy[1])) / 32 * 32);
+}
+
+/// Whether `width` x `height` is on the 32-pixel grid within the long side, and fits the buffers for `frames`.
+fn takes(cfg: *const ToolConfig, width: u32, height: u32, frames: u32) bool {
+    const side = maxSide(cfg);
+    return width <= side and height <= side and P.fits(limits(cfg), width, height, frames);
+}
+
+/// The largest frame about 16:9 that a full-length clip takes, landscape.
+fn widest(cfg: *const ToolConfig) [2]u32 {
+    const l = limits(cfg);
+    var h: u32 = maxSide(cfg);
+    while (h >= 32) : (h -= 32) {
+        const w = h * 16 / 9 / 32 * 32;
+        if (takes(cfg, w, h, l.frames)) return .{ w, h };
+    }
+    return .{ 32, 32 };
+}
+
+/// The size a video without one gets: `default_size` when a full-length clip takes it, else `max_width` x `max_height`
+/// where the config sets them, else the widest.
 fn defaultSize(cfg: *const ToolConfig) [2]u32 {
     const l = limits(cfg);
-    const d = @import("../tool/request.zig").parseSize(engine.optionString(cfg, "default_size", "")) orelse return .{ l.width, l.height };
-    if (d[0] > l.width or d[1] > l.height or d[0] % 32 != 0 or d[1] % 32 != 0) return .{ l.width, l.height };
-    return d;
+    const fallback = if (engine.optionInt(cfg, "max_width", 0) > 0 and engine.optionInt(cfg, "max_height", 0) > 0) legacySize(cfg) else widest(cfg);
+    const d = @import("../tool/request.zig").parseSize(engine.optionString(cfg, "default_size", "")) orelse return fallback;
+    return if (takes(cfg, d[0], d[1], l.frames)) d else fallback;
 }
 
 /// A video without a size gets `defaultSize`.
@@ -64,21 +95,28 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
     }
 }
 
-/// Refuses what `generate` would, before the 40 GB load evicts anything: a size past the pipeline's buffers or off its
-/// 32-pixel grid, a clip longer than `max_seconds`, or another frame rate.
+/// Refuses what `generate` would, before the 40 GB load evicts anything: a size off the 32-pixel grid or past the long
+/// side, a clip longer than `max_seconds`, a frame and length past the pipeline's buffers, or another frame rate.
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     const v = switch (req.*) {
         .video => |x| x,
         .image, .asset3d, .speech, .transcription, .chat, .decision => return true, // the kind check refuses it
     };
     const l = limits(cfg);
-    if (v.width > l.width or v.height > l.height or v.width % 32 != 0 or v.height % 32 != 0) {
+    var seconds = l.frames / fps;
+    while (seconds > 0 and !takes(cfg, v.width, v.height, seconds * fps)) seconds -= 1;
+    if (seconds == 0) {
         const d = defaultSize(cfg);
-        why.print("model '{s}' takes sizes up to {d}x{d}, multiples of 32 (omit size for {d}x{d})", .{ cfg.id, l.width, l.height, d[0], d[1] }) catch {};
+        const w = widest(cfg);
+        why.print("model '{s}' takes sizes up to {d} pixels ({d}x{d} or {d}x{d}), at most {d} a side, multiples of 32 (omit size for {d}x{d})", .{ cfg.id, l.pixels, w[0], w[1], w[1], w[0], maxSide(cfg), d[0], d[1] }) catch {};
         return false;
     }
-    if (v.seconds * fps > l.frames) {
-        why.print("model '{s}' takes clips up to {d} seconds", .{ cfg.id, l.frames / fps }) catch {};
+    if (v.seconds > seconds) {
+        if (seconds == l.frames / fps) {
+            why.print("model '{s}' takes clips up to {d} seconds", .{ cfg.id, seconds }) catch {};
+        } else {
+            why.print("model '{s}' takes {d}x{d} for clips up to {d} seconds (up to {d} seconds at {d} pixels or fewer)", .{ cfg.id, v.width, v.height, seconds, l.frames / fps, l.pixels }) catch {};
+        }
         return false;
     }
     if (v.fps != fps) {
@@ -262,7 +300,7 @@ test "a video without a size gets the model's own; one it cannot make is refused
     try std.testing.expect(check(cfg, &r, &why));
     const big: Request = .{ .video = .{ .prompt = "waves", .width = 1344, .height = 768 } };
     try std.testing.expect(!check(cfg, &big, &why));
-    try std.testing.expectEqualStrings("model 'h3' takes sizes up to 768x448, multiples of 32 (omit size for 768x448)", why.buffered());
+    try std.testing.expectEqualStrings("model 'h3' takes sizes up to 344064 pixels (768x448 or 448x768), at most 1344 a side, multiples of 32 (omit size for 768x448)", why.buffered());
     why = .fixed(&msg);
     const long: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448, .seconds = 6 } };
     try std.testing.expect(!check(cfg, &long, &why));
@@ -284,10 +322,52 @@ test "default_size: a video without a size gets it, within the limits; refusals 
     try std.testing.expect(check(c.tool("h3").?, &r, &why));
     const big: Request = .{ .video = .{ .prompt = "waves", .width = 1280, .height = 720, .seconds = 8 } };
     try std.testing.expect(!check(c.tool("h3").?, &big, &why));
-    try std.testing.expectEqualStrings("model 'h3' takes sizes up to 1280x704, multiples of 32 (omit size for 768x448)", why.buffered());
+    try std.testing.expectEqualStrings("model 'h3' takes sizes up to 901120 pixels (1248x704 or 704x1248), at most 1344 a side, multiples of 32 (omit size for 768x448)", why.buffered());
     var b: Request = .{ .video = .{ .prompt = "waves" } };
     engine.fill(c.tool("bad").?, &b);
     try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ b.video.width, b.video.height }); // past the limits: the largest
+}
+
+test "one area budget takes landscape and portrait; a larger frame takes a shorter clip; the long side is the model's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try @import("../config.zig").parse(arena.allocator(),
+        \\{"tools": [{"id": "h3", "kind": "video", "engine": "minimax_h3", "options": {"max_pixels": 901120, "max_seconds": 8}},
+        \\           {"id": "old", "kind": "video", "engine": "minimax_h3", "options": {"max_width": 1280, "max_height": 704, "max_seconds": 8}},
+        \\           {"id": "canvas", "kind": "video", "engine": "minimax_h3", "options": {"max_pixels": 1032192, "max_seconds": 5}}]}
+    );
+    const Case = struct { tool: []const u8, w: u32, h: u32, s: u32, ok: bool };
+    const cases = [_]Case{
+        .{ .tool = "h3", .w = 1280, .h = 704, .s = 8, .ok = true },
+        .{ .tool = "h3", .w = 704, .h = 1248, .s = 8, .ok = true },
+        .{ .tool = "old", .w = 1280, .h = 704, .s = 8, .ok = true },
+        .{ .tool = "old", .w = 704, .h = 1248, .s = 8, .ok = true },
+        .{ .tool = "h3", .w = 768, .h = 1344, .s = 6, .ok = true },
+        .{ .tool = "h3", .w = 768, .h = 1344, .s = 7, .ok = false },
+        .{ .tool = "canvas", .w = 768, .h = 1344, .s = 5, .ok = true },
+        .{ .tool = "canvas", .w = 1344, .h = 768, .s = 5, .ok = true },
+        .{ .tool = "canvas", .w = 640, .h = 1376, .s = 1, .ok = false }, // past the long side, within the area
+        .{ .tool = "h3", .w = 1024, .h = 1024, .s = 8, .ok = false },
+        .{ .tool = "h3", .w = 1024, .h = 1024, .s = 1, .ok = true }, // past the area, for a clip that fits the same buffers
+        .{ .tool = "h3", .w = 720, .h = 1280, .s = 1, .ok = false },
+        .{ .tool = "h3", .w = 704, .h = 1250, .s = 1, .ok = false },
+    };
+    var msg: [256]u8 = undefined;
+    for (cases) |k| {
+        var why: std.Io.Writer = .fixed(&msg);
+        const r: Request = .{ .video = .{ .prompt = "waves", .width = k.w, .height = k.h, .seconds = k.s } };
+        std.testing.expectEqual(k.ok, check(c.tool(k.tool).?, &r, &why)) catch |err| {
+            std.debug.print("{s} {d}x{d} {d} s: {s}\n", .{ k.tool, k.w, k.h, k.s, why.buffered() });
+            return err;
+        };
+    }
+    var why: std.Io.Writer = .fixed(&msg);
+    const tall: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 1344, .seconds = 8 } };
+    try std.testing.expect(!check(c.tool("h3").?, &tall, &why));
+    try std.testing.expectEqualStrings("model 'h3' takes 768x1344 for clips up to 6 seconds (up to 8 seconds at 901120 pixels or fewer)", why.buffered());
+    var d: Request = .{ .video = .{ .prompt = "waves" } };
+    engine.fill(c.tool("h3").?, &d);
+    try std.testing.expectEqual([2]u32{ 1248, 704 }, [2]u32{ d.video.width, d.video.height });
 }
 
 /// Refuses the request (the API's 400) with a reason the caller can act on.

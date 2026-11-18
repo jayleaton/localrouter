@@ -59,8 +59,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
     const t0 = std.Io.Clock.awake.now(io);
     const p = try pl.Pipeline.create(gpa, io, .{ .pack = args[0], .te = args[1], .vae_audio = args[2], .vae_video = args[3] }, .{
-        .width = width,
-        .height = height,
+        .pixels = width * height,
         .frames = frames,
         .tokens = @intCast(@max(want_ids.len + 64, 256)),
     }, .{});

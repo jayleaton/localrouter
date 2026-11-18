@@ -44,7 +44,7 @@ the voice loop's tool offers are all built from these fields (`engine.audioInfo`
 | speech | `text_to_speech`, `voice_clone` | `voices`, `default_voice`, `presets`, `min_speed`/`max_speed`, `max_input_chars`, `instructions` (template), `stream`, `references`, `clone_rate`, `clone_codebooks`, `clone_working_bytes` | `engine.checkSpeech`, `engine.speechInstructions`, `api/voices.zig` |
 | transcription | `speech_to_text` | `max_audio_s`, `languages` | `engine.checkTranscription`, `api/speech.zig` |
 | image | `text_to_image`, `image_edit` | the engine's own (`max_side`, `max_pixels`, `edit_refs`, `precision` for Qwen-Image); `reference_working_bytes` (a `cmd` worker: what each edit reference adds to `working_bytes`, measured) | the engine's `Entry.check` |
-| video | `text_to_video`, `image_to_video` | the engine's own (`max_width`, `max_height`, `max_seconds`, `default_size` for H3) | the engine's `Entry.check` |
+| video | `text_to_video`, `image_to_video` | the engine's own (`max_pixels`, `max_side`, `max_seconds`, `default_size` for H3) | the engine's `Entry.check` |
 | asset3d | `image_to_3d` | `formats`, `input_modes`, `max_steps`, `max_guidance`, `min_gaussians`/`max_gaussians`/`gaussian_multiple`/`default_gaussians`, `default_steps`, `default_guidance`, `working_bytes_by_gaussians` (measured; a count above every measurement is refused) | `engine.checkAsset3d`; the result's manifest and PLY by `media/asset3d.zig` |
 | decision | `typed_decision` | `decision_path` | `api/decide.zig` (answers checked against the questions) |
 
