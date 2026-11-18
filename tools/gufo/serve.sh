@@ -13,6 +13,11 @@
 # An image named without @sha256: is refused unless GUFO_ALLOW_UNPINNED=1: a tag can move between two installs.
 # Devices: /dev/kfd and /dev/dri; the video and render groups are passed by name, since keep-groups needs crun and
 # many hosts run runc.
+# Logs: the container's output reaches the daemon through this script's stdout and stderr, which it copies into the
+# tool's log. podman's default log driver on a systemd host (journald) also wrote every line to the journal, stderr at
+# priority 3, so each worker message appeared twice and as an error. --log-driver=none keeps the attached output and
+# drops the journal copy (`podman logs` then has nothing; the tool's log has it all). A --log-driver among the podman
+# options given to this script comes later on the command line and wins.
 set -euo pipefail
 name=${1:?usage: serve.sh NAME PORT [podman options...] -- gufo serve ...}; port=${2:?port}; shift 2
 popts=()
@@ -59,6 +64,6 @@ setsid -f sh -c 'while kill -0 "$1" 2> /dev/null; do sleep 0.5; done
   gufo-watch "$$" "$run_dir" "${GUFO_STOP_TIMEOUT:-10}" < /dev/null > /dev/null 2>&1
 podman run --rm --replace --cidfile "$run_dir/cid" --name "$cname" --userns=keep-id:uid="$(id -u)",gid="$(id -g)" \
   --device /dev/kfd --device /dev/dri --group-add video --group-add render --ulimit memlock=-1 \
-  -e "TZ=$tz" ${zi[@]+"${zi[@]}"} -p "127.0.0.1:$port:8080" ${popts[@]+"${popts[@]}"} "$image" "${args[@]}" &
+  --log-driver=none -e "TZ=$tz" ${zi[@]+"${zi[@]}"} -p "127.0.0.1:$port:8080" ${popts[@]+"${popts[@]}"} "$image" "${args[@]}" &
 pid=$!
 wait "$pid"

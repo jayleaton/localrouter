@@ -29,7 +29,7 @@ chmod +x "$t/bin/podman"
 export PATH="$t/bin:$PATH" GUFO_IMAGE="x@sha256:$(printf '0%.0s' {1..64})" GUFO_STOP_TIMEOUT=1 TMPDIR="$t"
 container() { local c; c=$(cat "$t/state/name-lr-gufo-$1" 2> /dev/null) && cat "$t/state/$c" 2> /dev/null; }
 alive() { [ -n "$1" ] && kill -0 "$1" 2> /dev/null; }
-start() { setsid bash "$here/serve.sh" "$1" 18080 -- gufo serve llm > /dev/null 2>&1 & echo $!; }  # its own group, as a worker's
+start() { local name=$1; shift; setsid bash "$here/serve.sh" "$name" 18080 "$@" -- gufo serve llm > /dev/null 2>&1 & echo $!; }  # its own group, as a worker's
 waitfor() { local i; for i in $(seq 100); do eval "$1" && return 0; sleep 0.1; done; return 1; }
 
 # a hard kill of the group: the container goes too
@@ -81,6 +81,16 @@ rm -f "$t/state/last-args"
 unset TZ
 s=$(start zu); waitfor 'grep -q "^TZ=" "$t/state/last-args" 2>/dev/null'
 check "without TZ, a zone name is still passed" 'grep -Eq "^TZ=[A-Za-z0-9_+/-]+$" "$t/state/last-args"'
+kill -KILL -- "-$s"; waitfor '! alive "$s"'
+
+# the container's output goes to the attached stdout/stderr only: no journald copy at error priority
+rm -f "$t/state/last-args"
+s=$(start ld); waitfor '[ -s "$t/state/last-args" ]'
+check "podman run gets --log-driver=none" 'grep -qx -- "--log-driver=none" "$t/state/last-args"'
+kill -KILL -- "-$s"; waitfor '! alive "$s"'
+rm -f "$t/state/last-args"
+s=$(start lo --log-driver=k8s-file); waitfor '[ -s "$t/state/last-args" ]'
+check "a caller's --log-driver comes after it, so it wins" '[ "$(grep -n -- "^--log-driver" "$t/state/last-args" | tail -1 | cut -d: -f2)" = "--log-driver=k8s-file" ]'
 kill -KILL -- "-$s"; waitfor '! alive "$s"'
 
 echo "gufo serve.sh: $pass passed, $fail failed"
