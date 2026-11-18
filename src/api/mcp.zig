@@ -310,7 +310,7 @@ fn taskOutcome(hub: *hub_mod.Hub, a: std.mem.Allocator, task_id: []const u8, wai
 }
 
 fn listModels(app: *App, a: std.mem.Allocator, out: *std.ArrayList(Content)) ToolError!bool {
-    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, booked_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, residency: []const u8, idle_ttl_s: u32, disabled: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null, formats: ?[]const Value = null, input_modes: ?[]const Value = null, gaussians: ?engine.Gaussians = null };
+    const Entry = struct { id: []const u8, name: []const u8, kind: []const u8, state: []const u8, running: bool, resident_bytes: u64, booked_bytes: u64, needs_bytes: u64, displaced: bool, held: bool, lane: []const u8, capabilities: []const engine.Capability, default_for: []const engine.Capability, priority: i32, keep_loaded: bool, residency: []const u8, idle_ttl_s: u32, disabled: bool, voices: ?[]const Value = null, default_voice: ?[]const u8 = null, presets: ?[]const Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const Value = null, qualified: ?bool = null, license: ?config.License = null, min_thinking_tokens: ?u32 = null, formats: ?[]const Value = null, input_modes: ?[]const Value = null, gaussians: ?engine.Gaussians = null, audio: ?bool = null, video: ?engine.VideoLimits = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -560,7 +560,7 @@ fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, ou
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: ?bool = null, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
@@ -927,7 +927,7 @@ const tool_list = [_]Tool{
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead (use a small value if your tool calls time out)."}},
     \\"additionalProperties":false}
     } },
-    .{ .name = "generate_video", .title = "Generate video", .description = "Text to video with audio (MP4), or image to video when `image` is given. Waits up to wait_s seconds; returns the MP4's URL when done, otherwise the job id for get_job.", .inputSchema = .{ .text =
+    .{ .name = "generate_video", .title = "Generate video", .description = "Text to video (MP4, with audio when the model makes it), or image to video when `image` is given. Waits up to wait_s seconds; returns the MP4's URL when done, otherwise the job id for get_job.", .inputSchema = .{ .text =
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
@@ -936,7 +936,7 @@ const tool_list = [_]Tool{
     \\"fps":{"type":"integer","default":24},
     \\"seed":{"type":"integer","minimum":0},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
-    \\"audio":{"type":"boolean","default":true},
+    \\"audio":{"type":"boolean","description":"Omit it for the model's own: an audio track when the model makes one (list_models audio). true for a model without audio is refused."},
     \\"negative_prompt":{"type":"string"},
     \\"image":{"type":"string","description":"First frame (image to video): a base64 string, data URL or http(s) URL of a PNG, JPEG or WebP up to 32 MB. Needs a model whose capabilities (list_models) include image_to_video."},
     \\"wait_s":{"type":"integer","minimum":0,"maximum":3000,"default":600,"description":"How long to wait before returning the job id instead."}},

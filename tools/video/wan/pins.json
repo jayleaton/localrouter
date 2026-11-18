@@ -1,0 +1,153 @@
+{
+ "note": "The Wan 2.2 TI2V-5B worker's weights (worker.py, fetch.sh): the Diffusers layout of an ungated Hugging Face repo at a pinned revision, no token. `path` is where it goes under the tool's `weights` directory, `src` where it comes from (https://huggingface.co/<repo>/resolve/<revision>/<src>). selected_files is in tools/package/verify_assets.py form: LFS sha256 for the weights, the git blob id for the small files.",
+ "sources": {
+  "wan": {
+   "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+   "revision": "b8fff7315c768468a5333511427288870b2e9635",
+   "role": "text encoder (UMT5-XXL), transformer (5B, fp32 as published, run in bf16), Wan 2.2 VAE (16x16x4)",
+   "license": "Apache-2.0 (the model card)"
+  }
+ },
+ "selected_files": [
+  {
+   "path": "model_index.json",
+   "source": "wan",
+   "src": "model_index.json",
+   "size_bytes": 499,
+   "git_blob_sha1": "fe52bfbdc8e5bbc8a6a607dd301f6e1ab0889cd1"
+  },
+  {
+   "path": "scheduler/scheduler_config.json",
+   "source": "wan",
+   "src": "scheduler/scheduler_config.json",
+   "size_bytes": 820,
+   "git_blob_sha1": "950d26faea717c8902ee197982026cb9c1b6463e"
+  },
+  {
+   "path": "text_encoder/config.json",
+   "source": "wan",
+   "src": "text_encoder/config.json",
+   "size_bytes": 855,
+   "git_blob_sha1": "ab4a73bce055c6e32e66133032dcb3adfb26ee8d"
+  },
+  {
+   "path": "text_encoder/model-00001-of-00003.safetensors",
+   "source": "wan",
+   "src": "text_encoder/model-00001-of-00003.safetensors",
+   "size_bytes": 4935812536,
+   "lfs_sha256": "a8e861969c7433e707cc5a74065d795d36cca07ec96eb6763eb4083df7248f58"
+  },
+  {
+   "path": "text_encoder/model-00002-of-00003.safetensors",
+   "source": "wan",
+   "src": "text_encoder/model-00002-of-00003.safetensors",
+   "size_bytes": 4983103192,
+   "lfs_sha256": "d57d948ece4837d850b7a859a4415121d57cacf8b9ee1d4db200c67f592902d7"
+  },
+  {
+   "path": "text_encoder/model-00003-of-00003.safetensors",
+   "source": "wan",
+   "src": "text_encoder/model-00003-of-00003.safetensors",
+   "size_bytes": 1442935480,
+   "lfs_sha256": "0da9ee284e21d1406df708788db1d502d95d75f69faa25cd26151bf8829b7c5f"
+  },
+  {
+   "path": "text_encoder/model.safetensors.index.json",
+   "source": "wan",
+   "src": "text_encoder/model.safetensors.index.json",
+   "size_bytes": 22476,
+   "git_blob_sha1": "f3d3d4da90eb33e14c92d88ea346370fa3c0b5b2"
+  },
+  {
+   "path": "tokenizer/special_tokens_map.json",
+   "source": "wan",
+   "src": "tokenizer/special_tokens_map.json",
+   "size_bytes": 7079,
+   "git_blob_sha1": "2ed25bf989a28d20b5d4b5822fbc24666d12a6f7"
+  },
+  {
+   "path": "tokenizer/spiece.model",
+   "source": "wan",
+   "src": "tokenizer/spiece.model",
+   "size_bytes": 4548313,
+   "lfs_sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+  },
+  {
+   "path": "tokenizer/tokenizer.json",
+   "source": "wan",
+   "src": "tokenizer/tokenizer.json",
+   "size_bytes": 16837459,
+   "lfs_sha256": "20a46ac256746594ed7e1e3ef733b83fbc5a6f0922aa7480eda961743de080ef"
+  },
+  {
+   "path": "tokenizer/tokenizer_config.json",
+   "source": "wan",
+   "src": "tokenizer/tokenizer_config.json",
+   "size_bytes": 61758,
+   "git_blob_sha1": "09d434f9457238f697f4c208aab47f58caa15bfe"
+  },
+  {
+   "path": "transformer/config.json",
+   "source": "wan",
+   "src": "transformer/config.json",
+   "size_bytes": 495,
+   "git_blob_sha1": "8180887e8ed86e4fd842824fb15fcabf43d19512"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+   "size_bytes": 4978254344,
+   "lfs_sha256": "511bec832a201caa410d09c5ce7dbbf8ad2708c345d82038f684fc74cce982be"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+   "size_bytes": 4846784976,
+   "lfs_sha256": "7c42724912b1911429125dc50c0e9a49ccbada5a601b657d4ed2e15e7597c193"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+   "size_bytes": 4972658392,
+   "lfs_sha256": "e9c3d0c76de786566382f8258101fea973ae37681c6e9fe0e5fe1fb93b806424"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+   "size_bytes": 4846785080,
+   "lfs_sha256": "a331121771790939678db6f585553fd5184609f7d02593c699a4d241b0d834c5"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+   "size_bytes": 354751840,
+   "lfs_sha256": "78b655685c47efdb2349f36826bb101264e9f212a16325d584aeb5f53c88e719"
+  },
+  {
+   "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+   "source": "wan",
+   "src": "transformer/diffusion_pytorch_model.safetensors.index.json",
+   "size_bytes": 73297,
+   "git_blob_sha1": "4ced518ff3eb023a0477eeab55f2a4d45d6fd43a"
+  },
+  {
+   "path": "vae/config.json",
+   "source": "wan",
+   "src": "vae/config.json",
+   "size_bytes": 1701,
+   "git_blob_sha1": "29f65bc63e9daadb95e4c1a8344d162be4b7d533"
+  },
+  {
+   "path": "vae/diffusion_pytorch_model.safetensors",
+   "source": "wan",
+   "src": "vae/diffusion_pytorch_model.safetensors",
+   "size_bytes": 2818777808,
+   "lfs_sha256": "62cd18f19438e35b32ac63020e2852f566e9b02f46b6cdbd87972a356e3c6f4b"
+  }
+ ]
+}

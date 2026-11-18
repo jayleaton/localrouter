@@ -55,7 +55,7 @@ pub const Video = struct {
     seed: u64 = 0,
     steps: u32 = 0,
     guidance: f32 = 0,
-    audio: bool = true,
+    audio: ?bool = null, // null: the model's own (with audio unless its `audio` option is false), filled in by `engine.fill`
     first_frame: ?[]const u8 = null, // file name in the job directory (image to video)
 };
 

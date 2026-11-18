@@ -101,7 +101,8 @@ Whisper are never unloaded for an image or a video.
 
 No other profile is tested yet. `mac-apple-silicon` is a preview: an Apple Silicon Mac with at least 64 GiB,
 [docs/dev/MAC-PORT.md](docs/dev/MAC-PORT.md#installing-on-a-mac). The GB10 profile's chat and Drama 3 engines are GB10
-builds, and their qualification refuses other GPUs.
+builds, and their qualification refuses other GPUs. A desktop with one consumer NVIDIA card (16 GB, Windows 11 through
+WSL2 or Linux) serves video with Wan 2.2 TI2V-5B as a `cmd` worker: [docs/dev/DESKTOP.md](docs/dev/DESKTOP.md).
 
 ## How it works
 

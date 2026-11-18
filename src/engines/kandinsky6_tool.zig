@@ -97,7 +97,7 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
         why.writeAll("Kandinsky-6 Pro distilled image to video is not available yet") catch {};
         return false;
     }
-    if (!v.audio) {
+    if (!(v.audio orelse true)) {
         why.writeAll("Kandinsky-6 Pro distilled generates audio jointly with the video; audio cannot be turned off") catch {};
         return false;
     }

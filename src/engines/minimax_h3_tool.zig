@@ -288,7 +288,7 @@ const MiniMaxH3 = struct {
         };
 
         var wav: ?[]const u8 = null;
-        if (v.audio) {
+        if (v.audio orelse true) {
             const inter = try gpa.alloc(f32, audio.len); // [2, n] planar to interleaved
             defer gpa.free(inter);
             for (0..sh.samples) |i| for (0..P.audio_channels) |c| {

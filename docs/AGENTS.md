@@ -151,7 +151,7 @@ curl -s -o out.mp4 $BASE/videos/$id/content   # once completed
 curl -s -X DELETE $BASE/videos/$id  # cancel
 ```
 
-Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (true by default). Poll every few seconds.
+Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (omit it for the model's own: an audio track when the model makes one; `/v1/models` lists `audio` and, for a `cmd` worker, its `video` limits). Poll every few seconds.
 
 Any job, of any kind, can be looked up by its id: `GET $BASE/jobs/{id}` returns `{id, kind, status, progress, phase,
 urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `completed`. The voice loop's

@@ -120,7 +120,7 @@ const TestPattern = struct {
         const frames = v.seconds * v.fps;
         const out = try std.fs.path.join(arena, &.{ dir, "video.mp4" });
         var wav: ?[]const u8 = null;
-        if (v.audio) {
+        if (v.audio orelse true) {
             const rate = 48_000;
             const samples = try t.env.gpa.alloc(f32, rate * v.seconds);
             defer t.env.gpa.free(samples);
