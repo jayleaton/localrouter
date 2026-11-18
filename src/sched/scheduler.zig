@@ -1276,6 +1276,7 @@ pub const Scheduler = struct {
         j.error_message = "the job was cancelled";
         j.completed_at = nowUnix(s.io);
         s.table.mutex.unlock(s.io);
+        j.dropIfEmpty(s.io);
         j.done.set(s.io);
     }
 
@@ -1299,6 +1300,7 @@ pub const Scheduler = struct {
             } else |_| {}
         }
         s.table.mutex.unlock(s.io);
+        if (status != .completed) j.dropIfEmpty(s.io);
         j.done.set(s.io);
     }
 
@@ -1967,4 +1969,24 @@ test "a voice model disabled before any call is listed disabled for every call; 
     // Not loaded: resident 0, but what it would book is known.
     try t.expectEqual(@as(u64, 0), b.slots[0].resident);
     try t.expectEqual(@as(u64, 3 << 20), b.s.bookedBytes(0));
+}
+
+test "a failed job's empty directory is removed when it ends, a cancelled one's too" {
+    const t = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(t.io, &path_buf)];
+    var fakes = [_]FakeTool{.{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100 }, .bytes = 10 << 20 }};
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    const j = try b.table.create(t.io, root, 0, .{ .chat = .{ .body = "{}" } }, "", 0);
+    b.s.runJob(j); // the fake's generate fails
+    try t.expectEqual(jobs.Status.failed, j.status);
+    try t.expectError(error.FileNotFound, Io.Dir.cwd().statFile(t.io, j.dir, .{}));
+    const c = try b.table.create(t.io, root, 0, .{ .chat = .{ .body = "{}" } }, "", 0);
+    b.s.finishCancelled(c); // as a cancel before the tool ran ends it
+    try t.expectEqual(jobs.Status.cancelled, c.status);
+    try t.expectError(error.FileNotFound, Io.Dir.cwd().statFile(t.io, c.dir, .{}));
 }

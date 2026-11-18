@@ -41,6 +41,14 @@ pub const Job = struct {
         return std.mem.sliceTo(&j.phase, 0);
     }
 
+    /// Removes the job's directory when nothing was written in it (a refused or failed request, a cancel before the
+    /// tool ran): an empty directory would otherwise stay until the job expires, or until a restart's `sweep` once it
+    /// is past the retention. A directory with files (outputs, inputs saved for the tool) is left for `expire`.
+    pub fn dropIfEmpty(j: *const Job, io: Io) void {
+        if (j.dir.len == 0) return;
+        Io.Dir.cwd().deleteDir(io, j.dir) catch {}; // DirNotEmpty: it has files; FileNotFound: already gone
+    }
+
     pub fn finished(j: *const Job) bool {
         return switch (j.status) {
             .completed, .failed, .cancelled => true,
@@ -119,9 +127,10 @@ pub const Table = struct {
     }
 };
 
-/// Removes the job directories under `dir` last modified `keep_s` or more before `now` (unix seconds) and returns how
-/// many: the outputs of jobs from before a restart, which this process's table never held and so never expires. Run
-/// once at start, before any job exists; a directory's mtime is its last file's, so the age runs from the job's output.
+/// Removes the job directories under `dir` last modified `keep_s` or more before `now` (unix seconds), and every
+/// empty one whatever its age, and returns how many: the outputs of jobs from before a restart, which this process's
+/// table never held and so never expires. Run once at start, before any job exists, so an empty directory belongs to
+/// no job; a directory's mtime is its last file's, so the age runs from the job's output.
 pub fn sweep(io: Io, gpa: std.mem.Allocator, dir: []const u8, now: i64, keep_s: u32) !u32 {
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
@@ -135,7 +144,7 @@ pub fn sweep(io: Io, gpa: std.mem.Allocator, dir: []const u8, now: i64, keep_s: 
         if (e.kind != .directory) continue;
         const st = d.statFile(io, e.name, .{}) catch continue;
         const mtime: i64 = @intCast(@divFloor(st.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime >= keep_s) try old.append(gpa, try gpa.dupe(u8, e.name));
+        if (now - mtime >= keep_s or isEmpty(io, d, e.name)) try old.append(gpa, try gpa.dupe(u8, e.name));
     }
     var n: u32 = 0;
     for (old.items) |name| {
@@ -146,6 +155,13 @@ pub fn sweep(io: Io, gpa: std.mem.Allocator, dir: []const u8, now: i64, keep_s: 
         n += 1;
     }
     return n;
+}
+
+fn isEmpty(io: Io, parent: Io.Dir, name: []const u8) bool {
+    var sub = parent.openDir(io, name, .{ .iterate = true }) catch return false;
+    defer sub.close(io);
+    var it = sub.iterate();
+    return (it.next(io) catch return false) == null;
 }
 
 test "sweep removes job directories past the retention, keeps fresh ones and plain files" {
@@ -255,4 +271,34 @@ test "a job owns a deep copy of its request" {
     try std.testing.expectEqualStrings("hello", say.speech.input);
     try std.testing.expectEqualStrings("en", hear.transcription.language);
     try std.testing.expectEqualStrings("Zig", hear.transcription.prompt);
+}
+
+test "a job that wrote nothing leaves no directory; one with files keeps it; sweep drops empty ones of any age" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    var table: Table = .{ .gpa = gpa };
+    defer table.deinit();
+    const req: Request = .{ .chat = .{ .body = "{}" } };
+    // refused before the tool ran: nothing in it
+    const refused = try table.create(io, root, 0, req, "", 0);
+    _ = try Io.Dir.cwd().statFile(io, refused.dir, .{});
+    refused.dropIfEmpty(io);
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(io, refused.dir, .{}));
+    refused.dropIfEmpty(io); // already gone: no error
+    // failed after an input was saved in it: kept for `expire`
+    const with_input = try table.create(io, root, 0, req, "", 0);
+    var d = try Io.Dir.cwd().openDir(io, with_input.dir, .{});
+    try d.writeFile(io, .{ .sub_path = "ref0.png", .data = "png" });
+    d.close(io);
+    with_input.dropIfEmpty(io);
+    _ = try Io.Dir.cwd().statFile(io, with_input.dir, .{});
+    // at start, an empty directory a minute old goes; the fresh one with a file stays
+    try tmp.dir.createDirPath(io, "chat_from_before");
+    try std.testing.expectEqual(@as(u32, 1), try sweep(io, gpa, root, std.math.maxInt(i32), std.math.maxInt(u32)));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "chat_from_before", .{}));
+    _ = try Io.Dir.cwd().statFile(io, with_input.dir, .{});
 }
