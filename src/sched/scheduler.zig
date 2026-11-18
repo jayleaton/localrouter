@@ -413,6 +413,14 @@ pub const Scheduler = struct {
         return s.keptBytes(i);
     }
 
+    /// Under `gate`: what the budget has left: the ceiling less every tool's resident and admitted (pending) bytes,
+    /// as `budget().ceiling_bytes - booked_bytes`. This, not the host's MemAvailable, is what a request is weighed against.
+    fn budgetFree(s: *const Scheduler) u64 {
+        var booked: u64 = 0;
+        for (s.slots) |slot| booked +|= slot.resident +| slot.pending;
+        return s.ceiling() -| booked;
+    }
+
     pub fn budget(s: *Scheduler) Budget {
         s.gate.lockUncancelable(s.io);
         defer s.gate.unlock(s.io);
@@ -1294,14 +1302,8 @@ pub const Scheduler = struct {
             const v = victim orelse return false;
             if (keepOf(v, in_call) != .no) s.displace(v, target); // it comes back after this job
             // the journal says what evicted what: on a box that keeps models warm an unload is never silent
-            std.log.info("evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB available of which {d} MiB is the reserve", .{
-                v.tool.config().id,
-                v.tool.config().priority,
-                s.slots[target].tool.config().id,
-                extra >> 20,
-                (memory.available() orelse 0) >> 20,
-                s.cfg.reserve_bytes >> 20,
-            });
+            var line: [256]u8 = undefined;
+            std.log.info("{s}", .{evictionLine(&line, v.tool.config().id, v.tool.config().priority, s.slots[target].tool.config().id, extra, s.budgetFree(), memory.available(), s.cfg.reserve_bytes)});
             s.evictNow(v);
         }
         return true;
@@ -1848,6 +1850,40 @@ const FakeCalls = struct {
         return c.n.load(.acquire);
     }
 };
+
+/// The journal line for an eviction. "free in the budget" is the router's budget less what is booked (`budgetFree`); the
+/// host's MemAvailable and the reserve follow it, since they can differ a lot on a unified-memory machine (2026-11: the
+/// line printed the host's free memory as "available", which read as the budget's and misled a review of an eviction).
+pub fn evictionLine(buf: []u8, victim: []const u8, priority: i32, for_id: []const u8, needs: u64, budget_free: u64, host_available: ?u64, reserve: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB free in the budget (host {d} MiB available, {d} MiB reserve)", .{
+        victim, priority, for_id, needs >> 20, budget_free >> 20, (host_available orelse 0) >> 20, reserve >> 20,
+    }) catch buf[0..0];
+}
+
+test "the eviction line reports the budget's free bytes, not the host's" {
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "img", .kind = .image, .priority = 10 }, .bytes = 60 << 20 },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100 }, .bytes = 30 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    try t.expectEqual(@as(u64, 100 << 20), b.s.budgetFree());
+    b.slots[0].resident = 60 << 20;
+    b.slots[1].pending = 10 << 20;
+    // 100 MiB budget less 60 resident and 10 admitted
+    try t.expectEqual(@as(u64, 30 << 20), b.s.budgetFree());
+    const bud = b.s.budget();
+    try t.expectEqual(bud.ceiling_bytes - bud.booked_bytes, b.s.budgetFree());
+    var buf: [256]u8 = undefined;
+    const line = evictionLine(&buf, "img", 10, "chat", 40 << 20, b.s.budgetFree(), 90_000 << 20, 2 << 30);
+    try t.expectEqualStrings("evicting img (priority 10) for chat: it needs 40 MiB more, 30 MiB free in the budget (host 90000 MiB available, 2048 MiB reserve)", line);
+    // Over budget (a worker reported more than it was booked at): 0 free, never a wrapped number.
+    b.slots[0].resident = 120 << 20;
+    try t.expectEqual(@as(u64, 0), b.s.budgetFree());
+    try t.expect(std.mem.indexOf(u8, evictionLine(&buf, "img", 10, "chat", 1, b.s.budgetFree(), null, 0), " 0 MiB free in the budget") != null);
+}
 
 /// A scheduler over `fakes`, with a budget of `budget_mib` and no reserve (the machine's own memory never decides).
 pub const Bench = struct {
