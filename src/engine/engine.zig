@@ -562,6 +562,113 @@ pub fn find(name: []const u8) ?*const Entry {
 }
 
 /// A u64 option from the tool's `options` object, else `default`.
+/// One mode's request fields, when they differ from the tool's (`RequestInfo.modes`).
+pub const ModeFields = struct { mode: []const u8, fields: []const []const u8 };
+
+/// What a `cmd` image or video tool reads from a request, from its `bindings` (and each mode's), named as the API
+/// takes them. A field outside the list is refused, not ignored (tools/comfyui/worker.py), so a client can drop it
+/// first: an agent that sent `negative_prompt` to a model without one lost a render to the 400.
+pub const RequestInfo = struct {
+    fields: []const []const u8,
+    modes: []const ModeFields = &.{},
+    max_references: ?u32 = null, // an edit takes at most this many input images
+};
+
+/// Binding key -> the API field it reads. width and height are both `size`; frames is `seconds`.
+const binding_fields = [_][2][]const u8{
+    .{ "prompt", "prompt" },    .{ "negative_prompt", "negative_prompt" }, .{ "width", "size" },
+    .{ "seed", "seed" },        .{ "steps", "steps" },                     .{ "guidance", "guidance" },
+    .{ "frames", "seconds" },   .{ "fps", "fps" },                         .{ "audio", "audio" },
+    .{ "references", "image" }, .{ "first_frame", "input_reference" },     .{ "mask", "mask" },
+};
+
+/// `requestInfo` for a tool with `options.bindings`; null for any other (a built-in engine checks its own fields).
+pub fn requestInfo(a: std.mem.Allocator, cfg: *const ToolConfig) !?RequestInfo {
+    if (cfg.kind != .image and cfg.kind != .video) return null;
+    const opts = cfg.options orelse return null;
+    if (opts != .object) return null;
+    const base = opts.object.get("bindings") orelse return null;
+    if (base != .object) return null;
+    const fields = try fieldsOf(a, base.object, null);
+    var modes: std.ArrayList(ModeFields) = .empty;
+    var max_refs: ?u32 = refCount(base.object.get("references"));
+    if (opts.object.get("modes")) |m| if (m == .object) {
+        var it = m.object.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.* != .object) continue;
+            const over = e.value_ptr.object.get("bindings");
+            const ob = if (over) |o| (if (o == .object) o.object else null) else null;
+            const mf = try fieldsOf(a, base.object, ob);
+            if (ob) |o| if (refCount(o.get("references"))) |n| {
+                max_refs = n;
+            };
+            if (!sameFields(mf, fields)) try modes.append(a, .{ .mode = e.key_ptr.*, .fields = mf });
+        }
+    };
+    return .{ .fields = fields, .modes = modes.items, .max_references = max_refs };
+}
+
+fn bound(base: std.json.ObjectMap, over: ?std.json.ObjectMap, key: []const u8) bool {
+    if (over) |o| if (o.get(key)) |v| return v != .null; // a mode's JSON null drops the binding
+    return base.get(key) != null;
+}
+
+fn fieldsOf(a: std.mem.Allocator, base: std.json.ObjectMap, over: ?std.json.ObjectMap) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (binding_fields) |bf| if (bound(base, over, bf[0])) try out.append(a, bf[1]);
+    return out.items;
+}
+
+fn refCount(v: ?std.json.Value) ?u32 {
+    const r = v orelse return null;
+    return switch (r) {
+        .array => |arr| @intCast(arr.items.len),
+        .string => 1,
+        else => null,
+    };
+}
+
+fn sameFields(x: []const []const u8, y: []const []const u8) bool {
+    if (x.len != y.len) return false;
+    for (x, y) |p, q| if (!std.mem.eql(u8, p, q)) return false;
+    return true;
+}
+
+test "request fields come from a cmd tool's bindings, per mode, named as the API takes them" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const json =
+        \\{"bindings": {"prompt": "4.prompt", "width": "4.width", "height": "4.height", "seed": "6.seed", "steps": "6.steps"},
+        \\ "modes": {"image_edit": {"bindings": {"references": ["11.image", "4.images.image_2"], "mask": "14.mask"}},
+        \\           "plain": {"bindings": {}},
+        \\           "fixed": {"bindings": {"width": null, "height": null}}}}
+    ;
+    const opts = try std.json.parseFromSliceLeaky(std.json.Value, aa, json, .{});
+    const cfg: ToolConfig = .{ .id = "img", .kind = .image, .options = opts };
+    const info = (try requestInfo(aa, &cfg)).?;
+    const want = [_][]const u8{ "prompt", "size", "seed", "steps" };
+    try std.testing.expectEqual(want.len, info.fields.len);
+    for (want, info.fields) |w, f| try std.testing.expectEqualStrings(w, f);
+    for (info.fields) |f| try std.testing.expect(!std.mem.eql(u8, f, "negative_prompt")); // not bound: refused
+    try std.testing.expectEqual(@as(usize, 2), info.modes.len); // "plain" is the same as the tool's
+    for (info.modes) |m| {
+        if (std.mem.eql(u8, m.mode, "image_edit")) {
+            try std.testing.expectEqualStrings("image", m.fields[m.fields.len - 2]);
+            try std.testing.expectEqualStrings("mask", m.fields[m.fields.len - 1]);
+        } else {
+            try std.testing.expectEqualStrings("fixed", m.mode);
+            for (m.fields) |f| try std.testing.expect(!std.mem.eql(u8, f, "size"));
+        }
+    }
+    try std.testing.expectEqual(@as(?u32, 2), info.max_references);
+    const chat: ToolConfig = .{ .id = "c", .kind = .chat, .options = opts };
+    try std.testing.expect((try requestInfo(aa, &chat)) == null);
+    const engine_tool: ToolConfig = .{ .id = "e", .kind = .image };
+    try std.testing.expect((try requestInfo(aa, &engine_tool)) == null);
+}
+
 pub fn optionInt(cfg: *const ToolConfig, key: []const u8, default: u64) u64 {
     const opts = cfg.options orelse return default;
     if (opts != .object) return default;

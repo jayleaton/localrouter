@@ -572,6 +572,17 @@ and `max_pixels` when it has a pixel cap). A ComfyUI tool's `size_multiple`, `mi
 
 ## Licences
 
+`GET /v1/models` also lists `request` for a `cmd` image or video tool with `options.bindings`: `fields` names the
+request fields the workflow reads (`prompt`, `size`, `seed`, `steps`, `guidance`, `negative_prompt`, `seconds`, `fps`,
+`audio`, `image`, `input_reference`, `mask`, only those it binds). `modes` lists the fields for modes that differ from
+the base (`image_edit`, `image_to_video`); a JSON null in a mode's bindings removes the field. `max_references` is
+how many reference images an edit takes. For example H3-Image lists `prompt,size,seed,steps,guidance`, with
+`image,mask` added for `image_edit` and `max_references:5`: no `negative_prompt`, so do not send one (the worker
+refuses it, rather than ignores it). The list is the workflow's fields, not the common transport fields (`model`,
+`response_format`, `n`, `size_snap`). Unknown for built-in engines or a tool without bindings, so absent then.
+`size` (image/video only, as on `GET /v1/tools`) gives the accepted width/height grid. Neither exposes workflow paths,
+node ids, or any option values.
+
 Each model's weights keep their publisher's licence. `GET /v1/models` lists it per model as `license`, and
 `GET /v1/capabilities` lists them all (`models.licenses`); an operator sets one per tool in the config (`license`,
 the same shape), and the compiled-in image and video engines state their own when the config does not. LocalRouter
