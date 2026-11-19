@@ -114,16 +114,17 @@ pub fn scratchBytes(l: Limits) !u64 {
     return total;
 }
 
-/// The device bytes a request takes beyond `scratchBytes` while it runs: the video VAE's decode and, with a first frame,
-/// the video encoder, the vision encoder, the frame's latent and its condition (which stays until the next first frame).
+/// The memory a request takes beyond `scratchBytes` at its largest phase, freed by the time it returns: encoding a
+/// first frame (its pixels on the device, the video and vision encoders, its latent), sampling with its condition, and
+/// decoding (the video VAE's scratch with the latents on the host in fp32 and fp16, as `generateImage` holds them).
 pub fn requestBytes(width: u32, height: u32, frames: u32, first_frame: bool) !u64 {
     const sh = try shapes(width, height, frames);
-    var total = vae_video.decodeBytes(sh.latent_t, sh.lh, sh.lw);
-    if (first_frame) {
-        const at_encode = vae_enc.Encoder.deviceBytes(height, width) + vision.VisionEncoder.deviceBytes(sh.lh * sh.lw) + 3 * @as(u64, width) * height * 4;
-        total = @max(total, at_encode) + 24 * @as(u64, sh.lh) * sh.lw * 4 + dit_mod.Dit.conditionBytes(sh.lh, sh.lw);
-    }
-    return total;
+    const decoding = vae_video.decodeBytes(sh.latent_t, sh.lh, sh.lw) + sh.n_video * (4 + 2);
+    if (!first_frame) return decoding;
+    const latent: u64 = 24 * @as(u64, sh.lh) * sh.lw * 4;
+    const encoding = vae_enc.Encoder.deviceBytes(height, width) + vision.VisionEncoder.deviceBytes(sh.lh * sh.lw) + 3 * @as(u64, width) * height * 4 + latent;
+    const sampling = latent + dit_mod.Dit.conditionBytes(sh.lh, sh.lw);
+    return @max(decoding, encoding, sampling);
 }
 
 pub const Options = struct {
@@ -495,7 +496,11 @@ pub const Pipeline = struct {
         const text = try p.bufs[5].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.dit.prepare(text, l);
-        if (first_latent) |b| try p.dit.firstFrame(try b.at(0), sh.lh, sh.lw, seed, it.?.tags);
+        if (first_latent) |*b| { // the latent is read only here: freed before sampling
+            try p.dit.firstFrame(try b.at(0), sh.lh, sh.lw, seed, it.?.tags);
+            b.free();
+            first_latent = null;
+        }
         try p.post("text_encoder", &.{
             .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
             .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
@@ -560,6 +565,7 @@ pub const Pipeline = struct {
                 pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
             }
         }
+        p.dit.releaseCondition(); // the steps are done with the first frame's condition
         try p.hops.scale32(p.s, xa, audio_scale_out, sh.n_audio); // process_latent_out
         try p.pre("latents", &.{});
         try p.post("latents", &.{ .{ .role = "video", .ptr = x, .bytes = nv * 4 }, .{ .role = "audio", .ptr = xa, .bytes = sh.n_audio * 4 } });

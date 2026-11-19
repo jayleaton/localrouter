@@ -170,12 +170,13 @@ fn residentBytes(cfg: *const ToolConfig) u64 {
     return @max(fixedBytes() +| scratch, engine.optionInt(cfg, "resident_mb", 0) <<| 20);
 }
 
-/// A request's memory besides `residentBytes`: the frames and the waveform on the host, ffmpeg's buffers and the
-/// pipeline's per-request device scratch.
+/// A request's memory besides `residentBytes`: for the whole job the frames and the waveform (and its interleaved copy)
+/// on the host, a first frame's pixels and ffmpeg's buffers; with them the pipeline's largest phase (`P.requestBytes`).
 fn workingBytes(v: @import("../tool/request.zig").Video) u64 {
     const sh = P.shapes(v.width, v.height, v.seconds * fps) catch return 0;
-    const device = P.requestBytes(v.width, v.height, v.seconds * fps, v.first_frame != null) catch return 0;
-    return sh.frame_bytes + sh.audioFloats() * 4 * 2 + (64 << 20) + device;
+    const phase = P.requestBytes(v.width, v.height, v.seconds * fps, v.first_frame != null) catch return 0;
+    const pixels: u64 = if (v.first_frame != null) 3 * @as(u64, v.width) * v.height * 4 else 0;
+    return sh.frame_bytes + sh.audioFloats() * 4 * 2 + pixels + (64 << 20) + phase;
 }
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
@@ -556,6 +557,21 @@ test "the booking follows the configured buffers; limits past the API or the mem
         try std.testing.expect(!validate(cfg, 0, &why));
     }
     try std.testing.expectEqualStrings("tool 'long': options.max_seconds is 9999999999999; it takes 1 to 20", why.buffered());
+}
+
+test "a request books its largest phase on top of its host buffers: the decode with the latents on the host, or a first frame's encode or condition" {
+    const sh = try P.shapes(2048, 2048, 5 * fps);
+    const decode = h3.vae_video.decodeBytes(sh.latent_t, sh.lh, sh.lw) + sh.n_video * (4 + 2); // the fp32 and fp16 latents on the host
+    const host = sh.frame_bytes + sh.audioFloats() * 4 * 2 + (64 << 20);
+    try std.testing.expect(workingBytes(.{ .prompt = "", .width = 2048, .height = 2048, .seconds = 5 }) >= host + decode);
+    const s2 = try P.shapes(768, 1344, 6 * fps);
+    const pixels: u64 = 3 * 768 * 1344 * 4;
+    const latent: u64 = 24 * @as(u64, s2.lh) * s2.lw * 4;
+    const host2 = s2.frame_bytes + s2.audioFloats() * 4 * 2 + (64 << 20) + pixels;
+    const i2v = workingBytes(.{ .prompt = "", .width = 768, .height = 1344, .seconds = 6, .first_frame = "" });
+    try std.testing.expect(i2v >= host2 + h3.vae_video.decodeBytes(s2.latent_t, s2.lh, s2.lw) + s2.n_video * (4 + 2));
+    try std.testing.expect(i2v >= host2 + h3.vae_video_enc.Encoder.deviceBytes(1344, 768) + h3.te_vision.VisionEncoder.deviceBytes(s2.lh * s2.lw) + pixels + latent);
+    try std.testing.expect(i2v >= host2 + latent + h3.dit.Dit.conditionBytes(s2.lh, s2.lw));
 }
 
 test "the default size is within the API's longest side, as checked sizes are" {

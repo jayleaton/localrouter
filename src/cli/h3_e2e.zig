@@ -96,7 +96,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const frames_equal_warm = std.mem.eql(u8, &sha(px), &frames_sha) and std.mem.eql(u8, &sha(std.mem.sliceAsBytes(wav)), &wav_sha);
 
     const tw = if (cap.note("twin_ms")) |n| n.object else null;
-    const pass = ids_equal and light_ok and frames_equal and wav_equal and frames_equal_warm;
+    const condition_resident = p.dit.conditionResident(); // a first frame's condition is freed with its request
+    const pass = ids_equal and light_ok and frames_equal and wav_equal and frames_equal_warm and condition_resident == 0;
     var out: std.Io.Writer.Allocating = .init(a);
     try out.writer.print("{{\"h3_e2e\": {{\"gpu\": \"sm_{d}{d}\", \"size\": \"{d}x{d}\", \"frames\": {d}, \"steps\": {d}, \"tokens\": {d}, " ++
         "\"load_ms\": {d}, \"weights_bytes\": {d}, \"gpu_used_mib\": {d}, \"ids_equal\": {}, " ++
@@ -109,12 +110,12 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     try out.writer.print("]}}, \"frames_equal\": {}, \"waveform_equal\": {}, \"equal_warm\": {}, \"frames_sha256\": \"{s}\", " ++
         "\"first_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
         "\"warm_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, " ++
-        "\"twin_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, \"pass\": {}}}}}\n", .{
+        "\"twin_ms\": {{\"encode\": {d:.1}, \"sample\": {d:.1}, \"audio\": {d:.1}, \"video\": {d:.1}}}, \"condition_resident\": {d}, \"pass\": {}}}}}\n", .{
         frames_equal,                                 wav_equal,                                    frames_equal_warm,                           &frames_sha,
         first.encode,                                 first.sample,                                 first.audio,                                 first.video,
         warm.encode,                                  warm.sample,                                  warm.audio,                                  warm.video,
         float(if (tw) |t| t.get("encode") else null), float(if (tw) |t| t.get("sample") else null), float(if (tw) |t| t.get("audio") else null), float(if (tw) |t| t.get("video") else null),
-        pass,
+        condition_resident,                           pass,
     });
     try std.Io.File.stdout().writeStreamingAll(io, out.written());
     return if (pass) 0 else 1;

@@ -280,7 +280,32 @@ pub const Dit = struct {
         return sumBuffers(scratch(max_s, max_l, max_a));
     }
 
-    /// A first frame's condition rows and their embedding (`firstFrame`), for an `h` x `w` latent: kept until the next one.
+    /// Frees a first frame's condition (`firstFrame`) once the steps that read it are done, so no request's
+    /// condition outlives it. The stream is synchronized first.
+    pub fn releaseCondition(x: *Dit) void {
+        if (x.cond_bufs[0] == null and x.cond_bufs[1] == null) return;
+        x.s.synchronize() catch {};
+        for (&x.cond_bufs) |*slot| if (slot.*) |*b| {
+            b.free();
+            slot.* = null;
+        };
+        x.cond_rows = 0;
+        x.cond_emb = 0;
+        x.cond_hw = null;
+        x.layout_key = null;
+    }
+
+    /// The device bytes a first frame's condition holds now (0 between requests).
+    pub fn conditionResident(x: *const Dit) u64 {
+        var total: u64 = 0;
+        for (x.cond_bufs) |slot| if (slot) |b| {
+            total += b.len;
+        };
+        return total;
+    }
+
+    /// A first frame's condition rows and their embedding (`firstFrame`), for an `h` x `w` latent, with the noise drawn
+    /// for them: held while the steps run (`releaseCondition`).
     pub fn conditionBytes(h: u32, w: u32) u64 {
         const rows: u64 = @as(u64, h / 2) * (w / 2);
         return 2 * rows * 96 * 4 + rows * dim * 4;
@@ -418,6 +443,7 @@ pub const Dit = struct {
         const rows: u64 = @as(u64, h / 2) * (w / 2);
         if (rows + x.ctx_rows > x.max_s) return error.VideoTooLong;
         const n = rows * 96;
+        x.releaseCondition(); // the previous request's, before this one's is allocated
         const owned = try x.gpa.dupe(u8, tags);
         errdefer x.gpa.free(owned);
         var cb = try cuda.DeviceBuffer.alloc(x.d, @intCast(n * 4));
@@ -447,7 +473,6 @@ pub const Dit = struct {
         x.text_tags = owned;
         x.cond_rows = cr;
         x.cond_emb = ce;
-        for (&x.cond_bufs) |*slot| if (slot.*) |*b| b.free();
         x.cond_bufs = .{ cb, eb };
         x.cond_hw = .{ h, w };
         x.layout_key = null;
