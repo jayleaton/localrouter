@@ -56,6 +56,22 @@ On a 16 GB card the worker keeps one of the three large modules on the GPU at a 
 Measured (RTX 5070 Ti, 704x1280, 5 s): 10.7 GiB peak GPU allocation, 21.6 GiB host memory resident, 26.5 GiB peak, about
 25 s a step and 190 s for the VAE decode. `resident_bytes` and `working_bytes` in the example book 22 + 5 GiB.
 
+## FP8 storage against the BF16 reference
+
+Storing the transformer in fp8 is a precision change, so `transformer_storage: bf16` is its reference. fp8 is the
+default because, against bf16 at the same seed, both text and image to video keep a mean frame PSNR of at least 20 dB
+and a mean SSIM of at least 0.70, and image to video keeps its first frame at 30 dB or more. Measured on the RTX 5070
+Ti (704x1280, 2 s, seed 7, 50 steps, guidance 5, the decoded H.264 frames, SSIM on BT.601 luma with an 11x11 Gaussian):
+
+| | PSNR mean / min / first frame | SSIM mean / min / first frame |
+| --- | --- | --- |
+| Text to video | 22.17 / 20.50 / 22.77 dB | 0.904 / 0.884 / 0.925 |
+| Image to video | 28.57 / 23.75 / 48.03 dB | 0.945 / 0.911 / 0.993 |
+
+The scene and composition match; text to video differs in pose, image to video drifts slowly over the clip. fp8 is not
+faster (5.0 s a step against 4.9 s for these 2 s clips) but holds 1.9 GB less of the card and 5 to 7 GiB less host memory:
+bf16 peaked at 15.8 of the card's 16.3 GB and at 29.3 GiB of the 30 GiB WSL host.
+
 ## Options
 
 `steps` (50), `guidance` (5.0), `negative_prompt`, `transformer_storage` (`fp8` or `bf16`; bf16 needs about 16 GB of free
