@@ -209,7 +209,9 @@ Not ours, and not listed above:
   `install.sh`. At import, on a ROCm build of PyTorch only, it replaces `comfy.ops.disable_weight_init.Conv3d._conv_forward`
   (a monkey-patch; every ComfyUI Conv3d op class derives from it). For GPU tensors and a convolution whose kernel equals
   its stride with no padding, unit dilation and one group, it computes the result as `F.linear` over the input's
-  blocks; everything else, including `autopad`, goes to the original. `LOCALROUTER_CONV3D_PATCHIFY=0` turns it off.
+  blocks; everything else, including `autopad`, goes to the original. Opt-in: only with `LOCALROUTER_CONV3D_PATCHIFY=rocm`
+  in the tool's `env` (unset or `0`, the default, leaves ComfyUI as it is), since the sums run in a different order and
+  most fp32 values differ from `conv3d`'s in their last bits (`allclose` holds) with no accepted GPU baseline yet.
 - **What and why:** image to video with MiniMax H3 encodes the first frame with the Qwen3.5 vision tower, whose
   `Qwen35VisionPatchEmbed` is such a Conv3d (kernel and stride 2x16x16, fp32, thousands of patches as the batch). On
   the Strix Halo box (gfx1151, PyTorch 2.14.1+rocm7.2) that convolution kills ComfyUI with SIGSEGV, no Python exception,
@@ -226,4 +228,3 @@ Not ours, and not listed above:
   adding this path to `Conv3d._conv_forward` beside the NVIDIA workaround, on ROCm only, with the equivalence test.
 - **Next:** drop the node when the PyTorch ROCm pin is fixed or the ComfyUI pin carries the path; until then
   `test_conv3d_patchify.py` guards it.
-

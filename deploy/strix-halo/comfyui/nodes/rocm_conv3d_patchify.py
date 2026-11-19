@@ -5,9 +5,11 @@
 # blocks of its input, one block per output position, so it is exactly the product of each flattened block with the
 # flattened weight: this computes those convolutions as that product (F.linear) and leaves every other one to PyTorch.
 # The results equal PyTorch's up to the order of the sums (test_conv3d_patchify.py).
-# At import it replaces comfy.ops' Conv3d._conv_forward (the classes every ComfyUI model's Conv3d derives from), only on a
-# ROCm build of PyTorch and only for tensors on the GPU; it modifies no files. LOCALROUTER_CONV3D_PATCHIFY=0 leaves
-# ComfyUI as it is; =1 takes the product on any build and device (the tests). docs/dev/UPSTREAM.md, entry 14.
+# The sums run in a different order, so most fp32 results differ from PyTorch's in their last bits (allclose holds); no
+# GPU baseline has been accepted for that yet, so it is opt-in. LOCALROUTER_CONV3D_PATCHIFY=rocm: at import it replaces
+# comfy.ops' Conv3d._conv_forward (the classes every ComfyUI model's Conv3d derives from), only on a ROCm build of PyTorch
+# and only for tensors on the GPU; it modifies no files. Unset or 0 (the default) leaves ComfyUI as it is; =1 takes the
+# product on any build and device (the tests). docs/dev/UPSTREAM.md, entry 14.
 import logging
 import os
 
@@ -50,12 +52,15 @@ def patchify(input, weight, bias, stride, padding, dilation, groups, padding_mod
 
 def install(cls=None, every=None):
     """Replaces cls._conv_forward (comfy.ops.disable_weight_init.Conv3d by default). True when it is replaced (now or
-    before). Without `every`, only on a ROCm build, for GPU tensors; LOCALROUTER_CONV3D_PATCHIFY decides first."""
+    before). Opt-in: without `every`, only when LOCALROUTER_CONV3D_PATCHIFY is `rocm` (a ROCm build, GPU tensors) or `1`
+    (any build and device); `0` refuses even an explicit `every`."""
     import torch
     mode = os.environ.get("LOCALROUTER_CONV3D_PATCHIFY", "")
     if mode == "0":
         return False
     if every is None:
+        if mode not in ("rocm", "1"):
+            return False  # off by default: the product is not bit-identical to PyTorch's conv3d
         every = mode == "1"
     if not every and not torch.version.hip:
         return False

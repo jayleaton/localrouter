@@ -82,7 +82,13 @@ class Conv3d(torch.nn.Conv3d):
         return super()._conv_forward(input, weight, bias, *args, **kwargs)
 
 
-check("not installed on a build without ROCm, unless asked", torch.version.hip or not m.install(Conv3d))
+check("off by default: not installed without LOCALROUTER_CONV3D_PATCHIFY, on any build", not m.install(Conv3d))
+os.environ["LOCALROUTER_CONV3D_PATCHIFY"] = "rocm"
+check("LOCALROUTER_CONV3D_PATCHIFY=rocm: not installed on a build without ROCm", torch.version.hip or not m.install(Conv3d))
+os.environ["LOCALROUTER_CONV3D_PATCHIFY"] = "yes"
+check("an unknown LOCALROUTER_CONV3D_PATCHIFY value: not installed", not m.install(Conv3d))
+del os.environ["LOCALROUTER_CONV3D_PATCHIFY"]
+check("still the class's own after the refusals", not getattr(Conv3d._conv_forward, m.MARK, False))
 os.environ["LOCALROUTER_CONV3D_PATCHIFY"] = "0"
 check("LOCALROUTER_CONV3D_PATCHIFY=0: not installed", not m.install(Conv3d, every=True))
 del os.environ["LOCALROUTER_CONV3D_PATCHIFY"]

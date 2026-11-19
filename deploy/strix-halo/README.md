@@ -64,10 +64,12 @@ without sudo and idempotently, ComfyUI and ComfyUI-GGUF at pinned commits under 
 3.13 venv with PyTorch 2.14.1+rocm7.2 from `comfyui/requirements-rocm7.2.txt` (every package by sha256, installed with
 `--require-hashes`), `comfyui/nodes/minimax_h3_image_gguf.py` (loads the Unsloth GGUF with the PDD config ComfyUI's
 detection needs), `comfyui/nodes/rocm_conv3d_patchify.py` (PyTorch ROCm's 3-D convolution segfaults ComfyUI on image to
-video, in the vision tower's patch embedding; on ROCm only, a Conv3d whose kernel equals its stride, with no padding, unit
-dilation and one group, runs as the matrix product it is instead: equal to PyTorch's up to the order of the sums, checked
-by `comfyui/test_conv3d_patchify.py`; `LOCALROUTER_CONV3D_PATCHIFY=0` in the tool's `env` turns it off; it replaces any
-hand patch of `comfy/ops.py`, which also stops `install.sh` moving the checkout; docs/dev/UPSTREAM.md, entries 13 and 14), and the weights at pinned revisions (`pins/minimax-*.json`: every file's size and sha256, checked in
+video, in the vision tower's patch embedding; with `"LOCALROUTER_CONV3D_PATCHIFY": "rocm"` in the `minimax-h3` tool's
+`env`, on ROCm only, a Conv3d whose kernel equals its stride, with no padding, unit dilation and one group, runs as the
+matrix product it is instead: equal to PyTorch's up to the order of the sums, checked by `comfyui/test_conv3d_patchify.py`.
+It is opt-in and off by default: most fp32 values differ from PyTorch's in their last bits, and no GPU baseline has been
+accepted yet, so without it image to video crashes ComfyUI on gfx1151 and the operator decides; it replaces any hand patch
+of `comfy/ops.py`, which also stops `install.sh` moving the checkout; docs/dev/UPSTREAM.md, entries 13 and 14), and the weights at pinned revisions (`pins/minimax-*.json`: every file's size and sha256, checked in
 full before a manifest is marked done), linked into `ComfyUI/models`. A step whose pins match is skipped; a checkout
 with local changes is left alone. Edits auto-select by whether a mask is supplied (a request may still set size, steps or guidance). A masked or local
 edit uses `comfyui/minimax-h3-image-edit.json`: Q4_K_M, the first input image scaled to about 1 MP on the 32-pixel grid
