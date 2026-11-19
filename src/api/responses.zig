@@ -881,7 +881,7 @@ pub fn create(app: *App, req: *h.Request, a: Allocator, owner: []const u8) !void
     const id = try ids.make("resp");
     if (t.asked.stream) return stream(app, req, a, j, ids, id, &t.asked, plan);
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const completion = chat.readCompletion(app, a, j, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     var r = fromCompletion(a, ids, id, j.created_at, &t.asked, completion) catch |err| switch (err) {
         error.Refused => return h.fail(req, a, 502, "server_error", "the model's server sent a reply that is not a chat completion"),
@@ -915,7 +915,7 @@ fn stream(app: *App, req: *h.Request, a: Allocator, j: *jobs.Job, ids: Ids, id: 
         Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
     }
     if (fd < 0) {
-        if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+        if (j.status != .completed) return h.failJob(req, a, j);
         return h.fail(req, a, 500, "server_error", "the model's server sent no event stream");
     }
     var send: [16 * 1024]u8 = undefined;

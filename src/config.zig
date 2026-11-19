@@ -183,6 +183,13 @@ pub const Config = struct {
     machine: []const u8 = "",
     budget_bytes: u64 = 0, // cap on loaded + working bytes; 0: only MemAvailable - reserve
     reserve_bytes: u64 = 8 * gib, // kept free for the OS and co-resident services
+    // Seconds a client should wait before retrying a request refused because a non-evictable job holds the memory
+    // (`Retry-After` and `error.retry_after`). 0 means 30. A blocker whose last load took longer raises the hint.
+    retry_after_s: u32 = 30,
+    // Per-tool logs (`<data_dir>/logs/<id>.log`) rotate once a file reaches this many bytes (the next append starts
+    // a new file and keeps `log_keep` older ones, `<id>.log.1` ..). 0: do not rotate. The computer audit log is separate.
+    log_max_bytes: u64 = 8 << 20,
+    log_keep: u32 = 3,
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
@@ -294,6 +301,17 @@ fn chatDefaults(arena: std.mem.Allocator, text: []const u8, c: *Config) !void {
         if (v.object.get("keep_loaded") == null and v.object.get("residency") == null) t.keep_loaded = true;
     }
     c.tools = tools;
+}
+
+test "tool logs rotate at log_max_bytes and keep log_keep files; the defaults are 8 MiB and 3" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const d = try parse(arena.allocator(), "{}");
+    try std.testing.expectEqual(@as(u64, 8 << 20), d.log_max_bytes);
+    try std.testing.expectEqual(@as(u32, 3), d.log_keep);
+    const set = try parse(arena.allocator(), "{\"log_max_bytes\": 1000, \"log_keep\": 2}");
+    try std.testing.expectEqual(@as(u64, 1000), set.log_max_bytes);
+    try std.testing.expectEqual(@as(u32, 2), set.log_keep);
 }
 
 test "transcriptions run in the caller's language, else stt.language; auto detects" {

@@ -33,7 +33,10 @@ document says which of it a harness may rely on.
 - **Refuse, never approximate.** A field or value the daemon cannot honour is a 400 (an `error` event on the
   WebSocket, a tool error over MCP) naming it, before any model loads. Nothing is silently dropped or rounded. The one
   exception is Chat Completions, whose body goes to the model's own server: a field that server does not know may be
-  ignored there rather than refused (see [Chat](#chat-completions)).
+  ignored there rather than refused (see [Chat](#chat-completions)). Image and video `size_snap: true` is the other:
+  the caller asked for the nearest size the model accepts, and the response names the size used. Without it, an
+  off-grid size is still refused, and the error names that model's grid (a 32-pixel tool does not say "multiples of 16").
+  A `cmd` tool that declares a size grid is refused before its worker loads.
 - **The service never executes the harness's tools.** Function calls a model makes for the caller's tools come back to
   the caller. The one exception is a realtime session left in its default `server` tool mode, where the box's
   built-ins (generation and computer tools) run on the box; a harness sets `client` mode and owns every tool.
@@ -62,7 +65,7 @@ curl -s http://<host>:8190/v1/capabilities | jq '{contract, chat: .chat.availabl
 | `mcp` | `path`, `transport` (`streamable_http`), `stateless`, `protocol_versions`, `stdio_bridge`, `tools` (names, in `tools/list` order) |
 | `decisions` | `available`, `path`, `shape` (`system_one`), `mcp_tool` |
 | `media` | the media and job routes (`voices`: `/v1/voices`, every voice and cloning one), `image_edit`, `image_to_video`, `image_to_3d` and `voice_clone` (whether a configured model can do them, after its weights are checked at start), `mcp_tools` |
-| `model_management` | the operator routes and the MCP tools that change what is loaded |
+| `model_management` | the operator routes and the MCP tools that change what is loaded. `GET /v1/status` and `GET /metrics` (scope `read`) are the scheduler snapshot; [AGENTS.md](AGENTS.md#status-and-metrics) |
 | `computer` | `enabled`, the helper and approval routes, and `placement` (`box_policy` today) |
 | `unsupported` | `[{feature, status, note}]`: `status` is `unsupported` or `coming`; `note` says what to use instead |
 

@@ -61,6 +61,7 @@ fn finish(app: *App, a: std.mem.Allocator, j: *jobs.Job, qs: []const systemone.Q
         why.status = j.http_status;
         why.typ = j.error_type;
         why.message = j.error_message;
+        why.retry_after = j.retry_after;
         return null;
     }
     const path = std.fs.path.join(a, &.{ j.dir, "decision.json" }) catch return null;
@@ -126,6 +127,6 @@ pub fn systemOne(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []cons
     const text = h.body(req, a) catch return h.fail(req, a, 413, "invalid_request_error", "body too large");
     const body = std.json.parseFromSliceLeaky(Value, a, text, .{}) catch return h.fail(req, a, 400, "invalid_request_error", "the body is not JSON: send {model, state, questions}");
     var why: Refusal = .{};
-    const r = decide(app, a, body, owner, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
+    const r = decide(app, a, body, owner, &why) orelse return h.failAfter(req, a, why.status, why.typ, why.message, why.retry_after);
     return h.json(req, .ok, r.raw);
 }

@@ -17,7 +17,20 @@ const h3 = @import("minimax_h3");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license };
+pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license, .sizes = sizes };
+
+/// Multiples of 32, from 256 up to `max_width` x `max_height` (the pipeline's buffers). 1280x720 is not on this grid.
+fn sizes(cfg: *const ToolConfig) engine.SizeLimits {
+    const l = limits(cfg);
+    const min: u32 = 256;
+    return .{
+        .min_width = if (l.width >= min) min else l.width,
+        .max_width = l.width,
+        .min_height = if (l.height >= min) min else l.height,
+        .max_height = l.height,
+        .multiple = 32,
+    };
+}
 
 /// The weights' licence, unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{
@@ -285,6 +298,14 @@ test "default_size: a video without a size gets it, within the limits; refusals 
     const big: Request = .{ .video = .{ .prompt = "waves", .width = 1280, .height = 720, .seconds = 8 } };
     try std.testing.expect(!check(c.tool("h3").?, &big, &why));
     try std.testing.expectEqualStrings("model 'h3' takes sizes up to 1280x704, multiples of 32 (omit size for 768x448)", why.buffered());
+    const lim = engine.sizeLimits(c.tool("h3").?).?;
+    try std.testing.expectEqual(@as(u32, 32), lim.multiple);
+    try std.testing.expectEqual(@as(u32, 1280), lim.max_width);
+    try std.testing.expectEqual(@as(u32, 704), lim.max_height);
+    try std.testing.expectEqual([2]u32{ 1280, 704 }, @import("../tool/size.zig").snap(1280, 720, lim));
+    var snapped = big;
+    engine.snapRequest(c.tool("h3").?, &snapped);
+    try std.testing.expect(check(c.tool("h3").?, &snapped, &why));
     var b: Request = .{ .video = .{ .prompt = "waves" } };
     engine.fill(c.tool("bad").?, &b);
     try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ b.video.width, b.video.height }); // past the limits: the largest

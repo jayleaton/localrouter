@@ -38,6 +38,7 @@ test {
     _ = @import("ranks.zig");
     _ = @import("dropin.zig");
     _ = @import("orphans.zig");
+    _ = @import("observe.zig");
 }
 test "images: deterministic, validated, and concurrent requests queue" {
     const io = testing.io;

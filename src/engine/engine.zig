@@ -8,6 +8,12 @@ const Request = request.Request;
 pub const Capability = request.Capability;
 const config = @import("../config.zig");
 const ToolConfig = config.ToolConfig;
+const size_grid = @import("../tool/size.zig");
+
+/// Width and height a tool accepts. `GET /v1/tools` lists it for image and video tools. `multiple` is the grid
+/// (16 for Qwen-Image, 32 for MiniMax H3 and a ComfyUI tool that sets `size_multiple`). `max_pixels` is absent when
+/// the tool has no pixel cap.
+pub const SizeLimits = size_grid.Limits;
 
 pub const Needs = tool.Needs;
 pub const Job = tool.Job;
@@ -68,6 +74,9 @@ pub const Entry = struct {
     defaults: ?*const fn (cfg: *const ToolConfig, req: *Request) void = null,
     /// The licence of the weights this engine runs, for a tool whose config names none. Null: unknown.
     license: ?config.License = null,
+    /// The sizes this engine accepts. Null: `sizesFromOptions` (a `cmd` tool's `size_multiple`, `min_side`, `max_side`,
+    /// `max_width`, `max_height` and `max_pixels`, else the API's 16-pixel grid from 256 to 2048).
+    sizes: ?*const fn (cfg: *const ToolConfig) SizeLimits = null,
 };
 
 /// The tool's licence: its config's, else its engine's; null when neither states one.
@@ -76,18 +85,21 @@ pub fn license(cfg: *const ToolConfig) ?config.License {
     return if (find(cfg.engine)) |e| e.license else null;
 }
 
-/// The size a video request without one gets when its engine has no `defaults`.
+/// The size a video request without one gets when its engine has no `defaults` and its options name none.
 pub const default_video_size = [2]u32{ 1344, 768 };
 
-/// Fills what `req` left to the model, before validation: the engine's `defaults`, then `default_video_size`; for a 3D
+/// Fills what `req` left to the model, before validation: the engine's `defaults`, then the tool's `default_width` and
+/// `default_height` options (both set: a `cmd` video model's own size), else `default_video_size`; for a 3D
 /// asset the tool's declared `default_gaussians` (a splat model), `default_steps` and `default_guidance`, so the job,
 /// its booking and its manifest say what runs.
 pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
     switch (req.*) {
         .video => |*v| if (v.width == 0 and v.height == 0) {
-            v.width = default_video_size[0];
-            v.height = default_video_size[1];
+            const w = std.math.cast(u32, optionInt(cfg, "default_width", 0)) orelse 0;
+            const h = std.math.cast(u32, optionInt(cfg, "default_height", 0)) orelse 0;
+            v.width = if (w > 0 and h > 0) w else default_video_size[0];
+            v.height = if (w > 0 and h > 0) h else default_video_size[1];
         },
         .asset3d => |*v| {
             if (v.num_gaussians == null and gaussianRange(cfg) != null) v.num_gaussians = std.math.cast(u32, optionInt(cfg, "default_gaussians", 0));
@@ -97,6 +109,59 @@ pub fn fill(cfg: *const ToolConfig, req: *Request) void {
             if (v.guidance == null and hasOption(cfg, "default_guidance")) v.guidance = optionFloat(cfg, "default_guidance", 0);
         },
         .image, .speech, .transcription, .chat, .decision => {},
+    }
+}
+
+/// Image and video tools only. The engine's `sizes` when it has one, else the tool's size options.
+pub fn sizeLimits(cfg: *const ToolConfig) ?SizeLimits {
+    switch (cfg.kind) {
+        .image, .video => {},
+        else => return null,
+    }
+    if (find(cfg.engine)) |e| if (e.sizes) |f| return f(cfg);
+    return sizesFromOptions(cfg);
+}
+
+/// A `cmd` tool's size options, and the default grid when an engine does not name its own. `size_multiple` defaults
+/// to 16, which is what `request.validate` already requires.
+pub fn sizesFromOptions(cfg: *const ToolConfig) SizeLimits {
+    const multiple: u32 = @intCast(@max(@min(optionInt(cfg, "size_multiple", 16), std.math.maxInt(u32)), 1));
+    const min_side: u32 = @intCast(@min(optionInt(cfg, "min_side", 256), std.math.maxInt(u32)));
+    const max_side = optionInt(cfg, "max_side", 0);
+    const max_w_raw: u32 = @intCast(@min(optionInt(cfg, "max_width", if (max_side > 0) max_side else 2048), std.math.maxInt(u32)));
+    const max_h_raw: u32 = @intCast(@min(optionInt(cfg, "max_height", if (max_side > 0) max_side else 2048), std.math.maxInt(u32)));
+    const min = size_grid.alignUp(min_side, multiple);
+    var max_w = size_grid.alignDown(max_w_raw, multiple);
+    var max_h = size_grid.alignDown(max_h_raw, multiple);
+    if (max_w < min) max_w = min;
+    if (max_h < min) max_h = min;
+    const px = optionInt(cfg, "max_pixels", 0);
+    return .{
+        .min_width = min,
+        .max_width = max_w,
+        .min_height = min,
+        .max_height = max_h,
+        .multiple = multiple,
+        .max_pixels = if (px > 0) px else null,
+    };
+}
+
+/// When the caller set `size_snap`, replace width and height with the nearest size this model accepts. A 0 x 0
+/// request is the model's own size and is left for `fill` and the model.
+pub fn snapRequest(cfg: *const ToolConfig, req: *Request) void {
+    const lim = sizeLimits(cfg) orelse return;
+    switch (req.*) {
+        .image => |*v| {
+            const s = size_grid.snap(v.width, v.height, lim);
+            v.width = s[0];
+            v.height = s[1];
+        },
+        .video => |*v| {
+            const s = size_grid.snap(v.width, v.height, lim);
+            v.width = s[0];
+            v.height = s[1];
+        },
+        else => {},
     }
 }
 
@@ -228,15 +293,38 @@ pub fn resolve(io: std.Io, a: std.mem.Allocator, tools: []ToolConfig) !void {
     }
 }
 
-/// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`; a `cmd` tool
-/// takes anything else that is valid.
+/// Whether the tool takes `req`: for speech its options (`checkSpeech`), then its engine's `Entry.check`, then the
+/// size grid (`checkSize`). A `cmd` tool has no engine check; `checkSize` still refuses an off-grid size before the
+/// worker loads, using the tool's own `size_multiple` and limits rather than the generic multiple of 16.
 pub fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     if (req.* == .speech and !checkSpeech(cfg, req.speech, why)) return false;
     if (req.* == .transcription and !checkTranscription(cfg, req.transcription, why)) return false;
     if (req.* == .asset3d and !checkAsset3d(cfg, req.asset3d, why)) return false;
-    const e = find(cfg.engine) orelse return true;
-    const f = e.check orelse return true;
-    return f(cfg, req, why);
+    if (find(cfg.engine)) |e| if (e.check) |f| if (!f(cfg, req, why)) return false;
+    return checkSize(cfg, req, why);
+}
+
+/// The tool's own width and height (`sizeLimits`), refused before a load. 0 x 0 is an edit or a video whose size the
+/// model still chooses. An engine check that already refused (MiniMax H3's own message) is not replaced.
+pub fn checkSize(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
+    const lim = sizeLimits(cfg) orelse return true;
+    const wh: ?[2]u32 = switch (req.*) {
+        .image => |v| if (v.width == 0 and v.height == 0) null else .{ v.width, v.height },
+        .video => |v| if (v.width == 0 and v.height == 0) null else .{ v.width, v.height },
+        else => null,
+    };
+    const w, const h = wh orelse return true;
+    const m: u32 = if (lim.multiple == 0) 1 else lim.multiple;
+    const off = w < lim.min_width or h < lim.min_height or w > lim.max_width or h > lim.max_height or w % m != 0 or h % m != 0;
+    const px = lim.max_pixels orelse 0;
+    const too_many = px > 0 and @as(u64, w) * h > px;
+    if (!off and !too_many) return true;
+    if (too_many and !off) {
+        why.print("model '{s}' takes at most {d} pixels (width x height), not {d}x{d}", .{ cfg.id, px, w, h }) catch {};
+        return false;
+    }
+    why.print("model '{s}' takes sizes from {d}x{d} to {d}x{d} in multiples of {d}, not {d}x{d}", .{ cfg.id, lim.min_width, lim.min_height, lim.max_width, lim.max_height, m, w, h }) catch {};
+    return false;
 }
 
 /// A transcription tool's own limits, from its options: `languages` (the ISO-639-1 codes it hears; absent: any), so a
@@ -679,6 +767,67 @@ test "stream and references need the speech tool to offer them" {
     try std.testing.expectEqualStrings("model 'gated' takes no voice references", w.buffered());
     try std.testing.expectEqual(@as(?bool, true), audioInfo(gated).stream);
     try std.testing.expectEqual(@as(?bool, false), audioInfo(c.tool("plain").?).references);
+}
+
+test "a video request without a size gets the tool's default_width x default_height, else the shared default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "own", "kind": "video", "cmd": ["x"], "options": {"default_width": 512, "default_height": 288}},
+        \\           {"id": "half", "kind": "video", "cmd": ["x"], "options": {"default_width": 512}},
+        \\           {"id": "plain", "kind": "video", "cmd": ["y"]}]}
+    );
+    var r: Request = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("own").?, &r);
+    try std.testing.expectEqual([2]u32{ 512, 288 }, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("half").?, &r);
+    try std.testing.expectEqual(default_video_size, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves", .width = 768, .height = 448 } };
+    fill(c.tool("own").?, &r);
+    try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ r.video.width, r.video.height });
+    r = .{ .video = .{ .prompt = "waves" } };
+    fill(c.tool("plain").?, &r);
+    try std.testing.expectEqual(default_video_size, [2]u32{ r.video.width, r.video.height });
+}
+
+test "size limits come from the tool's options, and size_snap lands on that grid" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [
+        \\ {"id": "img", "kind": "image", "cmd": ["x"], "options": {"size_multiple": 32, "min_side": 256, "max_side": 2048}},
+        \\ {"id": "say", "kind": "speech", "cmd": ["y"]}
+        \\]}
+    );
+    const lim = sizeLimits(c.tool("img").?).?;
+    try std.testing.expectEqual(@as(u32, 32), lim.multiple);
+    try std.testing.expectEqual(@as(u32, 256), lim.min_width);
+    try std.testing.expectEqual(@as(u32, 2048), lim.max_width);
+    try std.testing.expect(sizeLimits(c.tool("say").?) == null);
+    var r: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 720 } };
+    snapRequest(c.tool("img").?, &r);
+    try std.testing.expectEqual([2]u32{ 1280, 704 }, [2]u32{ r.image.width, r.image.height });
+    // a speech request is not a size; snapping it changes nothing
+    var say: Request = .{ .speech = .{ .input = "hi" } };
+    snapRequest(c.tool("say").?, &say);
+    try std.testing.expectEqualStrings("hi", say.speech.input);
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    const off: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 720 } };
+    try std.testing.expect(!check(c.tool("img").?, &off, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "not 1280x720") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 16") == null);
+    why = .fixed(&msg);
+    const on: Request = .{ .image = .{ .prompt = "a fox", .width = 1280, .height = 704 } };
+    try std.testing.expect(check(c.tool("img").?, &on, &why));
+    // Not a multiple of 16 either: still the tool's 32, not the generic rule.
+    why = .fixed(&msg);
+    const odd: Request = .{ .image = .{ .prompt = "a fox", .width = 1000, .height = 720 } };
+    try std.testing.expect(!check(c.tool("img").?, &odd, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.buffered(), "multiples of 16") == null);
 }
 
 test "instructions are written into the text by a tool's template, after a leading tag; refused without one" {
