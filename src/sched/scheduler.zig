@@ -1478,7 +1478,12 @@ pub const Scheduler = struct {
             }
         }
         held -|= freed;
-        const avail = (memory.available() orelse 0) +| freed;
+        // Without a MemAvailable reading the victims' bytes must not stand in for one: counted alone they let the room
+        // check pass, the eviction loop (which frees nothing yet) then unloads a healthy worker, and the load is refused
+        // anyway. Refuse before counting them; with nothing freed this is the check as it was (an unreadable host is 0).
+        const host = memory.available();
+        if (host == null and freed > 0) return false;
+        const avail = (host orelse 0) +| freed;
         // A load in progress already holds part of what it was admitted for, and MemAvailable shows that part: only the
         // rest is still to come. Counting all of it again evicted ready models (DGX-01: a 2 GiB transcription unloaded
         // Drama 3 with 36 GiB free while the image model reloaded).
@@ -2471,6 +2476,43 @@ test "usage over the budget recovers: an idle worker that reports more than its 
     try t.expect(chat.http_status != 503);
     try t.expectEqual(tool_mod.State.unloaded, b.state(0)); // the idle over-budget worker went
     try t.expectEqual(tool_mod.State.ready, b.state(1));
+}
+
+test "no MemAvailable reading: a load is refused and no healthy worker is evicted for it" {
+    // Review of the over-budget fix: with a 20 MiB reserve and no MemAvailable, the victims' bytes alone passed the room
+    // check (0 + 60 MiB clears the reserve), so a 10 MiB load evicted an idle 60 MiB worker and was then refused anyway.
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "big", .kind = .image, .priority = 10 }, .bytes = 60 << 20 },
+        .{ .cfg = .{ .id = "small", .kind = .chat, .priority = 100 }, .bytes = 10 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var load: Control = .{ .op = .load, .tool = 0 };
+    b.s.runControl(&load);
+    try t.expect(!load.failed);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    b.cfg.reserve_bytes = 20 << 20;
+    memory.test_available = @as(?u64, null);
+    defer memory.test_available = null;
+    b.s.gate.lockUncancelable(t.io);
+    try t.expect(!b.s.roomIfEvicted(1, 10 << 20, null));
+    try t.expectEqual(Scheduler.Admission.refuse, b.s.admission(1, 10 << 20));
+    b.s.gate.unlock(t.io);
+    var chat = chatJob("c", 1);
+    defer chat.arena.deinit();
+    b.s.runJob(&chat);
+    try t.expectEqual(@as(u16, 503), chat.http_status);
+    try t.expectEqualStrings("insufficient_memory", chat.error_type);
+    try t.expectEqual(tool_mod.State.ready, b.state(0)); // the healthy worker stays loaded
+    try t.expectEqual(@as(u64, 60 << 20), b.slots[0].resident);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(1));
+    // With a reading back, the same load evicts the idle worker if it must, as before.
+    memory.test_available = @as(?u64, 1 << 40);
+    b.s.gate.lockUncancelable(t.io);
+    try t.expectEqual(Scheduler.Admission.proceed, b.s.admission(1, 10 << 20));
+    b.s.gate.unlock(t.io);
 }
 
 test "a request that fits once a load's overshoot settles waits, and does not evict the loading tool" {
