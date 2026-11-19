@@ -539,6 +539,10 @@ fn printList(list: []const std.json.Value, why: *std.Io.Writer) void {
 
 /// Whether a video tool's limits leave it something to serve, naming the first option that does not.
 fn checkVideoLimits(t: *const ToolConfig, l: VideoLimits, why: *std.Io.Writer) bool {
+    if (hasOption(t, "max_seconds") and optionInt(t, "max_seconds", 0) == 0) {
+        why.print("tool '{s}': max_seconds must be a whole number of seconds, at least 1", .{t.id}) catch {};
+        return false;
+    }
     if (l.max_side < l.min_side) {
         why.print("tool '{s}': max_side {d} leaves no side from {d} in multiples of {d} (size_multiple)", .{ t.id, optionInt(t, "max_side", 0), l.min_side, l.size_multiple }) catch {};
         return false;
@@ -731,6 +735,7 @@ test "a cmd video tool whose limits leave nothing to serve is refused at startup
     const cases = [_][2][]const u8{
         .{ "\"max_side\": 256, \"size_multiple\": 24", "tool 'v': max_side 256 leaves no side from 288 in multiples of 48 (size_multiple)" },
         .{ "\"max_pixels\": 1000", "tool 'v': max_pixels 1000 is below its smallest frame, 256x256" },
+        .{ "\"max_seconds\": 0", "tool 'v': max_seconds must be a whole number of seconds, at least 1" },
         .{ "\"fps\": []", "tool 'v': fps lists no frame rate; leave it out for any from 1 to 30" },
         .{ "\"fps\": [24, 0]", "tool 'v': fps lists frame rates, whole numbers from 1 to 30" },
         .{ "\"max_side\": 1280, \"default_size\": \"2048x1152\"", "tool 'v': default_size '2048x1152' is not a size it takes" },
