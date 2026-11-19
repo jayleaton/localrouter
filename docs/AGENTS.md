@@ -537,9 +537,16 @@ and warm, a call's session says so (docs/HARNESS.md, `localrouter.session.loadin
 
 Per tool in the config: `priority` (integer, default 0, a chat model 100; higher is kept longer) and `keep_loaded`
 (default false, a chat model true).
-When a request needs memory, idle tools are unloaded lowest priority first, then least recently used, until it fits;
-a tool that is loading or running is never unloaded. Priority only orders the victims: a request is never refused while
-unloading idle tools, of any priority, would make room. An `always` (`keep_loaded`) tool is loaded when the daemon starts if it
+When a request needs memory, idle tools are unloaded lowest priority first, then least recently used, until it fits.
+A tool that is loading, committing memory it has been admitted (its worker may already have reported ready while the
+bytes are still landing), or running a job is never unloaded, including for a job that is only queued. Priority only
+orders the victims: a request is never refused while unloading idle tools, of any priority, would make room. A request
+that cannot fit while a non-evictable job holds its memory is refused at once with 503 `insufficient_memory` (`type`
+and `code` both `insufficient_memory`, and `retry_after` seconds, also the `Retry-After` header) instead of sitting
+until the client times out. `retry_after` is the config's `retry_after_s` (30 when unset or 0), or longer when that
+job's tool has taken longer than that to load before. A request that will fit once a load's temporary overshoot
+settles (the estimate is above the bytes the load will hold) waits for the load and does not unload that tool. An
+`always` (`keep_loaded`) tool is loaded when the daemon starts if it
 fits (best effort, logged), is not unloaded by its idle TTL, and is loaded again as soon as the scheduler has been
 idle for a couple of seconds: if it does not fit, it unloads idle tools of lower priority, as a request would (never one
 of its own priority or above), so a video job's model gives the room back right after the job rather than at its idle
@@ -578,7 +585,10 @@ informs and enforces nothing: check the terms before you use or publish what a m
 
 ## Errors
 
-Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
+Errors use OpenAI's shape: `{"error": {"message", "type", "code"}}`. A failed job (`GET /v1/jobs/{id}`, `/v1/videos/{id}`,
+`/v1/assets3d/{id}`) carries the same `type` and `code`. A refusal for want of room also carries `retry_after` (seconds)
+on the error and as a `Retry-After` header. Match `type` or `code`, and read `retry_after` when you retry; the message
+is for people (it reads "insufficient memory: ...").
 
 | Status | Meaning | Do |
 | --- | --- | --- |
@@ -586,7 +596,7 @@ Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
 | 401 `invalid_api_key` | Pairing is required and no paired token came (or it was revoked) | Ask the operator for a token |
 | 403 | Pairing is required and the token lacks the scope this route or tool needs (the message names it) | Ask for that scope |
 | 404 | Unknown model (the message lists the models that can do it) or route; with pairing, a job or file of another device | Re-check `GET /models` |
-| 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority) | Retry later; don't loop |
+| 503 `insufficient_memory` | The machine has no room for this tool right now (another service may have priority, or a job that is loading or running cannot be evicted). `retry_after` / `Retry-After` says how many seconds to wait | Retry after `retry_after` seconds; don't loop |
 | 503 `server_error` | The tool failed to load, its worker or server died, its server is busy, or it is not yet qualified on this machine; the message says which | Retry once; report it if it repeats |
 | 500 `server_error` | The model failed on this request | Report it |
 | 504 | A deadline passed | Retry once, then report |

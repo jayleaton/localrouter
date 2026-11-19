@@ -34,7 +34,7 @@ adding a model, or a new kind of model, does not touch the orchestration.
 | Pairing | `src/pair.zig`, `src/api/pair.zig`, `src/cli/pair.zig` | with `pairing.required`, every route but `/health`, `/v1/pair` and `/voice` answers paired devices only, each within its scopes (`inference`, `media`, `decisions`, `read`, `manage`; the legacy `voice` and `mcp` grant them all): `routes.need` names a route's scope, `pair.admit` checks it (401 or 403 before the body or upgrade), MCP tools and voice-session tools check theirs per call, and a job and its files are its device's alone (`Caller.sees`); `/v1/pair` trades a one-time code for a token; `localrouter pair` makes codes and tokens; hashes in `<data_dir>/devices.json`, read on every check |
 | Computer control | `src/computer/`, `src/api/desktop.zig`, `apps/desktop-helper/` | a paired desktop helper on the user's Mac (`/v1/desktop`); the box decides each step (the chat model behind a System One shaped `decide.Provider`), grants it by policy, waits for the user's tap on consequential ones (`/v1/computer/approvals`) and audits it ([COMPUTER.md](dev/COMPUTER.md)) |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
-| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech, `listen` for transcription, `chat`, `decide` for typed decisions): admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
+| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech, `listen` for transcription, `chat`, `decide` for typed decisions): admits a job, makes room (evicting idle tools, never one that is loading, committing or running a job), loads, runs, enforces deadlines and idle TTLs |
 | Tools | `src/tool/` | a tool is a model as the scheduler sees it: `needs`, `load`, `generate`, `unload`, `abort`, `state`. Today every tool is a worker process (`process.zig`) |
 | Engines | `src/engine/engine.zig`, `src/engines/` | the compiled-in model implementations a worker runs |
 | Topology | `src/topology.zig`, `src/tool/node.zig`, `src/tool/ranks.zig`, `src/api/node.zig` | `single` (default): this daemon is the box. `multi`: one daemon a node, each admitting its own models; the front serves the API for all of them, sends each job to the node that runs its model, watches the nodes and runs a `fallback` model itself while its node is down; a model on several nodes is a tensor-parallel group whose rank 0 starts the other ranks on their nodes ([MULTI-SPARK.md](dev/MULTI-SPARK.md#configuration)) |
@@ -133,7 +133,8 @@ SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no r
 worker, or one that has not answered within 5 s, is cancelled by killing its process group.
 
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
-there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
+there too. A video tool's `options` may give its own size for requests that name none, `default_width` and
+`default_height` (both, else 1344x768). `tools/comfyui/worker.py` serves any ComfyUI workflow this way. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
 
 ### Speech tools

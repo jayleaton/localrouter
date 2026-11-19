@@ -208,6 +208,12 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
     return error.ToolFailed;
 }
 
+/// A failed job, with `retry_after` when the scheduler refused it for memory.
+fn failJob(a: std.mem.Allocator, out: *std.ArrayList(Content), j: *const jobs.Job) ToolError {
+    if (j.retry_after > 0) return fail(a, out, "{s}: {s} (retry_after {d})", .{ j.error_type, j.error_message, j.retry_after });
+    return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+}
+
 /// The tool being called on this connection's thread, for argument errors that name it.
 threadlocal var calling: []const u8 = "";
 /// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
@@ -534,7 +540,7 @@ fn drawImage(app: *App, a: std.mem.Allocator, host: []const u8, b: ImageArgs, ou
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     if (!finished(app, j)) return report(app, a, host, j, out); // still loading or drawing: the job id, for get_job
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     if (b.inline_images) for (j.files) |f| {
         const png = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(h.max_body)) catch
             return fail(a, out, "could not read {s}", .{f});
@@ -641,7 +647,7 @@ fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Val
     var why: routes.Refusal = .{};
     const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     if (b.inline_audio) {
         const bytes = speech.encodeSpeech(app, a, j, format, &why) orelse return fail(a, out, "{s}", .{why.message});
         const enc = std.base64.standard.Encoder;
@@ -679,7 +685,7 @@ fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Co
     var plan: budget.Plan = .{};
     const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why, &plan) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     const text = try budget.annotate(a, chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message }), plan);
     const said = replyText(a, text) catch "";
     const warned = if (said.len > 0) @as([]const budget.Warning, &.{}) else try budget.ofCompletion(a, text, plan);
