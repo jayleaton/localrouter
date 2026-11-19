@@ -537,6 +537,35 @@ fn printList(list: []const std.json.Value, why: *std.Io.Writer) void {
     };
 }
 
+/// Whether a video tool's limits leave it something to serve, naming the first option that does not.
+fn checkVideoLimits(t: *const ToolConfig, l: VideoLimits, why: *std.Io.Writer) bool {
+    if (l.max_side < l.min_side) {
+        why.print("tool '{s}': max_side {d} leaves no side from {d} in multiples of {d} (size_multiple)", .{ t.id, optionInt(t, "max_side", 0), l.min_side, l.size_multiple }) catch {};
+        return false;
+    }
+    if (!l.takes(l.min_side, l.min_side)) {
+        why.print("tool '{s}': max_pixels {d} is below its smallest frame, {d}x{d}", .{ t.id, l.max_pixels.?, l.min_side, l.min_side }) catch {};
+        return false;
+    }
+    if (l.fps) |list| {
+        if (list.len == 0) {
+            why.print("tool '{s}': fps lists no frame rate; leave it out for any from 1 to {d}", .{ t.id, api_limits.max_fps }) catch {};
+            return false;
+        }
+        for (list) |x| if (x != .integer or x.integer < 1 or x.integer > api_limits.max_fps) {
+            why.print("tool '{s}': fps lists frame rates, whole numbers from 1 to {d}", .{ t.id, api_limits.max_fps }) catch {};
+            return false;
+        };
+    }
+    const ds = optionString(t, "default_size", "");
+    if (ds.len > 0) if (request.parseSize(ds)) |wh| if (wh[0] == l.default_size[0] and wh[1] == l.default_size[1]) return true;
+    if (ds.len > 0) {
+        why.print("tool '{s}': default_size '{s}' is not a size it takes", .{ t.id, ds }) catch {};
+        return false;
+    }
+    return true;
+}
+
 /// Whether each configured default (`Config.defaults`) names a tool that has its capability; the first that does not
 /// is written to `why`.
 pub fn checkDefaults(c: *const config.Config, why: *std.Io.Writer) bool {
@@ -567,6 +596,7 @@ pub fn checkDefaults(c: *const config.Config, why: *std.Io.Writer) bool {
             return false;
         };
     }
+    for (c.tools) |*t| if (videoLimits(t)) |l| if (!checkVideoLimits(t, l, why)) return false;
     for (std.enums.values(Capability)) |cap| {
         const id = c.defaults.get(cap) orelse continue;
         const t = c.tool(id) orelse {
@@ -692,6 +722,27 @@ test "a speech tool's voices are checked before it loads; cmd tools get their ki
     const bad = try config.parse(arena.allocator(), "{\"tools\": [{\"id\": \"t\", \"kind\": \"speech\", \"cmd\": [\"x\"], \"options\": {\"voices\": [\"a\"], \"default_voice\": \"b\"}}]}");
     try std.testing.expect(!checkDefaults(&bad, &why));
     try std.testing.expectEqualStrings("tool 't': default_voice 'b' is not one of its voices", why.buffered());
+}
+
+test "a cmd video tool whose limits leave nothing to serve is refused at startup, naming the option" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var buf: [256]u8 = undefined;
+    const cases = [_][2][]const u8{
+        .{ "\"max_side\": 256, \"size_multiple\": 24", "tool 'v': max_side 256 leaves no side from 288 in multiples of 48 (size_multiple)" },
+        .{ "\"max_pixels\": 1000", "tool 'v': max_pixels 1000 is below its smallest frame, 256x256" },
+        .{ "\"fps\": []", "tool 'v': fps lists no frame rate; leave it out for any from 1 to 30" },
+        .{ "\"fps\": [24, 0]", "tool 'v': fps lists frame rates, whole numbers from 1 to 30" },
+        .{ "\"max_side\": 1280, \"default_size\": \"2048x1152\"", "tool 'v': default_size '2048x1152' is not a size it takes" },
+    };
+    for (cases) |case| {
+        const text = try std.fmt.allocPrint(arena.allocator(), "{{\"tools\": [{{\"id\": \"v\", \"kind\": \"video\", \"cmd\": [\"x\"], \"options\": {{{s}}}}}]}}", .{case[0]});
+        var why: std.Io.Writer = .fixed(&buf);
+        try std.testing.expect(!checkDefaults(&try config.parse(arena.allocator(), text), &why));
+        try std.testing.expectEqualStrings(case[1], why.buffered());
+    }
+    var why: std.Io.Writer = .fixed(&buf);
+    try std.testing.expect(checkDefaults(&try config.parse(arena.allocator(), "{\"tools\": [{\"id\": \"v\", \"kind\": \"video\", \"cmd\": [\"x\"], \"options\": {\"max_pixels\": 901120, \"max_side\": 1280, \"size_multiple\": 32, \"default_size\": \"1280x704\", \"fps\": [24]}}]}"), &why));
 }
 
 test "a cmd video tool's declared limits and audio: filled, listed and refused before it loads" {
