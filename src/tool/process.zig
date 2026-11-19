@@ -704,9 +704,16 @@ test "unload is not held up by a descendant that outlives the worker and keeps i
     var p = try ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = "/nonexistent", .environ = &environ, .log_dir = dir, .guard = false }, &cfg);
     defer p.deinit();
     const t = p.asTool();
+    // Each load starts a worker that detaches its own descendant and writes its pid over the last one: read it after
+    // every load and register that child's cleanup then, so none outlives the test.
+    const descendantPid = struct {
+        fn f(io_: Io, d: Io.Dir) !i32 {
+            var pid_buf: [32]u8 = undefined;
+            return std.fmt.parseInt(i32, try d.readFile(io_, "descendant.pid", &pid_buf), 10);
+        }
+    }.f;
     _ = try t.load();
-    var pid_buf: [32]u8 = undefined;
-    const descendant = try std.fmt.parseInt(i32, try tmp.dir.readFile(io, "descendant.pid", &pid_buf), 10);
+    const descendant = try descendantPid(io, tmp.dir);
     defer _ = posix.system.kill(descendant, posix.SIG.KILL);
     const t0 = Io.Clock.awake.now(io);
     t.unload();
@@ -718,7 +725,13 @@ test "unload is not held up by a descendant that outlives the worker and keeps i
     try std.testing.expect(std.mem.indexOf(u8, try tmp.dir.readFile(io, "detach.log", &log_buf), "worker up") != null);
     // a second load and unload still work: the next spawn starts a fresh log thread
     _ = try t.load();
+    const second = try descendantPid(io, tmp.dir);
+    defer _ = posix.system.kill(second, posix.SIG.KILL);
+    try std.testing.expect(second != descendant);
+    const t1 = Io.Clock.awake.now(io);
     t.unload();
+    try std.testing.expect(t1.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 3000);
+    try std.testing.expectEqual(tool.State.unloaded, t.state());
 }
 
 test "an edit books reference_working_bytes for each reference image beside working_bytes" {
