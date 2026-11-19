@@ -183,6 +183,9 @@ pub const Config = struct {
     machine: []const u8 = "",
     budget_bytes: u64 = 0, // cap on loaded + working bytes; 0: only MemAvailable - reserve
     reserve_bytes: u64 = 8 * gib, // kept free for the OS and co-resident services
+    // Seconds a client should wait before retrying a request refused because a non-evictable job holds the memory
+    // (`Retry-After` and `error.retry_after`). 0 means 30. A blocker whose last load took longer raises the hint.
+    retry_after_s: u32 = 30,
     keep_outputs_s: u32 = 24 * 3600,
     max_queue: u32 = 64,
     allow_private_urls: bool = false, // URL inputs (edits, image to video) may name loopback / private / link-local hosts
