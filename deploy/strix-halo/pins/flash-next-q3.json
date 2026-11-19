@@ -1,0 +1,8 @@
+{"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "f5d175de2cf7f720d45d6064019a81fcf056e986",
+ "files": {
+  "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf": [2786568256, "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"],
+  "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00004.gguf": [10946618, "7666000ba91eb5527f8e12e0414de36766dc82a082876337f7827c2caa859143"],
+  "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00004.gguf": [49742117248, "e954cb3044ae087a003ce8cc1631c9d40fe15ae64a8befcf4aa06457848c647c"],
+  "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00004.gguf": [10911746208, "fcce26b1e5e6e54559a7e7c2f8d6e37067ec695ff1f14bce662810bde78abe1f"],
+  "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00004-of-00004.gguf": [28800138432, "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"]
+ }}

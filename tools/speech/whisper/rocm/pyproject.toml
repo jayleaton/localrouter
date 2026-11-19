@@ -1,0 +1,27 @@
+[project]
+name = "localrouter-speech-whisper-rocm"
+version = "0.1.0"
+description = "Whisper large-v3-turbo speech-to-text worker for LocalRouter's cmd adapter on AMD GPUs (PyTorch ROCm)"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.13.0",  # the same release as the Spark and Mac workers, from PyTorch's ROCm 7.2 index
+    "transformers==5.19.0",
+    "numpy==2.5.4",
+    "triton-rocm==3.7.1",  # torch's own pin, listed so uv takes it from the ROCm index (a source covers direct dependencies)
+]
+
+[tool.uv]
+package = false
+# x86_64 Linux with an AMD GPU (ROCm 7.2 wheels; tested on Strix Halo, gfx1151). The worker itself is ../worker.py:
+# torch.cuda is ROCm's HIP device, so options.device "cuda" (or "auto") runs it on the GPU.
+#   UV_PROJECT_ENVIRONMENT=$J/venvs/whisper-rocm uv sync --locked --python 3.12 --project tools/speech/whisper/rocm
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-rocm72" }]
+triton-rocm = [{ index = "pytorch-rocm72" }]
+
+[[tool.uv.index]]
+name = "pytorch-rocm72"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
