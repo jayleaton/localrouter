@@ -75,6 +75,8 @@ const routed = [_]Route{
     .{ .method = .POST, .path = "/v1/videos", .route = "/v1/videos" },
     .{ .method = .POST, .path = "/v1/audio/speech", .route = "/v1/audio/*" },
     .{ .method = .GET, .path = "/v1/models", .route = "GET /v1/models, /v1/tools, /v1/skills/*" },
+    .{ .method = .GET, .path = "/v1/status", .route = "GET /v1/status" },
+    .{ .method = .GET, .path = "/metrics", .route = "GET /metrics" },
     .{ .method = .POST, .path = "/v1/tools/release", .route = "POST /v1/tools/*" },
     .{ .method = .GET, .path = "/v1/voices", .route = "GET /v1/voices" },
     .{ .method = .POST, .path = "/v1/voices", .route = "POST, PATCH, DELETE /v1/voices/*" },

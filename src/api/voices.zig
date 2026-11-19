@@ -226,7 +226,7 @@ fn create(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u8, ct
     const j = routes.enqueue(app, tool, .{ .speech = .{ .input = "", .clone = "clone.json" } }, files, owner, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     defer scrub(app, j);
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const codes = readCodes(app, a, j, refs.len, engine.optionInt(cfg, "clone_codebooks", 0)) orelse return h.fail(req, a, 500, "server_error", "the model wrote no valid voice.json");
 
     const now = sched.nowUnix(app.io);

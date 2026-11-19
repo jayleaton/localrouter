@@ -208,6 +208,12 @@ fn fail(a: std.mem.Allocator, out: *std.ArrayList(Content), comptime fmt: []cons
     return error.ToolFailed;
 }
 
+/// A failed job, with `retry_after` when the scheduler refused it for memory.
+fn failJob(a: std.mem.Allocator, out: *std.ArrayList(Content), j: *const jobs.Job) ToolError {
+    if (j.retry_after > 0) return fail(a, out, "{s}: {s} (retry_after {d})", .{ j.error_type, j.error_message, j.retry_after });
+    return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+}
+
 /// The tool being called on this connection's thread, for argument errors that name it.
 threadlocal var calling: []const u8 = "";
 /// The request's device token (`computer/gate.zig`), for the computer tools; in the request's arena.
@@ -498,7 +504,7 @@ fn done(a: std.mem.Allocator, out: *std.ArrayList(Content), value: anytype) Tool
 }
 
 /// generate_image's and edit_image's arguments: `image` or `images` (and `mask`) make it an edit.
-const ImageArgs = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, image: ?[]const u8 = null, images: []const []const u8 = &.{}, mask: ?[]const u8 = null, wait_s: u32 = 600 };
+const ImageArgs = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", n: u32 = 1, seed: ?u64 = null, steps: u32 = 0, negative_prompt: []const u8 = "", inline_images: bool = true, image: ?[]const u8 = null, images: []const []const u8 = &.{}, mask: ?[]const u8 = null, wait_s: u32 = 600, size_snap: bool = false };
 
 fn generateImage(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
     const b = try parseArgs(ImageArgs, a, args, out);
@@ -530,11 +536,11 @@ fn drawImage(app: *App, a: std.mem.Allocator, host: []const u8, b: ImageArgs, ou
     const tool = routes.resolve(app, b.model, if (edit) .image_edit else .text_to_image, &why) orelse return fail(a, out, "{s}", .{why.message});
     const refs = try a.alloc([]const u8, refs_files.len);
     for (refs, refs_files) |*d, f| d.* = f.name;
-    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null } };
+    const r: request.Request = .{ .image = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .n = b.n, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .references = refs, .mask = if (mask_files.len > 0) mask_files[0].name else null, .size_snap = if (b.size_snap) true else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     if (!finished(app, j)) return report(app, a, host, j, out); // still loading or drawing: the job id, for get_job
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     if (b.inline_images) for (j.files) |f| {
         const png = Io.Dir.cwd().readFileAlloc(app.io, try std.fs.path.join(a, &.{ j.dir, f }), a, .limited(h.max_body)) catch
             return fail(a, out, "could not read {s}", .{f});
@@ -560,13 +566,13 @@ fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, ou
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 5, fps: u32 = 24, seed: ?u64 = null, steps: u32 = 0, audio: bool = true, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null, size_snap: bool = false };
     const b = try parseArgs(Args, a, args, out);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
     var why: routes.Refusal = .{};
     const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
-    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
+    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null, .size_snap = if (b.size_snap) true else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
@@ -641,7 +647,7 @@ fn synthesizeSpeech(app: *App, a: std.mem.Allocator, host: []const u8, args: Val
     var why: routes.Refusal = .{};
     const j = speech.startSpeech(app, a, .{ .model = b.model, .input = b.input, .voice = b.voice, .speed = b.speed, .preset = b.preset, .seed = b.seed, .instructions = b.instructions, .references = b.references }, caller.owner(), &why) orelse return fail(a, out, "{s}", .{why.message});
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     if (b.inline_audio) {
         const bytes = speech.encodeSpeech(app, a, j, format, &why) orelse return fail(a, out, "{s}", .{why.message});
         const enc = std.base64.standard.Encoder;
@@ -679,7 +685,7 @@ fn chatTool(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Co
     var plan: budget.Plan = .{};
     const j = chat.startChat(app, a, .{ .object = body }, caller.owner(), &why, &plan) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message });
     j.done.wait(app.io) catch return fail(a, out, "cancelled", .{});
-    if (j.status != .completed) return fail(a, out, "{s}: {s}", .{ j.error_type, j.error_message });
+    if (j.status != .completed) return failJob(a, out, j);
     const text = try budget.annotate(a, chat.readCompletion(app, a, j, &why) orelse return fail(a, out, "{s}: {s}", .{ why.typ, why.message }), plan);
     const said = replyText(a, text) catch "";
     const warned = if (said.len > 0) @as([]const budget.Warning, &.{}) else try budget.ofCompletion(a, text, plan);
@@ -812,6 +818,11 @@ fn summary(app: *App, a: std.mem.Allocator, host: []const u8, j: *jobs.Job, out:
         .progress = j.percent,
         .phase = try a.dupe(u8, j.phaseName()),
         .seed = j.request.seed(),
+        .size = switch (j.request) {
+            .image => |v| if (v.width > 0 and v.height > 0) try std.fmt.allocPrint(a, "{d}x{d}", .{ v.width, v.height }) else null,
+            .video => |v| if (v.width > 0 and v.height > 0) try std.fmt.allocPrint(a, "{d}x{d}", .{ v.width, v.height }) else null,
+            else => null,
+        },
         .ms = j.ms,
         .files = urls,
         .finish_reason = if (j.finish_reason.len > 0) @as(?[]const u8, j.finish_reason) else null,
@@ -901,7 +912,8 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"What to draw."},
     \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_image, or image_edit with images)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360). Omit for 1024x1024, or for an edit the input's own shape."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT, multiples of 16, 256 to 2048 a side; about 1 megapixel is best (1024x1024, 1360x768, 768x1360). Omit for 1024x1024, or for an edit the input's own shape. A model's own grid may be stricter (GET /v1/tools size)."},
+    \\"size_snap":{"type":"boolean","default":false,"description":"true: round width and height to the nearest size the model accepts (a multiple of its grid, inside its limits) and use that. false: a size off the grid is refused."},
     \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
     \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
@@ -919,6 +931,7 @@ const tool_list = [_]Tool{
     \\"mask":{"type":"string","description":"In the same forms: a PNG of the first image's size whose alpha is 0 where the edit goes; wherever it is opaque the first image's pixels are kept."},
     \\"model":{"type":"string","description":"An image model id from list_models; default: the model whose default_for lists image_edit."},
     \\"size":{"type":"string","description":"WIDTHxHEIGHT of the result, multiples of 16; omit for the input's own shape (the model picks the size)."},
+    \\"size_snap":{"type":"boolean","default":false,"description":"true: round width and height to the nearest size the model accepts. false: a size off its grid is refused. Omit size to keep the input's shape."},
     \\"n":{"type":"integer","minimum":1,"maximum":4,"default":1},
     \\"seed":{"type":"integer","minimum":0,"description":"Omit for a random one."},
     \\"steps":{"type":"integer","minimum":0,"description":"0: the model's default."},
@@ -931,7 +944,8 @@ const tool_list = [_]Tool{
     \\{"type":"object","required":["prompt"],"properties":{
     \\"prompt":{"type":"string","description":"The scene, the motion and the sound."},
     \\"model":{"type":"string","description":"A video model id from list_models; default: the model whose default_for lists the capability this request needs (text_to_video, or image_to_video with image)."},
-    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omit it for the model's own size."},
+    \\"size":{"type":"string","description":"WIDTHxHEIGHT within the model's limits; omit it for the model's own size. MiniMax H3 needs multiples of 32 (1280x720 is not one)."},
+    \\"size_snap":{"type":"boolean","default":false,"description":"true: round width and height to the nearest multiple the model accepts, inside its limits (1280x720 becomes 1280x704 on a 32 grid). false: an off-grid size is refused."},
     \\"seconds":{"type":"integer","minimum":1,"maximum":20,"default":5},
     \\"fps":{"type":"integer","default":24},
     \\"seed":{"type":"integer","minimum":0},
