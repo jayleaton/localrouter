@@ -76,7 +76,7 @@ pub fn completions(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []co
     const j = startChat(app, a, body, owner, &why, &plan) orelse return h.fail(req, a, why.status, why.typ, why.message);
     if (j.request.chat.stream) return streamChat(app, req, a, j, plan);
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const out = readCompletion(app, a, j, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     return h.json(req, .ok, try budget.annotate(a, out, plan));
 }
@@ -97,7 +97,7 @@ fn streamChat(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job, pl
         Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
     }
     if (fd < 0) {
-        if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+        if (j.status != .completed) return h.failJob(req, a, j);
         return h.fail(req, a, 500, "server_error", "the model's server sent no event stream");
     }
     var send: [16 * 1024]u8 = undefined;

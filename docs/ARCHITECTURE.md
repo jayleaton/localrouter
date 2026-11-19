@@ -26,7 +26,7 @@ adding a model, or a new kind of model, does not touch the orchestration.
 
 | Piece | Where | Does |
 | --- | --- | --- |
-| API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig`, `src/api/decide.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/responses` (`src/api/responses.zig`: a stateless adapter whose items become one chat request and whose completion becomes output items); typed decisions on `/v1/systemone` (the System One shape, `src/tool/systemone.zig`); output files; `/v1/tools` for operators; `/v1/capabilities` (`src/api/capabilities.zig`), the harness contract's discovery document ([HARNESS.md](HARNESS.md)) |
+| API | `src/api/routes.zig`, `src/api/speech.zig`, `src/api/chat.zig`, `src/api/decide.zig` | OpenAI's `/v1/models`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/chat/completions`, `/v1/responses` (`src/api/responses.zig`: a stateless adapter whose items become one chat request and whose completion becomes output items); typed decisions on `/v1/systemone` (the System One shape, `src/tool/systemone.zig`); output files; `/v1/tools` for operators; `GET /v1/status` and `GET /metrics` (`src/api/status.zig`: each tool's state, resident bytes, queue depth, last load and last error, the memory budget and the eviction count; Prometheus text on `/metrics`; no paths or secrets); `/v1/capabilities` (`src/api/capabilities.zig`), the harness contract's discovery document ([HARNESS.md](HARNESS.md)) |
 | MCP | `src/api/mcp.zig`, `src/cli/mcp_stdio.zig` | the same jobs as MCP tools, Streamable HTTP (stateless) or a stdio bridge |
 | Voice | `src/api/realtime.zig`, `src/voice/` | `/v1/realtime` (OpenAI Realtime API over a WebSocket) and the `/voice` page: VAD, STT, chat, sentence-chunked TTS, barge-in, tool jobs ([VOICE.md](dev/VOICE.md)) |
 | Cloned voices | `src/voices.zig`, `src/api/voices.zig`, `src/media/voiceprep.zig` | `/v1/voices`: a voice cloned from someone's recordings for a speech model with `voice_clone` (clips checked and levelled, transcribed, encoded by the model), kept in `<data_dir>/voices/`, and spoken anywhere a configured voice is ([DRAMA3.md](dev/DRAMA3.md#cloned-voices)) |
@@ -34,14 +34,16 @@ adding a model, or a new kind of model, does not touch the orchestration.
 | Pairing | `src/pair.zig`, `src/api/pair.zig`, `src/cli/pair.zig` | with `pairing.required`, every route but `/health`, `/v1/pair` and `/voice` answers paired devices only, each within its scopes (`inference`, `media`, `decisions`, `read`, `manage`; the legacy `voice` and `mcp` grant them all): `routes.need` names a route's scope, `pair.admit` checks it (401 or 403 before the body or upgrade), MCP tools and voice-session tools check theirs per call, and a job and its files are its device's alone (`Caller.sees`); `/v1/pair` trades a one-time code for a token; `localrouter pair` makes codes and tokens; hashes in `<data_dir>/devices.json`, read on every check |
 | Computer control | `src/computer/`, `src/api/desktop.zig`, `apps/desktop-helper/` | a paired desktop helper on the user's Mac (`/v1/desktop`); the box decides each step (the chat model behind a System One shaped `decide.Provider`), grants it by policy, waits for the user's tap on consequential ones (`/v1/computer/approvals`) and audits it ([COMPUTER.md](dev/COMPUTER.md)) |
 | Jobs | `src/sched/jobs.zig` | one request's life: queued, in progress, completed / failed / cancelled; its directory of inputs and outputs |
-| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech, `listen` for transcription, `chat`, `decide` for typed decisions): admits a job, makes room (evicting idle tools), loads, runs, enforces deadlines and idle TTLs |
+| Scheduler | `src/sched/scheduler.zig` | one executor thread a lane (`main`; `realtime` for speech, `listen` for transcription, `chat`, `decide` for typed decisions): admits a job, makes room (evicting idle tools, never one that is loading, committing or running a job), loads, runs, enforces deadlines and idle TTLs |
 | Tools | `src/tool/` | a tool is a model as the scheduler sees it: `needs`, `load`, `generate`, `unload`, `abort`, `state`. Today every tool is a worker process (`process.zig`) |
 | Engines | `src/engine/engine.zig`, `src/engines/` | the compiled-in model implementations a worker runs |
 | Topology | `src/topology.zig`, `src/tool/node.zig`, `src/tool/ranks.zig`, `src/api/node.zig` | `single` (default): this daemon is the box. `multi`: one daemon a node, each admitting its own models; the front serves the API for all of them, sends each job to the node that runs its model, watches the nodes and runs a `fallback` model itself while its node is down; a model on several nodes is a tensor-parallel group whose rank 0 starts the other ranks on their nodes ([MULTI-SPARK.md](dev/MULTI-SPARK.md#configuration)) |
 
 **One process a loaded model.** Each tool runs in its own worker process. Unloading is process exit, so every byte of
 GPU and host memory returns to the machine, and a crashing model fails one job, not the daemon. The idle daemon is a
-few MB and holds no GPU memory.
+few MB and holds no GPU memory. The worker's stderr is `<data_dir>/logs/<id>.log`. It rotates by size: once the file
+reaches `log_max_bytes` (default 8 MiB) the next append renames it to `<id>.log.1` and keeps `log_keep` older files
+(default 3). `log_max_bytes` 0 does not rotate.
 
 **Memory.** Every tool states what it needs before it is loaded (`needs(request)`: resident bytes while loaded, plus
 working bytes for this request). The scheduler admits a job only if it fits under the budget (the machine's available
@@ -133,7 +135,8 @@ SIGUSR1, and it replies `{"ok":false,"type":"cancelled"}` and stays loaded (no r
 worker, or one that has not answered within 5 s, is cancelled by killing its process group.
 
 Input images arrive as files in the job directory (the request's `references` / `first_frame` name them); outputs go
-there too. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
+there too. A video tool's `options` may give its own size for requests that name none, `default_width` and
+`default_height` (both, else 1344x768). `tools/comfyui/worker.py` serves any ComfyUI workflow this way. Set `resident_bytes` and `working_bytes` in the config so the scheduler can plan. Anything that can read and
 write lines can be a model: a Python pipeline, a llama.cpp server wrapper, a TTS engine.
 
 ### Speech tools

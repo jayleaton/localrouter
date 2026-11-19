@@ -144,7 +144,7 @@ pub fn speech(app: *App, req: *h.Request, a: std.mem.Allocator, owner: []const u
         return h.fail(req, a, why.status, why.typ, why.message);
     if (b.stream) return streamSpeech(app, req, a, j);
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const bytes = encodeSpeech(app, a, j, format, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     var extra: [5]std.http.Header = undefined;
     var n: usize = 0;
@@ -182,7 +182,7 @@ fn streamSpeech(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) 
         if ((fd >= 0 and fileSize(fd) > wav_header) or done) break;
         Io.sleep(app.io, .fromMilliseconds(poll_ms), .awake) catch {};
     }
-    if (j.done.isSet() and j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.done.isSet() and j.status != .completed) return h.failJob(req, a, j);
     var head: [wav_header]u8 = undefined;
     if (fd < 0 or readAt(fd, &head, 0) != wav_header or streamRate(&head) == null) {
         if (!j.done.isSet()) app.scheduler.cancel(j);
@@ -354,7 +354,7 @@ pub fn transcriptions(app: *App, req: *h.Request, a: std.mem.Allocator, host: []
     const j = startTranscription(app, a, .{ .model = b.model, .language = b.language, .prompt = b.prompt, .temperature = b.temperature, .timestamps = granularities, .seed = b.seed }, raws.items[0], owner, &why) orelse
         return h.fail(req, a, why.status, why.typ, why.message);
     j.done.wait(app.io) catch return;
-    if (j.status != .completed) return h.fail(req, a, j.http_status, j.error_type, j.error_message);
+    if (j.status != .completed) return h.failJob(req, a, j);
     const t = readTranscript(app, a, j, &why) orelse return h.fail(req, a, why.status, why.typ, why.message);
     const transcript = t.get("text").?.string;
     const duration = number(t.get("duration")) orelse @as(f64, @floatFromInt(j.request.transcription.duration_ms)) / 1000;
