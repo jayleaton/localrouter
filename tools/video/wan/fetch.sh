@@ -20,6 +20,7 @@ mkdir -p "$(dirname "$dest")"
 dest=$(cd "$(dirname "$dest")" && pwd)/$(basename "$dest")
 stage=$dest.staging
 if [ ! -e "$dest" ] && [ -d "$dest.old" ]; then mv "$dest.old" "$dest"; fi  # a publish cut short
+rm -rf "$dest.new"
 if [ -d "$dest" ] && [ -n "$(ls -A "$dest")" ] && [ ! -f "$dest/model_index.json" ]; then
   echo "fetch.sh: $dest is not empty and holds no model_index.json: give a new directory" >&2
   exit 1
@@ -28,13 +29,14 @@ mkdir -p "$stage"
 
 size_of() { wc -c <"$1" | tr -d ' '; }
 
-python3 -I -c '
+manifest=$(python3 -I -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
 for f in m["selected_files"]:
     s = m["sources"][f["source"]]
     print(f["path"], f["size_bytes"], s["repo"], s["revision"], f["src"])
-' "$pins" | while read -r path size hf_repo rev src; do
+' "$pins")
+while read -r path size hf_repo rev src; do
   out=$stage/$path
   if [ -f "$out" ] && [ "$(size_of "$out")" = "$size" ]; then continue; fi
   mkdir -p "$(dirname "$out")"
@@ -51,15 +53,21 @@ for f in m["selected_files"]:
     exit 1
   fi
   mv "$out.part" "$out"
-done
+done <<<"$manifest"
 
 if ! python3 -I "$repo/tools/package/verify_assets.py" "$pins" "$stage"; then
   echo "fetch.sh: a file in $stage does not match pins.json: delete it and run again ($dest is unchanged)" >&2
   exit 1
 fi
+# the published snapshot holds the manifest's files only: anything else in staging (an older pin's) is dropped
+rm -rf "$dest.new"
+while read -r path _; do
+  mkdir -p "$(dirname "$dest.new/$path")"
+  mv "$stage/$path" "$dest.new/$path"
+done <<<"$manifest"
 if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
-mv "$stage" "$dest"
-rm -rf "$dest.old"
+mv "$dest.new" "$dest"
+rm -rf "$dest.old" "$stage"
 
 if [ -n "$venv" ]; then
   command -v uv >/dev/null || { echo "fetch.sh: --venv needs uv on PATH" >&2; exit 1; }

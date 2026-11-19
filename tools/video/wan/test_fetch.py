@@ -66,6 +66,15 @@ class FetchTest(unittest.TestCase):
         self.assertEqual(self.run_fetch(b'{"v":22}', b'{"v":22}'), 0)
         self.assertEqual(self.published(), b'{"v":22}')
 
+    def test_a_retry_publishes_only_the_manifest(self):
+        stale = os.path.join(self.weights + ".staging", "transformer", "old.safetensors")
+        os.makedirs(os.path.dirname(stale))
+        with open(stale, "wb") as f:
+            f.write(b"obsolete")  # left by an earlier pin's interrupted run
+        self.assertEqual(self.run_fetch(b'{"v":1}', b'{"v":1}'), 0)
+        self.assertEqual(self.published(), b'{"v":1}')
+        self.assertEqual(sorted(os.listdir(self.weights)), ["model_index.json"])
+        self.assertFalse(os.path.exists(self.weights + ".staging"))
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
