@@ -5,7 +5,8 @@
 # The container listens on 127.0.0.1:PORT only. SIGTERM/SIGINT (the daemon unloading the tool) stops the container and
 # waits until it is gone, so its GPU memory is free before this script exits. A SIGKILL of this script's process group
 # (the daemon's, on abort or timeout: the trap never runs, and conmon keeps the container going outside the group) is
-# covered by a watcher in its own session, which removes this run's container (by id) once the script is gone.
+# covered by a watcher in its own session, which removes this run's container (by id) once the script is gone: exited,
+# or a zombie its parent has not reaped yet.
 # `--replace` clears a container left over from anything else.
 # Environment: GUFO_IMAGE (default: tools/gufo/IMAGE, the runtime pinned by digest), GUFO_STOP_TIMEOUT (default 10 s),
 # TZ (the host zone passed into the container; unset: read from the host). The image has no zoneinfo of its own, so
@@ -53,8 +54,16 @@ trap stop TERM INT
 args=(); placed=0
 for a in "$@"; do args+=("$a"); if [ $placed = 0 ] && [ "$a" = serve ]; then args+=(--host 0.0.0.0 --port 8080); placed=1; fi; done
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/lr-gufo-$name.XXXXXX")
-# the watcher: polls this script; when it is gone, removes the container this run made (not a later run's of the name)
-setsid -f sh -c 'while kill -0 "$1" 2> /dev/null; do sleep 0.5; done
+# the watcher: polls this script; when it is gone, removes the container this run made (not a later run's of the name).
+# A zombie counts as gone: `kill -0` succeeds on one, so a parent that is slow to reap this script (a subreaper) kept the
+# container running after a group SIGKILL. Where /proc is mounted the watcher reads the State: line instead.
+setsid -f sh -c 'running() {
+    if [ -d /proc/self ]; then
+      st=$(sed -n "s/^State:[[:space:]]*\([A-Za-z]\).*/\1/p" "/proc/$1/status" 2> /dev/null)
+      [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
+    else kill -0 "$1" 2> /dev/null; fi
+  }
+  while running "$1"; do sleep 0.5; done
   [ -s "$2/cid" ] && podman rm -f -t "$3" "$(cat "$2/cid")" > /dev/null 2>&1; rm -rf "$2"' \
   gufo-watch "$$" "$run_dir" "${GUFO_STOP_TIMEOUT:-10}" < /dev/null > /dev/null 2>&1
 podman run --rm --replace --cidfile "$run_dir/cid" --name "$cname" --userns=keep-id:uid="$(id -u)",gid="$(id -g)" \

@@ -83,5 +83,29 @@ s=$(start zu); waitfor 'grep -q "^TZ=" "$t/state/last-args" 2>/dev/null'
 check "without TZ, a zone name is still passed" 'grep -Eq "^TZ=[A-Za-z0-9_+/-]+$" "$t/state/last-args"'
 kill -KILL -- "-$s"; waitfor '! alive "$s"'
 
+# a parent slow to reap (a subreaper): after the group SIGKILL serve.sh stays a zombie, and the container must still go
+cat > "$t/holder.py" <<'PY'
+import os, sys, time
+serve, name, pidfile = sys.argv[1:4]
+pid = os.fork()
+if pid == 0:
+    os.setsid()  # its own group, as a worker's; this parent is outside it and survives the group kill
+    fd = os.open(os.devnull, os.O_RDWR)
+    for n in (0, 1, 2):
+        os.dup2(fd, n)
+    os.execvp("bash", ["bash", serve, name, "18080", "--", "gufo", "serve", "llm"])
+open(pidfile, "w").write(str(pid))
+time.sleep(60)  # does not reap the child until then
+os.waitpid(pid, 0)
+PY
+state() { sed -n 's/^State:[[:space:]]*\([A-Za-z]\).*/\1/p' "/proc/$1/status" 2> /dev/null; }
+python3 "$t/holder.py" "$here/serve.sh" d "$t/d.pid" & h=$!
+waitfor '[ -s "$t/d.pid" ] && [ -n "$(container d)" ]'; s=$(cat "$t/d.pid"); c=$(container d)
+kill -KILL -- "-$s"
+check "an unreaped serve.sh is a zombie" 'waitfor "[ \"\$(state $s)\" = Z ]"'
+check "a zombie serve.sh: the container is removed before it is reaped" 'waitfor "! alive $c" && [ "$(state "$s")" = Z ]'
+check "by its id, while unreaped" 'grep -q "$(cat "$t/state/name-lr-gufo-d")" "$t/state/removed"'
+kill -KILL "$h" 2> /dev/null; wait "$h" 2> /dev/null
+
 echo "gufo serve.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
