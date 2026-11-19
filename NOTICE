@@ -47,13 +47,21 @@ Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) a
 by the installer from their publishers and remain under their own licenses. Kandinsky-6 Pro distilled (Kandinsky Lab)
 is read from the publisher's snapshot as downloaded and likewise remains under its own license.
 
-ComfyUI (https://github.com/comfyanonymous/ComfyUI) is used, optionally and only at development time, as the reference
-implementation for MiniMax H3 in the comparison tests; it is not part of LocalRouter.
+ComfyUI (https://github.com/comfyanonymous/ComfyUI, GPL-3.0) is not part of LocalRouter and is not distributed with
+it. It is the reference implementation for MiniMax H3 in the comparison tests, and on AMD Strix Halo
+(deploy/strix-halo) it is also the runtime of the minimax-h3 and minimax-h3-image tools: deploy/strix-halo/comfyui/install.sh
+downloads ComfyUI and ComfyUI-GGUF (https://github.com/city96/ComfyUI-GGUF, Apache-2.0) at pinned commits onto the
+user's machine, and tools/comfyui/worker.py drives ComfyUI over its HTTP API as a separate process. The two ComfyUI
+custom nodes in deploy/strix-halo/comfyui/nodes/ are LocalRouter's own files (docs/dev/UPSTREAM.md, entries 13 and 14).
 
 Qwen-Image 2.1 weights: Qwen Research License (research/evaluation only).
   https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE
 MiniMax H3 weights: MiniMax H3 Community License Agreement (territorial and downstream use restrictions).
   https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+MiniMax H3-Image weights (deploy/strix-halo, downloaded by its installer): MiniMax-H3-Image Community License
+  Agreement (territorial and downstream use restrictions; separate written authorization from MiniMax above USD 1 million
+  annualized revenue or for a Hosted Service; "MiniMax-H3-Image" shown in a commercial product's user interface).
+  https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE
 Kandinsky-6.0 Pro distilled weights: the model card lists the MIT License.
   https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers
 Kitten TTS 2 weights (KittenML / Stellon Labs), used by the optional speech tool in tools/speech/kitten/ and downloaded

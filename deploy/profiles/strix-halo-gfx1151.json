@@ -1,0 +1,351 @@
+{
+ "profile": "strix-halo-gfx1151",
+ "status": "preview",
+ "description": "LocalRouter on one AMD Strix Halo box (Ryzen AI Max+ 395, Radeon 8060S gfx1151, unified memory with a 96 GiB GTT pool): Qwen3.8 Flash-Next chat through Gufo (ROCm, Q4 + MTP) or llama.cpp (Vulkan, Q3 + MTP) as openai_server tools, Qwen3-TTS and Qwen3-ASR through Gufo behind the generic openai_audio cmd worker, and Whisper large-v3-turbo on PyTorch ROCm. Model servers run in rootless Podman (tools/gufo/serve.sh); the daemon runs as a transient systemd user unit (deploy/strix-halo). The compiled-in CUDA engines (Qwen-Image, MiniMax H3, Kandinsky-6) and Drama 3 have no AMD build and are not part of this profile.",
+ "tested_on": "Ryzen AI Max+ 395 / Radeon 8060S (gfx1151), 128 GB LPDDR5X with amdgpu.gttsize=98304 (96 GiB GTT), kernel 7.2, ROCm 7.2.4, Podman 6.1 (runc), 2026-11-15: chat over /v1 on both chat tools, speech and transcription over /v1/audio, the voice loop over /v1/realtime (tools/spark/jarvis/voice_e2e.py --smoke)",
+ "hardware": {
+  "arch": "x86_64",
+  "gpu": "gfx1151",
+  "gfx": "gfx1151",
+  "unified_memory": true,
+  "min_memory_gib": 96,
+  "min_gtt_gib": 90,
+  "min_rocm": "7.2",
+  "min_free_gib": 96,
+  "os": "omarchy 4.5.0"
+ },
+ "disk_margin_gib": 30,
+ "env": {
+  "LR_BIN": "$REPO/zig-out/bin/localrouter",
+  "STEPS": "bash $REPO/tools/install/steps.sh",
+  "UV_CACHE_DIR": "$J/uv-cache",
+  "FLASHNEXT_DIR": "${FLASHNEXT_DIR:-$J/models/Qwen3.8-Flash-Next-GGUF}",
+  "TTS_DIR": "${TTS_DIR:-$J/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}",
+  "ASR_DIR": "${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}",
+  "LLAMA_BIN": "${LLAMA_BIN:-$J/llama.cpp/bin}",
+  "GUFO_IMAGE": "${GUFO_IMAGE:-$(cat $REPO/tools/gufo/IMAGE)}",
+  "PINS": "$REPO/deploy/strix-halo/pins",
+  "HF_PINNED": "python3 -I $REPO/tools/install/hf_pinned.py",
+  "HF": "$J/bin/uvx --from huggingface_hub==2.4.0 hf",
+  "COMFY_ROOT": "${COMFY_ROOT:-$J/comfy}",
+  "COMFY_HF": "${COMFY_HF:-$COMFY_ROOT/hf}",
+  "COMFY_INSTALL": "bash $REPO/deploy/strix-halo/comfyui/install.sh"
+ },
+ "prereqs": [
+  {
+   "id": "commands",
+   "title": "jq, curl, git, tar, xz, sha256sum, python3, podman, systemd-run",
+   "test": "for t in jq curl git tar xz sha256sum python3 podman systemctl systemd-run; do command -v $t > /dev/null || exit 1; done",
+   "fix": "install them with the distribution's package manager (Arch/Omarchy: sudo pacman -S jq curl git tar xz python podman)"
+  },
+  {
+   "id": "python",
+   "title": "/usr/bin/python3 3.11 or newer (the openai_audio worker and the scripts)",
+   "test": "/usr/bin/python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 11))'",
+   "fix": "install python 3.11 or newer"
+  },
+  {
+   "id": "amdgpu",
+   "title": "an AMD GPU on amdgpu with ROCm (rocminfo lists a gfx1151 agent)",
+   "test": "rocminfo 2> /dev/null | grep -q gfx1151",
+   "fix": "install ROCm 7.2 or newer (rocminfo, the HIP runtime); add yourself to the video and render groups and log in again"
+  },
+  {
+   "id": "gpu-devices",
+   "title": "/dev/kfd and /dev/dri/renderD* usable by this user",
+   "test": "[ -r /dev/kfd ] && [ -w /dev/kfd ] && ls /dev/dri/renderD* > /dev/null 2>&1",
+   "fix": "sudo usermod -aG video,render $(id -un), then log in again"
+  },
+  {
+   "id": "gtt",
+   "title": "a GTT pool of 90 GiB or more (amdgpu.gttsize / ttm.pages_limit on the kernel command line)",
+   "test": "source $REPO/tools/install/lib.sh && [ $(hw_gtt) -ge $((90 * 1073741824)) ]",
+   "fix": "a host setting this installer never changes: see the Gufo host configuration guide (amdgpu.gttsize=98304 ttm.pages_limit=25165824) and reboot"
+  },
+  {
+   "id": "podman-rootless",
+   "title": "rootless Podman that can run a container",
+   "test": "podman info --format '{{.Host.Security.Rootless}}' 2> /dev/null | grep -qx true",
+   "fix": "install podman (and crun or runc); check: podman run --rm docker.io/library/alpine true"
+  },
+  {
+   "id": "systemd-user",
+   "title": "a systemd user session (the daemon runs as a transient user unit)",
+   "test": "systemctl --user show-environment > /dev/null",
+   "fix": "log in through ssh or a desktop session (not su)"
+  },
+  {
+   "id": "network",
+   "title": "HTTPS to huggingface.co, github.com, ghcr.io and ziglang.org",
+   "test": "for u in https://huggingface.co https://github.com https://ziglang.org; do curl -fsS -m 15 -o /dev/null -I $u || exit 1; done; curl -sS -m 15 -o /dev/null https://ghcr.io/v2/",
+   "fix": "open outbound HTTPS to those hosts (and download.pytorch.org, pypi.org)"
+  }
+ ],
+ "host": {
+  "download_bytes": 73986483,
+  "disk_bytes": 450000000,
+  "tools": {
+   "zig": {
+    "url": "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz",
+    "sha256": "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
+    "bytes": 57332648,
+    "bin": [
+     "zig"
+    ],
+    "version": "0.17.0",
+    "version_cmd": "$J/bin/zig version"
+   },
+   "uv": {
+    "url": "https://github.com/astral-sh/uv/releases/download/0.13.4/uv-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f",
+    "bytes": 16653835,
+    "bin": [
+     "uv-x86_64-unknown-linux-gnu/uv",
+     "uv-x86_64-unknown-linux-gnu/uvx"
+    ],
+    "version": "uv 0.13.4",
+    "version_cmd": "$J/bin/uv --version"
+   }
+  },
+  "steps": [
+   {
+    "id": "zig",
+    "download_bytes": 57332648,
+    "disk_bytes": 330000000,
+    "title": "Zig 0.17.0 (x86_64 Linux, builds LocalRouter)",
+    "run": "$STEPS tool zig",
+    "done": "$STEPS tool-ok zig",
+    "fix": "a failed download or checksum: run again (it resumes)"
+   },
+   {
+    "id": "uv",
+    "download_bytes": 16653835,
+    "disk_bytes": 50000000,
+    "title": "uv 0.13.4 (the Whisper ROCm venv, hf downloads)",
+    "run": "$STEPS tool uv",
+    "done": "$STEPS tool-ok uv",
+    "fix": "a failed download or checksum: run again (it resumes)"
+   },
+   {
+    "id": "build",
+    "download_bytes": 0,
+    "disk_bytes": 300000000,
+    "title": "LocalRouter itself, from this checkout (zig build without -Dnvcc: the CUDA engines are compiled with empty kernel images and are not configured)",
+    "run": "cd $REPO && $J/bin/zig build -Doptimize=ReleaseSafe",
+    "done": "[ -x \"$LR_BIN\" ]",
+    "fix": "the build output says why; check zig version (0.17.0)"
+   },
+   {
+    "id": "gufo-image",
+    "download_bytes": 3490000000,
+    "disk_bytes": 3490000000,
+    "title": "the Gufo runtime image (ghcr.io/gufo-org/toolboxes/gufo-runtime 0.34.0, MIT; ROCm 10.1 inside), pinned by digest in tools/gufo/IMAGE",
+    "run": "case $GUFO_IMAGE in *@sha256:*) ;; *) echo \"GUFO_IMAGE $GUFO_IMAGE is not pinned by digest\" >&2; exit 1 ;; esac; podman pull $GUFO_IMAGE && [ \"$(podman image inspect --format '{{.Digest}}' $GUFO_IMAGE)\" = \"${GUFO_IMAGE##*@}\" ]",
+    "done": "podman image exists $GUFO_IMAGE && [ \"$(podman image inspect --format '{{.Digest}}' $GUFO_IMAGE)\" = \"${GUFO_IMAGE##*@}\" ]",
+    "fix": "network to ghcr.io: run again; a digest mismatch means the registry served other bytes than the pin (podman refuses those too)"
+   },
+   {
+    "id": "gufo-diagnose",
+    "gpu": true,
+    "min_free_gib": 8,
+    "download_bytes": 0,
+    "disk_bytes": 0,
+    "title": "gufo diagnose in the pinned image: the host's GPU devices, groups and GTT as Gufo sees them",
+    "run": "podman run --rm --device /dev/kfd --device /dev/dri --group-add video --group-add render $GUFO_IMAGE gufo diagnose && mkdir -p $J/install/state && echo $GUFO_IMAGE > $J/install/state/gufo-diagnose",
+    "done": "[ \"$(cat $J/install/state/gufo-diagnose 2> /dev/null)\" = \"$GUFO_IMAGE\" ]",
+    "fix": "gufo diagnose says what the host lacks (the gpu-devices and gtt prerequisites above)"
+   }
+  ]
+ },
+ "models": [
+  {
+   "key": "chat",
+   "id": "qwen3.8-flash-next",
+   "warm": false,
+   "title": "Qwen3.8 Flash-Next, Gufo (ROCm) UD-Q4_K_XL with the shared MTP head; 88 GiB GTT at 32k context",
+   "licence": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"
+   },
+   "download_bytes": 115028765978,
+   "disk_bytes": 115100000000,
+   "memory_bytes": 94489280512,
+   "steps": [
+    {
+     "id": "weights",
+     "download_bytes": 115028765978,
+     "disk_bytes": 115100000000,
+     "title": "unsloth/Qwen3.8-Flash-Next-GGUF at f5d175de: UD-Q4_K_XL (4 shards), MTP/mtp-...-shared-Q8_0.gguf, mmproj-BF16.gguf; every file by sha256 (deploy/strix-halo/pins/flash-next-q4.json)",
+     "run": "$HF_PINNED download $PINS/flash-next-q4.json $FLASHNEXT_DIR --hf '$HF' && $STEPS stamp flash-next-q4 $PINS/flash-next-q4.json",
+     "done": "$STEPS stamped flash-next-q4 $PINS/flash-next-q4.json && $HF_PINNED verify $PINS/flash-next-q4.json $FLASHNEXT_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
+    }
+   ],
+   "pins": "deploy/strix-halo/pins/flash-next-q4.json"
+  },
+  {
+   "key": "chat-q3",
+   "id": "qwen3.8-flash-next-q3",
+   "warm": false,
+   "title": "Qwen3.8 Flash-Next, llama.cpp (Vulkan, Unsloth fork b12347) UD-Q3_K_XL with the shared MTP head; 62 GiB GTT, the voice loop's chat model",
+   "licence": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"
+   },
+   "download_bytes": 89497018544,
+   "disk_bytes": 89600000000,
+   "memory_bytes": 66571993088,
+   "steps": [
+    {
+     "id": "llama-cpp",
+     "download_bytes": 32070038,
+     "disk_bytes": 120000000,
+     "title": "llama.cpp b12347-mix-241a0f3 (unslothai fork, Vulkan x64: loads the qwen4exp architecture and the shared MTP head)",
+     "run": "$STEPS file https://github.com/unslothai/llama.cpp/releases/download/b12347-mix-241a0f3/app-b12347-mix-241a0f3-linux-x64-vulkan.tar.gz 3eb345b7abd8cab58e6915543e5cb30686c0726c3f082f2787ec19b1a1592615 $J/dl/llama-us-vk.tgz && mkdir -p $LLAMA_BIN && tar -xzf $J/dl/llama-us-vk.tgz -C $LLAMA_BIN",
+     "done": "[ -x $LLAMA_BIN/llama-server ]",
+     "fix": "network to github.com: run again"
+    },
+    {
+     "id": "weights",
+     "download_bytes": 89464948506,
+     "disk_bytes": 89500000000,
+     "title": "unsloth/Qwen3.8-Flash-Next-GGUF at f5d175de: UD-Q3_K_XL (4 shards) and the shared MTP head; every file by sha256 (deploy/strix-halo/pins/flash-next-q3.json)",
+     "run": "$HF_PINNED download $PINS/flash-next-q3.json $FLASHNEXT_DIR --hf '$HF' && $STEPS stamp flash-next-q3 $PINS/flash-next-q3.json",
+     "done": "$STEPS stamped flash-next-q3 $PINS/flash-next-q3.json && $HF_PINNED verify $PINS/flash-next-q3.json $FLASHNEXT_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
+    }
+   ],
+   "pins": "deploy/strix-halo/pins/flash-next-q3.json"
+  },
+  {
+   "key": "tts",
+   "id": "qwen3-tts-customvoice",
+   "warm": true,
+   "title": "Qwen3-TTS 12Hz 1.7B CustomVoice through Gufo and tools/speech/openai_audio (9 voices, 24 kHz, streamed; 6.5 GiB)",
+   "licence": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+   },
+   "download_bytes": 4544233100,
+   "disk_bytes": 4600000000,
+   "memory_bytes": 6979321856,
+   "steps": [
+    {
+     "id": "weights",
+     "download_bytes": 4544233100,
+     "disk_bytes": 4600000000,
+     "title": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice at 0c0e3051, every file by sha256 (deploy/strix-halo/pins/qwen3-tts-customvoice.json)",
+     "run": "$HF_PINNED download $PINS/qwen3-tts-customvoice.json $TTS_DIR --hf '$HF' && $STEPS stamp qwen3-tts-customvoice $PINS/qwen3-tts-customvoice.json",
+     "done": "$STEPS stamped qwen3-tts-customvoice $PINS/qwen3-tts-customvoice.json && $HF_PINNED verify $PINS/qwen3-tts-customvoice.json $TTS_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
+    }
+   ],
+   "pins": "deploy/strix-halo/pins/qwen3-tts-customvoice.json"
+  },
+  {
+   "key": "stt",
+   "id": "qwen3-asr",
+   "warm": true,
+   "title": "Qwen3-ASR 1.7B through Gufo and tools/speech/openai_audio (5.5 GiB)",
+   "licence": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B"
+   },
+   "download_bytes": 4703117477,
+   "disk_bytes": 4750000000,
+   "memory_bytes": 5905580032,
+   "steps": [
+    {
+     "id": "weights",
+     "download_bytes": 4703117477,
+     "disk_bytes": 4750000000,
+     "title": "Qwen/Qwen3-ASR-1.7B at 7278e1e7, every file by sha256 (deploy/strix-halo/pins/qwen3-asr.json)",
+     "run": "$HF_PINNED download $PINS/qwen3-asr.json $ASR_DIR --hf '$HF' && $STEPS stamp qwen3-asr $PINS/qwen3-asr.json",
+     "done": "$STEPS stamped qwen3-asr $PINS/qwen3-asr.json && $HF_PINNED verify $PINS/qwen3-asr.json $ASR_DIR --sizes",
+     "fix": "network to huggingface.co: run again (hf resumes); a file that differs from its pin is named in the log"
+    }
+   ],
+   "pins": "deploy/strix-halo/pins/qwen3-asr.json"
+  },
+  {
+   "key": "whisper",
+   "id": "whisper-large-v3-turbo",
+   "warm": false,
+   "title": "Whisper large-v3-turbo on PyTorch ROCm 7.2 (tools/speech/whisper/rocm/uv.lock; FP16; 2.5 GiB)",
+   "licence": {
+    "name": "MIT",
+    "url": "https://huggingface.co/openai/whisper-large-v3-turbo"
+   },
+   "pins": "tools/speech/whisper/rocm/uv.lock",
+   "download_bytes": 6120000000,
+   "disk_bytes": 12000000000,
+   "memory_bytes": 3221225472,
+   "steps": [
+    {
+     "id": "venv",
+     "download_bytes": 4500000000,
+     "disk_bytes": 10000000000,
+     "title": "the Whisper venv from tools/speech/whisper/rocm/uv.lock (Python 3.12, torch 2.13.0+rocm7.2, transformers 5.19.0; every wheel by its locked hash)",
+     "run": "UV_PROJECT_ENVIRONMENT=$J/venvs/whisper-rocm $J/bin/uv sync --locked --python 3.12 --project $REPO/tools/speech/whisper/rocm && $STEPS stamp whisper-rocm-venv $REPO/tools/speech/whisper/rocm/uv.lock",
+     "done": "[ -x $J/venvs/whisper-rocm/bin/python ] && $STEPS stamped whisper-rocm-venv $REPO/tools/speech/whisper/rocm/uv.lock",
+     "fix": "network (download.pytorch.org, pypi.org): run again"
+    },
+    {
+     "id": "model",
+     "download_bytes": 1620000000,
+     "disk_bytes": 1620000000,
+     "title": "openai/whisper-large-v3-turbo at its pinned revision, every file by sha256",
+     "run": "python3 -I $REPO/tools/speech/whisper/fetch_model.py --root $J/models/whisper",
+     "done": "python3 -I $REPO/tools/speech/whisper/fetch_model.py --verify $J/models/whisper/whisper-large-v3-turbo/41f01f3fe87f28c78e2fbf8b568835947dd65ed9 > /dev/null",
+     "fix": "network: run again"
+    }
+   ]
+  },
+  {
+   "key": "minimax",
+   "id": "minimax-h3",
+   "warm": false,
+   "title": "MiniMax H3 (text/image to video with audio) and H3-Image (text to image, edits) through ComfyUI with PyTorch ROCm; tools minimax-h3 and minimax-h3-image, each booked at the whole GTT budget",
+   "licence": {
+    "name": "MiniMax H3 / H3-Image Community License Agreements (not licensed in the US, EU, UK or South Korea)",
+    "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
+   },
+   "accept": [
+    "the MiniMax H3 and MiniMax H3-Image Community Licenses (links below and https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE): they grant nothing in the United States, the European Union, the United Kingdom or South Korea, and set an Acceptable Use Policy and disclosure duties elsewhere"
+   ],
+   "download_bytes": 97797364272,
+   "disk_bytes": 109562596347,
+   "memory_bytes": 38654705664,
+   "steps": [
+    {
+     "id": "comfyui",
+     "download_bytes": 6000000000,
+     "disk_bytes": 17765232075,
+     "needs_accept": true,
+     "title": "ComfyUI e9afbcc and ComfyUI-GGUF 6ea2651 (pinned), a Python 3.13 venv with PyTorch 2.14.1+rocm7.2, and our two ComfyUI nodes (the H3-Image GGUF loader; the ROCm Conv3d workaround for image to video)",
+     "run": "$COMFY_INSTALL comfyui",
+     "done": "$COMFY_INSTALL ok-comfyui",
+     "fix": "network to github.com / download.pytorch.org / pypi.org: run again; a checkout with local changes is left alone (it says which)"
+    },
+    {
+     "id": "weights",
+     "download_bytes": 91797364272,
+     "disk_bytes": 91797364272,
+     "needs_accept": true,
+     "title": "Comfy-Org/MiniMax-H3 (int8 fl2va DiT, Qwen3-VL 32B int8 text encoder, video/audio VAEs, 4-step turbo LoRA), unsloth/MiniMax-H3-Image-GGUF Q4_K_M and Q8_0 (whole-scene edits), the H3-Image VAE (pinned revisions), linked into ComfyUI/models",
+     "run": "$COMFY_INSTALL models",
+     "done": "$COMFY_INSTALL ok-models",
+     "fix": "network to huggingface.co: run again (hf resumes); COMFY_HF=DIR reuses an existing download"
+    }
+   ]
+  }
+ ],
+ "deploy": {
+  "service": "systemd-transient",
+  "install": "deploy/strix-halo/render.sh",
+  "start": "deploy/strix-halo/start.sh",
+  "stop": "deploy/strix-halo/stop.sh",
+  "status": "deploy/strix-halo/status.sh",
+  "smoke": "python3 -I tools/spark/jarvis/voice_e2e.py --smoke --skip-barge --leak-probe 0 --url http://127.0.0.1:$PORT --out $J/smoke --tts qwen3-tts-customvoice --stt qwen3-asr --chat qwen3.8-flash-next-q3"
+ }
+}

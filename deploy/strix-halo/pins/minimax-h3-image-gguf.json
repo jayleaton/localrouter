@@ -1,0 +1,5 @@
+{"repo": "unsloth/MiniMax-H3-Image-GGUF", "revision": "2eda8f761a1625818e2933e7e726e337d197bc27",
+ "files": {
+  "minimax_h3_image_pruned-Q4_K_M.gguf": [12721119968, "ef784687ff25a974191d00f941388060ef971286fbd2e98b2769fa78c8d599a8"],
+  "minimax_h3_image_pruned-Q8_0.gguf": [22026760928, "ff5ed88d968e9fc3c3352101592ba83f963879ae3118ce9ab9eb7946aad70255"]
+ }}
