@@ -317,6 +317,12 @@ pub fn parseSize(s: []const u8) ?[2]u32 {
     return .{ w, h };
 }
 
+/// A video request's `seconds` or `fps` as sent: left out (null) is 0, the model's own; an explicit 0 is null, refused.
+pub fn sentCount(v: ?u32) ?u32 {
+    const n = v orelse return 0;
+    return if (n == 0) null else n;
+}
+
 test "validate and wire shape" {
     var why: []const u8 = "";
     const ok: Request = .{ .image = .{ .prompt = "a fox", .width = 1360, .height = 768 } };

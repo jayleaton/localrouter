@@ -718,7 +718,7 @@ const VideoBody = struct {
     negative_prompt: []const u8 = "",
     size: []const u8 = "", // "": the model's own size
     seconds: []const u8 = "", // OpenAI sends seconds as a string; "": the model's own
-    fps: u32 = 0, // 0: the model's own
+    fps: ?u32 = null, // null: the model's own
     seed: ?u64 = null,
     steps: u32 = 0,
     guidance: f32 = 0,
@@ -733,10 +733,12 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     const b = parseBody(VideoBody, app, a, host, text, ctype, &.{"input_reference"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
-    const seconds = if (b.seconds.len == 0) 0 else std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
+    const sent_seconds: ?u32 = if (b.seconds.len == 0) null else std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
+    const seconds = request.sentCount(sent_seconds) orelse return h.fail(req, a, 400, "invalid_request_error", "seconds must be at least 1; leave it out for the model's own");
+    const fps = request.sentCount(b.fps) orelse return h.fail(req, a, 400, "invalid_request_error", "fps must be at least 1; leave it out for the model's own");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
+    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     try videoObject(app, req, a, j);
 }

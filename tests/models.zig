@@ -227,3 +227,28 @@ test "model tools: reserve_for refuses a video job past the model's limits befor
     }
     try testing.expectEqualStrings("unloaded", try d.toolState(a, "vid"));
 }
+
+test "video requests: an explicit 0 for seconds or fps is refused, not taken as the model's default" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg = try std.fmt.allocPrint(a, "{{{s}, \"tools\": [{{\"id\": \"vid\", \"kind\": \"video\", \"cmd\": [\"python3\", \"-c\", \"pass\"]}}]}}", .{harness.reserve});
+    var d = try Daemon.start(testing.allocator, testing.io, "models-zero", cfg);
+    defer d.stop();
+    for ([_][]const u8{ "{\"prompt\":\"waves\",\"seconds\":\"0\"}", "{\"prompt\":\"waves\",\"fps\":0}" }) |body| {
+        const r = try d.call(a, .POST, "/v1/videos", body);
+        if (r.status != .bad_request) std.debug.print("POST /v1/videos {s}: {d} {s}\n", .{ body, @backingInt(r.status), r.body });
+        try testing.expectEqual(std.http.Status.bad_request, r.status);
+    }
+    for ([_][2][]const u8{
+        .{ "generate_video", "{\"prompt\":\"waves\",\"seconds\":0,\"wait_s\":0}" },
+        .{ "generate_video", "{\"prompt\":\"waves\",\"fps\":0,\"wait_s\":0}" },
+        .{ "reserve_for", "{\"model\":\"vid\",\"seconds\":0,\"dry_run\":true}" },
+    }) |c| {
+        const res = try result(a, try mcpCall(&d, a, c[0], c[1]));
+        if (res.ok) std.debug.print("{s} {s}: {s}\n", .{ c[0], c[1], res.text });
+        try testing.expect(!res.ok);
+        try testing.expect(std.mem.indexOf(u8, res.text, "must be at least 1") != null);
+    }
+    try testing.expectEqualStrings("unloaded", try d.toolState(a, "vid"));
+}

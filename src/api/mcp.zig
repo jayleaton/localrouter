@@ -431,13 +431,14 @@ fn unloadModel(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList
 }
 
 fn reserveFor(app: *App, a: std.mem.Allocator, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { model: []const u8, size: []const u8 = "", seconds: u32 = 0, num_gaussians: ?u32 = null, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
+    const Args = struct { model: []const u8, size: []const u8 = "", seconds: ?u32 = null, num_gaussians: ?u32 = null, dry_run: bool = false, hold_s: u32 = 180, wait_s: u32 = 300 };
     const b = try parseArgs(Args, a, args, out);
     const i = try modelIndex(app, a, b.model, out);
     const cfg = app.scheduler.slots[i].tool.config();
+    const seconds = request.sentCount(b.seconds) orelse return fail(a, out, "seconds must be at least 1; leave it out for the model's own", .{});
     var r: request.Request = switch (cfg.kind) {
         .image => .{ .image = .{ .prompt = "" } },
-        .video => .{ .video = .{ .prompt = "reserve", .seconds = b.seconds } },
+        .video => .{ .video = .{ .prompt = "reserve", .seconds = seconds } },
         .speech => .{ .speech = .{ .input = "" } },
         .transcription => .{ .transcription = .{ .audio = "" } },
         .chat => .{ .chat = .{ .body = "" } },
@@ -567,13 +568,15 @@ fn requireCapability(app: *App, a: std.mem.Allocator, cap: engine.Capability, ou
 }
 
 fn generateVideo(app: *App, a: std.mem.Allocator, host: []const u8, args: Value, out: *std.ArrayList(Content)) ToolError!bool {
-    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: u32 = 0, fps: u32 = 0, seed: ?u64 = null, steps: u32 = 0, audio: ?bool = null, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
+    const Args = struct { prompt: []const u8, model: ?[]const u8 = null, size: []const u8 = "", seconds: ?u32 = null, fps: ?u32 = null, seed: ?u64 = null, steps: u32 = 0, audio: ?bool = null, negative_prompt: []const u8 = "", wait_s: u32 = 600, image: ?[]const u8 = null };
     const b = try parseArgs(Args, a, args, out);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return fail(a, out, "size must be WIDTHxHEIGHT", .{});
+    const seconds = request.sentCount(b.seconds) orelse return fail(a, out, "seconds must be at least 1; leave it out for the model's own", .{});
+    const fps = request.sentCount(b.fps) orelse return fail(a, out, "fps must be at least 1; leave it out for the model's own", .{});
     const files = try inputFiles(app, a, host, "first_frame", if (b.image) |x| &.{x} else &.{}, out);
     var why: routes.Refusal = .{};
     const tool = routes.resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why) orelse return fail(a, out, "{s}", .{why.message});
-    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = b.seconds, .fps = b.fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
+    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = fps, .seed = b.seed orelse routes.randomSeed(app.io), .steps = b.steps, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = try start(app, a, tool, r, files, out);
     try waitFor(app, j, b.wait_s);
     return report(app, a, host, j, out);
