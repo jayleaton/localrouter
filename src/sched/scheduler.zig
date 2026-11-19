@@ -1302,8 +1302,7 @@ pub const Scheduler = struct {
             const v = victim orelse return false;
             if (keepOf(v, in_call) != .no) s.displace(v, target); // it comes back after this job
             // the journal says what evicted what: on a box that keeps models warm an unload is never silent
-            var line: [256]u8 = undefined;
-            std.log.info("{s}", .{evictionLine(&line, v.tool.config().id, v.tool.config().priority, s.slots[target].tool.config().id, extra, s.budgetFree(), memory.available(), s.cfg.reserve_bytes)});
+            std.log.info(eviction_fmt, evictionArgs(v.tool.config().id, v.tool.config().priority, s.slots[target].tool.config().id, extra, s.budgetFree(), memory.available(), s.cfg.reserve_bytes));
             s.evictNow(v);
         }
         return true;
@@ -1866,13 +1865,15 @@ const FakeCalls = struct {
     }
 };
 
-/// The journal line for an eviction. "free in the budget" is the router's budget less what is booked (`budgetFree`); the
-/// host's MemAvailable and the reserve follow it, since they can differ a lot on a unified-memory machine (2026-11: the
-/// line printed the host's free memory as "available", which read as the budget's and misled a review of an eviction).
-pub fn evictionLine(buf: []u8, victim: []const u8, priority: i32, for_id: []const u8, needs: u64, budget_free: u64, host_available: ?u64, reserve: u64) []const u8 {
-    return std.fmt.bufPrint(buf, "evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB free in the budget (host {d} MiB available, {d} MiB reserve)", .{
-        victim, priority, for_id, needs >> 20, budget_free >> 20, (host_available orelse 0) >> 20, reserve >> 20,
-    }) catch buf[0..0];
+/// The journal line for an eviction: `std.log.info(eviction_fmt, evictionArgs(...))`. "free in the budget" is the
+/// router's budget less what is booked (`budgetFree`); the host's MemAvailable and the reserve follow it, since they can
+/// differ a lot on a unified-memory machine (2026-11: the line printed the host's free memory as "available", which read
+/// as the budget's and misled a review of an eviction). It is formatted by the logger itself, never into a fixed buffer
+/// first: a 256-byte one came out blank for two valid 100-character tool ids.
+pub const eviction_fmt = "evicting {s} (priority {d}) for {s}: it needs {d} MiB more, {d} MiB free in the budget (host {d} MiB available, {d} MiB reserve)";
+
+pub fn evictionArgs(victim: []const u8, priority: i32, for_id: []const u8, needs: u64, budget_free: u64, host_available: ?u64, reserve: u64) struct { []const u8, i32, []const u8, u64, u64, u64, u64 } {
+    return .{ victim, priority, for_id, needs >> 20, budget_free >> 20, (host_available orelse 0) >> 20, reserve >> 20 };
 }
 
 test "the eviction line reports the budget's free bytes, not the host's" {
@@ -1891,13 +1892,34 @@ test "the eviction line reports the budget's free bytes, not the host's" {
     try t.expectEqual(@as(u64, 30 << 20), b.s.budgetFree());
     const bud = b.s.budget();
     try t.expectEqual(bud.ceiling_bytes - bud.booked_bytes, b.s.budgetFree());
-    var buf: [256]u8 = undefined;
-    const line = evictionLine(&buf, "img", 10, "chat", 40 << 20, b.s.budgetFree(), 90_000 << 20, 2 << 30);
+    const line = try std.fmt.allocPrint(t.allocator, eviction_fmt, evictionArgs("img", 10, "chat", 40 << 20, b.s.budgetFree(), 90_000 << 20, 2 << 30));
+    defer t.allocator.free(line);
     try t.expectEqualStrings("evicting img (priority 10) for chat: it needs 40 MiB more, 30 MiB free in the budget (host 90000 MiB available, 2048 MiB reserve)", line);
     // Over budget (a worker reported more than it was booked at): 0 free, never a wrapped number.
     b.slots[0].resident = 120 << 20;
     try t.expectEqual(@as(u64, 0), b.s.budgetFree());
-    try t.expect(std.mem.indexOf(u8, evictionLine(&buf, "img", 10, "chat", 1, b.s.budgetFree(), null, 0), " 0 MiB free in the budget") != null);
+    const over = try std.fmt.allocPrint(t.allocator, eviction_fmt, evictionArgs("img", 10, "chat", 1, b.s.budgetFree(), null, 0));
+    defer t.allocator.free(over);
+    try t.expect(std.mem.indexOf(u8, over, " 0 MiB free in the budget") != null);
+}
+
+test "the eviction line between two 100-character tool ids is whole, not blank" {
+    // Review: the line went through a 256-byte buffer and `bufPrint` failed (NoSpaceLeft) for two valid 100-character
+    // ids, so the journal got a blank entry. The format is now the logger's own.
+    const t = std.testing;
+    const victim_id: [100]u8 = @splat('v');
+    const for_id_buf: [100]u8 = @splat('f');
+    const victim: []const u8 = &victim_id;
+    const for_id: []const u8 = &for_id_buf;
+    const line = try std.fmt.allocPrint(t.allocator, eviction_fmt, evictionArgs(victim, -5, for_id, 70_000 << 20, 12_345 << 20, 99_999 << 20, 20_480 << 20));
+    defer t.allocator.free(line);
+    try t.expect(line.len > 256);
+    const head = try std.fmt.allocPrint(t.allocator, "evicting {s} (priority -5) for {s}: ", .{ victim, for_id });
+    defer t.allocator.free(head);
+    try t.expect(std.mem.startsWith(u8, line, head));
+    try t.expect(std.mem.endsWith(u8, line, "it needs 70000 MiB more, 12345 MiB free in the budget (host 99999 MiB available, 20480 MiB reserve)"));
+    // and the logger takes the format and its arguments as they are
+    std.log.info(eviction_fmt, evictionArgs(victim, -5, for_id, 70_000 << 20, 12_345 << 20, 99_999 << 20, 20_480 << 20));
 }
 
 /// A scheduler over `fakes`, with a budget of `budget_mib` and no reserve (the machine's own memory never decides).
