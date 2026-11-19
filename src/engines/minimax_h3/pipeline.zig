@@ -428,6 +428,85 @@ pub const Pipeline = struct {
         if (p.probe) |pr| try pr.after(pr.ctx, name, outs);
     }
 
+    /// What `sample` reads from `generateImage`'s encode.
+    const Sampling = struct { hidden: u64, text: u64, l: u32, tags: ?[]const u8, sh: Shapes, steps: u32, seed: u64, progress: ?Progress, clock: *Clock };
+
+    /// From the encoded prompt to the sampled latents in `bufs[0]` (fp32, video then audio).
+    fn sample(p: *Pipeline, w: Sampling) !void {
+        const gpa = p.gpa;
+        const hidden = w.hidden;
+        const text = w.text;
+        const l = w.l;
+        const sh = w.sh;
+        const steps = w.steps;
+        const seed = w.seed;
+        const nv: u64 = sh.n_video;
+        const n: u64 = nv + sh.n_audio;
+        try p.post("text_encoder", &.{
+            .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
+            .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
+        });
+        if (w.tags) |text_tags| {
+            const tags = try gpa.alloc(i64, text_tags.len);
+            defer gpa.free(tags);
+            for (tags, text_tags) |*dst, tag| dst.* = tag;
+            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
+            defer tb.free();
+            try p.pre("text_tags", &.{});
+            try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
+        }
+        if (p.opts.unload_te) {
+            try p.s.synchronize();
+            p.unloadTe();
+        }
+        p.times.encode = try w.clock.lap();
+
+        // ---- the sampler state: portable noise, one stream, video first
+        const x = try p.bufs[0].at(0);
+        {
+            const z = try gpa.alloc(f32, @intCast(n));
+            defer gpa.free(z);
+            qi.noise.fill(seed, z);
+            try p.dit.upload(x, std.mem.sliceAsBytes(z));
+        }
+        try p.pre("noise", &.{});
+        try p.post("noise", &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
+        const sig = try sigmas(gpa, steps);
+        defer gpa.free(sig);
+        const plan = try gpa.alloc(sampler.Step, steps);
+        defer gpa.free(plan);
+        sampler.plan(sig, plan);
+
+        // ---- the steps
+        const xb = try p.bufs[3].at(0); // bf16 model input [video | audio]
+        const vel = try p.bufs[4].at(0); // bf16 velocities, packed alike
+        const den = [2]u64{ try p.bufs[1].at(0), try p.bufs[2].at(0) };
+        var cur: usize = 0; // den[cur] is this step's, den[1 - cur] the previous step's
+        var nb: [24]u8 = undefined;
+        for (plan, 0..) |st, i| {
+            const name = try std.fmt.bufPrint(&nb, "step.{d}", .{i});
+            try p.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
+            try p.hops.toBf16(p.s, x, xb, n);
+            try p.dit.step(xb, xb + nv * 2, sig[i], sh.latent_t, sh.lh, sh.lw, sh.audio_t, vel, vel + nv * 2);
+            try p.hops.denoise(p.s, x, vel, sig[i], den[cur], n);
+            switch (st) {
+                .euler => |e| try p.hops.euler32(p.s, x, den[cur], e.sigma, e.dt, n),
+                .res2 => |r| try p.hops.res2(p.s, x, den[cur], den[1 - cur], r.e, r.h, r.b1, r.b2, n),
+            }
+            try p.post(name, &.{
+                .{ .role = "vel_v", .ptr = vel, .bytes = nv * 2 },
+                .{ .role = "vel_a", .ptr = vel + nv * 2, .bytes = sh.n_audio * 2 },
+                .{ .role = "den", .ptr = den[cur], .bytes = n * 4 },
+                .{ .role = "x", .ptr = x, .bytes = n * 4 },
+            });
+            cur = 1 - cur;
+            if (w.progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
+                try p.s.synchronize();
+                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            }
+        }
+    }
+
     /// One clip: `frames_out` gets the uint8 frames [F, height, width, 3] and `audio_out` the fp32 waveform [2, A * 800]
     /// at 32 kHz, both sized by `shapes(width, height, frames)`. The frame count snaps up to 17 k + 5.
     pub fn generate(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
@@ -443,8 +522,6 @@ pub const Pipeline = struct {
         if (audio_out.len != sh.audioFloats()) return error.BadAudioBuffer;
         const gpa = p.gpa;
         var clock = Clock{ .io = p.io, .s = p.s };
-        const nv: u64 = sh.n_video;
-        const n: u64 = nv + sh.n_audio;
         p.dit.probe = null;
         try clock.start();
 
@@ -496,76 +573,10 @@ pub const Pipeline = struct {
         const text = try p.bufs[5].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.dit.prepare(text, l);
-        if (first_latent) |*b| { // the latent is read only here: freed before sampling
-            try p.dit.firstFrame(try b.at(0), sh.lh, sh.lw, seed, it.?.tags);
-            b.free();
-            first_latent = null;
-        }
-        try p.post("text_encoder", &.{
-            .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
-            .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
-        });
-        if (it) |tokens| {
-            const tags = try gpa.alloc(i64, tokens.tags.len);
-            defer gpa.free(tags);
-            for (tags, tokens.tags) |*dst, tag| dst.* = tag;
-            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
-            defer tb.free();
-            try p.pre("text_tags", &.{});
-            try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
-        }
-        if (p.opts.unload_te) {
-            try p.s.synchronize();
-            p.unloadTe();
-        }
-        p.times.encode = try clock.lap();
-
-        // ---- the sampler state: portable noise, one stream, video first
+        try conditioned(p, &first_latent, .{ .lh = sh.lh, .lw = sh.lw, .seed = seed, .tags = if (it) |tokens| tokens.tags else &.{} }, Pipeline.sample, .{ p, Sampling{ .hidden = hidden, .text = text, .l = l, .tags = if (it) |tokens| tokens.tags else null, .sh = sh, .steps = steps, .seed = seed, .progress = progress, .clock = &clock } });
+        const nv: u64 = sh.n_video;
         const x = try p.bufs[0].at(0);
         const xa = x + nv * 4; // the audio half
-        {
-            const z = try gpa.alloc(f32, @intCast(n));
-            defer gpa.free(z);
-            qi.noise.fill(seed, z);
-            try p.dit.upload(x, std.mem.sliceAsBytes(z));
-        }
-        try p.pre("noise", &.{});
-        try p.post("noise", &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
-        const sig = try sigmas(gpa, steps);
-        defer gpa.free(sig);
-        const plan = try gpa.alloc(sampler.Step, steps);
-        defer gpa.free(plan);
-        sampler.plan(sig, plan);
-
-        // ---- the steps
-        const xb = try p.bufs[3].at(0); // bf16 model input [video | audio]
-        const vel = try p.bufs[4].at(0); // bf16 velocities, packed alike
-        const den = [2]u64{ try p.bufs[1].at(0), try p.bufs[2].at(0) };
-        var cur: usize = 0; // den[cur] is this step's, den[1 - cur] the previous step's
-        var nb: [24]u8 = undefined;
-        for (plan, 0..) |st, i| {
-            const name = try std.fmt.bufPrint(&nb, "step.{d}", .{i});
-            try p.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
-            try p.hops.toBf16(p.s, x, xb, n);
-            try p.dit.step(xb, xb + nv * 2, sig[i], sh.latent_t, sh.lh, sh.lw, sh.audio_t, vel, vel + nv * 2);
-            try p.hops.denoise(p.s, x, vel, sig[i], den[cur], n);
-            switch (st) {
-                .euler => |e| try p.hops.euler32(p.s, x, den[cur], e.sigma, e.dt, n),
-                .res2 => |r| try p.hops.res2(p.s, x, den[cur], den[1 - cur], r.e, r.h, r.b1, r.b2, n),
-            }
-            try p.post(name, &.{
-                .{ .role = "vel_v", .ptr = vel, .bytes = nv * 2 },
-                .{ .role = "vel_a", .ptr = vel + nv * 2, .bytes = sh.n_audio * 2 },
-                .{ .role = "den", .ptr = den[cur], .bytes = n * 4 },
-                .{ .role = "x", .ptr = x, .bytes = n * 4 },
-            });
-            cur = 1 - cur;
-            if (progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
-                try p.s.synchronize();
-                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
-            }
-        }
-        p.dit.releaseCondition(); // the steps are done with the first frame's condition
         try p.hops.scale32(p.s, xa, audio_scale_out, sh.n_audio); // process_latent_out
         try p.pre("latents", &.{});
         try p.post("latents", &.{ .{ .role = "video", .ptr = x, .bytes = nv * 4 }, .{ .role = "audio", .ptr = xa, .bytes = sh.n_audio * 4 } });
@@ -599,6 +610,22 @@ pub const Pipeline = struct {
         return .{ .shapes = sh, .width = width, .height = height, .tokens = l };
     }
 };
+
+/// Where a first frame's condition is built: its latent's height and width, the noise seed, the prompt's text tags.
+const Condition = struct { lh: u32, lw: u32, seed: u64, tags: []const u8 };
+
+/// A first frame's condition (`Dit.firstFrame`) lives for the steps only. `conditioned` installs it from `first.*` (the
+/// frame's latent, freed once read) and runs `run(args)`; the condition is released when the steps return or fail, so
+/// an error leaves nothing resident past the request.
+fn conditioned(p: anytype, first: anytype, c: Condition, comptime run: anytype, args: anytype) !void {
+    defer p.dit.releaseCondition();
+    if (first.*) |*b| {
+        try p.dit.firstFrame(try b.at(0), c.lh, c.lw, c.seed, c.tags);
+        b.free();
+        first.* = null;
+    }
+    try @call(.auto, run, args);
+}
 
 const Clock = struct {
     io: std.Io,
@@ -683,4 +710,51 @@ test "sigmas of eight steps end in zero" {
     try std.testing.expectEqual(@as(usize, 9), sig.len);
     try std.testing.expectEqual(@as(f32, 0), sig[8]);
     try std.testing.expectEqual(@as(f32, 1.0), sig[0]);
+}
+
+test "a first frame's condition is released when the steps after it fail, as when they finish" {
+    const Fake = struct {
+        const Dit = struct {
+            resident: u64 = 0,
+            fail: bool = false,
+            fn firstFrame(d: *Dit, z: u64, h: u32, w: u32, seed: u64, tags: []const u8) !void {
+                _ = .{ z, seed, tags };
+                if (d.fail) return error.OutOfMemory;
+                d.resident = @as(u64, h / 2) * (w / 2) * (96 + 3072) * 4;
+            }
+            fn releaseCondition(d: *Dit) void {
+                d.resident = 0;
+            }
+        };
+        const Latent = struct {
+            frees: *u32,
+            fn at(_: *Latent, _: u64) !u64 {
+                return 1;
+            }
+            fn free(b: *Latent) void {
+                b.frees.* += 1;
+            }
+        };
+        dit: Dit = .{},
+        fn steps(f: *@This(), fail: bool) !void {
+            try std.testing.expect(f.dit.resident > 0); // the steps read the condition
+            if (fail) return error.CudaError;
+        }
+    };
+    const c: Condition = .{ .lh = 84, .lw = 48, .seed = 7, .tags = "" };
+    for ([_]bool{ true, false }) |fail| {
+        var f: Fake = .{};
+        var frees: u32 = 0;
+        var first: ?Fake.Latent = .{ .frees = &frees };
+        const r = conditioned(&f, &first, c, Fake.steps, .{ &f, fail });
+        if (fail) try std.testing.expectError(error.CudaError, r) else try r;
+        try std.testing.expectEqual(@as(u64, 0), f.dit.resident);
+        try std.testing.expectEqual(@as(u32, 1), frees); // the latent is freed once read
+        try std.testing.expect(first == null);
+    }
+    var f: Fake = .{ .dit = .{ .fail = true } }; // firstFrame frees its own on failure; the latent stays the caller's
+    var frees: u32 = 0;
+    var first: ?Fake.Latent = .{ .frees = &frees };
+    try std.testing.expectError(error.OutOfMemory, conditioned(&f, &first, c, Fake.steps, .{ &f, false }));
+    try std.testing.expect(first != null and frees == 0);
 }
