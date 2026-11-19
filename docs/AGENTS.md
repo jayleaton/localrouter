@@ -578,7 +578,9 @@ informs and enforces nothing: check the terms before you use or publish what a m
 
 ## Errors
 
-Errors use OpenAI's shape: `{"error": {"message", "type"}}`.
+Errors use OpenAI's shape: `{"error": {"message", "type"}}`. A failed job (`GET /v1/jobs/{id}`, `/v1/videos/{id}`,
+`/v1/assets3d/{id}`) carries the same `type` in its `error`, and the same value again in `code`. Match `type` or `code`;
+the message is for people (it reads "insufficient memory: ...").
 
 | Status | Meaning | Do |
 | --- | --- | --- |

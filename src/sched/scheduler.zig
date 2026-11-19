@@ -1968,3 +1968,46 @@ test "a voice model disabled before any call is listed disabled for every call; 
     try t.expectEqual(@as(u64, 0), b.slots[0].resident);
     try t.expectEqual(@as(u64, 3 << 20), b.s.bookedBytes(0));
 }
+
+test "a tool running a job is never a victim: a contender that needs its room is refused (503 insufficient_memory), then loads once the job is done" {
+    // 2026-11-16: a video model's render and the agent's chat model, each about the whole budget. The journal showed
+    // the video model unloaded for the chat model, but only after its worker had died; this pins that a running job's
+    // model stays, and the contender is refused at once with a retryable error rather than waiting or evicting it.
+    const t = std.testing;
+    var fakes = [_]FakeTool{
+        .{ .cfg = .{ .id = "video", .kind = .video, .priority = 10 }, .bytes = 94 << 20 },
+        .{ .cfg = .{ .id = "chat", .kind = .chat, .priority = 100 }, .bytes = 88 << 20 },
+    };
+    var b: Bench = undefined;
+    try b.init(&fakes, 100);
+    defer b.deinit();
+    var load: Control = .{ .op = .load, .tool = 0 };
+    b.s.runControl(&load);
+    try t.expect(!load.failed);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    // The main lane is running a video job: `runJob` holds the slot in use (`reserve`) until `done`.
+    b.s.gate.lockUncancelable(t.io);
+    b.s.reserve(&b.slots[0], 0);
+    b.s.gate.unlock(t.io);
+    var chat: jobs.Job = .{ .arena = .init(t.allocator), .id = "c", .tool = 1, .request = .{ .chat = .{ .body = "{}" } }, .dir = "", .created_at = 0 };
+    defer chat.arena.deinit();
+    b.s.runJob(&chat);
+    try t.expectEqual(jobs.Status.failed, chat.status);
+    try t.expectEqual(@as(u16, 503), chat.http_status);
+    try t.expectEqualStrings("insufficient_memory", chat.error_type);
+    try t.expectEqual(tool_mod.State.ready, b.state(0)); // the render keeps its model
+    try t.expectEqual(tool_mod.State.unloaded, b.state(1));
+    // Nor does an API load of the contender take it.
+    var load_chat: Control = .{ .op = .load, .tool = 1 };
+    b.s.runControl(&load_chat);
+    try t.expect(load_chat.failed);
+    try t.expectEqual(tool_mod.State.ready, b.state(0));
+    // The job ends: the idle video model is a victim again, and the retried request loads.
+    b.s.done(&b.slots[0]);
+    var again: jobs.Job = .{ .arena = .init(t.allocator), .id = "c2", .tool = 1, .request = .{ .chat = .{ .body = "{}" } }, .dir = "", .created_at = 0 };
+    defer again.arena.deinit();
+    b.s.runJob(&again);
+    try t.expectEqual(tool_mod.State.unloaded, b.state(0));
+    try t.expectEqual(tool_mod.State.ready, b.state(1));
+    try t.expect(!std.mem.eql(u8, again.error_type, "insufficient_memory")); // the fake's generate fails; its load did not
+}
