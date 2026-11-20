@@ -29,8 +29,8 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 10 | cuBLASLt with a recorded algorithm; driver identity check | ashhart/TensorFold | not upstreamable: LocalRouter's attestation policy | keep |
 | 11 | NVFP4 kernels copied from TensorFold v0.6.1 | ashhart/TensorFold v0.6.x | not upstreamable: unmodified copies of a frozen line | keep |
 | 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
-| 13 | Wan worker: one large module on the GPU at a time under model CPU offload (forward pre-hooks) | huggingface/diffusers | prepared, awaiting filing: `enable_model_cpu_offload(exclusive=True)` (issue, patch and PR text drafted) | drop the hooks and `Engine.alone` once a pin has the option |
-| 14 | Wan worker: the VAE's `encode` and `decode` wrapped to take the GPU alone | huggingface/diffusers | prepared with 13: the same option covers `encode` and `decode` | as 13 |
+| 13 | Wan worker: one large module on the GPU at a time under model CPU offload (forward pre-hooks) | huggingface/diffusers | none, kept local: a general exclusive offload breaks pipelines that call submodules outside the top-level hooks, and Diffusers is moving offload strategies into modular pipelines (#14304) | drop the hooks and `Engine.alone` once a pinned release offloads exclusively |
+| 14 | Wan worker: the VAE's `encode` and `decode` wrapped to take the GPU alone | huggingface/diffusers | none, kept local with 13 | as 13 |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -201,12 +201,13 @@ Not ours, and not listed above:
 - **General?** Yes: any pipeline that calls a module out of its sequence order (image to video, which encodes first)
   keeps it resident. An option such as `enable_model_cpu_offload(exclusive=True)` would offload every other hooked
   module when one onloads.
-- **PR:** prepared, awaiting filing. The opt-in is drafted against Diffusers `main` (d5df05ed):
-  `enable_model_cpu_offload(exclusive=True)` offloads every other model in `model_cpu_offload_seq` when one onloads;
-  the default chain is unchanged. The draft is a patch with a shared `MemoryTesterMixin` test and a docs note, an
-  issue (Diffusers asks for a maintainer's acknowledgment on an issue before a PR) and the PR text, in
-  `~/Documents/Projects/spark-work/zig-dsv41-scratch/diffusers-upstream/` on the maintainer's workstation. Filing is
-  the maintainer's decision.
+- **PR:** none; kept local. Made general, exclusive offload breaks pipelines that call a submodule outside its
+  model's top-level hook. An opt-in `enable_model_cpu_offload(exclusive=True)` tried on Diffusers `main` (GB10) failed
+  8 of the 226 shared memory tests: Motif image to video runs its `vision_tower` with the weights still on the CPU, and
+  pipelines that override `enable_model_cpu_offload` do not take the option. Diffusers is also moving offload
+  strategies into modular pipelines (#14304) rather than the classic ones. For this worker's model, Wan 2.2 TI2V-5B,
+  the local hooks are verified: the same run passed the exclusive test for every Wan pipeline, and Diffusers' 20
+  existing Wan offload tests.
 - **Next:** when a pinned Diffusers release has such an option, replace the hooks and `Engine.alone` with it.
 
 ### 14. Wan worker: VAE `encode` and `decode` wrapped
@@ -218,5 +219,5 @@ Not ours, and not listed above:
   the transformer off first. Before `encode` the chain would leave the text encoder resident; before `decode` it
   already offloads the transformer, and the wrapper keeps one rule for all three modules.
 - **General?** Part of 13: with that option, `apply_forward_hook` would apply it to `encode` and `decode` too.
-- **PR:** prepared with 13, awaiting filing. `apply_forward_hook` calls the same offload hook from `encode` and
-  `decode`, so 13's option covers the VAE too and these wrappers go when a pinned release has it. Draft: 13's.
+- **PR:** none; kept local with 13, for 13's reason. The wrappers exist only to apply 13's rule to the VAE's methods,
+  so they go together with 13's hooks.

@@ -18,7 +18,7 @@
   GPU at a time). On an RTX 5070 Ti through WSL2: a 5 s 704x1280 clip from a first frame in about 25 min at 50 steps,
   10.7 GiB of GPU memory. A `cmd` video tool now declares `max_pixels`, `max_side`, `size_multiple`, `default_size`,
   `max_seconds` and `fps`, checked before it loads (`engine.checkVideo`) and listed in `/v1/models` and `list_models`
-  as `video`. Any video tool may declare `"audio": false`; a request's `audio` is now optional and means the model's
+  as `video`. A `cmd` video tool may declare `"audio": false`; a request's `audio` is now optional and means the model's
   own when omitted, so a model without audio is not refused by callers that leave it out, and `audio: true` to it is.
   Setting up such a desktop (WSL2, systemd, a keepalive task, `tailscale serve`, pairing): docs/dev/DESKTOP.md.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
