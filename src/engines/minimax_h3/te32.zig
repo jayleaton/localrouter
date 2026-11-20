@@ -104,6 +104,28 @@ pub const TextEncoder = struct {
     cos: u64 = 0,
     sin: u64 = 0,
 
+    /// The bytes of each buffer `init` allocates for `max_l` tokens (each at least 256).
+    pub const Scratch = struct { ids: u64, h: u64, x: u64, q: u64, kk: u64, v: u64, at: u64, o: u64, g: u64, u: u64, gu: u64, cos: u64, sin: u64 };
+
+    pub fn scratch(max_l: u32) Scratch {
+        const r: u64 = max_l;
+        return .{
+            .ids = r * 4,
+            .h = r * dim * 4,
+            .x = r * dim * 4,
+            .q = r * heads * head_dim * 4,
+            .kk = r * kv_heads * head_dim * 4,
+            .v = r * kv_heads * head_dim * 4,
+            .at = r * heads * head_dim * 4,
+            .o = r * dim * 4,
+            .g = r * mlp * 4,
+            .u = r * mlp * 4,
+            .gu = r * mlp * 4,
+            .cos = r * 64 * 4,
+            .sin = r * 64 * 4,
+        };
+    }
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_l: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .s = s, .store = .init(d, gpa), .max_l = max_l };
         errdefer t.store.deinit();
@@ -121,13 +143,8 @@ pub const TextEncoder = struct {
             for (lin_names, 0..) |nm, j| l.lin[j] = try t.linear(io, p, up, &host, try std.fmt.bufPrint(&nb, "model.layers.{d}.{s}", .{ i, nm }));
         }
         t.inv_freq = try invFreq(gpa);
-        const r: u64 = max_l;
-        inline for (.{
-            .{ "ids", r * 4 },                      .{ "h", r * dim * 4 },                 .{ "x", r * dim * 4 },               .{ "q", r * heads * head_dim * 4 },
-            .{ "kk", r * kv_heads * head_dim * 4 }, .{ "v", r * kv_heads * head_dim * 4 }, .{ "at", r * heads * head_dim * 4 }, .{ "o", r * dim * 4 },
-            .{ "g", r * mlp * 4 },                  .{ "u", r * mlp * 4 },                 .{ "gu", r * mlp * 4 },              .{ "cos", r * 64 * 4 },
-            .{ "sin", r * 64 * 4 },
-        }) |e| @field(t, e[0]) = try st.alloc(@max(e[1], 256));
+        const sizes = scratch(max_l);
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(t, name) = try st.alloc(@max(@field(sizes, name), 256));
         try st.done(up); // the weights have landed (the scratch above is plain device memory)
         return t;
     }

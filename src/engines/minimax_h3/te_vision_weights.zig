@@ -6,6 +6,13 @@ pub const Lin = struct { w: u64, b: u64 = 0, n: u32, k: u32, scale: u64 = 0, tsc
 pub const Norm = struct { w: u64, b: u64, dim: u32 };
 pub const Block = struct { n1: Norm, n2: Norm, qkv: Lin, proj: Lin, fc1: Lin, fc2: Lin };
 pub const Merger = struct { norm: Norm, fc1: Lin, fc2: Lin };
+/// The weights' device bytes at most: every tensor widened to fp32 (an NVFP4 linear keeps its smaller checkpoint form).
+pub const max_bytes: u64 = 4 * blk: {
+    const d = 1152;
+    const block = (3456 * d + 3456) + (d * d + d) + (4304 * d + 4304) + (d * 4304 + d) + 4 * d;
+    const merger = (4608 * 4608 + 4608) + (5120 * 4608 + 5120);
+    break :blk (d * 1536 + d) + 2304 * d + 27 * block + 3 * (merger + 2 * 4608) + (merger + 2 * d);
+};
 pub const Weights = struct {
     store: qi.weights.Store,
     patch: Lin = undefined,
