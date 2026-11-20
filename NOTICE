@@ -43,6 +43,15 @@ Sidebud (https://github.com/jayleaton/sidebud), Copyright 2026 Jay Leaton.
   each ported file naming its origin. Sidebud's own companion is distributed under a proprietary licence
   (apps/companion/LICENSE there); that licence does not apply to the files contributed here.
 
+Wan 2.2 (https://github.com/Wan-Video/Wan2.2), Copyright 2024-2025 The Alibaba Wan Team Authors, Apache License 2.0.
+  The Wan video tool's default negative prompt (NEGATIVE in tools/video/wan/worker.py) is copied unmodified from
+  sample_neg_prompt in wan/configs/shared_config.py, at commit 1ea34ff48f87168174e12956e200b1d908b1c5ff.
+
+Diffusers (https://github.com/huggingface/diffusers), Copyright The HuggingFace Team, Apache License 2.0.
+  The optional Wan video tool (tools/video/wan/) runs Diffusers 0.43.0 (WanPipeline, WanImageToVideoPipeline), which its
+  fetch.sh --venv installs from PyPI. No Diffusers file is copied into LocalRouter; worker.py wraps the VAE's encode
+  and decode and adds forward hooks at run time (docs/dev/UPSTREAM.md).
+
 Model weights are not distributed with LocalRouter. Qwen-Image 2.1 (Qwen team) and MiniMax H3 (MiniMax) are downloaded
 by the installer from their publishers and remain under their own licenses. Kandinsky-6 Pro distilled (Kandinsky Lab)
 is read from the publisher's snapshot as downloaded and likewise remains under its own license.
@@ -69,4 +78,7 @@ Fish Audio Drama 3 weights and codec checkpoint (fishaudio/drama-3 at e0a9218aa4
   USD 500,000 annual revenue, and no Hosted Service (third parties generating speech, e.g. through an API) without a
   separate licence (Section III(c)); see docs/dev/DRAMA3.md.
   https://huggingface.co/fishaudio/drama-3/blob/e0a9218aa48888270f06ef1ed9ea67622c0e17d2/LICENSE
+Wan 2.2 TI2V-5B weights (Wan-AI/Wan2.2-TI2V-5B-Diffusers at b8fff7315c768468a5333511427288870b2e9635), used by the
+  optional video tool in tools/video/wan/ and downloaded by its fetch.sh, not distributed with LocalRouter: Apache
+  License 2.0 (the model card). https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers
 These weight licences are separate from LocalRouter's software licence; installing locally does not waive them.

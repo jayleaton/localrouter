@@ -13,6 +13,14 @@
   buffers the limits allocate (`resident_mb` is a floor), and a request adds its decode and first-frame scratch, so a
   larger `max_pixels` or `max_seconds` books what it takes. Limits outside the API's (2048 a side, 20 s) or whose
   largest clip exceeds the memory budget stop the daemon at start, and the default size keeps within 2048 a side.
+- Video from a `cmd` worker: Wan 2.2 TI2V-5B (`tools/video/wan`, Apache-2.0, Diffusers on CUDA), text and image to
+  video at 24 fps without audio, sized for a 16 GB consumer card (transformer stored in fp8, one large module on the
+  GPU at a time). On an RTX 5070 Ti through WSL2: a 5 s 704x1280 clip from a first frame in about 25 min at 50 steps,
+  10.7 GiB of GPU memory. A `cmd` video tool now declares `max_pixels`, `max_side`, `size_multiple`, `default_size`,
+  `max_seconds` and `fps`, checked before it loads (`engine.checkVideo`) and listed in `/v1/models` and `list_models`
+  as `video`. A `cmd` video tool may declare `"audio": false`; a request's `audio` is now optional and means the model's
+  own when omitted, so a model without audio is not refused by callers that leave it out, and `audio: true` to it is.
+  Setting up such a desktop (WSL2, systemd, a keepalive task, `tailscale serve`, pairing): docs/dev/DESKTOP.md.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian
