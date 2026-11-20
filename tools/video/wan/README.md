@@ -77,7 +77,7 @@ bf16 peaked at 15.8 of the card's 16.3 GB and at 29.3 GiB of the 30 GiB WSL host
 `steps` (50), `guidance` (5.0), `negative_prompt`, `transformer_storage` (`fp8` or `bf16`; bf16 needs about 16 GB of free
 GPU memory), `offload` (`model` or `none`: everything on the GPU, for a card with 24 GB or more), `vae_tiling` (true),
 `crf` (16). The daemon's limits, also checked by the worker: `max_pixels`, `max_side`, `size_multiple`,
-`default_size`, `max_seconds`, `fps`, `audio`.
+`default_size` (or `default_width` and `default_height`), `max_seconds`, `fps`, `audio`.
 
 ## Tests
 
