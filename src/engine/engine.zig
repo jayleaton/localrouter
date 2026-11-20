@@ -85,9 +85,8 @@ pub const default_video_size = [2]u32{ 1344, 768 };
 pub const default_video_seconds = 5;
 pub const default_video_fps = 24;
 
-/// Fills what `req` left to the model, before validation: the engine's `defaults`, then the tool's `default_width` and
-/// `default_height` options (both set: a `cmd` video model's own size), else `default_video_size`; for a 3D
-/// asset the tool's declared `default_gaussians` (a splat model), `default_steps` and `default_guidance`, so the job,
+/// Fills what `req` left to the model, before validation: the engine's `defaults`, then a `cmd` video tool's own size,
+/// length, frame rate and audio (`videoLimits`), else `default_video_size`; for a 3D asset the tool's declared `default_gaussians` (a splat model), `default_steps` and `default_guidance`, so the job,
 /// its booking and its manifest say what runs.
 pub fn fill(cfg: *const ToolConfig, req: *Request) void {
     if (find(cfg.engine)) |e| if (e.defaults) |f| f(cfg, req);
@@ -165,7 +164,7 @@ pub fn checkAsset3d(cfg: *const ToolConfig, v: request.Asset3d, why: *std.Io.Wri
 /// so what `fill` gives a request that omits size, seconds or fps, what `check` takes and what the listings say are the
 /// same rules. `max_pixels` (a frame's area), `max_side` (the long side; the API's 2048 at most), `size_multiple` (the
 /// grid, made a multiple of the API's 16), `max_seconds` (the API's 20 at most), `fps` (the frame rates it makes; absent:
-/// any the API takes) and `default_size` (`WIDTHxHEIGHT`; else 1344x768 where taken, else the largest landscape frame
+/// any the API takes) and `default_size` (`WIDTHxHEIGHT`, or `default_width` and `default_height`; else 1344x768 where taken, else the largest landscape frame
 /// near 16:9). A request without seconds gets 5 or `max_seconds` if shorter; without fps, 24 or the first listed.
 pub const VideoLimits = struct {
     min_side: u32,
@@ -204,6 +203,16 @@ pub const VideoLimits = struct {
 
 const api_limits: request.Limits = .{};
 
+/// A video tool's declared default size: `default_size` (`WIDTHxHEIGHT`), else `default_width` and `default_height`
+/// (both set); null when it declares none or `default_size` is malformed.
+fn declaredSize(cfg: *const ToolConfig) ?[2]u32 {
+    const ds = optionString(cfg, "default_size", "");
+    if (ds.len > 0) return request.parseSize(ds);
+    const w = std.math.cast(u32, optionInt(cfg, "default_width", 0)) orelse 0;
+    const h = std.math.cast(u32, optionInt(cfg, "default_height", 0)) orelse 0;
+    return if (w > 0 and h > 0) .{ w, h } else null;
+}
+
 /// A tool's effective video limits (`VideoLimits`); null for another kind, or a tool whose engine checks its own.
 pub fn videoLimits(cfg: *const ToolConfig) ?VideoLimits {
     if (cfg.kind != .video) return null;
@@ -223,8 +232,7 @@ pub fn videoLimits(cfg: *const ToolConfig) ?VideoLimits {
         .default_seconds = @min(default_video_seconds, seconds),
         .default_fps = default_video_fps,
     };
-    const declared = request.parseSize(optionString(cfg, "default_size", ""));
-    l.default_size = for ([_]?[2]u32{ declared, default_video_size }) |d| {
+    l.default_size = for ([_]?[2]u32{ declaredSize(cfg), default_video_size }) |d| {
         if (d) |x| if (l.takes(x[0], x[1])) break x;
     } else l.widest();
     if (!l.takesFps(default_video_fps)) if (l.fps) |list| for (list) |x| if (x == .integer and x.integer >= 1 and x.integer <= api_limits.max_fps) {
@@ -562,12 +570,13 @@ fn checkVideoLimits(t: *const ToolConfig, l: VideoLimits, why: *std.Io.Writer) b
         };
     }
     const ds = optionString(t, "default_size", "");
-    if (ds.len > 0) if (request.parseSize(ds)) |wh| if (wh[0] == l.default_size[0] and wh[1] == l.default_size[1]) return true;
+    const wh = declaredSize(t);
+    if (ds.len == 0 and wh == null) return true;
+    if (wh) |d| if (d[0] == l.default_size[0] and d[1] == l.default_size[1]) return true;
     if (ds.len > 0) {
         why.print("tool '{s}': default_size '{s}' is not a size it takes", .{ t.id, ds }) catch {};
-        return false;
-    }
-    return true;
+    } else why.print("tool '{s}': default_width x default_height {d}x{d} is not a size it takes", .{ t.id, wh.?[0], wh.?[1] }) catch {};
+    return false;
 }
 
 /// Whether each configured default (`Config.defaults`) names a tool that has its capability; the first that does not
@@ -739,6 +748,7 @@ test "a cmd video tool whose limits leave nothing to serve is refused at startup
         .{ "\"fps\": []", "tool 'v': fps lists no frame rate; leave it out for any from 1 to 30" },
         .{ "\"fps\": [24, 0]", "tool 'v': fps lists frame rates, whole numbers from 1 to 30" },
         .{ "\"max_side\": 1280, \"default_size\": \"2048x1152\"", "tool 'v': default_size '2048x1152' is not a size it takes" },
+        .{ "\"max_side\": 1280, \"default_width\": 2048, \"default_height\": 1152", "tool 'v': default_width x default_height 2048x1152 is not a size it takes" },
     };
     for (cases) |case| {
         const text = try std.fmt.allocPrint(arena.allocator(), "{{\"tools\": [{{\"id\": \"v\", \"kind\": \"video\", \"cmd\": [\"x\"], \"options\": {{{s}}}}}]}}", .{case[0]});

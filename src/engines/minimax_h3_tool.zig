@@ -448,14 +448,14 @@ test "one area budget takes landscape and portrait; a larger frame takes a short
     var msg: [256]u8 = undefined;
     for (cases) |k| {
         var why: std.Io.Writer = .fixed(&msg);
-        const r: Request = .{ .video = .{ .prompt = "waves", .width = k.w, .height = k.h, .seconds = k.s } };
+        const r: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = k.w, .height = k.h, .seconds = k.s } };
         std.testing.expectEqual(k.ok, check(c.tool(k.tool).?, &r, &why)) catch |err| {
             std.debug.print("{s} {d}x{d} {d} s: {s}\n", .{ k.tool, k.w, k.h, k.s, why.buffered() });
             return err;
         };
     }
     var why: std.Io.Writer = .fixed(&msg);
-    const tall: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 1344, .seconds = 8 } };
+    const tall: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 768, .height = 1344, .seconds = 8 } };
     try std.testing.expect(!check(c.tool("h3").?, &tall, &why));
     try std.testing.expectEqualStrings("model 'h3' takes 768x1344 for clips up to 6 seconds (up to 8 seconds at 901120 pixels or fewer)", why.buffered());
     var d: Request = .{ .video = .{ .prompt = "waves" } };
@@ -472,12 +472,12 @@ test "a first frame whose canvas fills the text encoder is refused before loadin
     );
     var msg: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&msg);
-    const past: Request = .{ .video = .{ .prompt = "waves", .width = 1344, .height = 1344, .seconds = 1, .first_frame = "f.png" } };
+    const past: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 1344, .height = 1344, .seconds = 1, .first_frame = "f.png" } };
     try std.testing.expect(!check(c.tool("h3").?, &past, &why)); // past the canvas's area: a size refusal
     why = .fixed(&msg);
-    const tall: Request = .{ .video = .{ .prompt = "waves", .width = 768, .height = 1344, .seconds = 6, .first_frame = "f.png" } };
+    const tall: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 768, .height = 1344, .seconds = 6, .first_frame = "f.png" } };
     try std.testing.expect(check(c.tool("h3").?, &tall, &why));
-    const square: Request = .{ .video = .{ .prompt = "waves", .width = 1280, .height = 1280, .seconds = 1, .first_frame = "f.png" } };
+    const square: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 1280, .height = 1280, .seconds = 1, .first_frame = "f.png" } };
     try std.testing.expect(!check(c.tool("big").?, &square, &why));
     try std.testing.expectEqualStrings("model 'big' takes a first frame of up to 1519 32x32 cells: 1280x1280 is 1600, which leaves the prompt no room in the text encoder; send a smaller size", why.buffered());
     var t2v = square;
@@ -539,7 +539,7 @@ test "the booking follows the configured buffers; limits past the API or the mem
     try std.testing.expect(validate(c.tool("jarvis").?, budget, &why));
 
     const huge = c.tool("huge").?;
-    const clip: Request = .{ .video = .{ .prompt = "waves", .width = 2048, .height = 2048, .seconds = 20 } };
+    const clip: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 2048, .height = 2048, .seconds = 20 } };
     try std.testing.expect(check(huge, &clip, &why));
     const n = needs(huge, &clip);
     try std.testing.expect(n.resident + n.working > 135 << 30); // the DiT's and the pipeline's buffers alone
@@ -588,6 +588,6 @@ test "the default size is within the API's longest side, as checked sizes are" {
     var msg: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&msg);
     try std.testing.expect(check(cfg, &r, &why));
-    const explicit: Request = .{ .video = .{ .prompt = "waves", .width = 2048, .height = 256 } };
+    const explicit: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 2048, .height = 256, .seconds = 5 } };
     try std.testing.expect(check(cfg, &explicit, &why));
 }
