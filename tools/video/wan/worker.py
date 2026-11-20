@@ -26,7 +26,8 @@ Config (LOCALROUTER_TOOL): `weights` is the Diffusers directory fetch.sh fills. 
 are stored in float8 e4m3 and computed in bf16, which keeps a 16 GB GPU from spilling into shared memory; `bf16`:
 as loaded), `offload` (`model`: each module moves to the GPU only while it runs; `none`: everything stays on the GPU),
 `vae_tiling` (default true), `crf` (H.264 quality, default 16). The daemon's own limits (`max_pixels`, `max_side`,
-`size_multiple`, `default_size`, `max_seconds`, `fps`, `audio`) are checked again here.
+`size_multiple`, `default_size` or `default_width` and `default_height`, `max_seconds`, `fps`, `audio`) are checked
+again here.
 """
 
 import gc
@@ -48,7 +49,8 @@ PROTOCOL = sys.stdout  # main() moves it off fd 1, so stray prints from librarie
 
 FPS = 24
 OPTIONS = {"steps", "guidance", "negative_prompt", "transformer_storage", "offload", "vae_tiling", "crf"}
-DAEMON_OPTIONS = {"max_pixels", "max_side", "size_multiple", "default_size", "max_seconds", "fps", "audio"}
+DAEMON_OPTIONS = {"max_pixels", "max_side", "size_multiple", "default_size", "default_width", "default_height", "max_seconds",
+                  "fps", "audio"}
 # The negative prompt of the official Wan 2.2 configs (wan/configs/shared_config.py, sample_neg_prompt).
 NEGATIVE = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，"
             "多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走")

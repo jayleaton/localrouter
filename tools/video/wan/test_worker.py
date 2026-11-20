@@ -184,6 +184,11 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             w.Worker(tool(transformer_storage="int4"), FakeEngine())
 
+    def test_the_daemons_video_options_are_taken(self):
+        w.Worker(tool(max_pixels=901120, max_side=1280, size_multiple=32, default_size="1280x704", max_seconds=5,
+                      fps=[24], audio=False), FakeEngine())
+        w.Worker(tool(default_width=704, default_height=1280), FakeEngine())
+
     def test_protocol_over_stdio(self):
         env = dict(os.environ, LOCALROUTER_TOOL=json.dumps({"weights": os.path.join(WEIGHTS, "absent")}))
         p = subprocess.run([sys.executable, "-I", os.path.join(HERE, "worker.py")], input='{"op":"load"}\nnot json\n{"op":"exit"}\n',
