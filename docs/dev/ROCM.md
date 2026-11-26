@@ -213,9 +213,9 @@ Series 1, H3-Image. Each PR runs `zig build` and `zig build test` (Zig 0.17.0), 
 | PR | Content | Gate it carries |
 | --- | --- | --- |
 | 1.0 | this plan | — |
-| 1.1 | `gpu` seam: `-Dgpu`, `src/gpu/hip` runtime, `build/hip.zig` (`-Dhip`, `-Dgfx`), engines import `gpu` | host tests; CUDA SASS unchanged |
+| 1.1 | `gpu` seam: `-Dgpu`, `src/gpu/hip` runtime, `build/hip.zig`, engines import `gpu` | host tests; no kernel or nvcc flag changes |
 | 1.2 | GTT budget in `sched/memory.zig` | fixture tests |
-| 1.3 | `kernels/common/gpu.cuh` and the single-source kernels building for HIP; the twin's ROCm extension loader; `isa_check.sh` | ISA check; G0 for these kernels |
+| 1.3 | `kernels/common/gpu.cuh` and the single-source kernels building for HIP (`-Dhip`, `-Dgfx`); the twin's ROCm extension loader; `isa_check.sh` | ISA check; G0 for these kernels |
 | 1.4 | HIP bf16 and f16 WMMA GEMMs and bf16 attention; bf16 `Linear` kind (also on CUDA); kitchen rms_rope HIP copy plus its UPSTREAM.md entry | G0 |
 | 1.5 | `docs/dev/H3-IMAGE.md` (ComfyUI findings); H3-Image twin (`stk_twin/h3i`), bf16 pack build, captures, structure gate | CPU structure; baseline vs ComfyUI |
 | 1.6 | engine: DiT image variant (no audio, PDD heads), image VAE decoder, PDD sampler, `minimax_h3_image` entry (`text_to_image`, its own licence) | G1-G3 |
