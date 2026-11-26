@@ -220,7 +220,7 @@ step's `done` test.
   in the recipe's Docker image ([jayleaton/inkling-2-mini-tensorfold](https://github.com/jayleaton/inkling-2-mini-tensorfold)).
   Licence Apache-2.0. Loaded on demand (a request that names it), beside `qwen3.8-27b`, which stays the default.
 - **Size.** About 21 GB to download, 21 GB on disk for the weights and about 40 GB under Docker's root for the image.
-  48 GiB in memory.
+  40 GiB in memory.
 - **Steps.** `tools/chat/inkling2-mini/fetch.sh $J/inkling2-mini --models $J/inkling2-mini/models` (the recipe at its
   pinned commit, the weights, then the image, which the recipe's `scripts/prepare.sh` builds), then `setup.sh`, then
   `qualify.sh`. Every file is checked against `tools/chat/inkling2-mini/pins.json`, and the image by its `tf.patches`

@@ -106,7 +106,7 @@
    "licence": {"name": "Apache-2.0 (checkpoint, drafter, TensorFold and the recipe)", "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini"},
    "pins": "tools/chat/inkling2-mini/pins.json",
    "reuse": {"paths": ["inkling2-mini/models"]},
-   "download_bytes": 21181623378, "disk_bytes": 62000000000, "memory_bytes": 51539607552,
+   "download_bytes": 21181623378, "disk_bytes": 62000000000, "memory_bytes": 42949672960,
    "skip": "optional: installed only when --models names inkling; without it qwen3.8-27b stays the box's chat model",
    "steps": [
     {"id": "fetch", "download_bytes": 21181623378, "reused": true, "disk_bytes": 62000000000, "title": "the recipe at its pinned commit, the checkpoint and the DFlash2 drafter (21 GB, every file against pins.json), and the recipe's sm_121 image (built in NVIDIA's PyTorch container: about 40 GB under Docker's root, the first build takes a while)",

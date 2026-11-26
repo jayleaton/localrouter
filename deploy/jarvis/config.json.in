@@ -30,7 +30,7 @@
   {"id": "Inkling-2-Mini", "kind": "chat",
    "name": "Inkling 2 Mini (TensorFold sm_121 in Docker, NVFP4/MXFP8 + DFlash2 drafter, vision, 2 x 128k)",
    "engine": "openai_server", "weights": "@INKLING_MODELS@/Inkling-2-Mini", "qualification": "@INKLING_MARKER@",
-   "resident_bytes": 51539607552, "working_bytes": 0, "keep_loaded": false, "priority": 50, "idle_ttl_s": 600,
+   "resident_bytes": 42949672960, "working_bytes": 0, "keep_loaded": false, "priority": 50, "idle_ttl_s": 600,
    "load_timeout_s": 1800, "generate_timeout_s": 900,
    "license": {"name": "Apache-2.0", "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini",
                "use": "the checkpoint (thinkingmachines/Inkling-2-Mini) and the incoai DFlash2 drafter", "commercial": true},

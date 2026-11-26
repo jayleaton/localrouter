@@ -334,8 +334,42 @@ The engine is TensorFold's sm_121 build of Inkling's CUDA head (`dc2ca8a1`,
 Docker image. The Mac runs the same tool id on TensorFold's Metal build (`deploy/mac`,
 [MAC-PORT.md](MAC-PORT.md)).
 
-**Status: not yet qualified.** `tools/chat/inkling2-mini/qualify.sh` has not passed on a GB10, so the tool is refused
-(503, not GPU-qualified) until a box's own run writes its marker.
+**Status: qualified on DGX-01 (GB10)** by `tools/chat/inkling2-mini/qualify.sh` at commit 3e79016 on 2026-11-26:
+305 of 305 checks, no exceptions. Every other machine runs qualify.sh itself: the tool is refused (503, not
+GPU-qualified) on a host until its own marker says qualified.
+
+| Run | Commit | Checks | Result |
+| --- | --- | --- | --- |
+| run-20261126T072140Z | 3e79016 | 305 of 305 | qualified, no exception: every prompt's two direct replies, the daemon's and both streams' joined deltas are equal (content, reasoning, tool calls, finish reason, token count). Peak 30.98 GiB direct, 30.65 GiB through the daemon; ready in 48.6 s from a cold start; the container stopped on SIGTERM in 0.92 s and was gone |
+
+Marker (sha256 `28999727…`): `qualified: true`, host `dgx-01`, GPU `NVIDIA GB10`, `pins_sha256` `212911f0…`, image
+`sha256:64f07085…`, `tf_patches` `20315469ad8c`, `recipe_commit` `4ef6d1d5…`, 305 checks, `exceptions: []`. Receipts on
+DGX-01 in `~/jarvis/inkling2-mini/run-20261126T072140Z/` (manifest `SHA256SUMS` `5a13f8f6…`). The box: DGX OS (Ubuntu
+24.04, kernel 7.0.0-1019-nvidia), driver 580.178.04, 128 GB; nothing else on the GPU. The weights were copied from
+DGX-02 over the CX7 link and checked against the pins; the image was built on DGX-01 by `fetch.sh` (TensorFold
+`tensorfold-native` 1.3.2 inside, CUDA backend).
+
+Replies at temperature 0 from the run: P4's required call `get_weather {"city":"Lisbon","unit":"celsius"}`; P6's schema
+`{"city":"Tokyo","country":"Japan","population_millions":14}`; P8's 64x64 PNG `red`. Short prompts decode at 63–124
+tok/s with the drafter, the first streamed token 0.07 s after the request.
+
+### Live checks through LocalRouter
+
+On DGX-01, right after the run: `localrouter serve` with the qualified tool (its marker), on loopback, nothing else
+loaded (`MemAvailable` 116.2 GiB).
+
+| Check | Result |
+| --- | --- |
+| `GET /v1/models` | `{"id": "Inkling-2-Mini", "kind": "chat", "qualified": true, "capabilities": ["chat_completion"]}` |
+| Chat, cold (the load included) | loaded in 47.6 s; "A DGX Spark is a compact NVIDIA AI computing system designed to train and run machine learning workloads." (`stop`, 199 tokens, 170 of them reasoning) |
+| Streaming | 37 events ending in `data: [DONE]`; content `1, 2, 3, 4, 5` |
+| Tool call (`tool_choice: required`) | `get_weather {"city":"Oslo"}`, `finish_reason: tool_calls` |
+| Image (a 96x64 blue PNG data URL) | "Blue; yes, it is wider than it is tall." |
+| MCP `chat` (`reasoning: false`) | "Ready" |
+| Memory loaded | `MemAvailable` 86.6 GiB (29.6 GiB below idle), container `lr-Inkling-2-Mini` |
+| `POST /v1/tools/Inkling-2-Mini/unload` | 1.0 s; `MemAvailable` back to 116.3 GiB, no container left |
+| `POST /v1/tools/Inkling-2-Mini/load` | ready in 48.1 s, `MemAvailable` 86.7 GiB; then "OK" |
+| Daemon SIGTERM | `MemAvailable` 116.1 GiB, no container left |
 
 ### How it runs
 
@@ -374,9 +408,11 @@ thinking arrives as `reasoning_content`.
 
 ### Memory
 
-`resident_bytes` is **48 GiB** (51,539,607,552), `working_bytes` 0: the recipe's budget for these flags (about
-23.1 GiB of weights and scratch with DFlash2 and vision, 2.53 GiB a stream) plus the 8 GiB prompt cache and the CUDA
-context, rounded up. It is an estimate until a qualification run measures the peak (`report.json`'s `peak_drop`).
+`resident_bytes` is **40 GiB** (42,949,672,960), `working_bytes` 0: the measured 30.98 GiB peak (DGX-01's
+qualification, the largest fall in `MemAvailable` from the start of the run: weights, drafter, vision tower, both
+131,072-token windows allocated at start, CUDA context) plus the 8 GiB the prompt cache may fill (the run's short
+prompts left it nearly empty) and 1 GiB of margin. The server reported 30.3 GiB at its start (`/health` `memory.peak`).
+The recipe's own budget for these flags was about 28.2 GiB before the cache.
 
 ### Setup and qualification
 
