@@ -1,4 +1,4 @@
-//! LocalRouter's MiniMax H3 kernels as fatbins (ops.cu; kitchen_launch.cu with comfy-kitchen's copied device code; te32.cu; the VAEs' vae_audio.cu, gemm_f16.cu and vae_video.cu),
+//! LocalRouter's MiniMax H3 kernels as fatbins (ops.cu; kitchen_launch.cu with comfy-kitchen's copied device code; te32.cu; the VAEs' vae_audio.cu, gemm_f16.cu and vae_video.cu; H3-Image's h3_image.cu),
 //! built by build/minimax.zig with the flags the video twin's extensions use, or as HIP code objects of the same sources
 //! (-Dgpu=hip -Dhip, build/hip.zig). Without a compiler, or for a source not built for HIP, an image is empty.
 
@@ -34,3 +34,5 @@ pub const te32_inv_freq: []const u8 = @embedFile("minimax_te32_inv_freq");
 
 pub const vae_enc: []const u8 = image("vae_enc");
 pub const te_vision: []const u8 = image("te_vision");
+/// MiniMax H3-Image's own kernels (h3_image.cu): the PDD head mix and the image VAE decoder's RoPE, unpatchify and tile blend.
+pub const h3_image: []const u8 = image("h3_image");

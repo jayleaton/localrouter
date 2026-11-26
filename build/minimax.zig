@@ -43,6 +43,7 @@ const sources = [_]Source{
     .{ .name = "te_vision", .file = "kernels/cuda/minimax/te_vision.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
     .{ .name = "vae_enc", .file = "kernels/cuda/minimax/vae_enc.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
     .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
+    .{ .name = "h3_image", .file = "kernels/cuda/minimax/h3_image.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} }, // H3-Image: PDD heads, image VAE
 };
 
 /// `nvcc` set: CUDA fatbins; `hip` with a ROCm directory: HIP code objects (build.zig never sets both).

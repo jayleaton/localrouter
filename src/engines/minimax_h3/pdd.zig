@@ -83,6 +83,15 @@ pub fn step(grid: []const f64, sig: []const f32, i: usize) Step {
     return st;
 }
 
+/// Euler's scalars for step i of `sig` (ComfyUI's `sample_euler` at cfg 1 with no churn, one model call a step): the
+/// CONST denoise (`den = x - out * sigma`) and the step (`x += ((x - den) / sigma) * dt`) take the schedule's fp32
+/// sigma, not the model's float64 one, and dt = sig[i + 1] - sig[i] in fp32 (`launch.Ops.denoise` / `euler32`).
+pub const Euler = struct { sigma: f32, dt: f32 };
+
+pub fn euler(sig: []const f32, i: usize) Euler {
+    return .{ .sigma = sig[i], .dt = sig[i + 1] - sig[i] };
+}
+
 /// The grid point nearest `s` in float64 (the first on a tie).
 fn nearest(grid: []const f64, s: f64) usize {
     var best: usize = 0;
@@ -127,6 +136,42 @@ test "PDD plan: the twin's table, schedules and head plans, bit for bit (pdd_pla
         plans += 1;
     }
     try std.testing.expect(plans >= 10);
+}
+
+test "PDD euler: the schedule's fp32 sigma and its fp32 difference, every step of every fixture schedule" {
+    const gpa = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("pdd_plan.json"), .{});
+    defer parsed.deinit();
+    var tab: [1000]f32 = undefined;
+    table(&pdd_sigmas, &tab);
+    var buf: [64]f32 = undefined;
+    for (parsed.value.object.get("plans").?.array.items) |pv| {
+        const want = pv.object.get("sigmas").?.array.items;
+        const steps: usize = @intCast(pv.object.get("steps").?.integer);
+        const sig = buf[0 .. steps + 1];
+        sigmas(&tab, sig);
+        for (0..steps) |i| {
+            const e = euler(sig, i);
+            const s0: f32 = @floatCast(num(want[i]));
+            const s1: f32 = @floatCast(num(want[i + 1]));
+            try std.testing.expectEqual(@as(u32, @bitCast(s0)), @as(u32, @bitCast(e.sigma)));
+            // the exact difference of two fp32 values (exact in float64) rounded once: what an fp32 subtraction gives
+            const dt: f32 = @floatCast(@as(f64, s1) - @as(f64, s0));
+            try std.testing.expectEqual(@as(u32, @bitCast(dt)), @as(u32, @bitCast(e.dt)));
+            try std.testing.expect(e.dt < 0);
+        }
+        try std.testing.expectEqual(-sig[steps - 1], euler(sig, steps - 1).dt); // the last step lands on 0
+    }
+    // 6 steps: the step sigmas sit near the PDD grid, not on it (H3-IMAGE.md 1.4), and each step takes one head
+    var six: [7]f32 = undefined;
+    sigmas(&tab, &six);
+    try std.testing.expect(six[1] != @as(f32, @floatCast(pdd_sigmas[1])));
+    for (0..6) |i| {
+        const st = step(&pdd_sigmas, &six, i);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), st.start);
+        try std.testing.expectEqual(@as(u8, @intCast(i + 1)), st.stop);
+        try std.testing.expectEqual(@as(u8, if (i == 0) 0 else 1), st.nheads);
+    }
 }
 
 fn num(v: std.json.Value) f64 {

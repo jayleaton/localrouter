@@ -169,6 +169,23 @@ pub const Layout = struct {
     }
 };
 
+/// H3-Image's timestep and modulation rows for [text | target] (`MiniMaxH3ImageModel._forward`, ComfyUI e9afbccc): the
+/// text and the target are both at `t` (float64, 1 - sigma), so `unique_t` is that one value, which the time embedding
+/// takes as the fp32 tensor `torch.tensor(unique_t, float32)` holds it (`unique[0]`); each token's row is 0 * 3 + tag:
+/// text 1 (or the encoder's tags), target 0. Reference images (`max(t, 0.999)`) are PR 1.7's. A layout with audio or a
+/// condition segment is not an image one.
+pub fn imageModRows(x: Layout, t: f64, tags: []const u8, unique: *[1]f32, idx: []i32) !void {
+    if (x.a != 0 or x.cond != 0 or x.t != 1) return error.NotAnImageLayout;
+    std.debug.assert(idx.len == x.s);
+    unique[0] = @floatCast(t);
+    @memset(idx[0..x.l], 1);
+    if (tags.len != 0) {
+        if (tags.len != x.l) return error.BadTextTags;
+        for (tags, idx[0..x.l]) |tag, *v| v.* = tag;
+    }
+    @memset(idx[x.l..x.s], 0);
+}
+
 /// The curve form's t_emb [m, k] f32: torch.lerp(table[i0], table[i0 + 1], w) with pos = clamp(t, 0, 1) * (grid - 1).
 pub fn curveTEmb(table: []const f32, grid: usize, k: usize, t: []const f32, out: []f32) void {
     for (t, 0..) |tv, r| {
@@ -195,6 +212,23 @@ test "step 0: sigma 1 gives one timestep and a unit carry" {
 test "layout rows: 768x448, 56 frames" {
     const x = Layout.init(69, 17, 28, 48, 93);
     try std.testing.expectEqual(@as(u32, 69 + 186 + 17 * 14 * 24), x.s);
+}
+
+test "an image layout: [text | target] at one timestep, the target at time text_len on the area grid" {
+    const x = Layout.init(3, 1, 4, 6, 0); // a 96 x 64 image's 4 x 6 latent: 2 x 3 tokens
+    try std.testing.expectEqual(@as(u32, 3 + 6), x.s);
+    var pos: [9][3]f64 = undefined;
+    x.positions(&pos);
+    try std.testing.expectEqualSlices(f64, &.{ 2, 0, 0 }, &pos[2]);
+    for (pos[3..]) |p| try std.testing.expectEqual(@as(f64, 3), p[0]); // the target's time is text_len (no refs)
+    var idx: [9]i32 = undefined;
+    var unique: [1]f32 = undefined;
+    try imageModRows(x, 1.0 - 0.75, &.{ 1, 0, 1 }, &unique, &idx);
+    try std.testing.expectEqual(@as(f32, 0.25), unique[0]);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 0, 1, 0, 0, 0, 0, 0, 0 }, &idx);
+    try imageModRows(x, 0.5, &.{}, &unique, &idx);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 1, 1 }, idx[0..3]);
+    try std.testing.expectError(error.NotAnImageLayout, imageModRows(Layout.init(3, 1, 4, 6, 2), 0.5, &.{}, &unique, &idx));
 }
 
 test "first frame: packed positions and three modulation timesteps" {

@@ -15,6 +15,8 @@ const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const launch = @import("launch.zig");
 const lay = @import("layout.zig");
+const pdd = @import("pdd.zig");
+const launch_image = @import("launch_image.zig");
 
 const Pack = qi.pack.Pack;
 const Store = qi.weights.Store;
@@ -51,9 +53,10 @@ pub const Kernels = struct {
     kitchen: *const launch.Kitchen,
     te: *const qi.ops_launch.TeOps, // the bf16 GEMM (token refiner)
     ops: *const qi.ops_launch.Ops, // bf16 attention and row copies (token refiner)
-    nv: *qi.nvfp4_exec.Nvfp4,
+    nv: ?*qi.nvfp4_exec.Nvfp4, // null: no NVFP4 or FP8 linears (a bf16 pack: H3-Image)
     major: u32,
     minor: u32,
+    image: ?*const launch_image.Ops = null, // H3-Image's PDD head mix (`stepImage`)
 };
 
 const Block = struct {
@@ -84,6 +87,7 @@ pub const Weights = struct {
     fl_norm: u64 = 0,
     vo_w: u64 = 0,
     vo_b: u64 = 0,
+    heads: u32 = 1, // `final_layer.video_out`'s blocks of 96 rows: 1, or H3-Image's PDD bank of 6
     ao_w: u64 = 0,
     ao_b: u64 = 0,
     table: []f32 = &.{}, // host: the curve [grid, 8]
@@ -107,28 +111,84 @@ pub const Weights = struct {
             .{ "vo_w", "final_layer.video_out.weight" },           .{ "vo_b", "final_layer.video_out.bias" },
             .{ "ao_w", "final_layer.audio_out.weight" },           .{ "ao_b", "final_layer.audio_out.bias" },
         }) |e| @field(w, e[0]) = try st.tensor(up, p, e[1]);
+        try w.loadRefiner(up, p);
+        var nb: [96]u8 = undefined;
+        for (&w.blocks, 0..) |*b, i| {
+            try w.loadBlockTensors(up, p, b, i);
+            for (linear_names, 0..) |nm, j| b.lin[j] = try st.linear(io, p, nv, up, try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ i, nm }));
+        }
+        try w.loadHost(gpa, io, p);
+        try st.done(up); // every copy and pack4 has landed
+        return w;
+    }
+
+    /// H3-Image's DiT from its bf16 pack (`stk_twin.h3i.build`): the video pack's tensors under the video pack's names but
+    /// no audio ones, block linears of kind `bf16` (`{key}.weight` [n, k]), and `final_layer.video_out` the PDD bank
+    /// [6 x 96, 5376] / [576] fp32 (`heads` = 6). No NVFP4 kernels: every linear is the bf16 GEMM.
+    pub fn loadImage(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, p: *const Pack, up: *Uploader) !Weights {
+        var w: Weights = .{ .store = .init(d, gpa) };
+        errdefer w.deinit();
+        const st = &w.store;
+        {
+            const vw = try p.get("final_layer.video_out.weight");
+            const vb = try p.get("final_layer.video_out.bias");
+            if (vw.dtype != .f32 or vw.rank != 2 or vw.dim(0) != 96 * pdd.max_heads or vw.dim(1) != dim) return error.BadPddHeads;
+            if (vb.dtype != .f32 or vb.rank != 1 or vb.dim(0) != 96 * pdd.max_heads) return error.BadPddHeads;
+        }
+        inline for (.{
+            .{ "cond_w", "condition_proj.weight" },                .{ "cond_b", "condition_proj.bias" },
+            .{ "final_norm", "token_refiner.final_norm.weight" },  .{ "vp_w", "video_patch_proj.weight" },
+            .{ "vp_b", "video_patch_proj.bias" },                  .{ "fl_ada_w", "final_layer.adaln_proj.linear.weight" },
+            .{ "fl_ada_b", "final_layer.adaln_proj.linear.bias" }, .{ "fl_norm", "final_layer.norm.weight" },
+            .{ "vo_w", "final_layer.video_out.weight" },           .{ "vo_b", "final_layer.video_out.bias" },
+        }) |e| @field(w, e[0]) = try st.tensor(up, p, e[1]);
+        w.heads = pdd.max_heads;
+        try w.loadRefiner(up, p);
+        var nb: [96]u8 = undefined;
+        for (&w.blocks, 0..) |*b, i| {
+            try w.loadBlockTensors(up, p, b, i);
+            for (linear_names, 0..) |nm, j| b.lin[j] = try bf16Linear(st, up, p, try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ i, nm }));
+        }
+        try w.loadHost(gpa, io, p);
+        try st.done(up);
+        return w;
+    }
+
+    /// A block linear of a bf16 pack: the manifest says `bf16`, `{key}.weight` is BF16 [n, k] with K % 8 == 0 (the bf16
+    /// GEMM's rows); uploaded as stored.
+    fn bf16Linear(st: *Store, up: *Uploader, p: *const Pack, key: []const u8) !Linear {
+        if ((try p.kind(key)) != .bf16) return error.NotBf16Linear;
+        var nb: [80]u8 = undefined;
+        const t = try p.get(try std.fmt.bufPrint(&nb, "{s}.weight", .{key}));
+        if (t.dtype != .bf16 or t.rank != 2 or t.dim(1) % 8 != 0) return error.BadBf16Linear;
+        const n: u32 = @intCast(t.dim(0));
+        return .{ .kind = .bf16, .n = n, .k = @intCast(t.dim(1)), .npad = n, .w = try st.tensorOf(up, p, t), .ws = 0, .scale = 1, .act = 1 };
+    }
+
+    fn loadRefiner(w: *Weights, up: *Uploader, p: *const Pack) !void {
         var nb: [96]u8 = undefined;
         for (&w.refiner, 0..) |*r, i| {
             inline for (.{
                 .{ "norm1", "norm1.weight" },        .{ "qkv", "attn.qkv_proj.weight" }, .{ "q_norm", "attn.q_norm.weight" },
                 .{ "k_norm", "attn.k_norm.weight" }, .{ "out", "attn.out_proj.weight" }, .{ "norm2", "norm2.weight" },
                 .{ "fc1", "mlp.fc1.weight" },        .{ "fc2", "mlp.fc2.weight" },
-            }) |e| @field(r, e[0]) = try st.tensor(up, p, try std.fmt.bufPrint(&nb, "token_refiner.blocks.{d}.{s}", .{ i, e[1] }));
+            }) |e| @field(r, e[0]) = try w.store.tensor(up, p, try std.fmt.bufPrint(&nb, "token_refiner.blocks.{d}.{s}", .{ i, e[1] }));
         }
-        for (&w.blocks, 0..) |*b, i| {
-            inline for (.{ "norm1", "norm2", "q_norm", "k_norm", "ada_w", "ada_b" }) |nm|
-                @field(b, nm) = try st.tensor(up, p, try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ i, nm }));
-            for (linear_names, 0..) |nm, j| b.lin[j] = try st.linear(io, p, nv, up, try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ i, nm }));
-        }
-        { // host copies: the curve table and the RoPE frequencies
-            const t = try p.get("adaln_t_table");
-            if (t.dim(0) != grid or t.dim(1) != t_dim) return error.BadCurveTable;
-            w.table = try gpa.alloc(f32, grid * t_dim);
-            try p.read(io, t, std.mem.sliceAsBytes(w.table));
-            try p.read(io, try p.get("rope.inv_freq"), std.mem.sliceAsBytes(&w.inv_freq));
-        }
-        try st.done(up); // every copy and pack4 has landed
-        return w;
+    }
+
+    fn loadBlockTensors(w: *Weights, up: *Uploader, p: *const Pack, b: *Block, i: usize) !void {
+        var nb: [96]u8 = undefined;
+        inline for (.{ "norm1", "norm2", "q_norm", "k_norm", "ada_w", "ada_b" }) |nm|
+            @field(b, nm) = try w.store.tensor(up, p, try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ i, nm }));
+    }
+
+    /// Host copies: the curve table and the RoPE frequencies.
+    fn loadHost(w: *Weights, gpa: std.mem.Allocator, io: std.Io, p: *const Pack) !void {
+        const t = try p.get("adaln_t_table");
+        if (t.dim(0) != grid or t.dim(1) != t_dim) return error.BadCurveTable;
+        w.table = try gpa.alloc(f32, grid * t_dim);
+        try p.read(io, t, std.mem.sliceAsBytes(w.table));
+        try p.read(io, try p.get("rope.inv_freq"), std.mem.sliceAsBytes(&w.inv_freq));
     }
 };
 
@@ -199,8 +259,17 @@ pub const Dit = struct {
     idx_host: []i32 = &.{}, // the modulation row of every token, kept per layout (uploaded when it changes)
     idx_key: ?[9]u32 = null,
     extra_launches: u64 = 0, // the NVFP4 and row-copy launches (the H3 kernels count in `launch.count`)
+    /// The blocks' attention: comfy-kitchen's INT8 (false, the video model on CUDA) or the bf16 attention of the token
+    /// refiner on q, k, v copied out of the rotated qkv rows (true: H3-Image on both vendors, ROCM.md section 3).
+    attn_bf16: bool = false,
+    head_w: u64 = 0, // H3-Image: the step's mixed PDD head, fp32 [96, D] and [96]
+    head_b: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: Kernels, w: *const Weights, s: gpu.Stream, max_s: u32, max_l: u32, max_a: u32) !Dit {
+        return initWith(gpa, d, k, w, s, max_s, max_l, max_a, scratch(max_s, max_l, max_a));
+    }
+
+    fn initWith(gpa: std.mem.Allocator, d: *const gpu.Driver, k: Kernels, w: *const Weights, s: gpu.Stream, max_s: u32, max_l: u32, max_a: u32, sizes: Scratch) !Dit {
         var x: Dit = .{ .gpa = gpa, .d = d, .k = k, .w = w, .s = s, .max_s = max_s, .max_l = max_l, .max_a = max_a };
         errdefer x.deinit();
         if (std.c.getenv("STK_H3_REF")) |v| {
@@ -210,9 +279,36 @@ pub const Dit = struct {
             }
         }
         x.idx_host = try gpa.alloc(i32, max_s);
-        const sizes = scratch(max_s, max_l, max_a);
         inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(x, name) = try x.alloc(@field(sizes, name));
         return x;
+    }
+
+    /// H3-Image's DiT (`Weights.loadImage`, `stepImage`): `max_s` rows of [text | target] and `max_l` text tokens, the
+    /// bf16 attention, no audio, the PDD head buffers. `k.image` must be set.
+    pub fn initImage(gpa: std.mem.Allocator, d: *const gpu.Driver, k: Kernels, w: *const Weights, s: gpu.Stream, max_s: u32, max_l: u32) !Dit {
+        if (k.image == null or w.heads != pdd.max_heads) return error.NotAnImageDit;
+        var x = try initWith(gpa, d, k, w, s, max_s, max_l, 0, imageScratch(max_s, max_l));
+        errdefer x.deinit();
+        x.attn_bf16 = true;
+        x.graphs = false; // `stepImage` runs eagerly
+        x.head_w = try x.alloc(96 * dim * 4);
+        x.head_b = try x.alloc(96 * 4);
+        return x;
+    }
+
+    /// `scratch` for H3-Image: no audio, no NVFP4 quantizer rows, no INT8 workspace; q, k and v (the bf16 attention's
+    /// operands) for the whole sequence.
+    pub fn imageScratch(max_s: u32, max_l: u32) Scratch {
+        var sc = scratch(max_s, max_l, 0);
+        const qkv_rows: u64 = @max(max_s, max_l);
+        inline for (.{ "q", "kk", "v" }) |f| @field(sc, f) = qkv_rows * inner * 2;
+        inline for (.{ "heads_out", "qc", "qs", "ws", "a_in", "arows", "aemb", "aout" }) |f| @field(sc, f) = 0;
+        return sc;
+    }
+
+    /// The device bytes `initImage` allocates.
+    pub fn imageScratchBytes(max_s: u32, max_l: u32) u64 {
+        return sumBuffers(imageScratch(max_s, max_l)) + 96 * dim * 4 + @max(96 * 4, 256);
     }
 
     pub fn deinit(x: *Dit) void {
@@ -385,16 +481,17 @@ pub const Dit = struct {
             return;
         }
         x.extra_launches += 2;
-        if (x.prof == null or l.kind != .nvfp4) return l.forward(x.k.nv, x.k.major, x.k.minor, tile, in, out, rows, x.qc, x.qs, x.s);
+        const nv = x.k.nv orelse return error.NoNvfp4Kernels;
+        if (x.prof == null or l.kind != .nvfp4) return l.forward(nv, x.k.major, x.k.minor, tile, in, out, rows, x.qc, x.qs, x.s);
         const tbk = plan.tb(tile, x.k.major, x.k.minor);
         const rr = plan.rows(rows, l.k, tbk);
         try x.markBegin();
         const qp = try plan.quant4(rows, l.k, l.k, tbk, l.act);
-        try x.k.nv.run(&qp, .{ .x = in, .codes = x.qc, .scales = x.qs }, x.s);
+        try nv.run(&qp, .{ .x = in, .codes = x.qc, .scales = x.qs }, x.s);
         try x.markEnd(.quant);
         try x.markBegin();
         const gp = try plan.gemmPrompt(.a4, tile, x.k.major, x.k.minor, rows, l.n, l.k, l.npad, rr.mpad, false, l.alpha());
-        try x.k.nv.run(&gp, .{ .x = x.qc, .xs = x.qs, .w = l.w, .ws = l.ws, .out = out }, x.s);
+        try nv.run(&gp, .{ .x = x.qc, .xs = x.qs, .w = l.w, .ws = l.ws, .out = out }, x.s);
         try x.markEnd(gc);
     }
 
@@ -542,6 +639,94 @@ pub const Dit = struct {
         try x.post("uncarry", &.{.{ .role = "y", .ptr = vel_a, .bytes = na * 2 }});
     }
 
+    /// H3-Image (`initImage`): the target latent bf16 [24, 1, h, w] at PDD step `st` -> the velocity ComfyUI returns
+    /// (negated), bf16 [24, 1, h, w], into `vel` (`MiniMaxH3ImageModel._forward`). [text | target], no audio and no carry;
+    /// the text and the target at `st.t`; the final layer's head is the step's mix of the PDD bank (fp32, `sampler.mix`'s
+    /// order) feeding the fp32 head GEMM. The RoPE table and the modulation-row map are cached per layout as in `step`;
+    /// eager (no step graph).
+    pub fn stepImage(x: *Dit, latent: u64, st: pdd.Step, h: u32, w: u32, vel: u64) !void {
+        const im = x.k.image orelse return error.NotAnImageDit;
+        if (x.w.heads != pdd.max_heads or !x.attn_bf16) return error.NotAnImageDit;
+        if (h == 0 or w == 0 or h % 2 != 0 or w % 2 != 0) return error.BadImageShape;
+        const L = x.ctx_rows;
+        const ly = lay.Layout.init(L, 1, h, w, 0);
+        if (ly.s > x.max_s) return error.ImageTooLarge;
+        const key: [6]u32 = .{ L, 1, h, w, 0, 0 };
+        if (x.layout_key == null or !std.mem.eql(u32, &x.layout_key.?, &key)) {
+            const pos = try x.gpa.alloc([3]f64, ly.s);
+            defer x.gpa.free(pos);
+            ly.positions(pos);
+            const table = try x.gpa.alloc(u16, @as(usize, ly.s) * 48 * 4);
+            defer x.gpa.free(table);
+            ly.ropeTable(pos, &x.w.inv_freq, table);
+            try x.upload(x.rope, std.mem.sliceAsBytes(table));
+            x.layout_key = key;
+            x.idx_key = null;
+        }
+        var unique: [1]f32 = undefined;
+        try lay.imageModRows(ly, st.t, x.text_tags, &unique, x.idx_host[0..ly.s]);
+        var temb: [t_dim]f32 = undefined;
+        lay.curveTEmb(x.w.table, grid, t_dim, &unique, &temb);
+        const ik: [9]u32 = .{ L, 1, h, w, 0, 0, 0, 0, std.math.maxInt(u32) }; // the last entry marks an image's map
+        if (x.idx_key == null or !std.mem.eql(u32, &x.idx_key.?, &ik)) {
+            try x.uploadAsync(x.idx, std.mem.sliceAsBytes(x.idx_host[0..ly.s]));
+            x.idx_key = ik;
+        }
+        try x.uploadAsync(x.t_emb, std.mem.sliceAsBytes(&temb));
+
+        const S: u64 = ly.s;
+        const nv: u64 = @as(u64, h / 2) * (w / 2);
+        const nx: u64 = 24 * @as(u64, h) * w;
+        const vr = ly.videoRows();
+        try x.markBegin();
+        try x.pre("video_rows", &.{.{ .role = "x", .ptr = latent, .bytes = nx * 2 }});
+        try x.k.h3.patchify(x.s, latent, x.rows, 24, 1, h, w);
+        try x.post("video_rows", &.{.{ .role = "y", .ptr = x.rows, .bytes = nv * 96 * 4 }});
+        try x.gemmF32("video_patch_proj", x.rows, x.w.vp_w, x.w.vp_b, x.emb, nv, dim, 96);
+        try x.k.ops.copyRows(x.s, x.h, x.context, L, dim * 2, dim * 2, dim * 2); // [text | target]
+        x.extra_launches += 1;
+        try x.k.h3.toBf16(x.s, x.emb, x.h + @as(u64, vr[0]) * dim * 2, nv * dim);
+        try x.markEnd(.embed);
+
+        if (x.fuse and x.probe == null) {
+            try x.blocksFused(S, 1);
+        } else {
+            for (&x.w.blocks, 0..) |*b, i| try x.block(i, b, S, 1);
+        }
+
+        try x.markBegin();
+        try x.gemmF32("final.adaln", x.t_emb, x.w.fl_ada_w, x.w.fl_ada_b, x.fada, 1, 2 * dim, t_dim);
+        const hv = x.h + @as(u64, vr[0]) * dim * 2;
+        try x.pre("final.mod_video", &.{.{ .role = "x", .ptr = hv, .bytes = nv * dim * 2 }});
+        try x.k.h3.finalMod(x.s, hv, x.w.fl_norm, x.fada + dim * 4, x.fada, x.emb, nv, dim, eps);
+        try x.post("final.mod_video", &.{.{ .role = "y", .ptr = x.emb, .bytes = nv * dim * 4 }});
+        try x.pre("final.pdd_mix", &.{});
+        try im.headMix(x.s, x.w.vo_w, x.head_w, 96 * dim, st);
+        try im.headMix(x.s, x.w.vo_b, x.head_b, 96, st);
+        try x.post("final.pdd_mix", &.{ .{ .role = "w", .ptr = x.head_w, .bytes = 96 * dim * 4 }, .{ .role = "b", .ptr = x.head_b, .bytes = 96 * 4 } });
+        try x.gemmF32("final.video_out", x.emb, x.head_w, x.head_b, x.vout, nv, 96, dim);
+        try x.pre("video_out", &.{.{ .role = "x", .ptr = x.vout, .bytes = nv * 96 * 4 }});
+        try x.k.h3.unpatchifyNeg(x.s, x.vout, vel, 24, 1, h, w);
+        try x.post("video_out", &.{.{ .role = "y", .ptr = vel, .bytes = nx * 2 }});
+        try x.markEnd(.final);
+    }
+
+    /// softmax(q k^T / sqrt(128)) v of the rotated qkv rows [S, 3 * inner] into `att` [S, inner] with the bf16 attention
+    /// (qwen_image's attention.cu; attention.hip on HIP): q, k and v copied out as contiguous [S, H, 128], as the token
+    /// refiner lays them out.
+    fn attentionBf16(x: *Dit, rows: u32) !void {
+        std.debug.assert(rows <= x.max_s);
+        const R: u64 = rows;
+        try x.markBegin();
+        inline for (.{ "q", "kk", "v" }, 0..) |dst, part|
+            try x.k.ops.copyRows(x.s, @field(x, dst), x.qkv + part * inner * 2, R, inner * 2, 3 * inner * 2, inner * 2);
+        try x.markEnd(.attn_prep);
+        try x.markBegin();
+        try x.k.ops.attention(x.s, x.q, x.kk, x.v, x.att, rows, heads, heads, rows, false, 0);
+        try x.markEnd(.attn_kernel);
+        x.extra_launches += 4;
+    }
+
     /// The step graph of this shape and buffer set: replayed if captured; eager the first time a key is seen; captured
     /// (and launched) the second time. A capture that fails turns graphs off (`graph_error` says why) and runs eagerly.
     fn stepGraph(x: *Dit, bd: Body) !void {
@@ -672,12 +857,16 @@ pub const Dit = struct {
             try x.markBegin();
             try x.k.kitchen.rmsRope(x.s, x.qkv, x.rope, b.q_norm, b.k_norm, heads, rows, 96, eps);
             try x.markEnd(.rms_rope);
-            try x.markBegin();
-            try x.k.kitchen.attentionPrep(x.s, x.qkv, x.ws, heads, rows);
-            try x.markEnd(.attn_prep);
-            try x.markBegin();
-            try x.k.kitchen.attentionKernel(x.s, x.att, x.ws, heads, rows, true);
-            try x.markEnd(.attn_kernel);
+            if (x.attn_bf16) {
+                try x.attentionBf16(rows);
+            } else {
+                try x.markBegin();
+                try x.k.kitchen.attentionPrep(x.s, x.qkv, x.ws, heads, rows);
+                try x.markEnd(.attn_prep);
+                try x.markBegin();
+                try x.k.kitchen.attentionKernel(x.s, x.att, x.ws, heads, rows, true);
+                try x.markEnd(.attn_kernel);
+            }
             try x.linearRun(b.lin[1], x.att, x.o, rows, .gemm_out);
             try x.markBegin(); // gate_add1 + norm_mod2
             try x.k.h3.gateAddNormMod(x.s, x.h, x.o, cur, cur, x.idx, b.norm2, x.hn, S, dim, 0, 1, eps);
@@ -733,15 +922,19 @@ pub const Dit = struct {
                 try x.post(rn, &.{.{ .role = "qkv", .ptr = x.qkv, .bytes = qkv_bytes }});
                 const an = nm(&nb, i, "attention");
                 try x.pre(an, &.{.{ .role = "qkv", .ptr = x.qkv, .bytes = qkv_bytes }});
-                try x.markBegin();
-                try x.k.kitchen.attentionPrep(x.s, x.qkv, x.ws, heads, rows);
-                try x.markEnd(.attn_prep);
-                try x.markBegin();
-                try x.k.kitchen.attentionKernel(x.s, x.heads_out, x.ws, heads, rows, false);
-                try x.markEnd(.attn_kernel);
-                try x.markBegin();
-                try x.k.h3.headsToRows(x.s, x.heads_out, x.att, heads, S, head_dim);
-                try x.markEnd(.heads_rows);
+                if (x.attn_bf16) {
+                    try x.attentionBf16(rows);
+                } else {
+                    try x.markBegin();
+                    try x.k.kitchen.attentionPrep(x.s, x.qkv, x.ws, heads, rows);
+                    try x.markEnd(.attn_prep);
+                    try x.markBegin();
+                    try x.k.kitchen.attentionKernel(x.s, x.heads_out, x.ws, heads, rows, false);
+                    try x.markEnd(.attn_kernel);
+                    try x.markBegin();
+                    try x.k.h3.headsToRows(x.s, x.heads_out, x.att, heads, S, head_dim);
+                    try x.markEnd(.heads_rows);
+                }
                 try x.post(an, &.{.{ .role = "y", .ptr = x.att, .bytes = S * inner * 2 }});
                 try x.linear(nm(&nb, i, "out"), b.lin[1], x.att, x.o, rows, .gemm_out);
             } else { // MLP half
@@ -769,4 +962,17 @@ test "the step's code type-checks (no GPU here: the h3-replay and h3-step-bench 
     _ = &Dit.prepare;
     _ = &Dit.init;
     _ = &Dit.launches;
+    _ = &Dit.initImage;
+    _ = &Dit.stepImage;
+    _ = &Weights.loadImage;
+}
+
+test "H3-Image's scratch: no audio, NVFP4 or INT8 buffers; q, k, v for the whole sequence; the PDD head besides" {
+    const rows: u32 = 1100; // a 1024 x 1024 image (1024 tokens) and a 76-token prompt
+    const sc = Dit.imageScratch(rows, 512);
+    try std.testing.expectEqual(@as(u64, rows) * inner * 2, sc.q);
+    try std.testing.expectEqual(@as(u64, 0), sc.ws);
+    try std.testing.expectEqual(@as(u64, 0), sc.qc);
+    try std.testing.expect(Dit.imageScratchBytes(rows, 512) < Dit.scratchBytes(rows, 512, 0));
+    try std.testing.expectEqual(sumBuffers(sc) + 96 * dim * 4 + 384, Dit.imageScratchBytes(rows, 512));
 }

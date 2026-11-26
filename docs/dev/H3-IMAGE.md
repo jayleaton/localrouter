@@ -187,6 +187,17 @@ and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` po
 - One declared substitution remains: ComfyUI decodes up to 4 tiles a call depending on free memory (`_decode_tile_row`); the twin and the
   engine decode one tile a call, so a tile's bits never depend on how much memory was free.
 
+**Found while building the twin (PR 1.5).**
+- The adaLN compute dtype (section 3) is fp32. The curve-form checkpoint builds every `adaln_proj` with `adaln_dtype` float32
+  (`model.py:526-527, 312, 331`), so the stored fp16 weights are upcast exactly and run on the fp32 curve embedding. The twin's
+  `ada_w` / `ada_b` are fp32 on `k_gemm_f32`, as in the video twin. This is read from the code, not observed on a run.
+- The video decoder's `vv_place_tile` blends against the tiles it is given. The video twin passes it the raw neighbours, which
+  is ComfyUI 0.37.0's rule. The image twin (`h3i/vae_image.py`) runs the same kernel onto a scratch tile and passes it the
+  already blended strip and left tail. That gives e9afbccc's rule with no new kernel; the crops into the canvas are plain copies.
+- Two image-decoder ops have no kernel yet, so the twin runs them as torch ops with the kernels' arithmetic (`pending_kernel` in
+  its records): the per-head RMS + RoPE over 32 of 64 dims (`vv_rms_rope` rotates 48), with its 2-axis table computed on the host
+  like the DiT's, and the 768-column unshuffle (`vv_unshuffle` is fixed at 3072). PR 1.6's `vae_image` kernels replace them.
+
 ## 3. Open questions
 
 - **Which attention ComfyUI ran on gfx1151.** The selector names `comfy_kitchen_int8` (section 1). On gfx1151 kitchen has no ROCm backend,
