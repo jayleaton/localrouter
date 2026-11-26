@@ -55,7 +55,7 @@ jq --arg models "$models" --arg root "$root" --arg src "$src" --arg id "$id" --a
 
 # The serve arguments, as the config passes them, parsed by this image's binary: a model path that does not exist
 # makes it stop right after parsing, so an unknown or malformed flag shows as a usage error (exit 2).
-mapfile -t serve < <(jq -r '.tools[0].options.server | .[index("tensorfold-native") + 2:][]
+mapfile -t serve < <(jq -r '.tools[0].options.server | .[index("tensorfold-native") + 3:][]
   | gsub("\\{id\\}"; "Inkling-2-Mini") | gsub("\\{port\\}"; "8888")' "$root/config.json.tmp")
 code=0
 docker run --rm --network none --entrypoint "$(jq -er .image.binary "$pins")" "$id" serve /nonexistent/argument-check \
