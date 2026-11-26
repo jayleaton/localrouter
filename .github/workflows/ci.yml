@@ -24,8 +24,11 @@ jobs:
           for f in tools/install/*.sh deploy/jarvis/*.sh deploy/mac/*.sh deploy/strix-halo/*.sh tools/gufo/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
           for f in deploy/profiles/*.json tools/twin/packs/sources/*.json tools/twin/packs/built/*.json; do jq empty "$f"; done
           for p in deploy/profiles/*.json; do tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
-          # the Mac service's config: every profile model has its tool entry, each booked and resident as the profile says
+          # the Mac service's config: default install renders non-optional models; all-models render covers optional ones too
           JARVIS=$RUNNER_TEMP/jarvis RENDER_ONLY=1 deploy/mac/install.sh | jq -e --slurpfile p deploy/profiles/mac-apple-silicon.json '
+            ($p[0].models | map(select(.optional != true) | {key: .id, value: .}) | from_entries) as $m
+            | (.tools | length) == ($m | length) and all(.tools[]; .resident_bytes == $m[.id].memory_bytes and .residency == (if $m[.id].warm == true then "always" else "on_demand" end))' > /dev/null
+          JARVIS=$RUNNER_TEMP/jarvis TOOLS="$(jq -r '[.models[].id] | join(" ")' deploy/profiles/mac-apple-silicon.json)" RENDER_ONLY=1 deploy/mac/install.sh | jq -e --slurpfile p deploy/profiles/mac-apple-silicon.json '
             ($p[0].models | map({key: .id, value: .}) | from_entries) as $m
             | (.tools | length) == ($m | length) and all(.tools[]; .resident_bytes == $m[.id].memory_bytes and .residency == (if $m[.id].warm == true then "always" else "on_demand" end))' > /dev/null
       - name: AMD detection against recorded hosts (tests/fixtures/amd; no GPU)
