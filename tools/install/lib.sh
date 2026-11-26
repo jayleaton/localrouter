@@ -141,10 +141,10 @@ hw_match() {
 
 # ---- the manifest
 models() { jq -r '.models[].key' "$1"; }
-# selected PROFILE_FILE LIST: the keys in LIST (comma separated; "all": every model), in the manifest's order
+# selected PROFILE_FILE LIST: the keys in LIST (comma separated; "all": every default model, omitting optional ones), in the manifest's order
 selected() {
   local p=$1 list=${2:-all} k
-  [ "$list" = all ] && { models "$p"; return; }
+  [ "$list" = all ] && { jq -r '.models[] | select(.optional != true) | .key' "$p"; return; }
   for k in ${list//,/ }; do
     jq -e --arg k "$k" '.models[] | select(.key == $k)' "$p" > /dev/null || die "no model '$k' in $(basename "$p") (have: $(models "$p" | tr '\n' ' '))"
   done

@@ -27,7 +27,8 @@ repo=$(cd "$here/../.." && pwd)
 source "$here/env.sh"
 PROFILE_FILE=${PROFILE_FILE:-$repo/deploy/profiles/mac-apple-silicon.json}
 all=$(jq -r '[.models[].id] | join(" ")' "$PROFILE_FILE")
-TOOLS=${TOOLS:-$all}
+default_tools=$(jq -r '[.models[] | select(.optional != true) | .id] | join(" ")' "$PROFILE_FILE")
+TOOLS=${TOOLS:-$default_tools}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; the profile has: $all"; done
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
 chat_pins=$repo/tools/chat/qwen38-27b/pins-macos.json

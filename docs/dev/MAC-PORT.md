@@ -38,6 +38,8 @@ tools/install/bootstrap.sh --profile mac-apple-silicon --accept     # after read
 
 The run builds LocalRouter and downloads every model, about 60 GiB, each file checked against its pin. It then benches
 chat and runs Drama 3's Metal qualification, which writes the marker the daemon needs. `--models` picks a subset.
+Optional models (such as `Inkling-2-Mini`, key `inkling`) are skipped by default; include them explicitly with
+`--models stt,decide,image,chat,inkling,tts,asset3d` (or `TOOLS="... Inkling-2-Mini" deploy/mac/install.sh`).
 
 Last, the run installs the service ([deploy/mac](../../deploy/mac/install.sh)) and starts it. It waits until chat,
 Drama 3 and Whisper are warm.

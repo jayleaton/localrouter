@@ -258,6 +258,7 @@
   {
    "key": "inkling",
    "id": "Inkling-2-Mini",
+   "optional": true,
    "warm": false,
    "title": "Inkling 2 Mini chat: TensorFold native Metal server (NVFP4/MXFP8 + DFlash2 drafter, vision, 128k context, 2 streams)",
    "licence": {
