@@ -72,7 +72,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
     cfg.tools = tools;
     var local: std.ArrayList(config.ToolConfig) = .empty;
     for (tools, plan.places) |t, pl| if (pl != .remote) try local.append(arena, t);
-    const budget = if (cfg.budget_bytes > 0) cfg.budget_bytes else (@import("sched/memory.zig").total() orelse 0) -| cfg.reserve_bytes;
+    const budget = if (cfg.budget_bytes > 0) cfg.budget_bytes else (@import("sched/memory.zig").capacity() orelse 0) -| cfg.reserve_bytes;
     if (!engine.validate(local.items, budget, &why)) {
         std.log.err("{s}: {s}", .{ path orelse "config", why.buffered() });
         return 2;

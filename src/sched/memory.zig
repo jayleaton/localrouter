@@ -5,6 +5,10 @@
 //! is the smaller of what the VM system can give (total less wired, compressed and non-purgeable anonymous pages: file
 //! cache counts as free, as in MemAvailable) and the GPU's headroom (its wired-memory ceiling less what is wired now:
 //! Metal buffers in use are wired). Under critical memory pressure it is 0, so nothing new is admitted.
+//!
+//! An AMD APU (Strix Halo) maps system memory through its GTT pool, which `amdgpu.gttsize` / `ttm.pages_limit` cap below
+//! RAM; an allocation past it fails even while MemAvailable has room. There the GTT is the GPU's ceiling and what it
+//! holds is wired: the budget is the smaller of MemAvailable and the GTT left (`readGtt`, from sysfs).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -30,10 +34,13 @@ pub const Snapshot = struct {
     }
 };
 
-/// The bytes a new model may take now (MemAvailable on Linux; see the file comment for macOS); null when unreadable.
+/// The bytes a new model may take now (MemAvailable on Linux, within an AMD APU's GTT; see the file comment for macOS);
+/// null when unreadable.
 pub fn available() ?u64 {
     if (darwin) return if (snapshot()) |s| s.budget() else null;
-    return meminfo("MemAvailable:");
+    const free = meminfo("MemAvailable:") orelse return null;
+    const g = readGtt("/sys") orelse return free;
+    return @min(free, g.total -| g.used);
 }
 
 /// The host's memory in bytes; null when it cannot be read.
@@ -42,10 +49,19 @@ pub fn total() ?u64 {
     return meminfo("MemTotal:");
 }
 
+/// The most the scheduler can ever book: `total`, within an AMD APU's GTT on Linux; null when unreadable.
+pub fn capacity() ?u64 {
+    const t = total() orelse return null;
+    if (darwin) return t;
+    return if (readGtt("/sys")) |g| @min(t, g.total) else t;
+}
+
 pub fn snapshot() ?Snapshot {
     if (!darwin) {
         const t = meminfo("MemTotal:") orelse return null;
-        return .{ .total = t, .available = meminfo("MemAvailable:") orelse return null, .gpu_ceiling = t };
+        const free = meminfo("MemAvailable:") orelse return null;
+        const g = readGtt("/sys") orelse return .{ .total = t, .available = free, .gpu_ceiling = t };
+        return .{ .total = t, .available = free, .wired = g.used, .gpu_ceiling = @min(t, g.total) };
     }
     const t = sysctlInt(u64, "hw.memsize") orelse return null;
     const page: u64 = sysctlInt(u64, "hw.pagesize") orelse return null;
@@ -86,6 +102,45 @@ fn parseField(text: []const u8, key: []const u8) ?u64 {
     const end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;
     const kb = std.fmt.parseInt(u64, rest[0..end], 10) catch return null;
     return kb * 1024;
+}
+
+// ---- Linux: an AMD APU's GTT ----
+
+/// An AMD GPU's GTT pool (the system memory it may map), in bytes, when it is the GPU's memory: an APU, whose VRAM is a
+/// BIOS carve-out smaller than its GTT (tools/install/lib.sh `hw_vram` draws the same line). Null on a discrete card,
+/// with no AMD card, and when an NVIDIA GPU is present (the engines run there, as lib.sh's detection prefers it).
+pub const Gtt = struct { total: u64, used: u64 };
+
+/// The first AMD (vendor 0x1002) DRM card with a GTT counter under `sysfs` (normally "/sys"), as lib.sh's `amd_card`.
+pub fn readGtt(sysfs: []const u8) ?Gtt {
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    var amd: ?Gtt = null;
+    var card: u32 = 0;
+    while (card < 16) : (card += 1) {
+        const dev = std.fmt.bufPrint(&path, "{s}/class/drm/card{d}/device/", .{ sysfs, card }) catch return null;
+        const vendor = readInt(&path, dev.len, "vendor") orelse continue;
+        if (vendor == 0x10de) return null;
+        if (vendor != 0x1002 or amd != null) continue;
+        const gtt = readInt(&path, dev.len, "mem_info_gtt_total") orelse continue;
+        const vram = readInt(&path, dev.len, "mem_info_vram_total") orelse 0;
+        if (vram >= gtt) return null; // a discrete card: its VRAM is its memory
+        amd = .{ .total = gtt, .used = readInt(&path, dev.len, "mem_info_gtt_used") orelse 0 };
+    }
+    return amd;
+}
+
+/// A sysfs file's one number (decimal, or hex with 0x), at `path[0..dir_len] ++ name`.
+fn readInt(path: *[std.fs.max_path_bytes]u8, dir_len: usize, name: []const u8) ?u64 {
+    if (dir_len + name.len + 1 > path.len) return null;
+    @memcpy(path[dir_len..][0..name.len], name);
+    path[dir_len + name.len] = 0;
+    const fd = posix.openatZ(posix.AT.FDCWD, path[0 .. dir_len + name.len :0], .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
+    var buf: [64]u8 = undefined;
+    const n = posix.read(fd, &buf) catch return null;
+    const text = std.mem.trim(u8, buf[0..n], " \t\n");
+    if (std.mem.startsWith(u8, text, "0x")) return std.fmt.parseInt(u64, text[2..], 16) catch null;
+    return std.fmt.parseInt(u64, text, 10) catch null;
 }
 
 // ---- macOS ----
@@ -164,6 +219,7 @@ test "parse meminfo and read the real one" {
     try std.testing.expect(s.available > 0 and s.available <= s.total);
     try std.testing.expect(s.gpu_ceiling > 0 and s.gpu_ceiling <= s.total);
     try std.testing.expectEqual(total().?, s.total);
+    if (!darwin) try std.testing.expectEqual(s.gpu_ceiling, capacity().?); // MemTotal, within an APU's GTT
     try std.testing.expect(s.budget() <= s.available); // one reading: the machine's memory moves between two
     _ = available().?;
 }
@@ -175,4 +231,16 @@ test "one budget: the smaller of free memory and the GPU's headroom, none under 
     var c = s;
     c.pressure = .critical;
     try std.testing.expectEqual(@as(u64, 0), c.budget());
+}
+
+test "an AMD APU's GTT, read as lib.sh reads it, from the recorded hosts (tests/fixtures/amd)" {
+    const strix = readGtt("tests/fixtures/amd/strix-halo/sys").?; // card1 after DP/eDP connector entries
+    try std.testing.expectEqual(@as(u64, 103079215104), strix.total);
+    try std.testing.expectEqual(@as(u64, 57671680), strix.used);
+    try std.testing.expect(readGtt("tests/fixtures/amd/discrete/sys") == null); // 24 GiB VRAM above its 16 GiB GTT
+    try std.testing.expect(readGtt("tests/fixtures/amd/nvidia/sys") == null); // an NVIDIA GPU beside an AMD card
+    try std.testing.expect(readGtt("tests/fixtures/amd/none/sys") == null);
+    try std.testing.expect(readGtt("/nonexistent") == null);
+    const s: Snapshot = .{ .total = 128 << 30, .available = 120 << 30, .wired = strix.used, .gpu_ceiling = strix.total };
+    try std.testing.expectEqual(strix.total - strix.used, s.budget()); // GTT, not MemAvailable, is the bound here
 }
