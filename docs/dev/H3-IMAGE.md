@@ -163,7 +163,7 @@ split-half RoPE, the VAE encoder. New: the PDD sampler and head mix, the image d
 2048, 32 heads, 3-D RoPE over 0.75 of the head), the posterior sample, reference blocks (I2V has cond rows), and the composite.
 
 Declared substitutions, as in M7 and H3-I2V: LocalRouter's portable generator for the three draws; no `ImageScaleToTotalPixels` (`area`)
-pre-scale, the request's size instead; the decoder's tiles decoded one at a time (no batching by free memory); the bf16 attention of ROCM.md
+pre-scale, the request's size instead; the decoder's tiles decoded one at a time, in ComfyUI's tile plan and blend (section 2; no batching by free memory); the bf16 attention of ROCM.md
 in place of the `comfy_kitchen_int8` that `comfy_attention.config` selects.
 
 Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a step (G-baseline), decoded image LPIPS / DINO against
@@ -172,15 +172,27 @@ Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a
 and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` positions and segments against ComfyUI's function on CPU (as
 `test_vision_position`), the composite and the 8-bit lanczos against the twin's numpy path.
 
+**Decided: the decoder tiles exactly as ComfyUI does** (both the twin and the engine; `vae.py:686-725, 776-815`):
+- Tiles: `split_tiles(H)` and `split_tiles(W)` on the pixel sizes with `tile_size` 256, `tile_overlap_min` 64 and `vae_ratio` 16: one tile
+  when the side is at most 256; otherwise N = ceil(side / 256), grown until `256 N - 64 (N - 1) >= side`, then the surplus
+  `(256 N - 64 (N - 1) - side) / 16` (integer division) handed out 16 px at a time to the overlaps in order, round robin; starts are
+  `start[i + 1] = start[i] + 256 - overlap[i]`. Each tile decodes the latent window `[start / 16, (start + 256) / 16)` on both axes.
+- Order: rows of tiles top to bottom; in a row, tiles left to right. A tile is blended first **vertically** against the previous row's
+  already blended bottom strip (`strip`, the canvas's columns `[x_start, x_start + 256)`, extent `y_overlap[i - 1]`), then
+  **horizontally** against the left neighbour's already blended right tail (`left_tail`, extent `x_overlap[j - 1]`).
+- Blend: `blend(a, b, e)` with `e = min(len_a, len_b, e)`, positions `p = 0 .. e - 1` and, in the tile's dtype, `out = a[-e:] * (1 - p / e) +
+  b[:e] * (p / e)`; `b`'s rest is kept unchanged. Then a tile that is not the last in its row drops its right overlap (kept as `left_tail`),
+  and a tile not in the last row drops its bottom overlap (kept in the next `strip`); what remains is copied to the canvas at
+  `(out_y, out_x)`.
+- One declared substitution remains: ComfyUI decodes up to 4 tiles a call depending on free memory (`_decode_tile_row`); the twin and the
+  engine decode one tile a call, so a tile's bits never depend on how much memory was free.
+
 ## 3. Open questions
 
 - **Which attention ComfyUI ran on gfx1151.** The selector names `comfy_kitchen_int8` (section 1). On gfx1151 kitchen has no ROCm backend,
   so its availability check should fail, leave `self.function` unset and run the default attention (`attention.py:99-106`): which default
   (`optimized_attention` on ROCm: PyTorch SDPA or another) the baseline run must log. The twin's bf16 attention is a declared substitution
   either way.
-- **Tiling as reference.** Both encoder and decoder tile at 256 px, so ComfyUI's image depends on its tile plan. The twin should copy
-  `split_tiles` exactly (it is pure integer arithmetic); whether the engine also tiles (ViT attention per 261-token tile) or decodes whole is
-  a choice. Tiling is cheaper and matches the reference, so the default is to tile.
 - The adaLN linear's compute dtype (stored fp16, model bf16): read `comfy.ops` cast rules for `adaln_dtype` / `**curve` (`model.py:546-550`)
   before the twin fixes it.
 - `ImageScale(lanczos)` to the same size: confirm on a real run that node 15's 8-bit round trip is applied (`common_upscale` with
