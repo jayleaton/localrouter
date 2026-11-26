@@ -11,6 +11,7 @@ installer never changes kernel parameters, firmware or the bootloader; the GTT s
 | `qwen3-tts-customvoice` | speech | `tools/speech/openai_audio` → Gufo `serve tts` on :8091 | 6.5 GiB |
 | `qwen3-asr` | transcription (default) | `tools/speech/openai_audio` → Gufo `serve asr` on :8092 | 5.5 GiB |
 | `whisper-large-v3-turbo` | transcription | `tools/speech/whisper/worker.py` in the ROCm venv | 2.5 GiB |
+| `minimax-h3-image` | image (text to image, edits) | the compiled-in `minimax_h3_image` engine on the HIP runtime (`-Dgpu=hip -Dhip=<ROCm>`) | 55.2 GiB *estimate* |
 
 `budget_bytes` is the GTT pool less 2 GiB (`render.sh`, from `tools/install/lib.sh hw_gtt`): a GPU allocation past GTT
 fails even when MemAvailable has room, so the scheduler must plan against GTT. Q3 + TTS + ASR fit together (the voice
@@ -42,6 +43,12 @@ overrides any of them. `tools/install/doctor.sh --profile strix-halo-gfx1151 --u
   PASSED; first audio after the end of speech 1217 ms and 1376 ms on warm turns (25 s on the first, a cold chat load),
   a 42.6 s spoken reply with no underrun.
 
-Not here: the compiled-in engines (Qwen-Image, MiniMax H3, Kandinsky-6) are CUDA kernels, and Drama 3 has GB10 and Metal
+`minimax-h3-image` is **not qualified yet** and its memory figures are **estimates**, not measurements: `H3I_RESIDENT_MB` in
+`env.sh` is the engine's own estimate of its resident set, and the engine books each request's working bytes itself (about
+0.1 GiB for text to image, 6.9 to 11.9 GiB for an edit with 1 to 5 references). It runs only from a build with
+`-Dgpu=hip -Dhip=<ROCm>` and a bf16 pack in `$H3I_DIR` (docs/dev/ROCM.md, docs/dev/H3-IMAGE.md). The gates it must pass and
+the measured figures that replace the estimates go in `docs/dev/H3-IMAGE-QUALIFICATION.md`.
+
+Not here: the other compiled-in engines (Qwen-Image, MiniMax H3, Kandinsky-6) are CUDA kernels, and Drama 3 has GB10 and Metal
 builds only. Gufo serves Qwen-Image 2.1 and MiniMax H3 on gfx1151; wrapping them is the next step (a `cmd` image/video
 worker, or ComfyUI behind one).

@@ -13,6 +13,7 @@ Q3_DIR=${Q3_DIR:-$FLASHNEXT_DIR}                                    # UD-Q3_K_XL
 TTS_DIR=${TTS_DIR:-$J/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}
 ASR_DIR=${ASR_DIR:-$J/models/Qwen3-ASR-1.7B}
 WHISPER_DIR=${WHISPER_DIR:-$J/models/whisper/whisper-large-v3-turbo/41f01f3fe87f28c78e2fbf8b568835947dd65ed9}
+H3I_DIR=${H3I_DIR:-$J/models/minimax-h3-image}                     # h3i-bf16/ (stk_twin.h3i.build), text_encoders/, vae/ (ComfyUI layout)
 LLAMA_BIN=${LLAMA_BIN:-$J/llama.cpp/bin}                            # a llama.cpp build with llama-server
 GUFO_IMAGE=${GUFO_IMAGE:-$(cat "$REPO/tools/gufo/IMAGE")}           # the Gufo runtime, pinned by digest; start.sh passes it to the unit
 # which model serves what
@@ -29,5 +30,9 @@ FLASHNEXT_RESIDENT=${FLASHNEXT_RESIDENT:-94489280512}   # 88 GiB
 Q3_RESIDENT=${Q3_RESIDENT:-66571993088}                 # 62 GiB
 TTS_RESIDENT=${TTS_RESIDENT:-6979321856}                # 6.5 GiB
 ASR_RESIDENT=${ASR_RESIDENT:-5905580032}                # 5.5 GiB
+# ESTIMATE, not measured: MiniMax H3-Image's resident set as the engine computes it (bf16 DiT 40.2 GB, text encoder 15.7 GB,
+# VAE 1.2 GB, runtime and buffers for max_pixels 1024x1024; edits add only per-request working bytes). Replace it with the
+# gfx1151 GTT peak when the qualification (docs/dev/H3-IMAGE-QUALIFICATION.md) measures it.
+H3I_RESIDENT_MB=${H3I_RESIDENT_MB:-56513}                # ~55.2 GiB, ESTIMATE
 RESERVE_BYTES=${RESERVE_BYTES:-4294967296}
 GTT_MARGIN_BYTES=${GTT_MARGIN_BYTES:-2147483648}
