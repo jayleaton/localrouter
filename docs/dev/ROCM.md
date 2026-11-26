@@ -60,22 +60,25 @@ arithmetic becomes an override, not the only guard.
 | Option | Meaning |
 | --- | --- |
 | `-Dgpu=cuda` (default on Linux) / `-Dgpu=hip` | Which runtime and kernel images the GPU engines get. One backend per binary, so no runtime dispatch between vendors. |
-| `-Dhip=<clang++ or hipcc>` | Builds the HIP code objects, like `-Dnvcc`. Without it the images are empty slices: host build and `zig build test` stay GPU-free. |
-| `-Dgfx=gfx1151` | Offload targets, comma separated (as `-Dsm`). |
+| `-Dhip=<ROCm directory>` | Builds the HIP code objects with its `lib/llvm/bin/clang++`, like `-Dnvcc`. Without it the images are empty slices: host build and `zig build test` stay GPU-free. |
+| `-Dgfx=gfx1151` | The one offload target: one code object per build. |
 
 `build/hip.zig` mirrors `build/cuda.zig` and `build/minimax.zig`. Each kernel source is compiled as
-`clang++ -x hip --offload-arch=gfx1151 --offload-device-only -O3 <flags> -o <name>.hsaco` and embedded with
-`addAnonymousImport`. The flags are a fixed list per source, written next to the source like `kitchen_flags`, and
-they are exactly the ones the twin's torch-ROCm extension passes:
+`clang++ -x hip --offload-arch=gfx1151 --offload-device-only --no-gpu-bundle-output -O3 <flags> -o <name>.hsaco`
+(a plain amdgcn ELF) and embedded with `addAnonymousImport`; `zig build hsaco` installs them alone. The flags are a
+fixed list per source, written next to the source like `kitchen_flags`:
 
 - `-ffp-contract=on`, matching nvcc's default `-fmad=true`, or `-ffp-contract=off` where the CUDA source says
   `--fmad=false`.
 - No `-ffast-math`.
 - `-D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1`, torch's half and bf16 guards.
 
-`kernels/hip/isa_check.sh` is the analogue of `sass_check.sh`. It runs offline with no GPU. It builds each kernel the
-twin's way and the Zig way, then compares the `llvm-objdump -d` text of every kernel. Equal ISA is the evidence that
-the twin and the engine run the same code.
+**The twin loads the engine's own code objects.** On ROCm, `stk_twin` does not build torch extensions (torch's
+ROCm `cpp_extension` hipifies sources, which the engine does not). It loads the `.hsaco` files `zig build hsaco`
+installed with `hipModuleLoad` and launches them on torch's tensors and stream. The twin and the engine therefore run
+the same bytes by construction, and there is no `isa_check.sh`: nothing is left for an ISA comparison to prove.
+The independent check on each kernel is G0, against its torch reference op (section 5); twin-vs-engine
+bit-equality then covers the orchestration (G1-G4).
 
 ### Runtime
 
@@ -132,9 +135,9 @@ checks that both modules declare every name the engines use, so the HIP side can
 The rule (CONTRIBUTING, "Engine correctness") is bit-exact against the twin **on the target GPU**. Bits compare only
 within one architecture (INVENTORY.md section 5). For ROCm that means:
 
-- **The twin runs on gfx1151.** `stk_twin` loads the same `.hip` sources as torch-ROCm extensions. The ISA check
-  proves the twin and the engine run the same code. The engine is then bit-exact with that twin op by op, chained,
-  and prompt to pixels.
+- **The twin runs on gfx1151.** `stk_twin` loads the engine's own code objects (section 2), so both run the same
+  bytes. Each kernel is checked against its torch reference op (G0). The engine is then bit-exact with that twin op
+  by op, chained, and prompt to pixels.
 - **Cross-vendor bits are not expected.** WMMA and mma.sync accumulate inside the instruction in their own fixed
   orders, and HIP's `expf`/`rsqrtf` are not CUDA's. Where a kernel is pure fp32 with written-out roundings (ops.cu,
   te32.cu), equal bits across vendors are possible. They are reported when observed, but they are not a gate.
@@ -189,8 +192,9 @@ ComfyUI is a development-time reference for the baseline gate only, never a runt
   - the GTT budget from fixtures;
   - the masked composite and Lanczos resize (`image.zig`), bit-exact against the twin's CPU path (PIL / numpy);
   - the edit layout and prompt tokens (`H3-IMAGE.md` findings).
-- `kernels/hip/isa_check.sh` once ROCm's clang and device libraries are installed: it compiles for gfx1151 with no
-  GPU and checks the twin's ISA against the engine's.
+- `zig build -Dgpu=hip -Dhip=<ROCm> hsaco` once ROCm's clang and device libraries are installed: every source
+  compiles for gfx1151 with no GPU, and each code object exports the kernel names its loader asks for. (No ISA
+  check: the twin loads these same code objects.)
 - `sass_check.sh` on the single-source kernels, proving CUDA's SASS did not move.
 - The twin's structure on CPU at a small size (256², 2 blocks): the H3-Image module against ComfyUI's code, which
   catches layout mistakes before a GPU window.
@@ -199,7 +203,7 @@ ComfyUI is a development-time reference for the baseline gate only, never a runt
 
 | Gate | What must hold |
 | --- | --- |
-| G0 `stk_twin` op tests (`test_ops`, `test_kitchen`-style, new `test_wmma`) | each HIP kernel against its torch reference within the twin's stated tolerance, and bit-equal across runs and grid shapes (the row-independence claim) |
+| G0 `stk_twin` op tests (`test_ops`, `test_kitchen`-style, new `test_wmma`), on the engine's code objects | each HIP kernel against its torch reference op within the twin's stated tolerance (the independent check of the kernel), and bit-equal across runs and grid shapes (the row-independence claim) |
 | G1 `localrouter check h3i-replay`, `h3-te`, `h3i-vae` | every op alone, then chained, equal to the gfx1151 twin capture |
 | G2 one DiT step chained, fast schedule vs reference schedule | velocities equal; the fused and graph schedules equal to the eager one byte for byte (as `h3-step-bench`) |
 | G3 `localrouter check h3i-e2e` | prompt to decoded uint8 pixels equal to the twin; a warm rerun identical |
@@ -215,8 +219,8 @@ Series 1, H3-Image. Each PR runs `zig build` and `zig build test` (Zig 0.17.0), 
 | 1.0 | this plan | — |
 | 1.1 | `gpu` seam: `-Dgpu`, `src/gpu/hip` runtime, `build/hip.zig`, engines import `gpu` | host tests; no kernel or nvcc flag changes |
 | 1.2 | GTT budget in `sched/memory.zig` | fixture tests |
-| 1.3 | `kernels/hip/compat` and the single-source kernels building for HIP (`-Dhip`, `-Dgfx`); the twin's ROCm extension loader; `isa_check.sh` | ISA check; G0 for these kernels |
-| 1.4 | HIP bf16 and f16 WMMA GEMMs and bf16 attention; bf16 `Linear` kind (also on CUDA); kitchen rms_rope HIP copy plus its UPSTREAM.md entry | G0 |
+| 1.3 | `kernels/hip/compat` and the single-source kernels building for HIP (`-Dhip`, `-Dgfx`, `zig build hsaco`) | code objects for gfx1151 export their loaders' names; G0 for these kernels, with 1.4's |
+| 1.4 | HIP bf16 and f16 WMMA GEMMs and bf16 attention; bf16 `Linear` kind (also on CUDA); kitchen rms_rope HIP copy plus its UPSTREAM.md entry; `stk_twin`'s loader for the engine's code objects | G0 (1.3's kernels and these) |
 | 1.5 | `docs/dev/H3-IMAGE.md` (ComfyUI findings); H3-Image twin (`stk_twin/h3i`), bf16 pack build, captures, structure gate | CPU structure; baseline vs ComfyUI |
 | 1.6 | engine: DiT image variant (no audio, PDD heads), image VAE decoder, PDD sampler, `minimax_h3_image` entry (`text_to_image`, its own licence) | G1-G3 |
 | 1.7 | edits: references through `te_vision` and the VAE encoder, the masked composite, `image_edit` | G4 |
