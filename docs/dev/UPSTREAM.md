@@ -31,6 +31,7 @@ Audited 2026-10-31 against the latest upstream default branches:
 | 12 | Idol pipeline built with local, ungated encoders (no `from_pretrained` option for them) | speridlabs/idol-sdk | [#3](https://github.com/speridlabs/idol-sdk/pull/3) | drop the hand-built `IdolPipeline` once the SDK takes encoder paths |
 | 13 | Wan worker: one large module on the GPU at a time under model CPU offload (forward pre-hooks) | huggingface/diffusers | none, kept local: a general exclusive offload breaks pipelines that call submodules outside the top-level hooks, and Diffusers is moving offload strategies into modular pipelines (#14304) | drop the hooks and `Engine.alone` once a pinned release offloads exclusively |
 | 14 | Wan worker: the VAE's `encode` and `decode` wrapped to take the GPU alone | huggingface/diffusers | none, kept local with 13 | as 13 |
+| 15 | comfy-kitchen's `rms_rope` ported to HIP (one specialization) | Comfy-Org/comfy-kitchen | not opened: one specialization, not the general ROCm backend upstream would need | revisit if series 2 ports the INT8 attention (docs/dev/ROCM.md) |
 
 Not ours, and not listed above:
 - The series pinned by hash in `tools/speech/drama3/pins.json` (59 patches, `engine/patches/` at drama-tensorfold
@@ -221,3 +222,17 @@ Not ours, and not listed above:
 - **General?** Part of 13: with that option, `apply_forward_hook` would apply it to `encode` and `decode` too.
 - **PR:** none; kept local with 13, for 13's reason. The wrappers exist only to apply 13's rule to the VAE's methods,
   so they go together with 13's hooks.
+
+### 15. comfy-kitchen `rms_rope` on HIP
+
+- **Here:** `kernels/hip/minimax/kitchen/rms_rope.hip`, a modified port of comfy-kitchen 0.2.35's
+  `backends/cuda/ops/rms_rope.cu` and `rope_device.cuh` (the copies in `kernels/cuda/minimax/kitchen/` stay
+  verbatim). It keeps the one instantiation MiniMax H3 launches (bf16, RMSNorm, split half, q and k, in place,
+  contiguous heads) under that instantiation's arguments and launch, so `Kitchen.rmsRope` launches either.
+- **Why:** comfy-kitchen has no ROCm backend, and H3 on gfx1151 needs the per-head RMSNorm + RoPE. CUDA builds the
+  kernel with `--use_fast_math`; the port writes every rounding out (IEEE division and square root, explicit fused
+  multiply-adds), so its bits are its own and G0 gates it against torch's reference op (docs/dev/ROCM.md section 5).
+- **General?** Not as it stands: a general option would be a ROCm build of comfy-kitchen's whole CUDA backend (every
+  dtype and layout, and the INT8 attention), which this port is not.
+- **PR:** none opened. If series 2 ports the INT8 attention to `iu8` WMMA, the two together are the start of a ROCm
+  backend worth offering upstream; this entry is revisited then.

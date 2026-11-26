@@ -99,11 +99,13 @@ checks that both modules declare every name the engines use, so the HIP side can
 
 - `extern "C"` kernels (`h3_*`, `te32_*`, the VAE ops) keep their names, so `Ops.load` is unchanged and only receives
   the HIP image.
-- Mangled template names (comfy-kitchen's) differ by the bf16 type's name. Each backend gets its own symbol table, as
-  `nvfp4.zig` lists instantiations.
-- Where the algorithm differs (attention and the block linears, section 3), `launch.zig` gets one function per role,
-  `attention(...)` and `linear(...)`, chosen by `gpu.backend` at comptime. `dit.zig` calls the role and keeps its op
-  names and probes, so `localrouter check` replays the same capture format on both vendors.
+- Where the HIP kernel is a new one with the CUDA kernel's arguments, block and grid (the bf16 and f16 GEMMs, the
+  attention, rms_rope), only the symbol (mangled names differ by the bf16 type's name) and the dynamic shared memory
+  (none on HIP: gfx11's 64 KiB is static LDS) differ. The launchers pick them at comptime with
+  `@hasDecl(gpu, "hip_runtime")`, which only `src/gpu/hip` declares. The GEMMs keep their CUDA names outright.
+- Where the algorithm differs (the DiT's attention: INT8 on CUDA, bf16 on HIP; the block linears: NVFP4 or bf16),
+  `dit.zig` chooses per role and keeps its op names and probes, so `localrouter check` replays the same capture format
+  on both vendors. A bf16 linear (`weights.zig` `.bf16`) runs `Linear.forwardBf16`, the bf16 GEMM, on either vendor.
 
 ## 3. Kernels H3-Image needs, and their HIP form on RDNA3.5
 
@@ -121,9 +123,9 @@ checks that both modules declare every name the engines use, so the HIP side can
 | `minimax/ops.cu` (norm_mod, gate_add(+norm_mod), swiglu, rms, final_mod, patchify, euler, `h3_gemm_f32`, ...) | every DiT step, PDD heads, patch projection | One source for both vendors: the CUDA source compiles for HIP unchanged, with `kernels/hip/compat/cuda_compat.h` force-included (bf16 type, CUDA's bf16 and e4m3 roundings written out, shuffles). No tensor cores, written-out roundings. CUDA SASS must not move (`sass_check.sh`). |
 | `minimax/kitchen/rms_rope.cu` | per-head RMSNorm + RoPE | Ported copy under `kernels/hip/minimax/kitchen/`. It is built with `--use_fast_math` on CUDA. The HIP copy writes the same math out explicitly, so its bits are its own. UPSTREAM.md entry: comfy-kitchen has no ROCm backend; offer the port upstream as a general HIP backend, or record why not. |
 | `minimax/kitchen` INT8 attention (`qk_int_sv_i8`, quant_qk, quant_v) | DiT attention | **Not ported for H3-Image.** At 1 MP the sequence is about 1.3 k tokens (1,024 image tokens: VAE /16, patch 2, plus text). Attention is about 2 TFLOP a forward against about 53 TFLOP of linears (*estimate*), so INT8 attention buys nothing here. H3-Image on HIP uses the bf16 attention below. Series 2 revisits it at about 37 k tokens. |
-| `qwen_image/attention.cu` (TensorFold's bf16 prefill attention, mma.sync m16n8k16, D 128) | token refiner; on HIP, also the DiT | New HIP kernel `kernels/hip/attention.hip`: bf16 WMMA for QKᵀ and PV with fp32 accumulation, fp32 online softmax, a fixed key order and no split-K. Ours, not CK or AOTriton, so its order is written down and the twin runs the same code. |
-| `qwen_image/gemm.cu` (deterministic bf16 GEMM, mma.sync, cp.async, ldmatrix) | `condition_proj`, refiner, and on HIP **every block linear** of a bf16 pack | New HIP kernel `kernels/hip/gemm_bf16.hip` with the same contract: bf16 in, fp32 accumulation over K tiles in ascending order, no split-K, so a row's bits depend on neither M, N nor the grid. It uses `__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32` directly. rocWMMA is used only as a cross-check in tests: a pinned header dependency for one fragment wrapper is not worth it, and the builtin keeps the order visible. hipBLASLt is ruled out: it is not ours, and its algorithm choice is not bit-stable. |
-| `minimax/gemm_f16.cu` (fp16 mma.sync) | image VAE decoder linears and attention | `kernels/hip/gemm_f16.hip`, the f16 twin of the bf16 GEMM above |
+| `qwen_image/attention.cu` (TensorFold's bf16 prefill attention, mma.sync m16n8k16, D 128) | token refiner; on HIP, also the DiT | New HIP kernel `kernels/hip/qwen_image/attention.hip`: bf16 WMMA for QKᵀ and PV with fp32 accumulation, fp32 online softmax, a fixed key order and no split-K. Ours, not CK or AOTriton, so its order is written down and the twin runs the same code. |
+| `qwen_image/gemm.cu` (deterministic bf16 GEMM, mma.sync, cp.async, ldmatrix) | `condition_proj`, refiner, and on HIP **every block linear** of a bf16 pack | New HIP kernel `kernels/hip/qwen_image/gemm.hip` with the same contract and name: bf16 in, fp32 accumulation over K tiles in ascending order, no split-K, so a row's bits depend on neither M, N nor the grid. It uses `__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32` directly. rocWMMA is used only as a cross-check in tests: a pinned header dependency for one fragment wrapper is not worth it, and the builtin keeps the order visible. hipBLASLt is ruled out: it is not ours, and its algorithm choice is not bit-stable. |
+| `minimax/gemm_f16.cu` (fp16 mma.sync) | image VAE decoder linears and attention | `kernels/hip/minimax/gemm_f16.hip`, the f16 twin of the bf16 GEMM above, under gemm_f16.cu's four names (one map, `kernels/hip/common/wmma_map.h`, host-tested by `kernels/hip/test/wmma_map_test.cpp`) |
 | `minimax/vae_video.cu`, `vae_enc.cu` | image VAE decoder ops; encoder (edits) | single source via `kernels/hip/compat` |
 | `minimax/te32.cu` (fp32 GEMM with NVFP4 AWQ weights dequantized on the fly) | 32B text encoder | single source. It is weight-only dequantization on CUDA cores, so FP4's missing hardware does not matter. Keep the same checkpoint (15.7 GB, smaller than `int8_convrot`'s 27 GB). |
 | `minimax/te_vision.cu`, `qwen_image/vision.cu` | edits: the reference image through the vision tower | single source; its GEMMs go through the bf16 GEMM above |

@@ -15,6 +15,7 @@ SageAttention (https://github.com/thu-ml/SageAttention), Copyright 2024 by the S
   modifications by NVIDIA CORPORATION & AFFILIATES, as distributed in comfy-kitchen 0.2.35
   (https://github.com/Comfy-Org/comfy-kitchen), Apache License 2.0.
   The INT8 attention and RoPE kernels in kernels/cuda/minimax/kitchen/ are verbatim copies, headers intact.
+  kernels/hip/minimax/kitchen/rms_rope.hip is a modified HIP port of its rms_rope kernel (one specialization).
 
 Qwen2.5 tokenizer files (tools/twin/stk_twin/h3/tokenizer/), from the Qwen team, Apache License 2.0.
 

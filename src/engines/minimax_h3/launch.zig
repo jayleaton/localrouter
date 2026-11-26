@@ -7,6 +7,9 @@ const gpu = @import("gpu");
 
 const Ptr = u64;
 const block: u32 = 256;
+/// `-Dgpu=hip`: the kitchen image is the rms_rope port alone (kernels/hip/minimax/kitchen/rms_rope.hip); H3-Image runs
+/// the bf16 attention there (docs/dev/ROCM.md section 3), and the INT8 attention entry points refuse.
+const hip = @hasDecl(gpu, "hip_runtime");
 
 fn blocks(n: u64) u32 {
     return @intCast((n + block - 1) / block);
@@ -268,7 +271,8 @@ pub const Ops = struct {
     }
 };
 
-/// comfy-kitchen's INT8 attention (D 128, no mask, H == HK, batch 1) and fused per-head RMSNorm + split-half RoPE.
+/// comfy-kitchen's INT8 attention (D 128, no mask, H == HK, batch 1) and fused per-head RMSNorm + split-half RoPE. On HIP
+/// only `rope` is loaded (the other fields are undefined) and the attention calls return `error.Int8AttentionCudaOnly`.
 pub const Kitchen = struct {
     module: gpu.Module,
     anchor: gpu.Function,
@@ -291,13 +295,17 @@ pub const Kitchen = struct {
     const sym_attn_c64 = "_Z24qk_int_sv_i8_attn_kernelILj128ELj64ELj16ELj64ELj128EL8DataType1EL16QuantGranularity3ELS1_3EfLb0E13__nv_bfloat16L11ComputeUnit1EL8MaskMode0ELb0ELb1ELb0ELb0ELb0EEvPaS5_S5_PT9_PfS8_S8_S8_S8_PKvllllijjjjjjjjjjjjjjjf";
     const sym_attn_c64_fuse = "_Z24qk_int_sv_i8_attn_kernelILj128ELj64ELj16ELj64ELj128EL8DataType1EL16QuantGranularity3ELS1_3EfLb0E13__nv_bfloat16L11ComputeUnit1EL8MaskMode0ELb0ELb1ELb0ELb0ELb1EEvPaS5_S5_PT9_PfS8_S8_S8_S8_PKvllllijjjjjjjjjjjjjjjf";
     const sym_attn_c128_fuse = "_Z24qk_int_sv_i8_attn_kernelILj128ELj128ELj16ELj128ELj128EL8DataType1EL16QuantGranularity3ELS1_3EfLb0E13__nv_bfloat16L11ComputeUnit1EL8MaskMode0ELb0ELb1ELb0ELb0ELb1EEvPaS5_S5_PT9_PfS8_S8_S8_S8_PKvllllijjjjjjjjjjjjjjjf";
-    const sym_rope = "_ZN5comfy16kitchen_rms_rope11rope_kernelI13__nv_bfloat16S2_S2_Lb1ELb1ELb1ELb1ELb1EEEvPKT_S5_PKT0_PKT1_SB_PS3_SC_llliilllllllllllllllllllllllllllf";
+    const sym_rope = if (hip) "kitchen_rms_rope_bf16" else "_ZN5comfy16kitchen_rms_rope11rope_kernelI13__nv_bfloat16S2_S2_Lb1ELb1ELb1ELb1ELb1EEEvPKT_S5_PKT0_PKT1_SB_PS3_SC_llliilllllllllllllllllllllllllllf";
 
     pub fn load(d: *const gpu.Driver, image: []const u8) !Kitchen {
         var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         var k: Kitchen = undefined;
         k.module = m;
+        if (hip) {
+            k.rope = try m.function(sym_rope);
+            return k;
+        }
         inline for (.{
             .{ "anchor", sym_anchor },     .{ "qk_c64_rot4", sym_qk_c64_rot4 },     .{ "qk_c64_rot128", sym_qk_c64_rot128 },
             .{ "qk_c128", sym_qk_c128 },   .{ "v128", sym_v128 },                   .{ "v512", sym_v512 },
@@ -358,6 +366,7 @@ pub const Kitchen = struct {
 
     /// The wheel's launches 1 to 3 (the K anchor, Q and K to INT8 with the rotation, V to INT8) into the workspace.
     pub fn attentionPrep(k: *const Kitchen, s: gpu.Stream, qkv: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
+        if (hip) return error.Int8AttentionCudaOnly;
         const d: u32 = 128;
         const p = Plan.of(heads, seq);
         const row: i64 = 3 * @as(i64, heads) * d; // the qkv buffer's row stride (elements)
@@ -401,6 +410,7 @@ pub const Kitchen = struct {
     /// 128] as the wheel writes it; true: out as rows [S, heads * 128] (the kernel's output strides (seq, head) =
     /// (heads * 128, 128) instead of (128, S * 128): the same values at the addresses a [H, S, D] -> rows pass would give them).
     pub fn attentionKernel(k: *const Kitchen, s: gpu.Stream, out: Ptr, ws: Ptr, heads: u32, seq: u32, rows: bool) !void {
+        if (hip) return error.Int8AttentionCudaOnly;
         const d: u32 = 128;
         const p = Plan.of(heads, seq);
         var a: gpu.launch.Args = .{};

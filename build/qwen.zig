@@ -16,8 +16,14 @@ const torch_flags = [_][]const u8{
 };
 
 const sources = [_][]const u8{ "ops", "attention", "gemm", "te", "vae", "vision", "vae_enc" };
-/// The sources built for HIP (`-O3` as on CUDA); attention.cu and gemm.cu, on mma.sync, are ported in PR 1.4.
-const hip_sources = [_][]const u8{ "ops", "te", "vae", "vision", "vae_enc" };
+/// The sources built for HIP (`-O3` as on CUDA): the CUDA source itself, or for attention and gemm (mma.sync, cp.async,
+/// ldmatrix) their WMMA forms under kernels/hip/qwen_image, with the same kernel contract.
+const hip_sources = sources;
+
+fn hipFile(b: *std.Build, name: []const u8) []const u8 {
+    const own = std.mem.eql(u8, name, "attention") or std.mem.eql(u8, name, "gemm");
+    return if (own) b.fmt("kernels/hip/qwen_image/{s}.hip", .{name}) else b.fmt("kernels/cuda/qwen_image/{s}.cu", .{name});
+}
 
 /// `nvcc` / `sms` as given to build/cuda.zig (-Dnvcc, -Dsm); `gpu` the runtime (CUDA or HIP), `nvfp4` the TensorFold kernel module.
 pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, hip: ?@import("hip.zig").Hip, gpu: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
@@ -41,7 +47,7 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         fatbin_step.dependOn(&b.addInstallFile(out, b.fmt("fatbin/qwen_{s}.fatbin", .{name})).step);
     };
     if (hip) |h| if (h.root != null) for (hip_sources) |name| {
-        const out = @import("hip.zig").codeObject(b, h, b.fmt("qwen_{s}", .{name}), b.fmt("kernels/cuda/qwen_image/{s}.cu", .{name}), &.{"-O3"});
+        const out = @import("hip.zig").codeObject(b, h, b.fmt("qwen_{s}", .{name}), hipFile(b, name), &.{"-O3"});
         kmod.addAnonymousImport(b.fmt("qwen_image_{s}", .{name}), .{ .root_source_file = out });
     };
     const built: []const []const u8 = if (nvcc != null) &sources else if (hip != null and hip.?.root != null) &hip_sources else &.{};
