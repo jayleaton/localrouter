@@ -356,7 +356,8 @@ tok/s with the drafter, the first streamed token 0.07 s after the request.
 ### Live checks through LocalRouter
 
 On DGX-01, right after the run: `localrouter serve` with the qualified tool (its marker), on loopback, nothing else
-loaded (`MemAvailable` 116.2 GiB).
+loaded (`MemAvailable` 116.2 GiB). These checks ran with the tool booked at 48 GiB, before the booking was set
+to the 40 GiB below from qualify's measured 31 GiB peak.
 
 | Check | Result |
 | --- | --- |
