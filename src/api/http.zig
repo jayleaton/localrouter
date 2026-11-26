@@ -86,21 +86,47 @@ pub fn jsonValue(req: *Request, gpa: std.mem.Allocator, status: http.Status, val
     try json(req, status, text);
 }
 
-/// OpenAI's error envelope: {"error":{"message","type","param","code"}}.
+/// OpenAI's error envelope: {"error":{"message","type","param","code"}} plus `retry_after` when a refusal names one.
 pub fn fail(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, message: []const u8) !void {
     return failWith(req, gpa, status, typ, null, message, &.{});
 }
 
-/// `fail` with a `code` and more headers (at most 7), e.g. a 401's WWW-Authenticate.
+/// `fail` with a `code` and more headers (at most 6, beside an optional Retry-After), e.g. a 401's WWW-Authenticate.
 pub fn failWith(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, code: ?[]const u8, message: []const u8, extra: []const http.Header) !void {
-    const Env = struct { @"error": struct { message: []const u8, type: []const u8, param: ?[]const u8 = null, code: ?[]const u8 = null } };
-    const text = try std.json.Stringify.valueAlloc(gpa, Env{ .@"error" = .{ .message = message, .type = typ, .code = code } }, .{});
+    return failRetry(req, gpa, status, typ, code, message, 0, extra);
+}
+
+/// A finished job's error: `type` and `code` are the job's `error_type`, and `retry_after` (seconds) is also the
+/// `Retry-After` header when the scheduler set one. Clients match `type` or `code`, not the message.
+pub fn failJob(req: *Request, gpa: std.mem.Allocator, j: *const @import("../sched/jobs.zig").Job) !void {
+    const typ: []const u8 = if (j.error_type.len > 0) j.error_type else "server_error";
+    return failRetry(req, gpa, j.http_status, typ, typ, j.error_message, j.retry_after, &.{});
+}
+
+/// `fail`, plus `retry_after` seconds (`error.retry_after` and `Retry-After`) when it is not 0. `code` is `typ` then,
+/// so a memory refusal matches on `type` or `code`.
+pub fn failAfter(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, message: []const u8, retry_after: u32) !void {
+    const code: ?[]const u8 = if (retry_after > 0) typ else null;
+    return failRetry(req, gpa, status, typ, code, message, retry_after, &.{});
+}
+
+fn failRetry(req: *Request, gpa: std.mem.Allocator, status: u16, typ: []const u8, code: ?[]const u8, message: []const u8, retry_after: u32, extra: []const http.Header) !void {
+    const Env = struct { @"error": struct { message: []const u8, type: []const u8, param: ?[]const u8 = null, code: ?[]const u8 = null, retry_after: ?u32 = null } };
+    const text = try std.json.Stringify.valueAlloc(gpa, Env{ .@"error" = .{ .message = message, .type = typ, .code = code, .retry_after = if (retry_after > 0) retry_after else null } }, .{ .emit_null_optional_fields = false });
     defer gpa.free(text);
+    var retry_buf: [16]u8 = undefined;
+    const retry_s = if (retry_after > 0) std.fmt.bufPrint(&retry_buf, "{d}", .{retry_after}) catch null else null;
     var all: [8]http.Header = undefined;
     all[0] = .{ .name = "content-type", .value = "application/json" };
-    const n = @min(extra.len, all.len - 1);
-    @memcpy(all[1..][0..n], extra[0..n]);
-    try req.respond(text, .{ .status = @fromBackingInt(@intCast(status)), .extra_headers = all[0 .. n + 1] });
+    var n: usize = 1;
+    if (retry_s) |v| {
+        all[n] = .{ .name = "retry-after", .value = v };
+        n += 1;
+    }
+    const room = @min(extra.len, all.len - n);
+    @memcpy(all[n..][0..room], extra[0..room]);
+    n += room;
+    try req.respond(text, .{ .status = @fromBackingInt(@intCast(status)), .extra_headers = all[0..n] });
 }
 
 pub fn bytes(req: *Request, content_type: []const u8, data: []const u8) !void {

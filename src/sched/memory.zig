@@ -32,9 +32,13 @@ pub const Snapshot = struct {
 
 /// The bytes a new model may take now (MemAvailable on Linux; see the file comment for macOS); null when unreadable.
 pub fn available() ?u64 {
+    if (builtin.is_test) if (test_available) |v| return v;
     if (darwin) return if (snapshot()) |s| s.budget() else null;
     return meminfo("MemAvailable:");
 }
+
+/// Tests only: when set, `available` returns this instead of reading the host (`.{null}` is an unreadable MemAvailable).
+pub var test_available: ?(?u64) = null;
 
 /// The host's memory in bytes; null when it cannot be read.
 pub fn total() ?u64 {
