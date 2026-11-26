@@ -27,7 +27,8 @@ repo=$(cd "$here/../.." && pwd)
 source "$here/env.sh"
 PROFILE_FILE=${PROFILE_FILE:-$repo/deploy/profiles/mac-apple-silicon.json}
 all=$(jq -r '[.models[].id] | join(" ")' "$PROFILE_FILE")
-TOOLS=${TOOLS:-$all}
+default_tools=$(jq -r '[.models[] | select(.optional != true) | .id] | join(" ")' "$PROFILE_FILE")
+TOOLS=${TOOLS:-$default_tools}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; the profile has: $all"; done
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
 chat_pins=$repo/tools/chat/qwen38-27b/pins-macos.json
@@ -39,7 +40,9 @@ PYTHON=$(command -v python3 || echo python3)   # absolute: launchd's PATH is not
 render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@LABEL@|$LABEL|g" -e "s|@LOG@|$LOG|g" -e "s|@PYTHON@|$PYTHON|g" -e "s|@HF_HUB@|$HF_HUB|g" \
-      -e "s|@CHAT_BIN@|$CHAT_BIN|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" \
+      -e "s|@CHAT_BIN@|$CHAT_BIN|g" -e "s|@INKLING_BIN@|$INKLING_BIN|g" \
+      -e "s|@INKLING_MODEL@|$INKLING_MODEL|g" -e "s|@INKLING_DRAFTER@|$INKLING_DRAFTER|g" \
+      -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" \
       -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@WHISPER@|$WHISPER|g" -e "s|@IMAGE_ROOT@|$IMAGE_ROOT|g" "$1"
 }
 # config PAIRING_JSON: the daemon's config for TOOLS. Every model of the profile has its entry in config.json.in and
@@ -72,6 +75,7 @@ if [ "${CHECK_MODELS:-1}" = 1 ]; then
   # have WHAT PATH...: every PATH is there, else the step that makes it
   have() { local what=$1 f; shift; for f in "$@"; do [ -e "$f" ] || die "$what: no $f (run bootstrap.sh --profile mac-apple-silicon for it)"; done; echo "  $what: installed"; }
   if wanted qwen3.8-27b; then have qwen3.8-27b "$CHAT_BIN" "$HF_HUB/models--TensorFold--Qwen3.8-27B-MLX-4bit"; fi
+  if wanted Inkling-2-Mini; then have Inkling-2-Mini "$INKLING_BIN" "$INKLING_MODEL" "$INKLING_DRAFTER"; fi
   if wanted fishaudio/drama-3; then
     have fishaudio/drama-3 "$DRAMA_ROOT" "$DRAMA_MARKER"
     want=$(sha256 "$repo/tools/speech/drama3/pins-macos.json" | cut -c1-64)
