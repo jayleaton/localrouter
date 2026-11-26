@@ -18,6 +18,10 @@ pub const Config = launch.Config;
 pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
 
+/// Marks this runtime as HIP: the engines' per-vendor kernel tables test `@hasDecl(gpu, "hip_runtime")` (TensorFold's
+/// CUDA runtime declares no such name).
+pub const hip_runtime = true;
+
 /// TensorFold keeps a copy-source scope per capture (pinned staging it owns); HIP's capture has none to close.
 pub const copy_source = struct {
     pub fn captureEnd(_: Stream) void {}

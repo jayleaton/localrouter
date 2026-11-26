@@ -30,15 +30,16 @@ const kitchen_flags = [_][]const u8{
     "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
 };
 
-/// `extra`: nvcc's flags after torch's; `hip`: clang's for the HIP code object (null: not built for HIP yet, its image
-/// empty: comfy-kitchen's INT8 attention and the tensor-core GEMM are ported in PR 1.4, docs/dev/ROCM.md).
-const Source = struct { name: []const u8, file: []const u8, extra: []const []const u8, hip: ?[]const []const u8 };
+/// `extra`: nvcc's flags after torch's; `hip`: clang's for the HIP code object, built from `hip_file` where the CUDA
+/// source does not compile for gfx11 (mma.sync, cp.async, ldmatrix) and from `file` otherwise. kitchen on HIP is the
+/// rms_rope port alone (UPSTREAM.md 15): H3-Image runs the bf16 attention, not comfy-kitchen's INT8 one (ROCM.md 3).
+const Source = struct { name: []const u8, file: []const u8, extra: []const []const u8, hip: []const []const u8, hip_file: ?[]const u8 = null };
 const sources = [_]Source{
     .{ .name = "ops", .file = "kernels/cuda/minimax/ops.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
-    .{ .name = "kitchen", .file = "kernels/cuda/minimax/kitchen_launch.cu", .extra = &kitchen_flags, .hip = null },
+    .{ .name = "kitchen", .file = "kernels/cuda/minimax/kitchen_launch.cu", .extra = &kitchen_flags, .hip = &.{"-O3"}, .hip_file = "kernels/hip/minimax/kitchen/rms_rope.hip" },
     .{ .name = "te32", .file = "kernels/cuda/minimax/te32.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} }, // no fast math (h3/te32.py)
     .{ .name = "vae_audio", .file = "kernels/cuda/minimax/vae_audio.cu", .extra = &.{ "-O3", "--fmad=false" }, .hip = &.{ "-O3", "-ffp-contract=off" } }, // h3/vae_audio.py
-    .{ .name = "gemm_f16", .file = "kernels/cuda/minimax/gemm_f16.cu", .extra = &.{"-O3"}, .hip = null }, // h3/vae_video.py
+    .{ .name = "gemm_f16", .file = "kernels/cuda/minimax/gemm_f16.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"}, .hip_file = "kernels/hip/minimax/gemm_f16.hip" }, // h3/vae_video.py
     .{ .name = "te_vision", .file = "kernels/cuda/minimax/te_vision.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
     .{ .name = "vae_enc", .file = "kernels/cuda/minimax/vae_enc.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
     .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
@@ -67,8 +68,8 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         images.append(b.allocator, src.name) catch @panic("OOM");
         fatbin_step.dependOn(&b.addInstallFile(out, b.fmt("fatbin/minimax_{s}.fatbin", .{src.name})).step);
     };
-    if (hip) |h| if (h.root != null) for (sources) |src| if (src.hip) |flags| {
-        const out = @import("hip.zig").codeObject(b, h, b.fmt("minimax_{s}", .{src.name}), src.file, flags);
+    if (hip) |h| if (h.root != null) for (sources) |src| {
+        const out = @import("hip.zig").codeObject(b, h, b.fmt("minimax_{s}", .{src.name}), src.hip_file orelse src.file, src.hip);
         kmod.addAnonymousImport(b.fmt("minimax_image_{s}", .{src.name}), .{ .root_source_file = out });
         images.append(b.allocator, src.name) catch @panic("OOM");
     };

@@ -104,6 +104,10 @@ pub fn build(b: *std.Build) void {
     if (backend != .none) {
         test_step.dependOn(nvfp4.tests);
         unit_step.dependOn(nvfp4.tests);
+        // the HIP WMMA GEMMs' element map on the host (Zig's clang, no ROCm): on both backends, so CI runs it
+        const wmma_map = @import("build/hip.zig").mapTest(b, target);
+        test_step.dependOn(wmma_map);
+        unit_step.dependOn(wmma_map);
         // the Kandinsky-6 sampler and DiT checkpoint loader (M2): host tests, not yet reachable from main.zig
         const cuda_only = [_]*std.Build.Module{ qwen, k6, vendor, k6_build.sampler, k6_build.dit_weights };
         const modules: []const *std.Build.Module = if (backend == .hip) &.{ h3, gpu } else &(cuda_only ++ [_]*std.Build.Module{h3});

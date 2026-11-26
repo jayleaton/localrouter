@@ -6,6 +6,8 @@ const std = @import("std");
 const gpu = @import("gpu");
 
 const Ptr = u64;
+/// `-Dgpu=hip`: the HIP forms of attention.cu and gemm.cu (kernels/hip/qwen_image) under their own symbols and LDS.
+const hip = @hasDecl(gpu, "hip_runtime");
 const block: u32 = 256;
 
 fn blocks(n: u64) u32 {
@@ -28,9 +30,10 @@ pub const Ops = struct {
     transpose_fn: gpu.Function,
     attn: gpu.Function,
 
-    /// pattn2_kernel<128, 4, 1, 2, 64, true, 3>: pattn_kernel's bits with faster staging (attention.cu)
-    pub const attn_symbol = "_ZN13stk_attention13pattn2_kernelILi128ELi4ELi1ELi2ELi64ELb1ELi3EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiiiif";
-    pub const attn_smem: u32 = 32768; // two 64-key staging slots of 128 dims
+    /// CUDA: pattn2_kernel<128, 4, 1, 2, 64, true, 3>, pattn_kernel's bits with faster staging (attention.cu); HIP:
+    /// the WMMA attention (kernels/hip/qwen_image/attention.hip), same arguments, grid and block, static LDS only.
+    pub const attn_symbol = if (hip) "stk_attention_bf16" else "_ZN13stk_attention13pattn2_kernelILi128ELi4ELi1ELi2ELi64ELb1ELi3EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiiiif";
+    pub const attn_smem: u32 = if (hip) 0 else 32768; // CUDA: two 64-key staging slots of 128 dims
     pub const attn_rows: u32 = 64; // four warps of 16 query rows, one head a block
     pub const attn_threads: u32 = 128;
 
@@ -41,7 +44,7 @@ pub const Ops = struct {
         var am = try gpu.Module.load(d, attn_image);
         errdefer am.unload();
         const attn = try am.function(attn_symbol);
-        try attn.allowDynamicShared(attn_smem);
+        if (attn_smem > 0) try attn.allowDynamicShared(attn_smem);
         return .{
             .module = m,
             .attn_module = am,

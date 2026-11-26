@@ -1,6 +1,7 @@
 //! The DiT's weights on the device, from a pack (`pack.zig`), in the layouts the kernels read:
 //!   NVFP4 linears: codes -> TensorFold's lane words (the `pack4` kernel), block scales -> [npad/64][K/64][64][4] (host)
 //!   FP8 linears:   e4m3 -> the FP8 GEMM's fragment order (host); both with their static input scale `act`
+//!   bf16 linears:  [n, k] as stored, for the deterministic bf16 GEMM (gemm.cu on CUDA, kernels/hip on HIP)
 //!   side weights:  bf16 as stored; the text norm's zero-centred weight + 1 in f32 (as the twin), q / k norms f32
 
 const std = @import("std");
@@ -12,6 +13,7 @@ const block = @import("pack.zig").block;
 const plan = @import("nvfp4_plan.zig");
 const repack = @import("repack.zig");
 const Nvfp4 = @import("nvfp4_exec.zig").Nvfp4;
+const TeOps = @import("ops_launch.zig").TeOps;
 const upload_mod = @import("upload.zig");
 const Uploader = upload_mod.Uploader;
 const Slab = upload_mod.Slab;
@@ -20,7 +22,8 @@ pub const layers = 32;
 pub const dim = 4096;
 pub const mlp = 12288;
 
-/// One block linear on the device. `w` / `ws`: NVFP4 words and block scales, or FP8 bytes (ws 0).
+/// One block linear on the device. `w` / `ws`: NVFP4 words and block scales, FP8 bytes (ws 0), or bf16 [n, k] (ws 0,
+/// npad n, scale and act 1: no quantization).
 pub const Linear = struct {
     kind: Kind,
     n: u32,
@@ -36,8 +39,10 @@ pub const Linear = struct {
     }
 
     /// y[rows, n] = x[rows, k] . W^T: the rows quantized under the static input scale (NVFP4 or FP8, `qc` / `qs`
-    /// scratch for the widest rows), then TensorFold's prompt GEMM at `tile` (the twin's call).
+    /// scratch for the widest rows), then TensorFold's prompt GEMM at `tile` (the twin's call). A bf16 linear runs
+    /// `forwardBf16` instead.
     pub fn forward(l: Linear, nv: *Nvfp4, major: u32, minor: u32, tile: u32, in: u64, out: u64, rows: u32, qc: u64, qs: u64, s: gpu.Stream) !void {
+        if (l.kind == .bf16) return error.Bf16LinearNeedsGemm;
         const tb = plan.tb(tile, major, minor);
         const r = plan.rows(rows, l.k, tb);
         if (l.kind == .nvfp4) {
@@ -53,6 +58,13 @@ pub const Linear = struct {
         }
     }
 
+    /// y[rows, n] = x[rows, k] . W^T for a bf16 linear: the bf16 GEMM (bf16 in and out, fp32 accumulation over K in
+    /// ascending tiles, no split-K, so a row's bits depend on neither `rows` nor the other rows).
+    pub fn forwardBf16(l: Linear, te: *const TeOps, in: u64, out: u64, rows: u32, s: gpu.Stream) !void {
+        std.debug.assert(l.kind == .bf16);
+        try te.gemm(s, in, l.w, 0, out, rows, l.n, l.k);
+    }
+
     /// Output tiles [64 t0, 64 t1) of an NVFP4 linear as a view (gate and up halves of gate_up), as `Fp4Linear.tiles`.
     pub fn tiles(l: Linear, t0: u32, t1: u32) Linear {
         var v = l;
@@ -63,6 +75,31 @@ pub const Linear = struct {
         return v;
     }
 };
+
+/// A bf16 linear's [n, k]: BF16, rank 2, K a whole number of the GEMM's 16-byte chunks.
+fn bf16Shape(t: Tensor) !struct { n: u32, k: u32 } {
+    if (t.dtype != .bf16 or t.rank != 2) return error.BadBf16Linear;
+    const n = t.dim(0);
+    const k = t.dim(1);
+    if (n == 0 or k == 0 or k % 8 != 0 or n > std.math.maxInt(u32) or k > std.math.maxInt(u32)) return error.BadBf16Linear;
+    return .{ .n = @intCast(n), .k = @intCast(k) };
+}
+
+test "bf16 linear: [n, k] bf16 with K % 8 == 0, anything else refused" {
+    const T = struct {
+        fn of(dt: @import("pack.zig").DType, shape: []const usize) Tensor {
+            var t: Tensor = .{ .dtype = dt, .rank = @intCast(shape.len), .begin = 0, .end = 0 };
+            for (shape, 0..) |d, i| t.shape[i] = d;
+            return t;
+        }
+    };
+    const sh = try bf16Shape(T.of(.bf16, &.{ 16128, 5376 }));
+    try std.testing.expectEqual(@as(u32, 16128), sh.n);
+    try std.testing.expectEqual(@as(u32, 5376), sh.k);
+    try std.testing.expectError(error.BadBf16Linear, bf16Shape(T.of(.f32, &.{ 8, 8 })));
+    try std.testing.expectError(error.BadBf16Linear, bf16Shape(T.of(.bf16, &.{ 8, 12 })));
+    try std.testing.expectError(error.BadBf16Linear, bf16Shape(T.of(.bf16, &.{64})));
+}
 
 pub const Block = struct {
     qkv: Linear,
@@ -206,6 +243,12 @@ pub const Store = struct {
         }
     }
 
+    /// A bf16 linear's weight [n, k] to the device as stored (the bf16 GEMM reads rows of K, K % 8 == 0).
+    fn bf16Linear(w: *Store, up: *Uploader, p: *const Pack, t: Tensor) !Linear {
+        const sh = try bf16Shape(t);
+        return .{ .kind = .bf16, .n = sh.n, .k = sh.k, .npad = sh.n, .w = try w.tensorOf(up, p, t), .ws = 0, .scale = 1, .act = 1 };
+    }
+
     pub fn scalar(io: std.Io, p: *const Pack, name: []const u8) !f64 {
         var b: [4]u8 = undefined;
         try p.read(io, try p.get(name), &b);
@@ -312,7 +355,10 @@ pub const Store = struct {
                 try w.fp8Codes(io, p, up, w8, n, k, npad, dst);
                 return .{ .kind = .fp8, .n = n, .k = k, .npad = npad, .w = dst, .ws = 0, .scale = try Store.scalar(io, p, try std.fmt.bufPrint(&nb, "{s}.scale", .{key})), .act = act };
             },
-            .bf16 => return error.Bf16LinearsUnsupported, // the reference precision stays in the twin
+            .bf16 => {
+                const t = try p.get(try std.fmt.bufPrint(&nb, "{s}.weight", .{key}));
+                return try w.bf16Linear(up, p, t);
+            },
         }
     }
 };

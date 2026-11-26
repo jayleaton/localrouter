@@ -39,6 +39,16 @@ pub fn options(b: *std.Build) Hip {
     return .{ .root = root, .gfx = gfx, .version = version, .step = step };
 }
 
+/// kernels/hip/test/wmma_map_test.cpp, run on the host: the WMMA GEMMs' element map, tile order and row independence
+/// (no GPU, no ROCm; ReleaseFast whatever -Doptimize, as it emulates every tile).
+pub fn mapTest(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step {
+    const mod = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libcpp = true });
+    mod.addCSourceFile(.{ .file = b.path("kernels/hip/test/wmma_map_test.cpp"), .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-Werror" } });
+    const run = b.addRunArtifact(b.addExecutable(.{ .name = "wmma_map_test", .root_module = mod }));
+    run.expectExitCode(0);
+    return &run.step;
+}
+
 fn clang(b: *std.Build, root: []const u8) []const u8 {
     return b.pathJoin(&.{ root, "lib", "llvm", "bin", "clang++" });
 }

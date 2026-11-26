@@ -47,12 +47,18 @@ pub const Gemm = struct {
 
 /// The GEMM kernels of gemm_f16.cu, indexed as the twin's `k_gemm_v` variants: the reference (grid (n, m) of 128 x 128, the
 /// first version) and the three template tiles (grid (m, n), dynamic shared memory = stages * (BM + BN) * (BK + 8) * 2 bytes).
+/// HIP (kernels/hip/minimax/gemm_f16.hip): the same names, tiles, blocks and grids, static LDS only (two stages, within
+/// gfx11's 64 KiB), so no dynamic shared memory.
 const GemmKernel = struct { name: [:0]const u8, bm: u32, bn: u32, threads: u32, smem: u32 };
+const hip = @hasDecl(gpu, "hip_runtime");
+fn smemOf(stages: u32, bm: u32, bn: u32) u32 {
+    return if (hip) 0 else stages * (bm + bn) * 40 * 2;
+}
 const gemm_kernels = [_]GemmKernel{
     .{ .name = "stk_gemm_f16_ref", .bm = 128, .bn = 128, .threads = 256, .smem = 0 },
-    .{ .name = "stk_gemm_f16", .bm = 256, .bn = 128, .threads = 256, .smem = 3 * (256 + 128) * 40 * 2 },
-    .{ .name = "stk_gemm_f16_s", .bm = 128, .bn = 128, .threads = 256, .smem = 2 * (128 + 128) * 40 * 2 },
-    .{ .name = "stk_gemm_f16_n", .bm = 64, .bn = 64, .threads = 128, .smem = 3 * (64 + 64) * 40 * 2 },
+    .{ .name = "stk_gemm_f16", .bm = 256, .bn = 128, .threads = 256, .smem = smemOf(3, 256, 128) },
+    .{ .name = "stk_gemm_f16_s", .bm = 128, .bn = 128, .threads = 256, .smem = smemOf(2, 128, 128) },
+    .{ .name = "stk_gemm_f16_n", .bm = 64, .bn = 64, .threads = 128, .smem = smemOf(3, 64, 64) },
 };
 
 /// Environment variable `name` set to something other than "" or "0".
@@ -364,6 +370,10 @@ test "gemm kernels: the shape pick and the shared memory the tiles need" {
     try std.testing.expectEqual(@as(usize, 2), Ops.pick(1792, 2048, 24));
     try std.testing.expectEqual(@as(usize, 2), Ops.pick(1792, 24, 24));
     try std.testing.expectEqual(@as(usize, 3), Ops.pick(1797, 64, 1800));
+    if (hip) { // static LDS only on HIP
+        for (gemm_kernels) |k| try std.testing.expectEqual(@as(u32, 0), k.smem);
+        return;
+    }
     // stages * (BM + BN) * (BK + 8) * 2 as gemm_f16.cu's Cfg::SMEM
     try std.testing.expectEqual(@as(u32, 92160), gemm_kernels[1].smem);
     try std.testing.expectEqual(@as(u32, 40960), gemm_kernels[2].smem);

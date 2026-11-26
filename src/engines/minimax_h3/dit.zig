@@ -373,9 +373,17 @@ pub const Dit = struct {
         try x.post(name, &.{.{ .role = "y", .ptr = out, .bytes = @as(u64, rows) * l.n * 2 }});
     }
 
-    /// One block linear: the quantizer and the prompt GEMM (`Linear.forward`). Profiling runs forward's two launches itself
-    /// (the same plan calls and arguments) so each gets its own span: `quant`, then `gc`.
+    /// One block linear: the quantizer and the prompt GEMM (`Linear.forward`), or a bf16 pack's one bf16 GEMM
+    /// (`Linear.forwardBf16`). Profiling runs forward's two launches itself (the same plan calls and arguments) so each
+    /// gets its own span: `quant`, then `gc`.
     fn linearRun(x: *Dit, l: Linear, in: u64, out: u64, rows: u32, gc: Class) !void {
+        if (l.kind == .bf16) {
+            x.extra_launches += 1;
+            if (x.prof != null) try x.markBegin();
+            try l.forwardBf16(x.k.te, in, out, rows, x.s);
+            if (x.prof != null) try x.markEnd(gc);
+            return;
+        }
         x.extra_launches += 2;
         if (x.prof == null or l.kind != .nvfp4) return l.forward(x.k.nv, x.k.major, x.k.minor, tile, in, out, rows, x.qc, x.qs, x.s);
         const tbk = plan.tb(tile, x.k.major, x.k.minor);
