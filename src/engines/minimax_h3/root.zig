@@ -7,6 +7,7 @@ pub const layout = @import("layout.zig");
 pub const profile = @import("profile.zig");
 pub const dit = @import("dit.zig");
 pub const sampler = @import("sampler.zig");
+pub const pdd = @import("pdd.zig");
 pub const te32 = @import("te32.zig");
 pub const vae_audio = @import("vae_audio.zig");
 pub const vae_video = @import("vae_video.zig");
@@ -22,6 +23,7 @@ test {
     _ = dit;
     _ = layout;
     _ = sampler;
+    _ = pdd;
     _ = te32;
     _ = vae_audio;
     _ = vae_video;
