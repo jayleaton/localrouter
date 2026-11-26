@@ -64,6 +64,11 @@
    "cmd": ["@J@/venvs/whisper-rocm/bin/python", "@SRC@/tools/speech/whisper/worker.py"], "weights": "@WHISPER_DIR@",
    "resident_bytes": 2684354560, "working_bytes": 536870912, "priority": 85, "idle_ttl_s": 600,
    "license": {"name": "MIT", "url": "https://huggingface.co/openai/whisper-large-v3-turbo", "commercial": true},
-   "options": {"device": "cuda", "dtype": "float16", "attn": "sdpa", "threads": 4, "vad": "off"}}
+   "options": {"device": "cuda", "dtype": "float16", "attn": "sdpa", "threads": 4, "vad": "off"}},
+  {"id": "minimax-h3-image", "kind": "image", "capabilities": ["text_to_image", "image_edit"],
+   "name": "MiniMax H3-Image (bf16, PDD 6 steps; edits 1-5 references) - UNQUALIFIED, memory ESTIMATED",
+   "engine": "minimax_h3_image", "weights": "@H3I_DIR@", "idle_ttl_s": 300, "priority": 10, "keep_loaded": false,
+   "options": {"max_pixels": 1048576, "max_pictures": 5, "resident_mb": @H3I_RESIDENT_MB@,
+               "memory": "ESTIMATES, not measured (docs/dev/H3-IMAGE-QUALIFICATION.md): resident @H3I_RESIDENT_MB@ MiB (the engine's own estimate at max_pixels 1024x1024, the same with edits on or off); working about 0.1 GiB a text-to-image request, 6.9 GiB a 1-reference edit to 11.9 GiB a 5-reference one, booked per request by the engine. Replace with the gfx1151 GTT peaks once G0-G4 pass"}}
  ]
 }
