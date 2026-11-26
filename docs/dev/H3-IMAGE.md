@@ -163,8 +163,8 @@ split-half RoPE, the VAE encoder. New: the PDD sampler and head mix, the image d
 2048, 32 heads, 3-D RoPE over 0.75 of the head), the posterior sample, reference blocks (I2V has cond rows), and the composite.
 
 Declared substitutions, as in M7 and H3-I2V: LocalRouter's portable generator for the three draws; no `ImageScaleToTotalPixels` (`area`)
-pre-scale, the request's size instead; the decoder's tiles decoded one at a time, in ComfyUI's tile plan and blend (section 2; no batching by free memory); the bf16 attention of ROCM.md
-in place of the `comfy_kitchen_int8` that `comfy_attention.config` selects.
+pre-scale, the request's size instead; the decoder's tiles decoded one at a time, in ComfyUI's tile plan and blend (section 2; no batching
+by free memory); the bf16 attention of ROCM.md in place of the `comfy_kitchen_int8` that `comfy_attention.config` selects.
 
 Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a step (G-baseline), decoded image LPIPS / DINO against
 #157's outputs at the same seeds. Engine vs twin bit for bit (check names proposed, as in ROCM.md section 5): G1 `h3i-replay` / `h3-te` /
