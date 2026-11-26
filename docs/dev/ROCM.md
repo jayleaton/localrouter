@@ -225,7 +225,7 @@ Series 1, H3-Image. Each PR runs `zig build` and `zig build test` (Zig 0.17.0), 
 | 1.4 | HIP bf16 and f16 WMMA GEMMs and bf16 attention; bf16 `Linear` kind (also on CUDA); kitchen rms_rope HIP copy plus its UPSTREAM.md entry; `stk_twin`'s loader for the engine's code objects | G0 (1.3's kernels and these) |
 | 1.5 | `docs/dev/H3-IMAGE.md` (ComfyUI findings); H3-Image twin (`stk_twin/h3i`), bf16 pack build, captures, structure gate | CPU structure; baseline vs ComfyUI |
 | 1.6 | engine: DiT image variant (no audio, PDD heads), image VAE decoder, PDD sampler, `minimax_h3_image` entry (`text_to_image`, its own licence) | G1-G3 |
-| 1.7 | edits: references through `te_vision` and the VAE encoder, the masked composite, `image_edit` | G4 |
+| 1.7 | edits: references through `te_vision` and the VAE encoder (`te32.zig` `forwardImages`, `vae_video_enc.zig` `encodeMoments`, the posterior in `edit.zig`), reference blocks (`layout.zig` `ImageLayout`, `dit.zig` `imageRefs`), the host path and masked composite (`image.zig`, against `stk_twin/h3i/edit.py`'s `edit_image.json`), `pipeline_image.zig` `edit`, `image_edit` up to 5 input images (H3-IMAGE.md "Decided in PR 1.7") | host tests (CPU twin vs ComfyUI and PIL; engine vs twin); G4 |
 | 1.8 | Strix Halo tool entry on #155's template (after #155 merges), measured resident/working bytes, a qualification file | measured times and GTT peaks |
 | 1.9 (if wanted) | `int8_convrot` W8A8 pack on `iu8` WMMA | its own baseline |
 

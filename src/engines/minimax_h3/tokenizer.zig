@@ -94,6 +94,43 @@ pub const Tokenizer = struct {
         return .{ .ids = out, .tags = tags, .start = start };
     }
 
+    /// H3-Image edits (`MiniMaxH3Tokenizer.tokenize_with_weights` with `picture_label="Picture %d: "`,
+    /// comfy/text_encoders/minimax.py:226-236): per picture k (1-based) the label's tokens, the start marker,
+    /// `image_rows[k - 1]` vision rows, the end marker; then the prompt. Markers and vision rows are tag 0, text 1.
+    /// `starts` gets each picture's first vision row.
+    pub fn editIds(t: *const Tokenizer, gpa: std.mem.Allocator, prompt: []const u8, image_rows: []const u32, starts: []u32) !ImageTokens {
+        std.debug.assert(starts.len == image_rows.len);
+        var ids_: std.ArrayList(u32) = .empty;
+        defer ids_.deinit(gpa);
+        var tags: std.ArrayList(u8) = .empty;
+        defer tags.deinit(gpa);
+        var lb: [32]u8 = undefined;
+        for (image_rows, 0..) |rows, k| {
+            const label = try t.ids(gpa, try std.fmt.bufPrint(&lb, "Picture {d}: ", .{k + 1}));
+            defer gpa.free(label);
+            try ids_.appendSlice(gpa, label);
+            try tags.appendNTimes(gpa, 1, label.len);
+            try ids_.append(gpa, vision_start);
+            starts[k] = @intCast(ids_.items.len);
+            try ids_.appendNTimes(gpa, pad_id, rows);
+            try ids_.append(gpa, vision_end);
+            try tags.appendNTimes(gpa, 0, rows + 2);
+        }
+        if (prompt.len > 0) {
+            const p = try t.ids(gpa, prompt);
+            defer gpa.free(p);
+            try ids_.appendSlice(gpa, p);
+            try tags.appendNTimes(gpa, 1, p.len);
+        }
+        if (ids_.items.len == 0) {
+            try ids_.append(gpa, pad_id);
+            try tags.append(gpa, 1);
+        }
+        const out_tags = try tags.toOwnedSlice(gpa);
+        errdefer gpa.free(out_tags);
+        return .{ .ids = try ids_.toOwnedSlice(gpa), .tags = out_tags, .start = if (starts.len > 0) starts[0] else 0 };
+    }
+
     fn piece(t: *const Tokenizer, gpa: std.mem.Allocator, text: []const u8, out: *std.ArrayList(u32)) !void {
         if (text.len == 0) return;
         const ids_ = try t.tok.encode(gpa, text);
@@ -185,4 +222,28 @@ test "each embedding piece is tokenized on its own" {
     const whole = try t.ids(a, "xembedding:y");
     defer a.free(whole);
     try std.testing.expectEqualSlices(u32, &.{ 0, 3, 4, 5, 3, 6, 6, 7, 8, 9, 10, 11 }, whole);
+}
+
+test "edit sequence: per picture its label, the markers around its vision rows (tag 0), then the prompt" {
+    const a = std.testing.allocator;
+    var t = try Tokenizer.fromJson(a, test_json);
+    defer t.deinit();
+    const label1 = try t.ids(a, "Picture 1: ");
+    defer a.free(label1);
+    const label2 = try t.ids(a, "Picture 2: ");
+    defer a.free(label2);
+    var starts: [2]u32 = undefined;
+    const it = try t.editIds(a, "ab", &.{ 4, 6 }, &starts);
+    defer it.deinit(a);
+    try std.testing.expectEqual(@as(u32, @intCast(label1.len + 1)), starts[0]);
+    try std.testing.expectEqual(@as(u32, @intCast(label1.len + 1 + 4 + 1 + label2.len + 1)), starts[1]);
+    try std.testing.expectEqual(label1.len + 6 + label2.len + 8 + 1, it.ids.len);
+    try std.testing.expectEqual(vision_start, it.ids[starts[0] - 1]);
+    try std.testing.expectEqual(vision_end, it.ids[starts[0] + 4]);
+    try std.testing.expectEqual(vision_end, it.ids[starts[1] + 6]);
+    try std.testing.expectEqual(@as(u32, 3), it.ids[it.ids.len - 1]); // "ab"
+    for (it.tags, 0..) |tag, i| {
+        const in_span = (i + 1 >= starts[0] and i <= starts[0] + 4) or (i + 1 >= starts[1] and i <= starts[1] + 6);
+        try std.testing.expectEqual(@as(u8, if (in_span) 0 else 1), tag);
+    }
 }

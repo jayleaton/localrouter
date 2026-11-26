@@ -71,6 +71,15 @@ fn half(v: f64) f16 {
     return @floatCast(@as(f32, @floatCast(v)));
 }
 
+/// `latents_mean` / `latents_std` as the fp16 VAE holds them (the encoder's posterior normalizes against these too:
+/// H3ImageVAE.encode's `.to(latents)` of the fp16 buffers).
+pub fn latentStats(mean: *[zc]f16, stdv: *[zc]f16) void {
+    for (mean, stdv, latents_mean, latents_std) |*m, *s, mv, sv| {
+        m.* = half(mv);
+        s.* = half(sv);
+    }
+}
+
 /// An fp16 buffer's value as the fp32 it is read as (`pixel_std.to(float32)` of the fp16 module's buffer).
 fn f16Const(v: f32) f32 {
     return @as(f16, @floatCast(v));
@@ -346,6 +355,12 @@ pub const Decoder = struct {
     /// `lat`: the normalized fp16 latent [24, 1, hz, wz] on the device (what ComfyUI hands the VAE after `.to(fp16)`);
     /// `out`: uint8 [16 hz, 16 wz, 3] on the device. Everything is enqueued on the stream; synchronize after.
     pub fn decode(v: *Decoder, lat: u64, hz: u32, wz: u32, out: u64) !void {
+        return v.decodeTo(lat, hz, wz, out, 0);
+    }
+
+    /// As `decode`, with the fp32 pixels [16 hz, 16 wz, 3] in [0, 1] (VAEDecode's image, before SaveImage's uint8) also
+    /// written to `out_f32` (0: not): the masked edit composites them (`image.composite`).
+    pub fn decodeTo(v: *Decoder, lat: u64, hz: u32, wz: u32, out: u64, out_f32: u64) !void {
         const gpa = v.gpa;
         const k = v.k;
         const im = v.im;
@@ -432,6 +447,7 @@ pub const Decoder = struct {
             .sm = .{ f16Const(imagenet_std[0]), f16Const(imagenet_std[1]), f16Const(imagenet_std[2]), f16Const(imagenet_mean[0]), f16Const(imagenet_mean[1]), f16Const(imagenet_mean[2]) },
             .out_u8 = out,
             .pos = 0,
+            .out_f32 = out_f32,
         });
         try v.rec.post("finalize", &.{rio("y", out, 3 * @as(u64, hh) * ww)});
     }

@@ -130,8 +130,11 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, store: *Store,
     w.norm_out = try l.norm("encoder.norm_out", ci);
     w.output = try l.conv("encoder.conv_out", ci, 48, 3);
     w.quant = try l.conv("quant_conv", 48, 48, 1);
-    w.mean = try l.tensor("latents_mean", &.{24});
-    w.stdv = try l.tensor("latents_std", &.{24});
+    // The video VAE file carries its latent statistics; the H3-Image VAE file has none (ComfyUI's tables are used, and
+    // `vae_image.latentStats` has them), so there they are 0 and only `encodeMoments` runs.
+    const has_stats = l.header.object.get("latents_mean") != null;
+    w.mean = if (has_stats) try l.tensor("latents_mean", &.{24}) else 0;
+    w.stdv = if (has_stats) try l.tensor("latents_std", &.{24}) else 0;
     try store.done(up);
     return w;
 }

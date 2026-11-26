@@ -236,36 +236,40 @@ pub const TextEncoder = struct {
     /// ids -> the residual stream after layer index 49, [L, 5120] fp32 at the returned pointer. `rope_mode`: which
     /// product of the rotation is fused (the twin's choice, from its pod test against ComfyUI).
     pub fn forward(t: *TextEncoder, ids: []const u32, rope_mode: i32) !u64 {
-        return t.forwardInner(ids, rope_mode, null, 0);
+        return t.forwardInner(ids, rope_mode, &.{});
     }
 
-    pub fn forwardImage(t: *TextEncoder, ids: []const u32, image: @import("te_vision.zig").Features, image_start: u32, rope_mode: i32) !u64 {
-        if (image_start < 1 or @as(u64, image_start) + image.rows() >= ids.len or image.merged == 0) return error.BadImageSequence;
-        return t.forwardInner(ids, rope_mode, image, image_start);
+    pub fn forwardImage(t: *TextEncoder, ids: []const u32, image: Features, image_start: u32, rope_mode: i32) !u64 {
+        return t.forwardImages(ids, &.{.{ .f = image, .start = image_start }}, rope_mode);
     }
 
-    fn forwardInner(t: *TextEncoder, ids: []const u32, rope_mode: i32, image: ?@import("te_vision.zig").Features, image_start: u32) !u64 {
+    /// Several pictures (H3-Image edits): each one's merged features at its `start`, in order, MRoPE as
+    /// `mropePositions`, deepstack into each picture's span. One picture is `forwardImage`.
+    pub fn forwardImages(t: *TextEncoder, ids: []const u32, images: []const Placed, rope_mode: i32) !u64 {
+        var end: u64 = 0;
+        for (images) |im| {
+            if (im.start < 1 or im.start < end or @as(u64, im.start) + im.f.rows() >= ids.len or im.f.merged == 0) return error.BadImageSequence;
+            end = @as(u64, im.start) + im.f.rows();
+        }
+        return t.forwardInner(ids, rope_mode, images);
+    }
+
+    fn forwardInner(t: *TextEncoder, ids: []const u32, rope_mode: i32, images: []const Placed) !u64 {
         const L: u32 = @intCast(ids.len);
         if (L == 0 or L > t.max_l) return error.PromptTooLong;
         const Lu: u64 = L;
         { // the RoPE tables for positions 0..L-1: f32(pos) * inv, sincos in f64, rounded to f32
             const tab = try t.gpa.alloc(f32, 2 * @as(usize, L) * 64);
             defer t.gpa.free(tab);
+            const pos3 = try t.gpa.alloc([3]f32, L);
+            defer t.gpa.free(pos3);
+            var spans: [max_images]Span = undefined;
+            if (images.len > max_images) return error.TooManyImages;
+            for (images, spans[0..images.len]) |im, *sp| sp.* = .{ .start = im.start, .gh = im.f.grid_h, .gw = im.f.grid_w };
+            mropePositions(spans[0..images.len], pos3);
             for (0..L) |pos| for (t.inv_freq, 0..) |inv, j| {
-                var position: usize = pos;
-                if (image) |im| {
-                    const count = im.rows();
-                    if (pos >= image_start and pos < image_start + count) {
-                        const offset = pos - image_start;
-                        const axis: usize = if (j % 3 == 1 and j < 60) 1 else if (j % 3 == 2 and j < 60) 2 else 0;
-                        position = image_start + switch (axis) {
-                            1 => offset / (im.grid_w / 2),
-                            2 => offset % (im.grid_w / 2),
-                            else => 0,
-                        };
-                    } else if (pos >= image_start + count) position = image_start + @max(im.grid_h, im.grid_w) / 2 + pos - image_start - count;
-                }
-                const r = smath.sincos(@as(f64, @as(f32, @floatFromInt(position)) * inv));
+                const axis: usize = if (j % 3 == 1 and j < 60) 1 else if (j % 3 == 2 and j < 60) 2 else 0;
+                const r = smath.sincos(@as(f64, pos3[pos][axis] * inv));
                 tab[pos * 64 + j] = @floatCast(r.cos);
                 tab[@as(usize, L) * 64 + pos * 64 + j] = @floatCast(r.sin);
             };
@@ -283,11 +287,13 @@ pub const TextEncoder = struct {
             try Ops.go(t.k.embed_fn, t.s, .{ .x = blocks(dim), .y = L }, block, 0, &a);
         }
         try t.post("te.embed", &.{.{ .role = "y", .ptr = t.h, .bytes = Lu * dim * 4 }});
-        if (image) |im| {
-            const bytes = @as(u64, im.rows()) * dim * 4;
-            try t.pre("te.image_insert", &.{ .{ .role = "h", .ptr = t.h, .bytes = Lu * dim * 4 }, .{ .role = "image", .ptr = im.merged, .bytes = bytes } });
-            try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.h + @as(u64, image_start) * dim * 4, im.merged, bytes, t.s.handle), "cuMemcpyDtoDAsync");
-            try t.post("te.image_insert", &.{.{ .role = "y", .ptr = t.h, .bytes = Lu * dim * 4 }});
+        for (images, 0..) |im, k| {
+            const bytes = @as(u64, im.f.rows()) * dim * 4;
+            var ib: [32]u8 = undefined;
+            const name = if (k == 0) "te.image_insert" else try std.fmt.bufPrint(&ib, "te.image_insert.{d}", .{k});
+            try t.pre(name, &.{ .{ .role = "h", .ptr = t.h, .bytes = Lu * dim * 4 }, .{ .role = "image", .ptr = im.f.merged, .bytes = bytes } });
+            try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.h + @as(u64, im.start) * dim * 4, im.f.merged, bytes, t.s.handle), "cuMemcpyDtoDAsync");
+            try t.post(name, &.{.{ .role = "y", .ptr = t.h, .bytes = Lu * dim * 4 }});
         }
         var nb: [48]u8 = undefined;
         const nm = struct {
@@ -337,16 +343,77 @@ pub const TextEncoder = struct {
             try t.post(sn, &.{.{ .role = "y", .ptr = t.gu, .bytes = Lu * mlp * 4 }});
             try t.lin(nm(&nb, i, "down_proj"), l.lin[6], t.gu, t.o, Lu);
             try t.add(nm(&nb, i, "mlp_residual"), t.h, t.o, t.h, Lu * dim);
-            if (image) |im| {
-                if (i < 3) {
-                    const span = t.h + @as(u64, image_start) * dim * 4;
-                    try t.add(nm(&nb, i, "deepstack"), span, im.deepstack[i], span, @as(u64, im.rows()) * dim);
-                }
-            }
+            if (i < 3) for (images, 0..) |im, k| {
+                const span = t.h + @as(u64, im.start) * dim * 4;
+                var db: [48]u8 = undefined;
+                const name = if (k == 0) nm(&nb, i, "deepstack") else try std.fmt.bufPrint(&db, "te.{d}.deepstack.{d}", .{ i, k });
+                try t.add(name, span, im.f.deepstack[i], span, @as(u64, im.f.rows()) * dim);
+            };
         }
         return t.h;
     }
 };
+
+const Features = @import("te_vision.zig").Features;
+/// A picture's vision features and the index of its first vision row in the token sequence.
+pub const Placed = struct { f: Features, start: u32 };
+/// The pictures one sequence may hold.
+pub const max_images = 8;
+/// A picture's span for the positions: its first row and its 16-px patch grid ((gh/2)(gw/2) rows).
+pub const Span = struct { start: u32, gh: u32, gw: u32 };
+
+/// ComfyUI's `qwen2vl_mrope_position_ids` (comfy/text_encoders/qwen_vl.py:121-145) for the spans in order: text at its
+/// index plus the running offset, a picture's rows at (start, start + row, start + col) plus the offset, the text after
+/// it continuing at start + max(1, gh, gw) / 2; the offset grows by that half-extent minus the picture's rows. fp32
+/// (ComfyUI's position tensor), [T, H, W] a token.
+pub fn mropePositions(spans: []const Span, out: [][3]f32) void {
+    for (out, 0..) |*o, p| o.* = @splat(@floatFromInt(p));
+    var offset: i64 = 0;
+    for (spans) |sp| {
+        const mh: i64 = sp.gh / 2;
+        const mw: i64 = sp.gw / 2;
+        const n: i64 = mh * mw;
+        const start: i64 = sp.start;
+        const end = start + n;
+        const len_max: i64 = @max(1, @max(sp.gh, sp.gw)) / 2;
+        var p: i64 = end;
+        while (p < out.len) : (p += 1) out[@intCast(p)] = @splat(@floatFromInt(p - end + start + len_max + offset));
+        var i: i64 = 0;
+        while (i < n) : (i += 1) out[@intCast(start + i)] = .{
+            @floatFromInt(start + offset),
+            @floatFromInt(start + offset + @divTrunc(i, mw)),
+            @floatFromInt(start + offset + @mod(i, mw)),
+        };
+        offset += len_max - n;
+    }
+}
+
+test "MRoPE positions: the twin's edit.py (ComfyUI's qwen2vl_mrope_position_ids), bit for bit" {
+    const gpa = std.testing.allocator;
+    const image = @import("image.zig");
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("edit_image.json"), .{});
+    defer parsed.deinit();
+    for (parsed.value.object.get("mrope").?.array.items) |sv| {
+        const s = sv.object;
+        const L: usize = @intCast(s.get("len").?.integer);
+        var spans: [max_images]Span = undefined;
+        const imgs = s.get("images").?.array.items;
+        for (imgs, 0..) |iv, k| {
+            const r = iv.array.items;
+            spans[k] = .{ .start = @intCast(r[0].integer), .gh = @intCast(r[1].integer), .gw = @intCast(r[2].integer) };
+        }
+        const pos = try gpa.alloc([3]f32, L);
+        defer gpa.free(pos);
+        mropePositions(spans[0..imgs.len], pos);
+        // the twin's [3, L] layout: all T, then all H, then all W
+        const flat = try gpa.alloc(f32, 3 * L);
+        defer gpa.free(flat);
+        for (pos, 0..) |p, k| for (0..3) |ax| {
+            flat[ax * L + k] = p[ax];
+        };
+        try image.expectSha(s.get("pos").?.string, flat);
+    }
+}
 
 test "inv_freq: the frozen table, first frequency 1, the rest decreasing, within an ulp of the portable powf" {
     const f = try TextEncoder.invFreq(std.testing.allocator);

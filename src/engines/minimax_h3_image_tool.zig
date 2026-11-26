@@ -2,11 +2,15 @@
 //! (`minimax_h3.pipeline_image`), one PNG an image (docs/dev/H3-IMAGE.md). `weights` is a directory laid out like ComfyUI's
 //! models folder plus the pack: `<pack>/` (`python -m stk_twin.h3i.build`: the DiT in bf16 and `tokenizer.json`),
 //! `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` (the H3 encoder) and
-//! `vae/minimax_h3_image_vae_fp16.safetensors`, as published. Edits (`image_edit`) are PR 1.7's: a request with input
-//! images or a mask is refused. One DiT forward a step (cfg 1, as ComfyUI's workflows run it): `guidance` and
+//! `vae/minimax_h3_image_vae_fp16.safetensors`, as published. Edits (`image_edit`, #157's edit workflows): 1 to
+//! `max_pictures` input images (default 5, 0: no edits), the first the one edited, each through the vision tower and the
+//! VAE encoder as a reference; with a mask (the first image's size, alpha 0 where the edit goes) the decode is composited
+//! over the first image, at 1 megapixel and 6 steps by default, without one the whole scene is redrawn at 2 megapixels
+//! and 30 steps; an edit without a size takes the first image's shape at that area. One DiT forward a step (cfg 1, as ComfyUI's workflows run it): `guidance` and
 //! `negative_prompt` are not used. On HIP and CUDA alike the DiT runs the bf16 attention (ROCM.md section 3).
 //! Options: `pack` (default h3i-bf16), `max_pixels` (an image's area, default 1024 x 1024), `max_side` (default the API's
-//! 2048), `default_size` (`WIDTHxHEIGHT`, default 1024x1024), `steps` (default 6, the PDD heads' own count), `resident_mb`
+//! 2048), `default_size` (`WIDTHxHEIGHT`, default 1024x1024), `steps` (default 6, the PDD heads' own count),
+//! `max_pictures` (default 5), `edit_pixels` (an edit's largest target and VAE copy, default 2176 x 1024), `resident_mb`
 //! (a floor for the booking). The buffers are sized at load for `max_pixels`; limits outside the API's, or whose largest
 //! image does not fit the daemon's memory budget, stop the daemon at start (`validate`). Every byte figure here is an
 //! *estimate* (ROCM.md section 4) until a gfx1151 run measures the peak, as `minimax_h3`'s `default_resident_mb` was.
@@ -20,7 +24,7 @@ const Request = request.Request;
 const config = @import("../config.zig");
 const ToolConfig = config.ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3_image", .capabilities = &.{.text_to_image}, .needs = needs, .create = create, .check = check, .defaults = defaults, .validate = validate, .license = license };
+pub const entry: engine.Entry = .{ .name = "minimax_h3_image", .capabilities = &.{ .text_to_image, .image_edit }, .needs = needs, .create = create, .check = check, .defaults = defaults, .validate = validate, .license = license };
 
 /// The weights' licence (MiniMax-H3-Image Community License Agreement, 2026-11-10), unless a tool's config names its own.
 pub const license: config.License = .{
@@ -33,6 +37,8 @@ pub const license: config.License = .{
 };
 
 const P = h3.pipeline_image;
+const E = h3.edit;
+const image_in = @import("../media/image_in.zig");
 const api: request.Limits = .{};
 
 /// The PDD checkpoint's own step count (its six heads, one a step: H3-IMAGE.md 1.4; #157's text to image).
@@ -69,7 +75,24 @@ fn maxSide(cfg: *const ToolConfig) u32 {
 }
 
 fn limits(cfg: *const ToolConfig) P.Limits {
-    return .{ .pixels = option32(cfg, "max_pixels", default_max_pixels, max_max_pixels) / 1024 * 1024 };
+    return .{
+        .pixels = option32(cfg, "max_pixels", default_max_pixels, max_max_pixels) / 1024 * 1024,
+        .pictures = maxPictures(cfg),
+        .edit_pixels = option32(cfg, "edit_pixels", P.default_edit_pixels, max_max_pixels) / 1024 * 1024,
+    };
+}
+
+/// The input images an edit takes at most (`max_pictures`, at most `h3.edit.max_pictures`; 0: no edits).
+fn maxPictures(cfg: *const ToolConfig) u32 {
+    return option32(cfg, "max_pictures", E.max_pictures, E.max_pictures);
+}
+
+/// Whether an edit may be `width` x `height`: on the 32-pixel grid, within the sides and within the edit target.
+fn editTakes(cfg: *const ToolConfig, width: u32, height: u32) bool {
+    if (width % 32 != 0 or height % 32 != 0) return false;
+    if (@min(width, height) < min_side or @max(width, height) > maxSide(cfg)) return false;
+    const l = limits(cfg);
+    return @as(u64, width) * height <= @max(l.pixels, l.edit_pixels);
 }
 
 fn defaultSize(cfg: *const ToolConfig) [2]u32 {
@@ -86,10 +109,10 @@ fn takes(cfg: *const ToolConfig, width: u32, height: u32) bool {
     return P.fits(limits(cfg), width, height);
 }
 
-/// An image request without a size (0 x 0) gets `default_size`.
+/// An image request without a size (0 x 0) gets `default_size`; an edit keeps 0 x 0 (the first image's shape).
 fn defaults(cfg: *const ToolConfig, req: *Request) void {
     switch (req.*) {
-        .image => |*v| if (v.width == 0 and v.height == 0) {
+        .image => |*v| if (v.width == 0 and v.height == 0 and v.references.len == 0) {
             const d = defaultSize(cfg);
             v.width = d[0];
             v.height = d[1];
@@ -98,17 +121,25 @@ fn defaults(cfg: *const ToolConfig, req: *Request) void {
     }
 }
 
-/// Refuses what `generate` would, before the 57 GB load evicts anything: input images or a mask (edits are not
-/// available yet), a side off the 32-pixel grid or outside the sides, more pixels than `max_pixels`.
+/// Refuses what `generate` would, before the 57 GB load evicts anything: more input images than `max_pictures`, a mask
+/// without one, a side off the 32-pixel grid or outside the sides, more pixels than `max_pixels` (an edit's size:
+/// `edit_pixels`). The input images' own sizes are checked once they are read.
 fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool {
     const v = switch (req.*) {
         .image => |x| x,
         .video, .asset3d, .speech, .transcription, .chat, .decision => return true, // the kind check refuses it
     };
-    if (v.references.len > 0 or v.mask != null) {
-        why.print("model '{s}' makes images from text only: send no input images or mask", .{cfg.id}) catch {};
+    if (v.references.len > maxPictures(cfg)) {
+        if (maxPictures(cfg) == 0) {
+            why.print("model '{s}' makes images from text only here (max_pictures is 0): send no input images or mask", .{cfg.id}) catch {};
+        } else why.print("model '{s}' edits with 1 to {d} input images: {d} were sent", .{ cfg.id, maxPictures(cfg), v.references.len }) catch {};
         return false;
     }
+    if (v.mask != null and v.references.len == 0) {
+        why.print("a mask needs an input image to edit", .{}) catch {};
+        return false;
+    }
+    if (v.references.len > 0) return checkEdit(cfg, v, why);
     if (v.width % 32 != 0 or v.height % 32 != 0 or v.width == 0 or v.height == 0) {
         why.print("model '{s}' takes sides that are multiples of 32: {d}x{d} is not (omit size for {d}x{d})", .{ cfg.id, v.width, v.height, defaultSize(cfg)[0], defaultSize(cfg)[1] }) catch {};
         return false;
@@ -119,6 +150,24 @@ fn check(cfg: *const ToolConfig, req: *const Request, why: *std.Io.Writer) bool 
     }
     if (!P.fits(limits(cfg), v.width, v.height)) {
         why.print("model '{s}' takes at most {d} pixels (width x height), such as {d}x{d}", .{ cfg.id, limits(cfg).pixels, defaultSize(cfg)[0], defaultSize(cfg)[1] }) catch {};
+        return false;
+    }
+    return true;
+}
+
+fn checkEdit(cfg: *const ToolConfig, v: request.Image, why: *std.Io.Writer) bool {
+    if (v.width == 0 and v.height == 0) return true; // the first image's shape
+    if (v.width % 32 != 0 or v.height % 32 != 0 or v.width == 0 or v.height == 0) {
+        why.print("model '{s}' takes sides that are multiples of 32: {d}x{d} is not (omit size for the first image's shape)", .{ cfg.id, v.width, v.height }) catch {};
+        return false;
+    }
+    if (@min(v.width, v.height) < min_side or @max(v.width, v.height) > maxSide(cfg)) {
+        why.print("model '{s}' takes sides of {d} to {d} pixels", .{ cfg.id, min_side, maxSide(cfg) }) catch {};
+        return false;
+    }
+    if (!editTakes(cfg, v.width, v.height)) {
+        const l = limits(cfg);
+        why.print("model '{s}' edits to at most {d} pixels (width x height)", .{ cfg.id, @max(l.pixels, l.edit_pixels) }) catch {};
         return false;
     }
     return true;
@@ -138,9 +187,22 @@ fn workingBytes(width: u32, height: u32) u64 {
     return 2 * 3 * @as(u64, width) * height + phase + host_slack;
 }
 
+/// The largest edit a request may be before its images are read (*estimate*): `n` pictures of 2048 x 1024 (VAE copies
+/// at `edit_pixels`' default, 2048 vision rows each) at the request's size or the default target; the device phase at
+/// its largest (`P.editRequestBytes`), the host's copies (`P.editHostBytes`), each picture's RGBA at the API's largest
+/// side squared (and the mask's), the output and the PNG's copy, the worker's slack.
+fn editWorkingBytes(n: usize, masked: bool, width: u32, height: u32) u64 {
+    const k = @min(@max(n, 1), E.max_pictures);
+    const sizes: [E.max_pictures]E.Size = @splat(.{ .w = 2048, .h = 1024 });
+    const plan = E.Plan.of(sizes[0..k], masked, width, height) catch return 0;
+    const device = P.editRequestBytes(&plan) catch return 0;
+    const rgba = 4 * @as(u64, api.max_side) * api.max_side;
+    return device + P.editHostBytes(&plan) + (k + @intFromBool(masked)) * rgba + 2 * 3 * @as(u64, plan.target.w) * plan.target.h + host_slack;
+}
+
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image => |v| workingBytes(v.width, v.height),
+        .image => |v| if (v.references.len > 0) editWorkingBytes(v.references.len, v.mask != null, v.width, v.height) else workingBytes(v.width, v.height),
         .video, .asset3d, .speech, .transcription, .chat, .decision => 0,
     };
     return .{ .resident = residentBytes(cfg), .working = working };
@@ -157,6 +219,9 @@ fn peakBytes(cfg: *const ToolConfig) u64 {
             if (takes(cfg, w, h)) most = @max(most, workingBytes(w, h));
         }
     }
+    if (maxPictures(cfg) > 0) for ([_]bool{ false, true }) |masked| {
+        most = @max(most, editWorkingBytes(maxPictures(cfg), masked, 0, 0));
+    };
     return residentBytes(cfg) +| most;
 }
 
@@ -168,6 +233,8 @@ fn validate(cfg: *const ToolConfig, budget: u64, why: *std.Io.Writer) bool {
         .{ .key = "max_pixels", .min = min_side * min_side, .max = max_max_pixels },
         .{ .key = "max_side", .min = min_side, .max = api.max_side },
         .{ .key = "steps", .min = 1, .max = api.max_steps },
+        .{ .key = "max_pictures", .min = 0, .max = E.max_pictures },
+        .{ .key = "edit_pixels", .min = min_side * min_side, .max = max_max_pixels },
     }) |r| {
         const v = engine.optionInt(cfg, r.key, r.min);
         if (v < r.min or v > r.max) {
@@ -213,20 +280,50 @@ const MiniMaxH3Image = struct {
             .image => |x| x,
             .video, .asset3d, .speech, .transcription, .chat, .decision => return engine.Refused.Refused,
         };
-        if (v.references.len > 0 or v.mask != null) return refuse("this model makes images from text only: send no input images or mask", .{});
         const p = t.p orelse return error.NotLoaded;
         const start = std.Io.Clock.awake.now(t.env.io);
-        const steps = if (v.steps == 0) @as(u32, @intCast(engine.optionInt(t.cfg, "steps", default_steps))) else v.steps;
-        const pixels = try t.env.gpa.alloc(u8, @as(usize, v.width) * v.height * 3);
+        if (v.references.len > maxPictures(t.cfg)) return refuse("this model edits with 1 to {d} input images", .{maxPictures(t.cfg)});
+        if (v.mask != null and v.references.len == 0) return refuse("a mask needs an input image to edit", .{});
+        const pictures = try arena.alloc(P.Picture, v.references.len);
+        for (v.references, pictures) |name, *q| {
+            const in = image_in.load(t.env.io, arena, job.dir, name) catch |err| return refuse("an input image could not be read ({s}): send a PNG, JPEG or WebP", .{@errorName(err)});
+            q.* = .{ .rgba = in.rgba, .width = in.width, .height = in.height };
+        }
+        var mask: ?[]const u8 = null;
+        if (v.mask) |name| {
+            const m = image_in.load(t.env.io, arena, job.dir, name) catch |err| return refuse("the mask could not be read ({s}): send a PNG of the first image's size, transparent where the edit goes", .{@errorName(err)});
+            if (m.width != pictures[0].width or m.height != pictures[0].height) return refuse("the mask is {d}x{d}, the first image {d}x{d}: send a mask of the first image's size", .{ m.width, m.height, pictures[0].width, pictures[0].height });
+            mask = m.rgba;
+        }
+        const edit = pictures.len > 0;
+        var width = v.width;
+        var height = v.height;
+        if (edit) {
+            var loaded: [E.max_pictures]E.Size = undefined;
+            for (pictures, loaded[0..pictures.len]) |q, *s| s.* = .{ .w = q.width, .h = q.height };
+            const s = P.Pipeline.editSize(loaded[0..pictures.len], mask != null, width, height) catch return refuse("an input image is empty", .{});
+            width = s.w;
+            height = s.h;
+        }
+        const default: u32 = if (!edit) @intCast(engine.optionInt(t.cfg, "steps", default_steps)) else if (mask != null) E.masked_steps else E.unmasked_steps;
+        const steps = if (v.steps == 0) default else v.steps;
+        const pixels = try t.env.gpa.alloc(u8, @as(usize, width) * height * 3);
         defer t.env.gpa.free(pixels);
         const names = try arena.alloc([]const u8, v.n);
         var bridge: Bridge = .{ .sink = sink };
         for (names, 0..) |*name, i| {
             const seed = v.seed +% i;
-            _ = p.generate(v.prompt, v.width, v.height, steps, seed, pixels, bridge.progress()) catch |err| switch (err) {
-                error.SizeNotMultipleOf32 => return refuse("size {d}x{d}: each side must be a multiple of 32", .{ v.width, v.height }),
-                error.ImageTooLarge => return refuse("{d}x{d} is larger than this model takes: lower size", .{ v.width, v.height }),
-                error.PromptTooLong => return refuse("the prompt is longer than the text encoder takes: shorten it", .{}),
+            const made = if (edit) p.edit(v.prompt, pictures, mask, v.width, v.height, steps, seed, pixels, bridge.progress()) else p.generate(v.prompt, width, height, steps, seed, pixels, bridge.progress());
+            _ = made catch |err| switch (err) {
+                error.SizeNotMultipleOf32 => return refuse("size {d}x{d}: each side must be a multiple of 32", .{ width, height }),
+                error.ImageTooLarge => return refuse("{d}x{d} is larger than this model takes: lower size", .{ width, height }),
+                error.PromptTooLong => return refuse("the prompt (with the input images' tokens) is longer than the text encoder takes: shorten it", .{}),
+                error.PictureTooLarge => return refuse("an input image is too long and thin to edit here: at most about 2:1 (edit_pixels)", .{}),
+                error.PicturesTooLarge => return refuse("the input images together are larger than this model's vision budget: send fewer or squarer images", .{}),
+                error.MaskKeepsEverything => return refuse("the mask has no transparent pixel: make it transparent where the edit goes", .{}),
+                error.MaskResizeTooSmall => return refuse("{d}x{d} is too small to composite a mask onto: send a larger size", .{ width, height }),
+                error.BadPicture, error.BadMask => return refuse("an input image or the mask could not be used: send 8-bit images, the mask of the first image's size", .{}),
+                error.TooManyPictures, error.NoEdits => return refuse("this model edits with 1 to {d} input images", .{maxPictures(t.cfg)}),
                 else => return err,
             };
             name.* = try std.fmt.allocPrint(arena, "{d}.png", .{i});
@@ -236,7 +333,7 @@ const MiniMaxH3Image = struct {
             defer file.close(t.env.io);
             var buf: [64 * 1024]u8 = undefined;
             var fw = file.writer(t.env.io, &buf);
-            try png.encode(&fw.interface, pixels, v.width, v.height, .rgb8, .{ .level = .fastest, .text = &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed_s } }, .marker = .{ .model = t.cfg.id } });
+            try png.encode(&fw.interface, pixels, width, height, .rgb8, .{ .level = .fastest, .text = &.{ .{ .key = "prompt", .value = v.prompt }, .{ .key = "seed", .value = seed_s } }, .marker = .{ .model = t.cfg.id } });
             try fw.interface.flush();
         }
         const ms = start.durationTo(std.Io.Clock.awake.now(t.env.io)).toMilliseconds();
@@ -270,7 +367,7 @@ fn create(env: engine.Env, cfg: *const ToolConfig) anyerror!engine.Engine {
     return .{ .ptr = t, .vtable = &.{ .load = MiniMaxH3Image.load, .generate = MiniMaxH3Image.generate, .unload = MiniMaxH3Image.unload } };
 }
 
-test "sizes: multiples of 32 within the sides and max_pixels; refusals name the limit; edits are refused" {
+test "sizes: multiples of 32 within the sides and max_pixels; refusals name the limit" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const c = try config.parse(arena.allocator(),
@@ -309,9 +406,6 @@ test "sizes: multiples of 32 within the sides and max_pixels; refusals name the 
     why = .fixed(&msg);
     try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .width = 4096, .height = 256 } }, &why));
     try std.testing.expectEqualStrings("model 'h3i' takes sides of 256 to 2048 pixels", why.buffered());
-    why = .fixed(&msg);
-    try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .references = &.{"in.png"} } }, &why));
-    try std.testing.expectEqualStrings("model 'h3i' makes images from text only: send no input images or mask", why.buffered());
     try std.testing.expect(check(c.tool("big").?, &.{ .image = .{ .prompt = "a", .width = 2048, .height = 2048 } }, &why));
 
     var r: Request = .{ .image = .{ .prompt = "a", .width = 0, .height = 0 } };
@@ -332,12 +426,16 @@ test "needs: the weights and the buffers for max_pixels resident, the decode and
         \\           {"id": "big", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pixels": 4194304}},
         \\           {"id": "floor", "kind": "image", "engine": "minimax_h3_image", "options": {"resident_mb": 80000}},
         \\           {"id": "wide", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pixels": 8388608}},
+        \\           {"id": "off", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pictures": 0}},
         \\           {"id": "steps", "kind": "image", "engine": "minimax_h3_image", "options": {"steps": 0}}]}
     );
     const one: Request = .{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } };
     const n = needs(c.tool("h3i").?, &one);
-    // ROCM.md section 4: about 58 GB resident (weights and buffers), a request's decode on top
-    try std.testing.expect(n.resident > 56_000_000_000 and n.resident < 60_000_000_000);
+    // ROCM.md section 4: about 58 GB resident (weights and buffers) for text to image, a request's decode on top; the
+    // buffers for five pictures' edits (the DiT's 20 k rows, the encoder's 6.7 k tokens) add about 6.6 GB
+    const text_only = needs(c.tool("off").?, &one).resident;
+    try std.testing.expect(text_only > 56_000_000_000 and text_only < 60_000_000_000);
+    try std.testing.expect(n.resident > text_only + 6_000_000_000 and n.resident < 68_000_000_000);
     try std.testing.expect(n.working > try P.requestBytes(1024, 1024));
     try std.testing.expect(n.working < 128 << 20);
     try std.testing.expect(needs(c.tool("big").?, &one).resident > n.resident); // the buffers follow max_pixels
@@ -360,5 +458,70 @@ test "the licence is H3-Image's own: hosted services to third parties need MiniM
     try std.testing.expectEqualStrings("MiniMax H3 Image Community License", license.name);
     try std.testing.expect(std.mem.indexOf(u8, license.use, "hosted service to third parties") != null);
     try std.testing.expectEqual(@as(usize, 4), license.excluded_regions.len);
-    try std.testing.expectEqualSlices(engine.Capability, &.{.text_to_image}, entry.capabilities);
+    try std.testing.expectEqualSlices(engine.Capability, &.{ .text_to_image, .image_edit }, entry.capabilities);
+}
+
+test "edits: 1 to max_pictures images, a mask needs one, an edit's size is its own or within edit_pixels" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "h3i", "kind": "image", "engine": "minimax_h3_image"},
+        \\           {"id": "two", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pictures": 2}},
+        \\           {"id": "off", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pictures": 0}}]}
+    );
+    const cfg = c.tool("h3i").?;
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    const five = [_][]const u8{ "a.png", "b.png", "c.png", "d.png", "e.png" };
+    try std.testing.expect(check(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &five } }, &why));
+    try std.testing.expect(check(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = five[0..1], .mask = "m.png" } }, &why));
+    // a whole-scene edit's 2 megapixels are past max_pixels but within edit_pixels
+    try std.testing.expect(check(cfg, &.{ .image = .{ .prompt = "a", .width = 1440, .height = 1440, .references = five[0..1] } }, &why));
+    try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .width = 1440, .height = 1440 } }, &why));
+    why = .fixed(&msg);
+    try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .width = 2048, .height = 2048, .references = five[0..1] } }, &why));
+    try std.testing.expectEqualStrings("model 'h3i' edits to at most 2228224 pixels (width x height)", why.buffered());
+    why = .fixed(&msg);
+    try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .width = 1000, .height = 1024, .references = five[0..1] } }, &why));
+    try std.testing.expectEqualStrings("model 'h3i' takes sides that are multiples of 32: 1000x1024 is not (omit size for the first image's shape)", why.buffered());
+    why = .fixed(&msg);
+    try std.testing.expect(!check(c.tool("two").?, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = five[0..3] } }, &why));
+    try std.testing.expectEqualStrings("model 'two' edits with 1 to 2 input images: 3 were sent", why.buffered());
+    why = .fixed(&msg);
+    try std.testing.expect(!check(c.tool("off").?, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = five[0..1] } }, &why));
+    try std.testing.expectEqualStrings("model 'off' makes images from text only here (max_pictures is 0): send no input images or mask", why.buffered());
+    why = .fixed(&msg);
+    try std.testing.expect(!check(cfg, &.{ .image = .{ .prompt = "a", .mask = "m.png" } }, &why));
+    try std.testing.expectEqualStrings("a mask needs an input image to edit", why.buffered());
+    // an edit without a size keeps 0 x 0 for the first image's shape; text to image gets default_size
+    var r: Request = .{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = five[0..1] } };
+    engine.fill(cfg, &r);
+    try std.testing.expectEqual([2]u32{ 0, 0 }, [2]u32{ r.image.width, r.image.height });
+}
+
+test "edit needs: the vision tower, the encoder, the references and the composite on top of a decode (estimates)" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try config.parse(arena.allocator(),
+        \\{"tools": [{"id": "h3i", "kind": "image", "engine": "minimax_h3_image"},
+        \\           {"id": "off", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pictures": 0}},
+        \\           {"id": "pics", "kind": "image", "engine": "minimax_h3_image", "options": {"max_pictures": 6}}]}
+    );
+    const cfg = c.tool("h3i").?;
+    const t2i = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } });
+    const one = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &.{"a.png"}, .mask = "m.png" } });
+    const five = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &.{ "a", "b", "c", "d", "e" } } });
+    try std.testing.expect(one.working > t2i.working);
+    try std.testing.expect(five.working > one.working);
+    // the vision tower and the VAE encoder load per request: at least their weights and buffers
+    try std.testing.expect(one.working > h3.vae_video_enc.Encoder.deviceBytes(1024, 2048));
+    try std.testing.expect(one.working > h3.te_vision.VisionEncoder.deviceBytes(128 * 64));
+    try std.testing.expect(five.working < 8 << 30);
+    // the buffers for edits: the edit's text, references and target rows resident; none with max_pictures 0
+    try std.testing.expect(t2i.resident > needs(c.tool("off").?, &.{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } }).resident);
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    try std.testing.expect(validate(cfg, 90 << 30, &why));
+    try std.testing.expect(!validate(c.tool("pics").?, 0, &why));
+    try std.testing.expectEqualStrings("tool 'pics': options.max_pictures is 6; it takes 0 to 5", why.buffered());
 }

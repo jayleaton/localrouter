@@ -219,6 +219,12 @@ pub const Dit = struct {
     cond_bufs: [2]?gpu.DeviceBuffer = .{ null, null },
     cond_hw: ?[2]u32 = null,
     text_tags: []u8 = &.{},
+    // H3-Image's reference pictures (`imageRefs`): their embeddings bf16 [rows, D], held for the run (`releaseRefs`)
+    ref_buf: ?gpu.DeviceBuffer = null,
+    ref_shapes: [lay.max_refs][2]u32 = undefined,
+    n_refs: u32 = 0,
+    image_key: ?[3 + 2 * lay.max_refs]u32 = null,
+    image_idx_key: ?[4 + 2 * lay.max_refs]u32 = null,
     // per step
     h: u64 = 0,
     hn: u64 = 0,
@@ -316,6 +322,7 @@ pub const Dit = struct {
         x.step_graphs.deinit(x.gpa);
         x.gpa.free(x.idx_host);
         x.gpa.free(x.text_tags);
+        if (x.ref_buf) |*b| b.free();
         for (&x.cond_bufs) |*slot| if (slot.*) |*b| b.free();
         for (x.bufs.items) |*b| b.free();
         x.bufs.deinit(x.gpa);
@@ -502,6 +509,7 @@ pub const Dit = struct {
         if (l > x.max_l) return error.PromptTooLong;
         x.cond_hw = null;
         x.layout_key = null;
+        x.releaseRefs();
         x.gpa.free(x.text_tags);
         x.text_tags = &.{};
         const L: u64 = l;
@@ -583,6 +591,93 @@ pub const Dit = struct {
         x.layout_key = null;
     }
 
+    /// An H3-Image reference: its normalized fp32 latent [24, 1, h, w] on the device (even h, w).
+    pub const Ref = struct { z: u64, h: u32, w: u32 };
+
+    /// After prepare (H3-Image edits, `initImage`): each reference's rows patchified in fp32 with the condition noise
+    /// 0.999 r + 0.001 noise (the portable stream restarted at `seed` for each, in place of ComfyUI's CPU torch.randn
+    /// at the sampler's seed), through video_patch_proj (fp32) and rounded to bf16, once; `tags` are the expanded text's
+    /// modality tags. Held for the run's steps (`releaseRefs`; `prepare` releases them). The twin's `prepare(refs=...)`.
+    pub fn imageRefs(x: *Dit, refs: []const Ref, seed: u64, tags: []const u8) !void {
+        if (!x.attn_bf16 or x.k.image == null) return error.NotAnImageDit;
+        if (refs.len > lay.max_refs) return error.TooManyReferences;
+        if (tags.len != x.ctx_rows) return error.BadCondition;
+        for (tags) |tag| if (tag > 1) return error.BadCondition;
+        x.releaseRefs();
+        var total: u64 = 0;
+        var most: u64 = 0;
+        for (refs) |r| {
+            if (r.h == 0 or r.w == 0 or r.h % 2 != 0 or r.w % 2 != 0) return error.BadReferenceShape;
+            const rows = @as(u64, r.h / 2) * (r.w / 2);
+            total += rows;
+            most = @max(most, rows);
+        }
+        if (total + x.ctx_rows > x.max_s) return error.ImageTooLarge;
+        const owned = try x.gpa.dupe(u8, tags);
+        errdefer x.gpa.free(owned);
+        var eb = try gpu.DeviceBuffer.alloc(x.d, @intCast(@max(total * dim * 2, 256)));
+        errdefer {
+            x.s.synchronize() catch {};
+            eb.free();
+        }
+        var rb = try gpu.DeviceBuffer.alloc(x.d, @intCast(@max(most * 96 * 4, 256)));
+        defer {
+            x.s.synchronize() catch {};
+            rb.free();
+        }
+        var nbuf = try gpu.DeviceBuffer.alloc(x.d, @intCast(@max(most * 96 * 4, 256)));
+        defer {
+            x.s.synchronize() catch {};
+            nbuf.free();
+        }
+        const host = try x.gpa.alloc(f32, @intCast(most * 96));
+        defer x.gpa.free(host);
+        const e = try eb.at(0);
+        const cr = try rb.at(0);
+        const np = try nbuf.at(0);
+        var off: u64 = 0;
+        var nb: [32]u8 = undefined;
+        for (refs, 0..) |r, j| {
+            const rows = @as(u64, r.h / 2) * (r.w / 2);
+            const n = rows * 96;
+            qi.noise.fill(seed, host[0..@intCast(n)]);
+            try x.upload(np, std.mem.sliceAsBytes(host[0..@intCast(n)]));
+            const cn = try std.fmt.bufPrint(&nb, "ref{d}.cond_rows", .{j});
+            try x.pre(cn, &.{ .{ .role = "z", .ptr = r.z, .bytes = n * 4 }, .{ .role = "noise", .ptr = np, .bytes = n * 4 } });
+            try x.k.h3.conditionRows(x.s, r.z, np, cr, r.h, r.w);
+            try x.post(cn, &.{.{ .role = "y", .ptr = cr, .bytes = n * 4 }});
+            try x.gemmF32(try std.fmt.bufPrint(&nb, "ref{d}.patch_proj", .{j}), cr, x.w.vp_w, x.w.vp_b, x.emb, rows, dim, 96);
+            try x.k.h3.toBf16(x.s, x.emb, e + off * dim * 2, rows * dim);
+            x.ref_shapes[j] = .{ r.h, r.w };
+            off += rows;
+        }
+        try x.s.synchronize();
+        x.gpa.free(x.text_tags);
+        x.text_tags = owned;
+        x.ref_buf = eb;
+        x.n_refs = @intCast(refs.len);
+        x.image_key = null;
+        x.image_idx_key = null;
+    }
+
+    /// Frees the references (`imageRefs`) once the steps that read them are done; the stream is synchronized first.
+    pub fn releaseRefs(x: *Dit) void {
+        x.n_refs = 0;
+        x.image_key = null;
+        x.image_idx_key = null;
+        if (x.ref_buf) |*b| {
+            x.s.synchronize() catch {};
+            b.free();
+            x.ref_buf = null;
+        }
+    }
+
+    /// The device bytes `imageRefs` holds for references of `rows` DiT rows in all (and its temporaries, at most
+    /// `most_rows` for one).
+    pub fn refBytes(rows: u64, most_rows: u64) u64 {
+        return rows * dim * 2 + 2 * most_rows * 96 * 4;
+    }
+
     // ------------------------------------------------------------------ one step
     /// video bf16 [24, T, H, W] and the sampler's carried audio bf16 [32, 2, A] at `sigma` -> the velocities ComfyUI
     /// returns (negated; the audio back on the carry), into `vel_v` / `vel_a`. Host work a step repeats is cached per
@@ -640,65 +735,78 @@ pub const Dit = struct {
     }
 
     /// H3-Image (`initImage`): the target latent bf16 [24, 1, h, w] at PDD step `st` -> the velocity ComfyUI returns
-    /// (negated), bf16 [24, 1, h, w], into `vel` (`MiniMaxH3ImageModel._forward`). [text | target], no audio and no carry;
-    /// the text and the target at `st.t`; the final layer's head is the step's mix of the PDD bank (fp32, `sampler.mix`'s
-    /// order) feeding the fp32 head GEMM. The RoPE table and the modulation-row map are cached per layout as in `step`;
-    /// eager (no step graph).
+    /// (negated), bf16 [24, 1, h, w], into `vel` (`MiniMaxH3ImageModel._forward`). [text | references | target]
+    /// (`lay.ImageLayout`; the references are `imageRefs`', none for text to image), no audio and no carry; the text and
+    /// the target at `st.t`, the references at max(t, 0.999); the final layer modulates the target with its own row and
+    /// its head is the step's mix of the PDD bank (fp32, `sampler.mix`'s order) feeding the fp32 head GEMM. The RoPE
+    /// table and the modulation-row map are cached per layout; eager (no step graph).
     pub fn stepImage(x: *Dit, latent: u64, st: pdd.Step, h: u32, w: u32, vel: u64) !void {
         const im = x.k.image orelse return error.NotAnImageDit;
         if (x.w.heads != pdd.max_heads or !x.attn_bf16) return error.NotAnImageDit;
         if (h == 0 or w == 0 or h % 2 != 0 or w % 2 != 0) return error.BadImageShape;
         const L = x.ctx_rows;
-        const ly = lay.Layout.init(L, 1, h, w, 0);
+        const ly = try lay.ImageLayout.init(L, h, w, x.ref_shapes[0..x.n_refs]);
         if (ly.s > x.max_s) return error.ImageTooLarge;
-        const key: [6]u32 = .{ L, 1, h, w, 0, 0 };
-        if (x.layout_key == null or !std.mem.eql(u32, &x.layout_key.?, &key)) {
+        const key = ly.key();
+        if (x.image_key == null or !std.mem.eql(u32, &x.image_key.?, &key)) {
             const pos = try x.gpa.alloc([3]f64, ly.s);
             defer x.gpa.free(pos);
             ly.positions(pos);
             const table = try x.gpa.alloc(u16, @as(usize, ly.s) * 48 * 4);
             defer x.gpa.free(table);
-            ly.ropeTable(pos, &x.w.inv_freq, table);
+            lay.ropeRows(pos, &x.w.inv_freq, table);
             try x.upload(x.rope, std.mem.sliceAsBytes(table));
-            x.layout_key = key;
+            x.image_key = key;
+            x.image_idx_key = null;
+            x.layout_key = null; // the video layouts' cache no longer describes the table
             x.idx_key = null;
         }
-        var unique: [1]f32 = undefined;
-        try lay.imageModRows(ly, st.t, x.text_tags, &unique, x.idx_host[0..ly.s]);
-        var temb: [t_dim]f32 = undefined;
-        lay.curveTEmb(x.w.table, grid, t_dim, &unique, &temb);
-        const ik: [9]u32 = .{ L, 1, h, w, 0, 0, 0, 0, std.math.maxInt(u32) }; // the last entry marks an image's map
-        if (x.idx_key == null or !std.mem.eql(u32, &x.idx_key.?, &ik)) {
+        var unique: [2]f32 = undefined;
+        const mr = try ly.modRows(st.t, x.text_tags, &unique, x.idx_host[0..ly.s]);
+        var temb: [2 * t_dim]f32 = undefined;
+        lay.curveTEmb(x.w.table, grid, t_dim, unique[0..mr.m], temb[0 .. mr.m * t_dim]);
+        var ik: [4 + 2 * lay.max_refs]u32 = undefined;
+        @memcpy(ik[0 .. 3 + 2 * lay.max_refs], &key);
+        ik[3 + 2 * lay.max_refs] = mr.m * 2 + mr.row_t; // the map depends on t only through these
+        if (x.image_idx_key == null or !std.mem.eql(u32, &x.image_idx_key.?, &ik)) {
             try x.uploadAsync(x.idx, std.mem.sliceAsBytes(x.idx_host[0..ly.s]));
-            x.idx_key = ik;
+            x.image_idx_key = ik;
         }
-        try x.uploadAsync(x.t_emb, std.mem.sliceAsBytes(&temb));
+        try x.uploadAsync(x.t_emb, std.mem.sliceAsBytes(temb[0 .. mr.m * t_dim]));
 
         const S: u64 = ly.s;
+        const m: u64 = mr.m;
         const nv: u64 = @as(u64, h / 2) * (w / 2);
         const nx: u64 = 24 * @as(u64, h) * w;
-        const vr = ly.videoRows();
+        const vr = ly.targetRows();
+        const rs = ly.refSpan();
         try x.markBegin();
         try x.pre("video_rows", &.{.{ .role = "x", .ptr = latent, .bytes = nx * 2 }});
         try x.k.h3.patchify(x.s, latent, x.rows, 24, 1, h, w);
         try x.post("video_rows", &.{.{ .role = "y", .ptr = x.rows, .bytes = nv * 96 * 4 }});
         try x.gemmF32("video_patch_proj", x.rows, x.w.vp_w, x.w.vp_b, x.emb, nv, dim, 96);
-        try x.k.ops.copyRows(x.s, x.h, x.context, L, dim * 2, dim * 2, dim * 2); // [text | target]
+        try x.k.ops.copyRows(x.s, x.h, x.context, L, dim * 2, dim * 2, dim * 2); // [text | refs | target]
         x.extra_launches += 1;
+        if (rs[1] > rs[0]) {
+            const e = try x.ref_buf.?.at(0);
+            try x.k.ops.copyRows(x.s, x.h + @as(u64, rs[0]) * dim * 2, e, rs[1] - rs[0], dim * 2, dim * 2, dim * 2);
+            x.extra_launches += 1;
+        }
         try x.k.h3.toBf16(x.s, x.emb, x.h + @as(u64, vr[0]) * dim * 2, nv * dim);
         try x.markEnd(.embed);
 
         if (x.fuse and x.probe == null) {
-            try x.blocksFused(S, 1);
+            try x.blocksFused(S, m);
         } else {
-            for (&x.w.blocks, 0..) |*b, i| try x.block(i, b, S, 1);
+            for (&x.w.blocks, 0..) |*b, i| try x.block(i, b, S, m);
         }
 
         try x.markBegin();
-        try x.gemmF32("final.adaln", x.t_emb, x.w.fl_ada_w, x.w.fl_ada_b, x.fada, 1, 2 * dim, t_dim);
+        try x.gemmF32("final.adaln", x.t_emb, x.w.fl_ada_w, x.w.fl_ada_b, x.fada, m, 2 * dim, t_dim);
         const hv = x.h + @as(u64, vr[0]) * dim * 2;
+        const shift = x.fada + @as(u64, mr.row_t) * 2 * dim * 4;
         try x.pre("final.mod_video", &.{.{ .role = "x", .ptr = hv, .bytes = nv * dim * 2 }});
-        try x.k.h3.finalMod(x.s, hv, x.w.fl_norm, x.fada + dim * 4, x.fada, x.emb, nv, dim, eps);
+        try x.k.h3.finalMod(x.s, hv, x.w.fl_norm, shift + dim * 4, shift, x.emb, nv, dim, eps);
         try x.post("final.mod_video", &.{.{ .role = "y", .ptr = x.emb, .bytes = nv * dim * 4 }});
         try x.pre("final.pdd_mix", &.{});
         try im.headMix(x.s, x.w.vo_w, x.head_w, 96 * dim, st);
