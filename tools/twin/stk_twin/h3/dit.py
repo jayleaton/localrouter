@@ -44,6 +44,48 @@ def fused() -> bool:
     return not REC.on and os.environ.get("STK_H3_REF", "") != "1"
 
 
+class GpuOps:
+    """The kernels the DiT runs on (the default, and the only GPU path): LocalRouter's H3 ops (`H.mod()`), its bf16 GEMM
+    and attention, kitchen's split-half RMS RoPE, with bf16 activations. A model built with another provider (the CPU
+    reference of `stk_twin.h3i.cpu_ops`, for the structure gates without a GPU) calls the same five names."""
+
+    act = torch.bfloat16
+
+    @staticmethod
+    def mod():
+        return H.mod()
+
+    @staticmethod
+    def gemm_bf16(a, b, bias=None):
+        return tops.gemm_bf16(a, b, bias)
+
+    @staticmethod
+    def attention(q, k, v):
+        return bf16_attention(q, k, v)
+
+    @staticmethod
+    def rms_rope_split_half_(q, k, freqs, qw, kw, eps, rot_dim):
+        from .kitchen import rms_rope_split_half_
+
+        return rms_rope_split_half_(q, k, freqs, qw, kw, eps, rot_dim)
+
+
+GPU = GpuOps()
+
+
+def rope_rotation(pos: np.ndarray, inv_freq: np.ndarray, dtype=torch.bfloat16) -> torch.Tensor:
+    """[1, S, 1, 48, 2, 2]: ComfyUI's rope_rotation_table of the fp32 angles pos [S, 3] (fp64, cast to fp32) * inv_freq
+    [16] per axis, cos / sin by LocalRouter's portable sincos (in f64 of the fp32 angle, rounded to fp32), then `dtype`."""
+    S = pos.shape[0]
+    ang = (pos.astype(F32)[:, :, None] * inv_freq.astype(F32)[None, None, :]).reshape(S, -1)
+    c = np.empty_like(ang)
+    s = np.empty_like(ang)
+    for idx, a in np.ndenumerate(ang):
+        s[idx], c[idx] = sincos(float(a))
+    table = np.stack([c, -s, s, c], -1).reshape(1, S, 1, ang.shape[1], 2, 2)
+    return torch.from_numpy(table).to(dtype)
+
+
 # ------------------------------------------------------------------------------------------------ host-side scalars
 def f32(x) -> np.float32:
     return np.float32(x)
@@ -136,13 +178,7 @@ class Layout:
     def rope_table(self, inv_freq: np.ndarray) -> torch.Tensor:
         """[1, S, 1, 48, 2, 2] bf16: ComfyUI's rope_rotation_table of the fp32 angles pos * inv_freq, cos / sin by the
         LocalRouter's portable sincos (in f64 of the fp32 angle, rounded to fp32), then bf16."""
-        ang = (self.pos.astype(F32)[:, :, None] * inv_freq.astype(F32)[None, None, :]).reshape(self.S, 48)
-        c = np.empty_like(ang)
-        s = np.empty_like(ang)
-        for idx, a in np.ndenumerate(ang):
-            s[idx], c[idx] = sincos(float(a))
-        table = np.stack([c, -s, s, c], -1).reshape(1, self.S, 1, 48, 2, 2)
-        return torch.from_numpy(table).to(torch.bfloat16)
+        return rope_rotation(self.pos, inv_freq)
 
     def mod_rows(self, t_v: float, t_a: float) -> tuple[list[float], np.ndarray, int, int]:
         """unique timesteps, the int32 [S] modulation row of every token (t_row * 3 + tag: video 0, text 1,
@@ -163,10 +199,13 @@ class Layout:
 # ------------------------------------------------------------------------------------------------ the model
 class H3Dit:
     """The DiT on device: `prepare(context)` once a run (condition_proj + token refiner), `__call__(video, audio,
-    sigma)` once a step."""
+    sigma)` once a step. `ops`: the kernel provider (`GpuOps`, the default)."""
+
+    D, HEADS = D, HEADS              # model width and attention heads (head dim HD); the image twin's gates shrink them
 
     def __init__(self, w: dict[str, torch.Tensor], kind: str = "bf16", attn: str = "bf16", acts: dict | None = None,
-                 device="cuda", lins: dict | None = None):
+                 device="cuda", lins: dict | None = None, ops=None):
+        self.ops = ops or GPU
         self.dev, self.kind, self.attn = torch.device(device), kind, attn
         g = lambda k, dt=None: (w[k] if dt is None else w[k].to(dt)).to(self.dev).contiguous()
         self.table = w["adaln_t_table"].float().cpu().numpy()
@@ -224,7 +263,7 @@ class H3Dit:
 
     def _linear(self, wt: torch.Tensor, act: float | None):
         if self.kind == "bf16":
-            return wt.to(self.dev, torch.bfloat16).contiguous()
+            return wt.to(self.dev, self.ops.act).contiguous()
         if self.kind == "nvfp4":
             from tfvideo.linear import Nvfp4Linear
 
@@ -235,7 +274,7 @@ class H3Dit:
 
     def lin(self, name: str, lin, x: torch.Tensor) -> torch.Tensor:
         with REC.op(name, "linear", {"kind": self.kind}, x=x) as o:
-            y = tops.gemm_bf16(x, lin) if self.kind == "bf16" else lin(x.contiguous())
+            y = self.ops.gemm_bf16(x, lin) if self.kind == "bf16" else lin(x.contiguous())
             o.out(y=y)
         return y
 
@@ -252,27 +291,27 @@ class H3Dit:
         self.text_tags = None if text_tags is None else np.asarray(text_tags, dtype=np.int32)
         if self.text_tags is not None and (self.text_tags.shape != (text.shape[1],) or not np.isin(self.text_tags, [0, 1]).all()):
             raise ValueError("text_tags must have one video/text tag per expanded text row")
-        x = text[0].to(self.dev, torch.bfloat16).contiguous()
+        x = text[0].to(self.dev, self.ops.act).contiguous()
         with REC.op("refiner.condition_proj", "linear", {"kind": "bf16"}, x=x) as o:
-            x = tops.gemm_bf16(x, r["condition_proj.weight"], r["condition_proj.bias"])
+            x = self.ops.gemm_bf16(x, r["condition_proj.weight"], r["condition_proj.bias"])
             o.out(y=x)
         L = x.shape[0]
         for i in range(2):
             p = f"token_refiner.blocks.{i}."
             n = self._rms(f"refiner.{i}.norm1", x, r[p + "norm1.weight"])
             qkv = self._gemm(f"refiner.{i}.qkv", n, r[p + "attn.qkv_proj.weight"])
-            q, k, v = (t.contiguous().view(L, HEADS, HD) for t in qkv.split(HEADS * HD, dim=-1))
+            q, k, v = (t.contiguous().view(L, self.HEADS, HD) for t in qkv.split(self.HEADS * HD, dim=-1))
             q = self._rms(f"refiner.{i}.q_norm", q, r[p + "attn.q_norm.weight"])
             k = self._rms(f"refiner.{i}.k_norm", k, r[p + "attn.k_norm.weight"])
             with REC.op(f"refiner.{i}.attention", "attention", {"impl": "bf16"}, q=q, k=k, v=v) as o:
-                a = bf16_attention(q, k, v)
+                a = self.ops.attention(q, k, v)
                 o.out(y=a)
             a = self._gemm(f"refiner.{i}.out", a.view(L, -1), r[p + "attn.out_proj.weight"])
             x = self._add(f"refiner.{i}.attn_residual", a, x)
             n = self._rms(f"refiner.{i}.norm2", x, r[p + "norm2.weight"])
             gu = self._gemm(f"refiner.{i}.fc1", n, r[p + "mlp.fc1.weight"])
             with REC.op(f"refiner.{i}.swiglu", "silu_mul_split", {}, x=gu) as o:
-                m = H.mod().k_silu_mul_split(gu)
+                m = self.ops.mod().k_silu_mul_split(gu)
                 o.out(y=m)
             m = self._gemm(f"refiner.{i}.fc2", m, r[p + "mlp.fc2.weight"])
             x = self._add(f"refiner.{i}.mlp_residual", m, x)
@@ -285,25 +324,25 @@ class H3Dit:
                 raise ValueError("first_frame must be normalized [1,24,1,H,W] with even latent sides")
             n = torch.from_numpy(noise(seed, z.numel())).to(self.dev).contiguous()
             with REC.op("cond_rows", "condition_rows", {"seed": seed, "aug": VISUAL_COND_TIMESTEP}, z=z, noise=n) as o:
-                self.cond_rows = H.mod().k_cond_rows(z, n, VISUAL_COND_TIMESTEP)
+                self.cond_rows = self.ops.mod().k_cond_rows(z, n, VISUAL_COND_TIMESTEP)
                 o.out(y=self.cond_rows)
         return self.context
 
     def _rms(self, name, x, w):
         with REC.op(name, "rms_norm", {"eps": EPS}, x=x) as o:
-            y = H.mod().k_rms_norm(x.contiguous(), w, EPS)
+            y = self.ops.mod().k_rms_norm(x.contiguous(), w, EPS)
             o.out(y=y)
         return y
 
     def _gemm(self, name, x, wt, bias=None):
         with REC.op(name, "linear", {"kind": "bf16"}, x=x) as o:
-            y = tops.gemm_bf16(x, wt, bias)
+            y = self.ops.gemm_bf16(x, wt, bias)
             o.out(y=y)
         return y
 
     def _add(self, name, a, b):
         with REC.op(name, "add", {}, x=a, z=b) as o:
-            y = H.mod().k_add(a, b)
+            y = self.ops.mod().k_add(a, b)
             o.out(y=y)
         return y
 
@@ -322,7 +361,7 @@ class H3Dit:
     def __call__(self, video: torch.Tensor, audio: torch.Tensor, sigma: float) -> tuple[torch.Tensor, torch.Tensor]:
         """video bf16 [1, 24, T, H, W], audio bf16 [1, 32, 2, A] (the sampler's carried audio), sigma (fp32 value)
         -> (video velocity, audio velocity) bf16, negated as ComfyUI returns them, the audio back on the carry."""
-        m = H.mod()
+        m = self.ops.mod()
         sc = step_scalars(sigma)
         _, _, T, Hh, Ww = video.shape
         A = audio.shape[-1]
@@ -347,8 +386,8 @@ class H3Dit:
         pieces = [self.context]
         if self.cond_rows is not None:
             ce = self._gemm32("cond_patch_proj", self.cond_rows, self.side["video_patch_proj.weight"], self.side["video_patch_proj.bias"])
-            pieces.append(ce.to(torch.bfloat16))
-        h = torch.cat(pieces + [ae.to(torch.bfloat16), ve.to(torch.bfloat16)]).contiguous()
+            pieces.append(ce.to(self.ops.act))
+        h = torch.cat(pieces + [ae.to(self.ops.act), ve.to(self.ops.act)]).contiguous()
 
         if fused():
             h = self.blocks_fused(h, t_emb, idx, lay.S)
@@ -359,7 +398,7 @@ class H3Dit:
         # final layer: fp32 curve modulation of each target segment, fp32 heads, negated, back to the latents
         ada = self._gemm32("final.adaln", t_emb, self.side["final_layer.adaln_proj.linear.weight"],
                            self.side["final_layer.adaln_proj.linear.bias"])
-        shift, scale = ada[:, :D], ada[:, D:]
+        shift, scale = ada[:, :self.D], ada[:, self.D:]
         (a0, a1), (v0, v1) = lay.audio_rows, lay.video_rows
         with REC.op("final.mod_video", "final_mod", {"row": row_v}, x=h[v0:v1]) as o:
             fv = m.k_final_mod(h[v0:v1].contiguous(), self.side["final_layer.norm.weight"], scale[row_v].contiguous(),
@@ -384,32 +423,32 @@ class H3Dit:
 
     def _gemm32(self, name, x, wt, bias):
         with REC.op(name, "gemm_f32", {}, x=x) as o:
-            y = H.mod().k_gemm_f32(x.contiguous(), wt, bias)
+            y = self.ops.mod().k_gemm_f32(x.contiguous(), wt, bias)
             o.out(y=y)
         return y
 
     def block(self, i: int, b: dict, x: torch.Tensor, t_emb: torch.Tensor, idx: torch.Tensor, S: int) -> torch.Tensor:
-        m, p = H.mod(), f"L{i}"
-        mod = self._gemm32(f"{p}.adaln", t_emb, b["ada_w"], b["ada_b"]).view(-1, 6, D).contiguous()  # [M*3, 6, D]
+        m, p, NH = self.ops.mod(), f"L{i}", self.HEADS
+        mod = self._gemm32(f"{p}.adaln", t_emb, b["ada_w"], b["ada_b"]).view(-1, 6, self.D).contiguous()  # [M*3, 6, D]
         h = torch.empty_like(x)
         with REC.op(f"{p}.norm_mod1", "norm_mod", {"part": 0, "eps": EPS}, x=x, mod=mod, idx=idx) as o:
             m.k_norm_mod(x, b["norm1"], mod, idx, h, 0, EPS)
             o.out(y=h)
         qkv = self.lin(f"{p}.qkv", b["qkv"], h)                                   # [S, 3 * 7168]
-        q = qkv[:, : HEADS * HD].view(1, S, HEADS, HD)
-        k = qkv[:, HEADS * HD: 2 * HEADS * HD].view(1, S, HEADS, HD)
-        v = qkv[:, 2 * HEADS * HD:].view(S, HEADS, HD)
-        from .kitchen import int8_attention, rms_rope_split_half_
+        q = qkv[:, : NH * HD].view(1, S, NH, HD)
+        k = qkv[:, NH * HD: 2 * NH * HD].view(1, S, NH, HD)
+        v = qkv[:, 2 * NH * HD:].view(S, NH, HD)
+        from .kitchen import int8_attention
 
         with REC.op(f"{p}.rms_rope", "rms_rope", {"eps": EPS, "rot_dim": 96}, qkv=qkv) as o:
-            rms_rope_split_half_(q, k, self._rope, b["q_norm"], b["k_norm"], EPS, 96)
+            self.ops.rms_rope_split_half_(q, k, self._rope, b["q_norm"], b["k_norm"], EPS, 96)
             o.out(qkv=qkv)
         with REC.op(f"{p}.attention", "attention", {"impl": self.attn}, qkv=qkv) as o:
             if self.attn == "int8":
                 qh, kh, vh = (t.transpose(0, 1).unsqueeze(0) for t in (q[0], k[0], v))
-                att = int8_attention(qh, kh, vh)[0].transpose(0, 1).reshape(S, HEADS * HD)
+                att = int8_attention(qh, kh, vh)[0].transpose(0, 1).reshape(S, NH * HD)
             else:
-                att = bf16_attention(q[0].contiguous(), k[0].contiguous(), v.contiguous()).view(S, HEADS * HD)
+                att = self.ops.attention(q[0].contiguous(), k[0].contiguous(), v.contiguous()).view(S, NH * HD)
             att = att.contiguous()
             o.out(y=att)
         out = self.lin(f"{p}.out", b["out"], att)
@@ -435,23 +474,23 @@ class H3Dit:
         a gate_add and the norm_mod right after it (the same block's gate_add1 + norm_mod2, or a block's gate_add2 + the
         next block's norm_mod1, each under its own block's modulation) are one kernel, and the INT8 attention stores
         rows. The next block's adaln runs before that fused kernel (it reads no activation). Nothing is recorded."""
-        from .kitchen import int8_attention_rows, rms_rope_split_half_
+        from .kitchen import int8_attention_rows
 
-        m, bl = H.mod(), self.blocks
-        adaln = lambda i: self._gemm32(f"L{i}.adaln", t_emb, bl[i]["ada_w"], bl[i]["ada_b"]).view(-1, 6, D).contiguous()
+        m, bl, NH = self.ops.mod(), self.blocks, self.HEADS
+        adaln = lambda i: self._gemm32(f"L{i}.adaln", t_emb, bl[i]["ada_w"], bl[i]["ada_b"]).view(-1, 6, self.D).contiguous()
         mod = adaln(0)
         h = torch.empty_like(x)
         m.k_norm_mod(x, bl[0]["norm1"], mod, idx, h, 0, EPS)
         for i, b in enumerate(bl):
             qkv = self.lin(f"L{i}.qkv", b["qkv"], h)
-            q = qkv[:, : HEADS * HD].view(1, S, HEADS, HD)
-            k = qkv[:, HEADS * HD: 2 * HEADS * HD].view(1, S, HEADS, HD)
-            v = qkv[:, 2 * HEADS * HD:].view(S, HEADS, HD)
-            rms_rope_split_half_(q, k, self._rope, b["q_norm"], b["k_norm"], EPS, 96)
+            q = qkv[:, : NH * HD].view(1, S, NH, HD)
+            k = qkv[:, NH * HD: 2 * NH * HD].view(1, S, NH, HD)
+            v = qkv[:, 2 * NH * HD:].view(S, NH, HD)
+            self.ops.rms_rope_split_half_(q, k, self._rope, b["q_norm"], b["k_norm"], EPS, 96)
             if self.attn == "int8":
                 att = int8_attention_rows(*(t.transpose(0, 1).unsqueeze(0) for t in (q[0], k[0], v)))
             else:
-                att = bf16_attention(q[0].contiguous(), k[0].contiguous(), v.contiguous()).view(S, HEADS * HD).contiguous()
+                att = self.ops.attention(q[0].contiguous(), k[0].contiguous(), v.contiguous()).view(S, NH * HD).contiguous()
             out = self.lin(f"L{i}.out", b["out"], att)
             m.k_gate_add_norm_mod_(x, out, mod, mod, idx, b["norm2"], h, 0, 1, EPS)
             y = self.lin(f"L{i}.fc2", b["fc2"], m.k_swiglu(self.lin(f"L{i}.fc1", b["fc1"], h)))
