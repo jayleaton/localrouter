@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- MiniMax H3: portrait. The limit is a frame's area (`max_pixels`) and the long side (`max_side`, the model's 1344), not a
+  width and a height, so one config takes landscape and 9:16 portrait with the same load-time buffers; a frame past
+  `max_pixels` (up to the canvas's 768x1344 area) is taken for a clip short enough to fit them, and its refusal names
+  that length. The video VAE's per-decode scratch follows the frame's area and width: on Jarvis at most 486 MiB
+  (1344x768) against 445 MiB for 1280x704 at 8 s, inside its booking. A first frame whose canvas leaves the prompt no
+  text tokens is refused before loading. A config of `max_width` / `max_height` gets their product and keeps that
+  size as its default. The DiT's audio scratch is sized from the audio latents, not the sequence: a small budget's
+  could overrun. Jarvis: 1280x704 or 704x1248 for 8 s, 768x1344 for up to 6 s. The booking is the weights plus the
+  buffers the limits allocate (`resident_mb` is a floor), and a request adds its decode and first-frame scratch, so a
+  larger `max_pixels` or `max_seconds` books what it takes. Limits outside the API's (2048 a side, 20 s) or whose
+  largest clip exceeds the memory budget stop the daemon at start, and the default size keeps within 2048 a side.
+- Video from a `cmd` worker: Wan 2.2 TI2V-5B (`tools/video/wan`, Apache-2.0, Diffusers on CUDA), text and image to
+  video at 24 fps without audio, sized for a 16 GB consumer card (transformer stored in fp8, one large module on the
+  GPU at a time). On an RTX 5070 Ti through WSL2: a 5 s 704x1280 clip from a first frame in about 25 min at 50 steps,
+  10.7 GiB of GPU memory. A `cmd` video tool now declares `max_pixels`, `max_side`, `size_multiple`, `default_size`,
+  `max_seconds` and `fps`, checked before it loads (`engine.checkVideo`) and listed in `/v1/models` and `list_models`
+  as `video`. A `cmd` video tool may declare `"audio": false`; a request's `audio` is now optional and means the model's
+  own when omitted, so a model without audio is not refused by callers that leave it out, and `audio: true` to it is.
+  Setting up such a desktop (WSL2, systemd, a keepalive task, `tailscale serve`, pairing): docs/dev/DESKTOP.md.
 - 3D assets: a new kind, `asset3d`, with capability `image_to_3d`. `POST /v1/assets3d` (an image; `input_mode`
   synthetic or real, `format` ply, `seed`, `steps`, `guidance`, `num_gaussians`, `wait_s`) runs an async job
   (`GET /v1/assets3d/{id}`, `/content`, `DELETE`; `DELETE /v1/jobs/{id}` cancels any job); the result is a Gaussian

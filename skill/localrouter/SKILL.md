@@ -31,8 +31,8 @@ stdio-only clients `npx -y mcp-remote http://<host>:8190/mcp --allow-http`.
 3. If a model's `capabilities` include `image_edit`: `edit_image` with `prompt` (the change: "make it night") and
    `image` (base64, a data URL, or the URL `generate_image` returned); omit `size` to keep the input's shape. `mask`
    (a PNG of the image's size, transparent where the edit goes) keeps the rest. Returns the PNG as `generate_image` does.
-4. If `list_models` shows a video model: `generate_video` with `prompt` (and `size`, `seconds`, `seed`): waits up to `wait_s` (600) and returns the MP4's
-   URL, or a job id; then `get_job` with `wait_s` until `status` is `completed`. With `image_to_video` in its
+4. If `list_models` shows a video model: `generate_video` with `prompt` (and `size`, `seconds`, `seed`; for 9:16 portrait send
+   a portrait `size` such as `704x1248`, multiples of 32): waits up to `wait_s` (600) and returns the MP4's URL, or a job id; then `get_job` with `wait_s` until `status` is `completed`. With `image_to_video` in its
    capabilities, `image` (a picture, as for `edit_image`) is the first frame.
 5. If it shows a transcription model: `transcribe_audio` with `audio` (base64, a data URL or a URL; up to 32 MB and
    30 minutes; `language` if you know it, `timestamps` `segment` or `word`): the text, then JSON with segments. It

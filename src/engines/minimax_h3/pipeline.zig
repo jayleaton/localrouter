@@ -57,8 +57,75 @@ fn openInputs(gpa: std.mem.Allocator, io: std.Io, paths: Paths) anyerror!Opened 
     return .{ .pack = pack, .te_pack = te_pack, .tok = tok };
 }
 
-/// The largest request this pipeline serves (width and height in pixels, multiples of 32; frames before alignment).
-pub const Limits = struct { width: u32 = 768, height: u32 = 448, frames: u32 = 56, tokens: u32 = 1536 };
+/// The largest request this pipeline serves: `pixels` a frame (width x height, sides in multiples of 32) for `frames`
+/// (before alignment). Every buffer follows the frame's area, not its sides, so one budget takes a frame of any shape,
+/// and a frame larger than `pixels` for a clip short enough to fit the same buffers (`fits`).
+pub const Limits = struct { pixels: u32 = 768 * 448, frames: u32 = 56, tokens: u32 = 1536 };
+
+/// The model's official canvas (`adapt_canvas`, 768 x 1344): its long side, and its area, the largest frame a budget
+/// smaller than it trades clip length for (the video VAE's per-decode scratch follows the frame's area and columns).
+pub const canvas_side = 1344;
+pub const canvas_pixels = 768 * 1344;
+
+/// The text tokens a first frame's canvas takes besides its own (`<Picture 1>: ` and the vision markers), with room.
+const first_frame_tokens = 16;
+
+/// The most 32 x 32 cells a first frame's canvas may have (one text token each) and leave the prompt room in `l.tokens`.
+pub fn firstFrameCells(l: Limits) u32 {
+    return l.tokens -| (first_frame_tokens + 1);
+}
+
+pub fn firstFrameFits(l: Limits, width: u32, height: u32) bool {
+    return @as(u64, width / 32) * (height / 32) <= firstFrameCells(l);
+}
+
+/// The DiT's sequence rows for `l`: the text, the audio, the video and a first frame's condition.
+fn ditRows(l: Limits, max: Shapes) u64 {
+    return l.tokens + 2 * @as(u64, max.audio_t) + max.videoTokens();
+}
+
+/// The buffers `l` allocates, as the shapes of a 32-pixel-wide strip of the same area.
+fn ceiling(l: Limits) !Shapes {
+    return shapes(32, l.pixels / 1024 * 32, l.frames);
+}
+
+/// Whether a clip fits the buffers allocated for `l`, its frame no larger than `l.pixels` or the canvas.
+pub fn fits(l: Limits, width: u32, height: u32, frames: u32) bool {
+    if (@as(u64, width) * height > @max(canvas_pixels, l.pixels)) return false;
+    const sh = shapes(width, height, frames) catch return false;
+    const max = ceiling(l) catch return false;
+    return sh.frames <= max.frames and sh.n_video <= max.n_video and sh.frame_bytes <= max.frame_bytes and sh.videoTokens() <= max.videoTokens();
+}
+
+/// The sampler's buffers for `l` (`max` its `ceiling`): the packed state, the velocities and the denoised in fp32, two bf16
+/// copies, the text context, the video latents in fp16 and the frames.
+fn bufferSizes(l: Limits, max: Shapes) [8]u64 {
+    const n: u64 = max.n_video + max.n_audio;
+    return .{ 4 * n, 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, l.tokens) * te32.dim * 2, 2 * max.n_video, max.frame_bytes };
+}
+
+/// The device bytes `create` allocates for `l` besides the weights: the DiT's, the text encoder's, the audio VAE's and the
+/// sampler's buffers. Weights are not counted: they are the checkpoints', whatever `l` is.
+pub fn scratchBytes(l: Limits) !u64 {
+    const max = try ceiling(l);
+    const rows = std.math.cast(u32, ditRows(l, max)) orelse return error.RequestTooLarge;
+    var total = dit_mod.Dit.scratchBytes(rows, l.tokens, max.audio_t) + dit_mod.sumBuffers(te32.TextEncoder.scratch(l.tokens)) + vae_audio.Decoder.scratchBytes(max.audio_t);
+    for (bufferSizes(l, max)) |n| total += n;
+    return total;
+}
+
+/// The memory a request takes beyond `scratchBytes` at its largest phase, freed by the time it returns: encoding a
+/// first frame (its pixels on the device, the video and vision encoders, its latent), sampling with its condition, and
+/// decoding (the video VAE's scratch with the latents on the host in fp32 and fp16, as `generateImage` holds them).
+pub fn requestBytes(width: u32, height: u32, frames: u32, first_frame: bool) !u64 {
+    const sh = try shapes(width, height, frames);
+    const decoding = vae_video.decodeBytes(sh.latent_t, sh.lh, sh.lw) + sh.n_video * (4 + 2);
+    if (!first_frame) return decoding;
+    const latent: u64 = 24 * @as(u64, sh.lh) * sh.lw * 4;
+    const encoding = vae_enc.Encoder.deviceBytes(height, width) + vision.VisionEncoder.deviceBytes(sh.lh * sh.lw) + 3 * @as(u64, width) * height * 4 + latent;
+    const sampling = latent + dit_mod.Dit.conditionBytes(sh.lh, sh.lw);
+    return @max(decoding, encoding, sampling);
+}
 
 pub const Options = struct {
     /// Free the text encoder after each encode (see the memory note above).
@@ -112,6 +179,11 @@ pub const Shapes = struct {
     pub fn audioFloats(s: Shapes) u64 {
         return audio_channels * s.samples;
     }
+
+    /// The DiT's video rows: the latent frames and the reference frame, in 2x2 patches.
+    pub fn videoTokens(s: Shapes) u64 {
+        return (@as(u64, s.latent_t) + 1) * (s.lh / 2) * (s.lw / 2);
+    }
 };
 
 /// `align_frame_count(max(5, n))`: up to the next 17 k + 5.
@@ -153,7 +225,8 @@ pub const Pipeline = struct {
     io: std.Io,
     paths: Paths,
     opts: Options,
-    max: Shapes, // of `Limits`
+    limits: Limits,
+    max: Shapes, // the buffers' (`ceiling`)
     max_tokens: u32,
     d: cuda.Driver,
     ctx: cuda.Context,
@@ -201,7 +274,8 @@ pub const Pipeline = struct {
         p.load = .{};
         p.ids = &.{};
         p.te = null;
-        p.max = try shapes(limits.width, limits.height, limits.frames);
+        p.limits = limits;
+        p.max = try ceiling(limits);
         p.max_tokens = limits.tokens;
         var clock = qi.pipeline.LoadClock.start(io);
         // the pack and encoder headers and the tokenizer are plain file reads: they run alongside the driver, the
@@ -259,9 +333,9 @@ pub const Pipeline = struct {
         defer up.deinit();
         p.w = try dit_mod.Weights.load(gpa, io, &p.d, &p.pack, &p.nv, &up);
         errdefer p.w.deinit();
-        const max_s: u32 = limits.tokens + 2 * p.max.audio_t + (p.max.latent_t + 1) * (p.max.lh / 2) * (p.max.lw / 2);
+        const max_s: u32 = @intCast(ditRows(limits, p.max));
         const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = &p.nv, .major = p.major, .minor = p.minor };
-        p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens);
+        p.dit = try dit_mod.Dit.init(gpa, &p.d, kk, &p.w, p.s, max_s, limits.tokens, p.max.audio_t);
         errdefer p.dit.deinit();
         p.load.dit = clock.lap();
         if (!opts.unload_te) try p.loadTeWith(&up);
@@ -277,8 +351,7 @@ pub const Pipeline = struct {
         p.vid = try vae_video.Decoder.init(gpa, io, &p.d, &p.v_ops, p.s, paths.vae_video, &up);
         errdefer p.vid.deinit();
 
-        const n: u64 = p.max.n_video + p.max.n_audio;
-        const sizes = [8]u64{ 4 * n, 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, limits.tokens) * te32.dim * 2, 2 * p.max.n_video, p.max.frame_bytes };
+        const sizes = bufferSizes(limits, p.max);
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, sizes) |*b, len| {
@@ -355,6 +428,85 @@ pub const Pipeline = struct {
         if (p.probe) |pr| try pr.after(pr.ctx, name, outs);
     }
 
+    /// What `sample` reads from `generateImage`'s encode.
+    const Sampling = struct { hidden: u64, text: u64, l: u32, tags: ?[]const u8, sh: Shapes, steps: u32, seed: u64, progress: ?Progress, clock: *Clock };
+
+    /// From the encoded prompt to the sampled latents in `bufs[0]` (fp32, video then audio).
+    fn sample(p: *Pipeline, w: Sampling) !void {
+        const gpa = p.gpa;
+        const hidden = w.hidden;
+        const text = w.text;
+        const l = w.l;
+        const sh = w.sh;
+        const steps = w.steps;
+        const seed = w.seed;
+        const nv: u64 = sh.n_video;
+        const n: u64 = nv + sh.n_audio;
+        try p.post("text_encoder", &.{
+            .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
+            .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
+        });
+        if (w.tags) |text_tags| {
+            const tags = try gpa.alloc(i64, text_tags.len);
+            defer gpa.free(tags);
+            for (tags, text_tags) |*dst, tag| dst.* = tag;
+            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
+            defer tb.free();
+            try p.pre("text_tags", &.{});
+            try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
+        }
+        if (p.opts.unload_te) {
+            try p.s.synchronize();
+            p.unloadTe();
+        }
+        p.times.encode = try w.clock.lap();
+
+        // ---- the sampler state: portable noise, one stream, video first
+        const x = try p.bufs[0].at(0);
+        {
+            const z = try gpa.alloc(f32, @intCast(n));
+            defer gpa.free(z);
+            qi.noise.fill(seed, z);
+            try p.dit.upload(x, std.mem.sliceAsBytes(z));
+        }
+        try p.pre("noise", &.{});
+        try p.post("noise", &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
+        const sig = try sigmas(gpa, steps);
+        defer gpa.free(sig);
+        const plan = try gpa.alloc(sampler.Step, steps);
+        defer gpa.free(plan);
+        sampler.plan(sig, plan);
+
+        // ---- the steps
+        const xb = try p.bufs[3].at(0); // bf16 model input [video | audio]
+        const vel = try p.bufs[4].at(0); // bf16 velocities, packed alike
+        const den = [2]u64{ try p.bufs[1].at(0), try p.bufs[2].at(0) };
+        var cur: usize = 0; // den[cur] is this step's, den[1 - cur] the previous step's
+        var nb: [24]u8 = undefined;
+        for (plan, 0..) |st, i| {
+            const name = try std.fmt.bufPrint(&nb, "step.{d}", .{i});
+            try p.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
+            try p.hops.toBf16(p.s, x, xb, n);
+            try p.dit.step(xb, xb + nv * 2, sig[i], sh.latent_t, sh.lh, sh.lw, sh.audio_t, vel, vel + nv * 2);
+            try p.hops.denoise(p.s, x, vel, sig[i], den[cur], n);
+            switch (st) {
+                .euler => |e| try p.hops.euler32(p.s, x, den[cur], e.sigma, e.dt, n),
+                .res2 => |r| try p.hops.res2(p.s, x, den[cur], den[1 - cur], r.e, r.h, r.b1, r.b2, n),
+            }
+            try p.post(name, &.{
+                .{ .role = "vel_v", .ptr = vel, .bytes = nv * 2 },
+                .{ .role = "vel_a", .ptr = vel + nv * 2, .bytes = sh.n_audio * 2 },
+                .{ .role = "den", .ptr = den[cur], .bytes = n * 4 },
+                .{ .role = "x", .ptr = x, .bytes = n * 4 },
+            });
+            cur = 1 - cur;
+            if (w.progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
+                try p.s.synchronize();
+                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
+            }
+        }
+    }
+
     /// One clip: `frames_out` gets the uint8 frames [F, height, width, 3] and `audio_out` the fp32 waveform [2, A * 800]
     /// at 32 kHz, both sized by `shapes(width, height, frames)`. The frame count snaps up to 17 k + 5.
     pub fn generate(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
@@ -365,13 +517,11 @@ pub const Pipeline = struct {
     pub fn generateImage(p: *Pipeline, prompt: []const u8, width: u32, height: u32, frames: u32, steps: u32, seed: u64, rgb: ?[]const f32, frames_out: []u8, audio_out: []f32, progress: ?Progress) !Result {
         const sh = try shapes(width, height, frames);
         if (steps == 0) return error.NoSteps;
-        if (width > p.max_width() or height > p.max_height() or sh.frames > p.max.frames) return error.RequestTooLarge;
+        if (!fits(p.limits, width, height, frames)) return error.RequestTooLarge;
         if (frames_out.len != sh.frame_bytes) return error.BadFrameBuffer;
         if (audio_out.len != sh.audioFloats()) return error.BadAudioBuffer;
         const gpa = p.gpa;
         var clock = Clock{ .io = p.io, .s = p.s };
-        const nv: u64 = sh.n_video;
-        const n: u64 = nv + sh.n_audio;
         p.dit.probe = null;
         try clock.start();
 
@@ -423,71 +573,10 @@ pub const Pipeline = struct {
         const text = try p.bufs[5].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.dit.prepare(text, l);
-        if (first_latent) |b| try p.dit.firstFrame(try b.at(0), sh.lh, sh.lw, seed, it.?.tags);
-        try p.post("text_encoder", &.{
-            .{ .role = "hidden", .ptr = hidden, .bytes = @as(u64, l) * te32.dim * 4 },
-            .{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 },
-        });
-        if (it) |tokens| {
-            const tags = try gpa.alloc(i64, tokens.tags.len);
-            defer gpa.free(tags);
-            for (tags, tokens.tags) |*dst, tag| dst.* = tag;
-            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
-            defer tb.free();
-            try p.pre("text_tags", &.{});
-            try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
-        }
-        if (p.opts.unload_te) {
-            try p.s.synchronize();
-            p.unloadTe();
-        }
-        p.times.encode = try clock.lap();
-
-        // ---- the sampler state: portable noise, one stream, video first
+        try conditioned(p, &first_latent, .{ .lh = sh.lh, .lw = sh.lw, .seed = seed, .tags = if (it) |tokens| tokens.tags else &.{} }, Pipeline.sample, .{ p, Sampling{ .hidden = hidden, .text = text, .l = l, .tags = if (it) |tokens| tokens.tags else null, .sh = sh, .steps = steps, .seed = seed, .progress = progress, .clock = &clock } });
+        const nv: u64 = sh.n_video;
         const x = try p.bufs[0].at(0);
         const xa = x + nv * 4; // the audio half
-        {
-            const z = try gpa.alloc(f32, @intCast(n));
-            defer gpa.free(z);
-            qi.noise.fill(seed, z);
-            try p.dit.upload(x, std.mem.sliceAsBytes(z));
-        }
-        try p.pre("noise", &.{});
-        try p.post("noise", &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
-        const sig = try sigmas(gpa, steps);
-        defer gpa.free(sig);
-        const plan = try gpa.alloc(sampler.Step, steps);
-        defer gpa.free(plan);
-        sampler.plan(sig, plan);
-
-        // ---- the steps
-        const xb = try p.bufs[3].at(0); // bf16 model input [video | audio]
-        const vel = try p.bufs[4].at(0); // bf16 velocities, packed alike
-        const den = [2]u64{ try p.bufs[1].at(0), try p.bufs[2].at(0) };
-        var cur: usize = 0; // den[cur] is this step's, den[1 - cur] the previous step's
-        var nb: [24]u8 = undefined;
-        for (plan, 0..) |st, i| {
-            const name = try std.fmt.bufPrint(&nb, "step.{d}", .{i});
-            try p.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
-            try p.hops.toBf16(p.s, x, xb, n);
-            try p.dit.step(xb, xb + nv * 2, sig[i], sh.latent_t, sh.lh, sh.lw, sh.audio_t, vel, vel + nv * 2);
-            try p.hops.denoise(p.s, x, vel, sig[i], den[cur], n);
-            switch (st) {
-                .euler => |e| try p.hops.euler32(p.s, x, den[cur], e.sigma, e.dt, n),
-                .res2 => |r| try p.hops.res2(p.s, x, den[cur], den[1 - cur], r.e, r.h, r.b1, r.b2, n),
-            }
-            try p.post(name, &.{
-                .{ .role = "vel_v", .ptr = vel, .bytes = nv * 2 },
-                .{ .role = "vel_a", .ptr = vel + nv * 2, .bytes = sh.n_audio * 2 },
-                .{ .role = "den", .ptr = den[cur], .bytes = n * 4 },
-                .{ .role = "x", .ptr = x, .bytes = n * 4 },
-            });
-            cur = 1 - cur;
-            if (progress) |pr| { // the step has run on the GPU first: a report can pause the work (speech first)
-                try p.s.synchronize();
-                pr.report(pr.ctx, "denoise", @intCast(i + 1), steps);
-            }
-        }
         try p.hops.scale32(p.s, xa, audio_scale_out, sh.n_audio); // process_latent_out
         try p.pre("latents", &.{});
         try p.post("latents", &.{ .{ .role = "video", .ptr = x, .bytes = nv * 4 }, .{ .role = "audio", .ptr = xa, .bytes = sh.n_audio * 4 } });
@@ -520,15 +609,23 @@ pub const Pipeline = struct {
         p.times.video = try clock.lap();
         return .{ .shapes = sh, .width = width, .height = height, .tokens = l };
     }
-
-    fn max_width(p: *const Pipeline) u32 {
-        return p.max.lw * 16;
-    }
-
-    fn max_height(p: *const Pipeline) u32 {
-        return p.max.lh * 16;
-    }
 };
+
+/// Where a first frame's condition is built: its latent's height and width, the noise seed, the prompt's text tags.
+const Condition = struct { lh: u32, lw: u32, seed: u64, tags: []const u8 };
+
+/// A first frame's condition (`Dit.firstFrame`) lives for the steps only. `conditioned` installs it from `first.*` (the
+/// frame's latent, freed once read) and runs `run(args)`; the condition is released when the steps return or fail, so
+/// an error leaves nothing resident past the request.
+fn conditioned(p: anytype, first: anytype, c: Condition, comptime run: anytype, args: anytype) !void {
+    defer p.dit.releaseCondition();
+    if (first.*) |*b| {
+        try p.dit.firstFrame(try b.at(0), c.lh, c.lw, c.seed, c.tags);
+        b.free();
+        first.* = null;
+    }
+    try @call(.auto, run, args);
+}
 
 const Clock = struct {
     io: std.Io,
@@ -565,10 +662,99 @@ test "frame counts snap up to 17 k + 5 and the shapes follow" {
     try std.testing.expectError(error.SizeNotMultipleOf32, shapes(770, 448, 56));
 }
 
+test "every clip `fits` admits fits the buffers, the DiT's rows and its audio scratch" {
+    const budgets = [_]Limits{
+        .{ .pixels = 768 * 448, .frames = 5 * 24 },
+        .{ .pixels = 512 * 512, .frames = 5 * 24 }, // a_in sized by rows alone was 23,356 bytes for 26,496 at 512x512, 5 s
+        .{ .pixels = 1280 * 704, .frames = 8 * 24 },
+        .{ .pixels = 768 * 1344, .frames = 5 * 24 },
+    };
+    for (budgets) |l| {
+        const max = try ceiling(l);
+        const n_max = max.n_video + max.n_audio;
+        var admitted: u32 = 0;
+        var w: u32 = 256;
+        while (w <= canvas_side) : (w += 32) {
+            var h: u32 = 256;
+            while (h <= canvas_side) : (h += 32) {
+                var s: u32 = 1;
+                while (s * 24 <= l.frames) : (s += 1) {
+                    if (!fits(l, w, h, s * 24)) continue;
+                    admitted += 1;
+                    const sh = try shapes(w, h, s * 24);
+                    const ly = layout.Layout.init(l.tokens, sh.latent_t, sh.lh, sh.lw, sh.audio_t).withFirstFrame();
+                    try std.testing.expect(ly.s <= ditRows(l, max));
+                    try std.testing.expect(@as(u64, w) * h <= @max(canvas_pixels, l.pixels));
+                    try std.testing.expect(sh.audio_t <= max.audio_t);
+                    try std.testing.expect(sh.n_audio * 2 <= dit_mod.Dit.audioInBytes(max.audio_t));
+                    try std.testing.expect(sh.n_video + sh.n_audio <= n_max and sh.frame_bytes <= max.frame_bytes);
+                }
+            }
+        }
+        try std.testing.expect(admitted > 0);
+    }
+    const small = try ceiling(budgets[1]);
+    try std.testing.expect(ditRows(budgets[1], small) * 2 < (try shapes(512, 512, 120)).n_audio * 2);
+}
+
+test "a first frame's canvas leaves the prompt room in the text budget" {
+    const l: Limits = .{ .pixels = 1280 * 704, .frames = 8 * 24 };
+    try std.testing.expect(firstFrameFits(l, 768, 1344));
+    try std.testing.expect(firstFrameFits(l, 704, 1248));
+    try std.testing.expect(!firstFrameFits(l, 1344, 1344)); // 1,764 image tokens for 1,536
+}
+
 test "sigmas of eight steps end in zero" {
     const sig = try Pipeline.sigmas(std.testing.allocator, 8);
     defer std.testing.allocator.free(sig);
     try std.testing.expectEqual(@as(usize, 9), sig.len);
     try std.testing.expectEqual(@as(f32, 0), sig[8]);
     try std.testing.expectEqual(@as(f32, 1.0), sig[0]);
+}
+
+test "a first frame's condition is released when the steps after it fail, as when they finish" {
+    const Fake = struct {
+        const Dit = struct {
+            resident: u64 = 0,
+            fail: bool = false,
+            fn firstFrame(d: *Dit, z: u64, h: u32, w: u32, seed: u64, tags: []const u8) !void {
+                _ = .{ z, seed, tags };
+                if (d.fail) return error.OutOfMemory;
+                d.resident = @as(u64, h / 2) * (w / 2) * (96 + 3072) * 4;
+            }
+            fn releaseCondition(d: *Dit) void {
+                d.resident = 0;
+            }
+        };
+        const Latent = struct {
+            frees: *u32,
+            fn at(_: *Latent, _: u64) !u64 {
+                return 1;
+            }
+            fn free(b: *Latent) void {
+                b.frees.* += 1;
+            }
+        };
+        dit: Dit = .{},
+        fn steps(f: *@This(), fail: bool) !void {
+            try std.testing.expect(f.dit.resident > 0); // the steps read the condition
+            if (fail) return error.CudaError;
+        }
+    };
+    const c: Condition = .{ .lh = 84, .lw = 48, .seed = 7, .tags = "" };
+    for ([_]bool{ true, false }) |fail| {
+        var f: Fake = .{};
+        var frees: u32 = 0;
+        var first: ?Fake.Latent = .{ .frees = &frees };
+        const r = conditioned(&f, &first, c, Fake.steps, .{ &f, fail });
+        if (fail) try std.testing.expectError(error.CudaError, r) else try r;
+        try std.testing.expectEqual(@as(u64, 0), f.dit.resident);
+        try std.testing.expectEqual(@as(u32, 1), frees); // the latent is freed once read
+        try std.testing.expect(first == null);
+    }
+    var f: Fake = .{ .dit = .{ .fail = true } }; // firstFrame frees its own on failure; the latent stays the caller's
+    var frees: u32 = 0;
+    var first: ?Fake.Latent = .{ .frees = &frees };
+    try std.testing.expectError(error.OutOfMemory, conditioned(&f, &first, c, Fake.steps, .{ &f, false }));
+    try std.testing.expect(first != null and frees == 0);
 }

@@ -50,12 +50,12 @@ pub const Video = struct {
     negative_prompt: []const u8 = "",
     width: u32 = 0, // 0 (with height 0): the model's own size, filled in by `engine.fill` before validation
     height: u32 = 0,
-    seconds: u32 = 5,
-    fps: u32 = 24,
+    seconds: u32 = 0, // 0: the model's own (5, or its `max_seconds` if shorter), filled in by `engine.fill`
+    fps: u32 = 0, // 0: the model's own (24, or the first of its `fps`), filled in by `engine.fill`
     seed: u64 = 0,
     steps: u32 = 0,
     guidance: f32 = 0,
-    audio: bool = true,
+    audio: ?bool = null, // null: the model's own (with audio unless its `audio` option is false), filled in by `engine.fill`
     first_frame: ?[]const u8 = null, // file name in the job directory (image to video)
 };
 
@@ -315,6 +315,12 @@ pub fn parseSize(s: []const u8) ?[2]u32 {
     const w = std.fmt.parseInt(u32, s[0..x], 10) catch return null;
     const h = std.fmt.parseInt(u32, s[x + 1 ..], 10) catch return null;
     return .{ w, h };
+}
+
+/// A video request's `seconds` or `fps` as sent: left out (null) is 0, the model's own; an explicit 0 is null, refused.
+pub fn sentCount(v: ?u32) ?u32 {
+    const n = v orelse return 0;
+    return if (n == 0) null else n;
 }
 
 test "validate and wire shape" {

@@ -51,7 +51,7 @@ asks for; prefer `reserve_for` to a run of `unload_model` calls, since it unload
 | `whisper-large-v3-turbo` (ears) | 3.6 GiB, plus 2 GiB a job | 90 | yes |
 | `qwen-image-2.1-turbo` (image) | 35.2 GiB | 10 | yes |
 | `knowline-4b` (decisions) | 12.4 GiB | 15 | yes, into spare room only |
-| `minimax-h3` (video) | about 39 GiB, plus its frames | 0 | no (unloads 30 s after a clip) |
+| `minimax-h3` (video: 1280x704 or 704x1248 for 8 s, 768x1344 for 6 s) | about 39 GiB, plus its frames | 0 | no (unloads 30 s after a clip) |
 
 With everything warm about 14 GiB is free (6 GiB more is the reserve). A video then needs the image model's memory;
 `reserve_for` unloads the image model and, only when memory is tighter (another job, a long chat context), Whisper and

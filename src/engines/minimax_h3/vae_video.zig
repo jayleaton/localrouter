@@ -48,6 +48,35 @@ pub const Split = struct {
     }
 };
 
+/// The tiles `splitTiles` cuts `len` pixels into.
+pub fn tileCount(len: u32) u32 {
+    if (tile_size >= len) return 1;
+    var n: u32 = (len + tile_size - 1) / tile_size;
+    while (@as(i64, tile_size) * n - @as(i64, tile_overlap_min) * (n - 1) - len < 0) n += 1;
+    return n;
+}
+
+/// One clip canvas of `decode` (fp16, 3 channels, the clip's frames at `hh` x `ww`); two are allocated.
+fn canvasBytes(tz: u32, hh: u32, ww: u32) u64 {
+    return 3 * ratio_t * @as(u64, clipFrames(tz)) * hh * ww * 2;
+}
+
+/// One tile buffer of `decode`; two a column of tiles are allocated.
+fn tileBytes(tz: u32) u64 {
+    return 3 * ratio_t * @as(u64, clipFrames(tz)) * tile_size * tile_size * 2;
+}
+
+/// The latent frames of the longest clip `decode` runs for `tz`.
+fn clipFrames(tz: u32) u32 {
+    return if (tz == 1) 1 else tile_mod.max_tn;
+}
+
+/// The device scratch one `decode` of [24, tz, hz, wz] latents takes (freed when it returns), besides `out`.
+pub fn decodeBytes(tz: u32, hz: u32, wz: u32) u64 {
+    const zbytes: u64 = @as(u64, tile_mod.zc) * tz * hz * wz * 2;
+    return zbytes + 2 * canvasBytes(tz, hz * ratio, wz * ratio) + 2 * @as(u64, tileCount(wz * ratio)) * tileBytes(tz);
+}
+
 pub fn splitTiles(gpa: std.mem.Allocator, len: u32) !Split {
     if (tile_size >= len) {
         const st = try gpa.alloc(u32, 1);
@@ -56,8 +85,7 @@ pub fn splitTiles(gpa: std.mem.Allocator, len: u32) !Split {
         ln[0] = len;
         return .{ .starts = st, .lens = ln, .overlaps = try gpa.alloc(u32, 0) };
     }
-    var n: u32 = (len + tile_size - 1) / tile_size;
-    while (@as(i64, tile_size) * n - @as(i64, tile_overlap_min) * (n - 1) - len < 0) n += 1;
+    const n = tileCount(len);
     const remaining: u32 = @intCast(@as(i64, tile_size) * n - @as(i64, tile_overlap_min) * (n - 1) - len);
     const ov = try gpa.alloc(u32, n - 1);
     errdefer gpa.free(ov);
@@ -242,8 +270,7 @@ pub const Decoder = struct {
         defer sy.deinit(gpa);
         var sx = try splitTiles(gpa, ww);
         defer sx.deinit(gpa);
-        const tn_max: u32 = if (tz == 1) 1 else tile_mod.max_tn;
-        const cbytes: u64 = 3 * ratio_t * @as(u64, tn_max) * hh * ww * 2;
+        const cbytes = canvasBytes(tz, hh, ww);
         var run: Run = .{
             .v = v,
             .lat = .{ .ptr = zd, .tz = tz, .hz = hz, .wz = wz },
@@ -255,7 +282,7 @@ pub const Decoder = struct {
             .out = out,
             .cv = .{ try scratch.alloc(cbytes), try scratch.alloc(cbytes) },
             .tbufs = try gpa.alloc(u64, 2 * sx.starts.len),
-            .tbytes = 3 * ratio_t * @as(u64, tn_max) * tile_size * tile_size * 2,
+            .tbytes = tileBytes(tz),
         };
         defer gpa.free(run.tbufs);
         for (run.tbufs) |*b| b.* = try scratch.alloc(run.tbytes);

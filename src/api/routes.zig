@@ -175,7 +175,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 // ---------------------------------------------------------------- models and tools
 
 fn models(app: *App, req: *h.Request, a: std.mem.Allocator) !void {
-    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const std.json.Value = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null, formats: ?[]const std.json.Value = null, input_modes: ?[]const std.json.Value = null, gaussians: ?engine.Gaussians = null };
+    const Entry = struct { id: []const u8, object: []const u8 = "model", created: i64 = 0, owned_by: []const u8 = "localrouter", name: []const u8, kind: []const u8, machine: []const u8, running: bool, resident_bytes: u64, capabilities: []const engine.Capability, default_for: []const engine.Capability, voices: ?[]const std.json.Value = null, default_voice: ?[]const u8 = null, presets: ?[]const std.json.Value = null, speed: ?[2]f32 = null, max_input_chars: ?u64 = null, stream: ?bool = null, references: ?bool = null, instructions: ?bool = null, max_audio_s: ?u64 = null, languages: ?[]const std.json.Value = null, qualified: ?bool = null, license: ?@import("../config.zig").License = null, min_thinking_tokens: ?u32 = null, node: ?[]const u8 = null, formats: ?[]const std.json.Value = null, input_modes: ?[]const std.json.Value = null, gaussians: ?engine.Gaussians = null, audio: ?bool = null, video: ?engine.VideoLimits = null };
     const list = try a.alloc(Entry, app.scheduler.slots.len);
     for (list, app.scheduler.slots, 0..) |*e, slot, i| {
         const c = slot.tool.config();
@@ -717,12 +717,12 @@ const VideoBody = struct {
     prompt: []const u8 = "",
     negative_prompt: []const u8 = "",
     size: []const u8 = "", // "": the model's own size
-    seconds: []const u8 = "5", // OpenAI sends seconds as a string
-    fps: u32 = 24,
+    seconds: []const u8 = "", // OpenAI sends seconds as a string; "": the model's own
+    fps: ?u32 = null, // null: the model's own
     seed: ?u64 = null,
     steps: u32 = 0,
     guidance: f32 = 0,
-    audio: bool = true,
+    audio: ?bool = null, // null: the model's own
 };
 
 /// `input_reference` (OpenAI's name) is the first frame: a multipart file, or JSON base64, a data URL or a URL.
@@ -733,10 +733,12 @@ fn videoCreate(app: *App, req: *h.Request, a: std.mem.Allocator, host: []const u
     const b = parseBody(VideoBody, app, a, host, text, ctype, &.{"input_reference"}, &raws, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const files = inputs.validate(a, "first_frame", raws.items, 1, &why) catch return h.fail(req, a, 400, "invalid_request_error", why);
     const wh: [2]u32 = if (b.size.len == 0) .{ 0, 0 } else request.parseSize(b.size) orelse return h.fail(req, a, 400, "invalid_request_error", "size must be WIDTHxHEIGHT");
-    const seconds = std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
+    const sent_seconds: ?u32 = if (b.seconds.len == 0) null else std.fmt.parseInt(u32, b.seconds, 10) catch return h.fail(req, a, 400, "invalid_request_error", "seconds must be a whole number");
+    const seconds = request.sentCount(sent_seconds) orelse return h.fail(req, a, 400, "invalid_request_error", "seconds must be at least 1; leave it out for the model's own");
+    const fps = request.sentCount(b.fps) orelse return h.fail(req, a, 400, "invalid_request_error", "fps must be at least 1; leave it out for the model's own");
     var why_model: Refusal = .{};
     const tool = resolve(app, b.model, if (files.len > 0) .image_to_video else .text_to_video, &why_model) orelse return h.fail(req, a, why_model.status, why_model.typ, why_model.message);
-    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = b.fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
+    const r: request.Request = .{ .video = .{ .prompt = b.prompt, .negative_prompt = b.negative_prompt, .width = wh[0], .height = wh[1], .seconds = seconds, .fps = fps, .seed = b.seed orelse randomSeed(app.io), .steps = b.steps, .guidance = b.guidance, .audio = b.audio, .first_frame = if (files.len > 0) files[0].name else null } };
     const j = (try submit(app, req, a, tool, r, files, caller.owner())) orelse return;
     try videoObject(app, req, a, j);
 }
@@ -763,12 +765,24 @@ fn videoRoute(app: *App, req: *h.Request, a: std.mem.Allocator, rest: []const u8
     }
 }
 
+/// A failed or cancelled job's error, as the job, video and 3D asset objects show it. `type` is what an HTTP error for
+/// the same failure carries (a synchronous request that waited for the job answers `{"error": {"message", "type"}}`),
+/// `code` the same value (what these objects carried before), `message` is for people and may change. A client retries
+/// on `insufficient_memory` in `type` or `code`, never on the message: it reads "insufficient memory: ..." (2026-11:
+/// a client matching the HTTP spelling in the message missed a job that failed for want of room, and gave up).
+pub const JobError = struct { type: []const u8, code: []const u8, message: []const u8 };
+
+/// `JobError` of `j` in `status` (read under the table's lock), null unless it failed or was cancelled.
+pub fn jobError(a: std.mem.Allocator, j: *const jobs.Job, status: jobs.Status) !?JobError {
+    if (status != .failed and status != .cancelled) return null;
+    return .{ .type = j.error_type, .code = j.error_type, .message = try a.dupe(u8, j.error_message) };
+}
+
 /// GET /v1/jobs/{id}: any job's state and, once done, its output URLs (a client that lost a job's result event, such as a
 /// voice session that reconnected while its picture was made, asks here).
 fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, caller: pair.Caller) !void {
     const j = app.table.get(app.io, id) orelse return h.fail(req, a, 404, "invalid_request_error", "no such job");
     if (!caller.sees(j)) return h.fail(req, a, 404, "invalid_request_error", "no such job"); // another device's: as if absent
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     defer app.table.mutex.unlock(app.io);
     const urls = try a.alloc([]const u8, if (j.status == .completed) j.files.len else 0);
@@ -781,12 +795,11 @@ fn jobObject(app: *App, req: *h.Request, a: std.mem.Allocator, id: []const u8, c
         .progress = j.percent,
         .phase = try a.dupe(u8, j.phaseName()),
         .urls = urls,
-        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, j.status),
     });
 }
 
 fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !void {
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     const v = j.request.video;
     const obj = .{
@@ -801,7 +814,7 @@ fn videoObject(app: *App, req: *h.Request, a: std.mem.Allocator, j: *jobs.Job) !
         .size = try std.fmt.allocPrint(a, "{d}x{d}", .{ v.width, v.height }),
         .seconds = try std.fmt.allocPrint(a, "{d}", .{v.seconds}),
         .seed = v.seed,
-        .@"error" = if (j.status == .failed or j.status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, j.status),
     };
     app.table.mutex.unlock(app.io);
     try h.jsonValue(req, a, .ok, obj);
@@ -919,7 +932,6 @@ pub fn assetOutput(app: *App, a: std.mem.Allocator, scheme: []const u8, host: []
 }
 
 fn assetObject(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const u8, host: []const u8, j: *jobs.Job) !void {
-    const Err = struct { code: []const u8, message: []const u8 };
     try app.table.mutex.lock(app.io);
     const v = j.request.asset3d;
     const status = j.status;
@@ -939,7 +951,7 @@ fn assetObject(app: *App, req: *h.Request, a: std.mem.Allocator, scheme: []const
         .guidance = v.guidance,
         .num_gaussians = v.num_gaussians,
         .ms = if (status == .completed) @as(?u64, j.ms) else null,
-        .@"error" = if (status == .failed or status == .cancelled) @as(?Err, .{ .code = j.error_type, .message = try a.dupe(u8, j.error_message) }) else null,
+        .@"error" = try jobError(a, j, status),
     };
     app.table.mutex.unlock(app.io);
     const out = assetOutput(app, a, scheme, host, j); // reads files: outside the table's lock (a completed job's fields no longer change)
@@ -1020,4 +1032,29 @@ test "disabled tools: refused by name with 409 model_disabled, skipped for a def
     try t.expect(!(try toolEntry(&app, a, 2)).supported);
     const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"residency\": \"disabled\"}", .{});
     try t.expect(try applySettings(&app, a, 2, body) == .bad);
+}
+
+test "a job that failed for want of room says insufficient_memory in type and code, as its HTTP error says in type" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var j: jobs.Job = .{ .arena = .init(t.allocator), .id = "video_1", .tool = 0, .request = .{ .video = .{ .prompt = "x" } }, .dir = "", .created_at = 0 };
+    defer j.arena.deinit();
+    try t.expect(try jobError(a, &j, .in_progress) == null);
+    try t.expect(try jobError(a, &j, .completed) == null);
+    // What the scheduler leaves on a job refused for room (its test "a tool running a job is never a victim"); a
+    // request that waited for the job answers h.fail(j.http_status, j.error_type, j.error_message).
+    j.http_status = 503;
+    j.error_type = "insufficient_memory";
+    j.error_message = "insufficient memory: this request needs 96256 MiB more than is free within the budget";
+    const e = (try jobError(a, &j, .failed)).?;
+    try t.expectEqualStrings("insufficient_memory", e.type);
+    try t.expectEqualStrings("insufficient_memory", e.code);
+    try t.expectEqualStrings(j.error_message, e.message);
+    const text = try std.json.Stringify.valueAlloc(a, .{ .@"error" = e }, .{});
+    try t.expectEqualStrings("{\"error\":{\"type\":\"insufficient_memory\",\"code\":\"insufficient_memory\",\"message\":\"insufficient memory: this request needs 96256 MiB more than is free within the budget\"}}", text);
+    // A cancelled job: the same shape.
+    j.error_type = "cancelled";
+    try t.expectEqualStrings("cancelled", (try jobError(a, &j, .cancelled)).?.type);
 }
