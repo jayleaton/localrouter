@@ -46,7 +46,12 @@ const k6 = @import("kandinsky6");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license };
+pub const entry: engine.Entry = .{ .name = "kandinsky6", .capabilities = &.{.text_to_video}, .needs = needs, .create = create, .check = check, .defaults = defaults, .license = license, .sizes = sizes };
+
+/// The one size the video decoder is proven on. Snapping lands there.
+fn sizes(_: *const ToolConfig) engine.SizeLimits {
+    return .{ .min_width = S.out_width, .max_width = S.out_width, .min_height = S.out_height, .max_height = S.out_height, .multiple = 32 };
+}
 
 /// The weights' licence, unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{

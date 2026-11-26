@@ -22,7 +22,14 @@ const h3 = @import("minimax_h3");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .validate = validate, .license = license };
+pub const entry: engine.Entry = .{ .name = "minimax_h3", .capabilities = &.{ .text_to_video, .image_to_video }, .needs = needs, .create = create, .check = check, .defaults = defaults, .validate = validate, .license = license, .sizes = sizes };
+
+/// Multiples of 32 on each side from the API's shortest side up to the long side (`maxSide`). The frame's area and the
+/// clip's length stay `check`'s: a larger frame is taken for a shorter clip, so the grid carries no `max_pixels`.
+fn sizes(cfg: *const ToolConfig) engine.SizeLimits {
+    const side = maxSide(cfg);
+    return .{ .min_width = min_side, .max_width = side, .min_height = min_side, .max_height = side, .multiple = 32 };
+}
 
 /// The weights' licence, unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{
@@ -415,6 +422,15 @@ test "default_size: a video without a size gets it, within the limits; refusals 
     const big: Request = .{ .video = .{ .prompt = "waves", .width = 1280, .height = 720, .seconds = 8 } };
     try std.testing.expect(!check(c.tool("h3").?, &big, &why));
     try std.testing.expectEqualStrings("model 'h3' takes sizes up to 901120 pixels (1248x704 or 704x1248), at most 1344 a side, multiples of 32 (omit size for 768x448)", why.buffered());
+    const lim = engine.sizeLimits(c.tool("h3").?).?;
+    try std.testing.expectEqual(@as(u32, 32), lim.multiple);
+    try std.testing.expectEqual(@as(u32, 1344), lim.max_width);
+    try std.testing.expectEqual(@as(u32, 1344), lim.max_height);
+    try std.testing.expectEqual([2]u32{ 1280, 704 }, @import("../tool/size.zig").snap(1280, 720, lim));
+    var snapped = big;
+    engine.snapRequest(c.tool("h3").?, &snapped);
+    engine.fill(c.tool("h3").?, &snapped);
+    try std.testing.expect(check(c.tool("h3").?, &snapped, &why));
     var b: Request = .{ .video = .{ .prompt = "waves" } };
     engine.fill(c.tool("bad").?, &b);
     try std.testing.expectEqual([2]u32{ 768, 448 }, [2]u32{ b.video.width, b.video.height }); // past the limits: the largest
@@ -461,6 +477,24 @@ test "one area budget takes landscape and portrait; a larger frame takes a short
     var d: Request = .{ .video = .{ .prompt = "waves" } };
     engine.fill(c.tool("h3").?, &d);
     try std.testing.expectEqual([2]u32{ 1248, 704 }, [2]u32{ d.video.width, d.video.height });
+}
+
+test "the size grid keeps the area limits: a larger frame for a shorter clip passes engine.check, one too large for its clip gets the model's own refusal" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try @import("../config.zig").parse(arena.allocator(),
+        \\{"tools": [{"id": "h3", "kind": "video", "engine": "minimax_h3", "options": {"max_pixels": 901120, "max_seconds": 8}}]}
+    );
+    const t = c.tool("h3").?;
+    var msg: [256]u8 = undefined;
+    var why: std.Io.Writer = .fixed(&msg);
+    const short: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 768, .height = 1344, .seconds = 6 } };
+    try std.testing.expect(engine.check(t, &short, &why));
+    const wide: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 960, .height = 1024, .seconds = 1 } };
+    try std.testing.expect(engine.check(t, &wide, &why));
+    const long: Request = .{ .video = .{ .prompt = "waves", .fps = fps, .width = 768, .height = 1344, .seconds = 8 } };
+    try std.testing.expect(!engine.check(t, &long, &why));
+    try std.testing.expectEqualStrings("model 'h3' takes 768x1344 for clips up to 6 seconds (up to 8 seconds at 901120 pixels or fewer)", why.buffered());
 }
 
 test "a first frame whose canvas fills the text encoder is refused before loading; the canvas sizes are taken" {

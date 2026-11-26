@@ -98,7 +98,8 @@ curl -s -m 900 $BASE/images/generations -H 'content-type: application/json' -d '
 
 | Field | Notes |
 | --- | --- |
-| `size` | `WIDTHxHEIGHT`, 256 to 2048 a side, multiples of 16 |
+| `size` | `WIDTHxHEIGHT`, 256 to 2048 a side, multiples of 16. A model's own grid can be stricter: `GET /v1/tools` lists it as `size` (`multiple`, `min_width`, `max_width`, `min_height`, `max_height`, and `max_pixels` when the model has one) |
+| `size_snap` | Extension, default false. `true` rounds width and height to the nearest size that model accepts (its `multiple`, inside its limits; a tie goes to the lower multiple) and the response's `size` is the size used. `false` refuses a size off that model's grid before it loads, and the error names the grid (`multiples of 32` for MiniMax H3 and H3-Image, not the generic multiple of 16). An edit that omits `size` still keeps the input's shape |
 | `n` | 1 to 4 |
 | `seed` | Extension. Omit it for a random one; the response's `seed` reproduces the image |
 | `steps`, `guidance`, `negative_prompt` | Extensions; 0 or absent means the tool's default |
@@ -164,11 +165,14 @@ size, so send one of that shape to keep all of it. Say what the image shows in t
 something else pulls the clip away from it.
 
 MiniMax H3 (`minimax-h3`) takes a frame of any shape up to its `max_pixels` (landscape or portrait), at most 1344 a
-side (the model's canvas, 768x1344), in multiples of 32 pixels (1280x720 is not one: send 1280x704), for clips up to
+side (the model's canvas, 768x1344), in multiples of 32 pixels (1280x720 is not one: send 1280x704, or `"size_snap": true`
+to have each side rounded to the nearest multiple of 32 within the long side, which gives 1280x704), for clips up to
 `max_seconds`; a frame larger than `max_pixels` (up to 768x1344's area) is taken for a shorter clip that fits the same
 buffers (the decode's scratch grows a little with the frame: on Jarvis at most 486 MiB against 445 MiB). A request past
-them is refused with the limits named (for a large frame, the longest clip it takes), before anything loads. Without
-`size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: 901120 pixels and 8 s, so 1280x704 or
+them is refused with the limits named (a multiple of 32, not the generic multiple of 16; for a large frame, the longest
+clip it takes), before anything loads; `size_snap` does not shrink a frame to fit the area. A `cmd` image tool that sets
+`size_multiple` (H3-Image does, to 32) is refused the same way, before its worker loads. Without `size` a clip gets the
+operator's `default_size`. On a GB10 (the Jarvis box: 901120 pixels and 8 s, so 1280x704 or
 704x1248 for 8 s and 768x1344 for up to 6 s; 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
 1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
 
@@ -565,7 +569,10 @@ higher priority, nor a `call` tool of any priority (and a call's tools never unl
 before anything is unloaded, and the call keeps its voice. The chat model sees that message as the tool's result and
 says the machine is busy. Without a call, priority only orders the victims, as above. MCP `reserve_for` (which tells
 the session first and brings the voice back after the job) is unchanged.
-`GET /v1/tools` shows `priority`, `keep_loaded`, `residency`, `spare_room_only` and `capabilities`.
+`GET /v1/tools` shows `priority`, `keep_loaded`, `residency`, `spare_room_only` and `capabilities`, and for an image
+or video tool `size`: the width and height it accepts (`min_width`, `max_width`, `min_height`, `max_height`, `multiple`,
+and `max_pixels` when it has a pixel cap). A ComfyUI tool's `size_multiple`, `min_side`, `max_side`, `max_width`,
+`max_height` and `max_pixels` options are that grid (default multiple 16, sides 256 to 2048).
 
 ## Licences
 
@@ -585,6 +592,28 @@ informs and enforces nothing: check the terms before you use or publish what a m
 | `qwen-image-2.1`, `qwen-image-2.1-turbo` | Qwen Research License | non-commercial research or evaluation only | commercial use needs a separate licence from Qwen |
 | `minimax-h3` | MiniMax H3 Community License | outside the excluded territories; commercial included (over USD 20 million yearly revenue: MiniMax's written authorization) | not licensed in the US, EU, UK or South Korea; public content disclosed as machine-generated; "MiniMax H3" on a commercial product's interface |
 | `idol` (Mac, on demand) | Apache-2.0 (Idol, its BiRefNet, the FLUX.2 autoencoder) + DINOv3 License (the image encoder) | any | DINOv3: redistribute only under its licence with a copy; acknowledge it in publications; no reverse engineering; trade controls; no military, nuclear, espionage or ITAR uses |
+
+## Status and metrics
+
+`GET /health` is unchanged: `{"ok":true}`. `GET /v1/status` (scope `read`) is a snapshot of the scheduler, and `GET /metrics` is the same figures as Prometheus text. Neither includes a path, a secret, a hostname or a log line.
+
+| Field | Meaning |
+| --- | --- |
+| `tools[].state` | `idle` (loaded, no job; this is `ready` on `GET /v1/tools`), `loading`, `committing` (the worker is ready and admitted bytes are still landing), `busy` or `unloaded` |
+| `tools[].resident_bytes` | bytes that tool holds now (0 while unloaded) |
+| `tools[].queue_depth` | jobs waiting for it, not counting the one running |
+| `tools[].last_load_unix_s` | when its last successful load finished, in unix seconds; absent until it has loaded, and kept after it unloads |
+| `tools[].last_load_ms` | how long that load took, in milliseconds (the same figure as `last_load_ms` on `GET /v1/tools`); absent with `last_load_unix_s` |
+| `tools[].last_error` | `{type, code, time}` of its last failed job (`time` is unix seconds). `type` and `code` are the same token as an HTTP error's. Absent until one fails. The message is not included |
+| `memory` | `ceiling_bytes` (the budget), `used_bytes` (booked now), `free_bytes` |
+| `evictions` | how many times a tool was unloaded to make room for another. An idle-TTL unload or `POST /v1/tools/.../unload` is not one |
+
+```bash
+curl -s $BASE/status | jq '{memory, evictions, tools: [.tools[] | {id, state, queue_depth, last_error}]}'
+curl -s http://<host>:8190/metrics    # Prometheus text; the same gauges and counters
+```
+
+The Prometheus series are `localrouter_tool_resident_bytes`, `localrouter_tool_state`, `localrouter_memory_bytes` (`ceiling`, `used`, `free`), `localrouter_tool_queue_depth`, `localrouter_tool_last_load_timestamp_seconds`, `localrouter_evictions_total` and `localrouter_tool_last_error_timestamp_seconds`.
 
 ## Errors
 

@@ -22,8 +22,16 @@ const qi = @import("qwen_image");
 const Request = @import("../tool/request.zig").Request;
 const ToolConfig = @import("../config.zig").ToolConfig;
 
-pub const entry: engine.Entry = .{ .name = "qwen_image", .capabilities = &.{ .text_to_image, .image_edit }, .available = available, .needs = needs, .create = create(.base), .check = check(.base), .license = license };
-pub const turbo_entry: engine.Entry = .{ .name = "qwen_image_turbo", .capabilities = &.{ .text_to_image, .image_edit }, .available = available, .needs = needs, .create = create(.turbo), .check = check(.turbo), .license = license };
+pub const entry: engine.Entry = .{ .name = "qwen_image", .capabilities = &.{ .text_to_image, .image_edit }, .available = available, .needs = needs, .create = create(.base), .check = check(.base), .license = license, .sizes = sizes };
+pub const turbo_entry: engine.Entry = .{ .name = "qwen_image_turbo", .capabilities = &.{ .text_to_image, .image_edit }, .available = available, .needs = needs, .create = create(.turbo), .check = check(.turbo), .license = license, .sizes = sizes };
+
+/// Sides on the 16-pixel grid, from 256 up to `max_side`, and at most `max_pixels`.
+fn sizes(cfg: *const ToolConfig) engine.SizeLimits {
+    const max = maxSide(cfg);
+    const min: u32 = 256;
+    const hi: u32 = if (max >= min) max else min;
+    return .{ .min_width = min, .max_width = hi, .min_height = min, .max_height = hi, .multiple = 16, .max_pixels = maxPixels(cfg) };
+}
 
 /// Both checkpoints' weights (the same LICENSE file at each revision), unless a tool's config names its own.
 pub const license: @import("../config.zig").License = .{

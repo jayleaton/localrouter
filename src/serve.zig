@@ -119,7 +119,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, arena: std.mem.Allocator, args: []con
             .lead, .follower => |g| .{ .rank = g.rank, .world = g.world(), .master = plan.nodes[g.nodes[0]].addresses[0] },
             else => null,
         };
-        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path, .rank = rank }, t);
+        p.* = try process.ProcessTool.init(.{ .gpa = gpa, .io = io, .self_exe = self_exe, .environ = environ, .log_dir = log_dir, .log_max_bytes = cfg.log_max_bytes, .log_keep = cfg.log_keep, .gpu_lock = cfg.gpu_lock, .speech_gate = gate_path, .rank = rank }, t);
         switch (pl) {
             .local, .follower => s.* = .{ .tool = p.asTool() },
             .lead => |g| {

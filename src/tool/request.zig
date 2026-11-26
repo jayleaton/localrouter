@@ -42,6 +42,9 @@ pub const Image = struct {
     guidance: f32 = 0, // 0: the tool's default
     references: []const []const u8 = &.{}, // file names in the job directory (edits)
     mask: ?[]const u8 = null, // a file name in the job directory: an edit's mask (alpha 0 where the edit goes)
+    // Set by the API when the caller asked for `size_snap`, then cleared before the request is stored, so a worker
+    // never sees it. Null stays off the worker protocol (`emit_null_optional_fields` is false there).
+    size_snap: ?bool = null,
 };
 
 /// Video (optionally with audio). `seconds` x `fps` frames.
@@ -57,6 +60,7 @@ pub const Video = struct {
     guidance: f32 = 0,
     audio: ?bool = null, // null: the model's own (with audio unless its `audio` option is false), filled in by `engine.fill`
     first_frame: ?[]const u8 = null, // file name in the job directory (image to video)
+    size_snap: ?bool = null, // as `Image.size_snap`: cleared before the worker sees the request
 };
 
 /// Text to speech. The tool writes `speech.wav`: mono 16-bit PCM at the model's own rate; the API encodes other formats.
@@ -206,6 +210,9 @@ pub const Request = union(Kind) {
 pub const Limits = struct {
     min_side: u32 = 256,
     max_side: u32 = 2048,
+    /// False: do not apply the generic 256–2048, multiple-of-16 rule. The tool's own check names its grid
+    /// (32 for MiniMax H3, a cmd tool's `size_multiple`). Default true, so `validate` alone still refuses 1000x1000.
+    grid: bool = true,
     max_n: u32 = 4,
     max_seconds: u32 = 20,
     max_fps: u32 = 30,
@@ -299,8 +306,10 @@ fn language(s: []const u8) bool {
 fn common(prompt: []const u8, w: u32, h: u32, steps: u32, l: Limits, why: *[]const u8) Invalid!void {
     if (prompt.len == 0) return fail(why, "prompt is required");
     if (prompt.len > l.max_prompt) return fail(why, "prompt is too long");
-    if (w < l.min_side or h < l.min_side or w > l.max_side or h > l.max_side) return fail(why, "size sides must be 256 to 2048");
-    if (w % 16 != 0 or h % 16 != 0) return fail(why, "size sides must be multiples of 16");
+    if (l.grid) {
+        if (w < l.min_side or h < l.min_side or w > l.max_side or h > l.max_side) return fail(why, "size sides must be 256 to 2048");
+        if (w % 16 != 0 or h % 16 != 0) return fail(why, "size sides must be multiples of 16");
+    }
     if (steps > l.max_steps) return fail(why, "steps must be at most 200");
 }
 
@@ -329,6 +338,8 @@ test "validate and wire shape" {
     try validate(ok, .{}, &why);
     try std.testing.expectError(error.Invalid, validate(.{ .image = .{ .prompt = "a", .width = 1000 } }, .{}, &why));
     try std.testing.expectEqualStrings("size sides must be multiples of 16", why);
+    // The API turns this off when the tool has its own grid, so that check can name 32 instead of 16.
+    try validate(.{ .image = .{ .prompt = "a fox", .width = 1280, .height = 720 } }, .{ .grid = false }, &why);
     try std.testing.expectError(error.Invalid, validate(.{ .video = .{ .prompt = "a", .seconds = 0 } }, .{}, &why));
     const text = try std.json.Stringify.valueAlloc(std.testing.allocator, ok, .{});
     defer std.testing.allocator.free(text);
