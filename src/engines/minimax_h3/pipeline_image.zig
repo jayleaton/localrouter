@@ -154,19 +154,73 @@ pub fn editHostBytes(plan: *const edit_mod.Plan) u64 {
     return total + 4 * 12 * @as(u64, plan.target.w) * plan.target.h;
 }
 
-/// The sampler's buffers for `l`: the fp32 state and denoised, the bf16 model input and velocity, the bf16 text, the
-/// fp16 latent for the VAE and the uint8 image.
-fn bufferSizes(l: Limits) [7]u64 {
-    const px = maxTarget(l);
+/// The sampler's buffers for a target of `px` pixels and `text` tokens: the fp32 state and denoised, the bf16 model
+/// input and velocity, the bf16 text, the fp16 latent for the VAE and the uint8 image.
+fn bufferSizes(px: u32, text: u32) [7]u64 {
     const n: u64 = 24 * @as(u64, px / 256);
-    return .{ 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, textTokens(l)) * te32.dim * 2, 2 * n, 3 * @as(u64, px) };
+    return .{ 4 * n, 4 * n, 2 * n, 2 * n, @as(u64, text) * te32.dim * 2, 2 * n, 3 * @as(u64, px) };
 }
 
-/// The device bytes `create` allocates for `l` besides the weights.
+/// What `create` sizes the resident buffers for: text to image only. An edit's longer sequence and larger target get
+/// buffers of their own for the request (`EditDims`, `editScratchBytes`), so the resident set is the same with edits
+/// on or off (ROCM.md section 4).
+fn residentLimits(l: Limits) Limits {
+    var r = l;
+    r.pictures = 0;
+    return r;
+}
+
+/// The device bytes `create` allocates for `l` besides the weights (the same for any `l.pictures`).
 pub fn scratchBytes(l: Limits) u64 {
-    var total = dit_mod.Dit.imageScratchBytes(ditRows(l), textTokens(l)) + dit_mod.sumBuffers(te32.TextEncoder.scratch(textTokens(l))) + vae_image.tileBytes();
-    for (bufferSizes(l)) |n| total += @max(n, 256);
+    const r = residentLimits(l);
+    return scratchFor(ditRows(r), textTokens(r), maxTarget(r)) + vae_image.tileBytes();
+}
+
+/// The DiT's and the text encoder's scratch and the sampler's buffers for `rows` DiT rows, `text` tokens and a target
+/// of `px` pixels.
+fn scratchFor(rows: u32, text: u32, px: u32) u64 {
+    var total = dit_mod.Dit.imageScratchBytes(rows, text) + dit_mod.sumBuffers(te32.TextEncoder.scratch(text));
+    for (bufferSizes(px, text)) |n| total += @max(n, 256);
     return total;
+}
+
+/// An edit's sequence: its text tokens (the prompt's limit, each picture's label and markers, its vision rows), its
+/// DiT rows (the text, each reference's rows, the target's) and its target's pixels.
+pub const EditDims = struct {
+    text: u32,
+    rows: u32,
+    px: u32,
+
+    /// For `plan` (its pictures' sizes known) under `l`.
+    pub fn of(l: Limits, plan: *const edit_mod.Plan) EditDims {
+        var vision_rows: u32 = 0;
+        var ref_rows: u32 = 0;
+        for (plan.list()) |q| {
+            vision_rows += (q.vision.w / 32) * (q.vision.h / 32);
+            ref_rows += (q.vae.w / 32) * (q.vae.h / 32);
+        }
+        return from(l, plan.n, @min(vision_rows, l.vision_rows), ref_rows, plan.target.w * plan.target.h);
+    }
+
+    /// The most `n` pictures may take under `l` before their sizes are known: each VAE copy and the target at
+    /// `edit_pixels`, each Qwen copy's vision rows likewise (its short edge is 1024, so it has no more rows than the VAE
+    /// copy has DiT rows) up to `vision_rows` for them all.
+    pub fn most(l: Limits, n: usize) EditDims {
+        const k: u32 = @intCast(@min(n, edit_mod.max_pictures));
+        const each = l.edit_pixels / pixels_a_row;
+        return from(l, k, @min(k * each, l.vision_rows), k * each, @max(l.pixels, l.edit_pixels));
+    }
+
+    fn from(l: Limits, n: u32, vision_rows: u32, ref_rows: u32, px: u32) EditDims {
+        const text = l.tokens + vision_rows + n * label_tokens;
+        return .{ .text = text, .rows = text + ref_rows + px / pixels_a_row, .px = px };
+    }
+};
+
+/// The device bytes an edit's own buffers take for the request (`edit` allocates them, frees them by the time it
+/// returns): the DiT's and the text encoder's scratch and the sampler's buffers for `dims`.
+pub fn editScratchBytes(dims: EditDims) u64 {
+    return scratchFor(dims.rows, dims.text, dims.px);
 }
 
 /// The memory a request takes beyond `scratchBytes`, freed by the time it returns: the decode's device scratch and the
@@ -201,6 +255,27 @@ pub const Progress = struct {
 
 pub const Result = struct { width: u32, height: u32, tokens: u32 };
 
+/// The DiT, the text encoder and the sampler's buffers one request runs on.
+const Work = struct { dit: *dit_mod.Dit, te: *te32.TextEncoder, bufs: *[7]gpu.DeviceBuffer };
+
+/// An edit's own DiT scratch, text-encoder scratch (sharing the resident weights) and sampler buffers.
+const EditWork = struct {
+    dit: dit_mod.Dit,
+    te: te32.TextEncoder,
+    bufs: [7]gpu.DeviceBuffer,
+
+    fn view(e: *EditWork) Work {
+        return .{ .dit = &e.dit, .te = &e.te, .bufs = &e.bufs };
+    }
+
+    fn deinit(e: *EditWork, p: *Pipeline) void {
+        p.s.synchronize() catch {};
+        for (&e.bufs) |*b| b.free();
+        e.te.deinit();
+        e.dit.deinit();
+    }
+};
+
 pub const Pipeline = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -224,6 +299,7 @@ pub const Pipeline = struct {
     te: te32.TextEncoder,
     vae: vae_image.Decoder,
     bufs: [7]gpu.DeviceBuffer,
+    kk: dit_mod.Kernels,
     /// The run's light ops under the twin's names when set: `noise`, `step.{i}`, `latents`, `pixels`.
     probe: ?Probe = null,
     ids: []u32 = &.{},
@@ -271,16 +347,17 @@ pub const Pipeline = struct {
         defer up.deinit();
         p.w = try dit_mod.Weights.loadImage(gpa, io, &p.d, &p.pack, &up);
         errdefer p.w.deinit();
-        const kk: dit_mod.Kernels = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = null, .major = 0, .minor = 0, .image = &p.iops };
-        p.dit = try dit_mod.Dit.initImage(gpa, &p.d, kk, &p.w, p.s, ditRows(limits), textTokens(limits));
+        p.kk = .{ .h3 = &p.hops, .kitchen = &p.kitchen, .te = &p.tk, .ops = &p.ops, .nv = null, .major = 0, .minor = 0, .image = &p.iops };
+        const rl = residentLimits(limits);
+        p.dit = try dit_mod.Dit.initImage(gpa, &p.d, p.kk, &p.w, p.s, ditRows(rl), textTokens(rl));
         errdefer p.dit.deinit();
-        p.te = try te32.TextEncoder.init(gpa, io, &p.d, &p.te_ops, p.s, &p.te_pack, &up, textTokens(limits));
+        p.te = try te32.TextEncoder.init(gpa, io, &p.d, &p.te_ops, p.s, &p.te_pack, &up, textTokens(rl));
         errdefer p.te.deinit();
         p.vae = try vae_image.Decoder.init(gpa, io, &p.d, &p.v_ops, &p.iops, p.s, paths.vae, &up);
         errdefer p.vae.deinit();
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
-        for (&p.bufs, bufferSizes(limits)) |*b, len| {
+        for (&p.bufs, bufferSizes(maxTarget(rl), textTokens(rl))) |*b, len| {
             b.* = try gpu.DeviceBuffer.alloc(&p.d, @intCast(@max(len, 256)));
             made += 1;
         }
@@ -312,6 +389,25 @@ pub const Pipeline = struct {
         gpa.destroy(p);
     }
 
+    fn resident(p: *Pipeline) Work {
+        return .{ .dit = &p.dit, .te = &p.te, .bufs = &p.bufs };
+    }
+
+    fn editWork(p: *Pipeline, dims: EditDims) !EditWork {
+        var e: EditWork = undefined;
+        e.dit = try dit_mod.Dit.initImage(p.gpa, &p.d, p.kk, &p.w, p.s, dims.rows, dims.text);
+        errdefer e.dit.deinit();
+        e.te = try p.te.withScratch(dims.text);
+        errdefer e.te.deinit();
+        var made: usize = 0;
+        errdefer for (e.bufs[0..made]) |*b| b.free();
+        for (&e.bufs, bufferSizes(dims.px, dims.text)) |*b, len| {
+            b.* = try gpu.DeviceBuffer.alloc(&p.d, @intCast(@max(len, 256)));
+            made += 1;
+        }
+        return e;
+    }
+
     fn pre(p: *Pipeline, name: []const u8, ins: []const Io) !void {
         if (p.probe) |pr| try pr.before(pr.ctx, name, ins);
     }
@@ -327,7 +423,8 @@ pub const Pipeline = struct {
         if (!fits(p.limits, width, height)) return error.ImageTooLarge;
         if (rgb_out.len != sh.pixel_bytes) return error.BadImageBuffer;
         const gpa = p.gpa;
-        p.dit.probe = null;
+        const w = p.resident();
+        w.dit.probe = null;
 
         // ---- the prompt: its raw ids (no template), the encoder, the bf16 hand-off, condition_proj and the refiner
         const ids = try p.tok.ids(gpa, prompt);
@@ -336,21 +433,21 @@ pub const Pipeline = struct {
         if (ids.len > p.limits.tokens) return error.PromptTooLong;
         const l: u32 = @intCast(ids.len);
         try p.pre("text_encoder", &.{});
-        const hidden = try p.te.forward(ids, 0);
-        const text = try p.bufs[4].at(0);
+        const hidden = try w.te.forward(ids, 0);
+        const text = try w.bufs[4].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.post("text_encoder", &.{.{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 }});
-        try p.dit.prepare(text, l);
+        try w.dit.prepare(text, l);
 
-        try p.sample(sh, steps, seed, progress);
-        try p.decode(sh, rgb_out, 0);
+        try p.sample(&w, sh, steps, seed, progress);
+        try p.decode(&w, sh, rgb_out, 0);
         if (progress) |pr| pr.report(pr.ctx, "decode", 1, 1);
         return .{ .width = width, .height = height, .tokens = l };
     }
 
     /// The schedule and the state (portable noise in place of torch.randn, scaled by the first sigma: CONST), then the
     /// steps: one forward each (cfg 1), the CONST denoise, euler. The context (and an edit's references) are prepared.
-    fn sample(p: *Pipeline, sh: Shapes, steps: u32, seed: u64, progress: ?Progress) !void {
+    fn sample(p: *Pipeline, w: *const Work, sh: Shapes, steps: u32, seed: u64, progress: ?Progress) !void {
         const gpa = p.gpa;
         var tab: [1000]f32 = undefined;
         pdd.table(&pdd.pdd_sigmas, &tab);
@@ -358,21 +455,21 @@ pub const Pipeline = struct {
         defer gpa.free(sig);
         pdd.sigmas(&tab, sig);
         const n = sh.n;
-        const x = try p.bufs[0].at(0);
+        const x = try w.bufs[0].at(0);
         {
             const z = try gpa.alloc(f32, @intCast(n));
             defer gpa.free(z);
             qi.noise.fill(seed, z);
             const s0 = sig[0];
             for (z) |*v| v.* = s0 * v.* + (1.0 - s0) * 0.0; // noise_scaling: sigma * noise + (1 - sigma) * the empty latent
-            try p.dit.upload(x, std.mem.sliceAsBytes(z));
+            try w.dit.upload(x, std.mem.sliceAsBytes(z));
         }
         try p.pre("noise", &.{});
         try p.post("noise", &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
 
-        const den = try p.bufs[1].at(0);
-        const xb = try p.bufs[2].at(0);
-        const vel = try p.bufs[3].at(0);
+        const den = try w.bufs[1].at(0);
+        const xb = try w.bufs[2].at(0);
+        const vel = try w.bufs[3].at(0);
         var nb: [24]u8 = undefined;
         for (0..steps) |i| {
             const st = pdd.step(&pdd.pdd_sigmas, sig, i);
@@ -380,7 +477,7 @@ pub const Pipeline = struct {
             const name = try std.fmt.bufPrint(&nb, "step.{d}", .{i});
             try p.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
             try p.hops.toBf16(p.s, x, xb, n);
-            try p.dit.stepImage(xb, st, sh.lh, sh.lw, vel);
+            try w.dit.stepImage(xb, st, sh.lh, sh.lw, vel);
             try p.hops.denoise(p.s, x, vel, e.sigma, den, n);
             try p.hops.euler32(p.s, x, den, e.sigma, e.dt, n);
             try p.post(name, &.{ .{ .role = "vel", .ptr = vel, .bytes = n * 2 }, .{ .role = "den", .ptr = den, .bytes = n * 4 }, .{ .role = "x", .ptr = x, .bytes = n * 4 } });
@@ -395,10 +492,10 @@ pub const Pipeline = struct {
 
     /// The VAE: the fp32 state to fp16 (the VAE's own cast, round to nearest even), the tiles, uint8 into `rgb_out`;
     /// the fp32 pixels into `out_f32` too unless 0.
-    fn decode(p: *Pipeline, sh: Shapes, rgb_out: []u8, out_f32: u64) !void {
+    fn decode(p: *Pipeline, w: *const Work, sh: Shapes, rgb_out: []u8, out_f32: u64) !void {
         const gpa = p.gpa;
         const n = sh.n;
-        const x = try p.bufs[0].at(0);
+        const x = try w.bufs[0].at(0);
         try p.s.synchronize();
         const f32s = try gpa.alloc(f32, @intCast(n));
         defer gpa.free(f32s);
@@ -406,9 +503,9 @@ pub const Pipeline = struct {
         const f16s = try gpa.alloc(f16, @intCast(n));
         defer gpa.free(f16s);
         for (f16s, f32s) |*o, v| o.* = @floatCast(v);
-        const z16 = try p.bufs[5].at(0);
-        try p.dit.upload(z16, std.mem.sliceAsBytes(f16s));
-        const px = try p.bufs[6].at(0);
+        const z16 = try w.bufs[5].at(0);
+        try w.dit.upload(z16, std.mem.sliceAsBytes(f16s));
+        const px = try w.bufs[6].at(0);
         p.vae.rec.probe = p.probe;
         try p.vae.decodeTo(z16, sh.lh, sh.lw, px, out_f32);
         try p.s.synchronize();
@@ -446,8 +543,13 @@ pub const Pipeline = struct {
         if (steps == 0 or steps > 1000) return error.BadSteps;
         if (rgb_out.len != sh.pixel_bytes) return error.BadImageBuffer;
         const gpa = p.gpa;
-        p.dit.probe = null;
-        p.dit.releaseRefs();
+        // the edit's own DiT and text-encoder scratch and sampler buffers, for this request's sequence (the resident
+        // ones are text to image's), freed by the time it returns
+        const dims = EditDims.of(p.limits, &plan);
+        var work = try p.editWork(dims);
+        defer work.deinit(p);
+        const w = work.view();
+        w.dit.probe = null;
 
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
@@ -531,16 +633,16 @@ pub const Pipeline = struct {
         defer gpa.free(it.tags);
         if (p.ids.len > 0) gpa.free(p.ids);
         p.ids = it.ids;
-        if (it.ids.len > textTokens(p.limits)) return error.PromptTooLong;
+        if (it.ids.len > dims.text) return error.PromptTooLong;
         const l: u32 = @intCast(it.ids.len);
         var placed: [max]te32.Placed = undefined;
         for (feats[0..n], starts[0..n], placed[0..n]) |f, s, *pl| pl.* = .{ .f = f, .start = s };
         try p.pre("text_encoder", &.{});
-        const hidden = try p.te.forwardImages(it.ids, placed[0..n], 0);
-        const text = try p.bufs[4].at(0);
+        const hidden = try w.te.forwardImages(it.ids, placed[0..n], 0);
+        const text = try w.bufs[4].at(0);
         try p.hops.toBf16(p.s, hidden, text, @as(u64, l) * te32.dim);
         try p.post("text_encoder", &.{.{ .role = "context", .ptr = text, .bytes = @as(u64, l) * te32.dim * 2 }});
-        try p.dit.prepare(text, l);
+        try w.dit.prepare(text, l);
         try p.s.synchronize();
         for (&fbufs) |*slot| if (slot.*) |*b| {
             b.free();
@@ -595,20 +697,20 @@ pub const Pipeline = struct {
                 try p.post(name, &.{.{ .role = "z", .ptr = refs[i].z, .bytes = z.len * 4 }});
             }
         }
-        try p.dit.imageRefs(refs[0..n], seed, it.tags);
-        defer p.dit.releaseRefs();
+        try w.dit.imageRefs(refs[0..n], seed, it.tags);
+        defer w.dit.releaseRefs();
 
         // ---- the steps, the decode (its fp32 pixels kept for the composite), the composite, SaveImage's uint8
-        try p.sample(sh, steps, seed, progress);
+        try p.sample(&w, sh, steps, seed, progress);
         if (mask == null) {
-            try p.decode(sh, rgb_out, 0);
+            try p.decode(&w, sh, rgb_out, 0);
         } else {
             var f32buf = try gpu.DeviceBuffer.alloc(&p.d, @intCast(sh.pixel_bytes * 4));
             defer {
                 p.s.synchronize() catch {};
                 f32buf.free();
             }
-            try p.decode(sh, rgb_out, try f32buf.at(0));
+            try p.decode(&w, sh, rgb_out, try f32buf.at(0));
             const decoded = try a.alloc(f32, @intCast(sh.pixel_bytes));
             try p.d.check(p.d.api.cuMemcpyDtoH_v2(decoded.ptr, try f32buf.at(0), sh.pixel_bytes * 4), "cuMemcpyDtoH");
             const src = plan.list()[0].source;
@@ -689,9 +791,23 @@ test "edit limits: pictures, the target, each VAE copy, the vision rows; the buf
     try editFits(on, &(try edit_mod.Plan.of(&.{ one[0], wide, wide, one[0] }, true, 0, 0)));
     try editFits(on, &(try edit_mod.Plan.of(&.{ one[0], one[0], one[0], one[0], one[0] }, true, 0, 0)));
     try std.testing.expectError(error.TooManyPictures, edit_mod.Plan.of(&.{ one[0], one[0], one[0], one[0], one[0], one[0] }, true, 0, 0));
-    // the DiT holds the text, five references and the target at their largest
+    // an edit's DiT holds the text, its references and the target at their largest, in buffers of its own: the
+    // resident ones are text to image's with edits on or off, and an edit's grow with its pictures
     try std.testing.expectEqual(@as(u32, 1536 + 5 * 1024 + 5 * 16 + 6 * 2176), ditRows(on));
-    try std.testing.expect(scratchBytes(on) > scratchBytes(off));
+    try std.testing.expectEqual(ditRows(on), EditDims.most(on, 5).rows);
+    try std.testing.expectEqual(@as(u32, 1536 + 2176 + 16 + 2 * 2176), EditDims.most(on, 1).rows);
+    try std.testing.expectEqual(scratchBytes(off), scratchBytes(on));
+    var k: usize = 1;
+    while (k < 5) : (k += 1) try std.testing.expect(editScratchBytes(EditDims.most(on, k)) < editScratchBytes(EditDims.most(on, k + 1)));
+    // a plan's own sequence is within what its picture count was booked for
+    for (1..6) |m| {
+        const sq: [5]edit_mod.Size = @splat(one[0]);
+        const pl = try edit_mod.Plan.of(sq[0..m], m % 2 == 0, 0, 0);
+        try editFits(on, &pl);
+        const d = EditDims.of(on, &pl);
+        const b = EditDims.most(on, m);
+        try std.testing.expect(d.text <= b.text and d.rows <= b.rows and d.px <= b.px);
+    }
     // an edit's request: more than a decode at its target, the vision tower or the encoder at their largest
     plan = try edit_mod.Plan.of(&.{ one[0], one[0], one[0] }, true, 0, 0);
     const req = try editRequestBytes(&plan);

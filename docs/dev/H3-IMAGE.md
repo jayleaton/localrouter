@@ -215,9 +215,11 @@ and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` po
   are ComfyUI's `qwen2vl_mrope_position_ids` (after a picture the text resumes at its start plus `max(1, gh, gw) / 2`).
 - LocalRouter's limits (`pipeline_image.Limits`, *estimates* until a gfx1151 run): 5 pictures (#157's cap); `edit_pixels` 2176 x 1024 for
   the target and each VAE copy (every 2-MP node-11 size fits; a VAE copy past it, such as a reference longer than about 2:1, is refused);
-  `vision_rows` 5 x 1024 (five square pictures; four 4:3 ones). With them the DiT holds about 20 k rows and the encoder 6.7 k tokens,
-  about 6.6 GB of buffers over text to image's (the tool's `max_pictures` 0 leaves them out). The vision tower and the encoder load per
-  request, as I2V's do. A mask must be image 1's size and have a transparent pixel (ComfyUI would return the background unchanged).
+  `vision_rows` 5 x 1024 (five square pictures; four 4:3 ones). At five pictures the DiT holds about 20 k rows and the encoder 6.7 k
+  tokens. Those buffers are not resident: an edit allocates its own DiT and encoder scratch and sampler buffers for its sequence and frees
+  them before it returns, so they are booked as the request's working bytes, scaled by the pictures it sends (ROCM.md section 4, the
+  split `reference_working_bytes` makes), and the resident set is text to image's with edits on or off. The vision tower and the encoder
+  load per request, as I2V's do. A mask must be image 1's size and have a transparent pixel (ComfyUI would return the background unchanged).
 - Steps: 6 masked, 30 whole scene (#157's workflows), unless the request sets them.
 
 ## 3. Open questions

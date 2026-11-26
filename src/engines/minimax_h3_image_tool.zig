@@ -11,7 +11,8 @@
 //! Options: `pack` (default h3i-bf16), `max_pixels` (an image's area, default 1024 x 1024), `max_side` (default the API's
 //! 2048), `default_size` (`WIDTHxHEIGHT`, default 1024x1024), `steps` (default 6, the PDD heads' own count),
 //! `max_pictures` (default 5), `edit_pixels` (an edit's largest target and VAE copy, default 2176 x 1024), `resident_mb`
-//! (a floor for the booking). The buffers are sized at load for `max_pixels`; limits outside the API's, or whose largest
+//! (a floor for the booking). The resident buffers are sized at load for `max_pixels`; an edit's are its own request's working
+//! bytes, scaled by its pictures (ROCM.md section 4), so edits cost text to image nothing resident. Limits outside the API's, or whose largest
 //! image does not fit the daemon's memory budget, stop the daemon at start (`validate`). Every byte figure here is an
 //! *estimate* (ROCM.md section 4) until a gfx1151 run measures the peak, as `minimax_h3`'s `default_resident_mb` was.
 
@@ -187,22 +188,24 @@ fn workingBytes(width: u32, height: u32) u64 {
     return 2 * 3 * @as(u64, width) * height + phase + host_slack;
 }
 
-/// The largest edit a request may be before its images are read (*estimate*): `n` pictures of 2048 x 1024 (VAE copies
-/// at `edit_pixels`' default, 2048 vision rows each) at the request's size or the default target; the device phase at
-/// its largest (`P.editRequestBytes`), the host's copies (`P.editHostBytes`), each picture's RGBA at the API's largest
-/// side squared (and the mask's), the output and the PNG's copy, the worker's slack.
-fn editWorkingBytes(n: usize, masked: bool, width: u32, height: u32) u64 {
+/// The largest edit a request may be before its images are read (*estimate*), scaled by its `n` pictures as
+/// `reference_working_bytes` is: the edit's own DiT and text-encoder scratch and sampler buffers for `n` pictures
+/// (`P.editScratchBytes`, none of it resident); `n` pictures of 2048 x 1024 (VAE copies at `edit_pixels`' default,
+/// 2048 vision rows each) at the request's size or the default target; the device phase at its largest
+/// (`P.editRequestBytes`), the host's copies (`P.editHostBytes`), each picture's RGBA at the API's largest side squared
+/// (and the mask's), the output and the PNG's copy, the worker's slack.
+fn editWorkingBytes(cfg: *const ToolConfig, n: usize, masked: bool, width: u32, height: u32) u64 {
     const k = @min(@max(n, 1), E.max_pictures);
     const sizes: [E.max_pictures]E.Size = @splat(.{ .w = 2048, .h = 1024 });
     const plan = E.Plan.of(sizes[0..k], masked, width, height) catch return 0;
     const device = P.editRequestBytes(&plan) catch return 0;
     const rgba = 4 * @as(u64, api.max_side) * api.max_side;
-    return device + P.editHostBytes(&plan) + (k + @intFromBool(masked)) * rgba + 2 * 3 * @as(u64, plan.target.w) * plan.target.h + host_slack;
+    return P.editScratchBytes(P.EditDims.most(limits(cfg), k)) + device + P.editHostBytes(&plan) + (k + @intFromBool(masked)) * rgba + 2 * 3 * @as(u64, plan.target.w) * plan.target.h + host_slack;
 }
 
 fn needs(cfg: *const ToolConfig, req: *const Request) engine.Needs {
     const working: u64 = switch (req.*) {
-        .image => |v| if (v.references.len > 0) editWorkingBytes(v.references.len, v.mask != null, v.width, v.height) else workingBytes(v.width, v.height),
+        .image => |v| if (v.references.len > 0) editWorkingBytes(cfg, v.references.len, v.mask != null, v.width, v.height) else workingBytes(v.width, v.height),
         .video, .asset3d, .speech, .transcription, .chat, .decision => 0,
     };
     return .{ .resident = residentBytes(cfg), .working = working };
@@ -220,7 +223,7 @@ fn peakBytes(cfg: *const ToolConfig) u64 {
         }
     }
     if (maxPictures(cfg) > 0) for ([_]bool{ false, true }) |masked| {
-        most = @max(most, editWorkingBytes(maxPictures(cfg), masked, 0, 0));
+        most = @max(most, editWorkingBytes(cfg, maxPictures(cfg), masked, 0, 0));
     };
     return residentBytes(cfg) +| most;
 }
@@ -431,11 +434,11 @@ test "needs: the weights and the buffers for max_pixels resident, the decode and
     );
     const one: Request = .{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } };
     const n = needs(c.tool("h3i").?, &one);
-    // ROCM.md section 4: about 58 GB resident (weights and buffers) for text to image, a request's decode on top; the
-    // buffers for five pictures' edits (the DiT's 20 k rows, the encoder's 6.7 k tokens) add about 6.6 GB
+    // ROCM.md section 4: about 58 GB resident (weights and buffers) for text to image, a request's decode on top; an
+    // edit's buffers are its own request's working bytes, so the resident set is the same with edits on or off
     const text_only = needs(c.tool("off").?, &one).resident;
     try std.testing.expect(text_only > 56_000_000_000 and text_only < 60_000_000_000);
-    try std.testing.expect(n.resident > text_only + 6_000_000_000 and n.resident < 68_000_000_000);
+    try std.testing.expectEqual(text_only, n.resident);
     try std.testing.expect(n.working > try P.requestBytes(1024, 1024));
     try std.testing.expect(n.working < 128 << 20);
     try std.testing.expect(needs(c.tool("big").?, &one).resident > n.resident); // the buffers follow max_pixels
@@ -511,14 +514,23 @@ test "edit needs: the vision tower, the encoder, the references and the composit
     const t2i = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } });
     const one = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &.{"a.png"}, .mask = "m.png" } });
     const five = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &.{ "a", "b", "c", "d", "e" } } });
+    const two = needs(cfg, &.{ .image = .{ .prompt = "a", .width = 0, .height = 0, .references = &.{ "a", "b" } } });
     try std.testing.expect(one.working > t2i.working);
-    try std.testing.expect(five.working > one.working);
+    try std.testing.expect(two.working > one.working and five.working > two.working);
+    // ROCM.md section 4: the edit's buffers (its DiT and text-encoder scratch, the references' and vision tokens'
+    // rows) are working bytes scaled by the pictures the request sends, as reference_working_bytes; never resident
+    const l = limits(cfg);
+    try std.testing.expect(one.working > P.editScratchBytes(P.EditDims.most(l, 1)));
+    try std.testing.expect(five.working > P.editScratchBytes(P.EditDims.most(l, 5)));
+    try std.testing.expect(P.editScratchBytes(P.EditDims.most(l, 5)) > P.editScratchBytes(P.EditDims.most(l, 1)));
+    try std.testing.expectEqual(t2i.resident, one.resident);
+    try std.testing.expectEqual(t2i.resident, five.resident);
     // the vision tower and the VAE encoder load per request: at least their weights and buffers
     try std.testing.expect(one.working > h3.vae_video_enc.Encoder.deviceBytes(1024, 2048));
     try std.testing.expect(one.working > h3.te_vision.VisionEncoder.deviceBytes(128 * 64));
-    try std.testing.expect(five.working < 8 << 30);
-    // the buffers for edits: the edit's text, references and target rows resident; none with max_pictures 0
-    try std.testing.expect(t2i.resident > needs(c.tool("off").?, &.{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } }).resident);
+    try std.testing.expect(five.working < 16 << 30);
+    // max_pictures 0 (edits off) loads the same resident set
+    try std.testing.expectEqual(t2i.resident, needs(c.tool("off").?, &.{ .image = .{ .prompt = "a", .width = 1024, .height = 1024 } }).resident);
     var msg: [256]u8 = undefined;
     var why: std.Io.Writer = .fixed(&msg);
     try std.testing.expect(validate(cfg, 90 << 30, &why));

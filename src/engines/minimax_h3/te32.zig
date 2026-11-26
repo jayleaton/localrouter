@@ -153,6 +153,18 @@ pub const TextEncoder = struct {
         t.store.deinit();
     }
 
+    /// A copy of `t` that shares its weights and has scratch of its own for `max_l` tokens (an H3-Image edit's longer
+    /// sequence, allocated for one request). Its `deinit` frees only that scratch; `t` must outlive it.
+    pub fn withScratch(t: *const TextEncoder, max_l: u32) !TextEncoder {
+        var c = t.*;
+        c.store = .init(t.d, t.gpa);
+        errdefer c.store.deinit();
+        c.max_l = max_l;
+        const sizes = scratch(max_l);
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(c, name) = try c.store.alloc(@max(@field(sizes, name), 256));
+        return c;
+    }
+
     /// A bf16 tensor widened to fp32 (exact) on the device.
     fn widen(t: *TextEncoder, io: std.Io, p: *const Pack, up: *Uploader, host: *std.ArrayList(u8), name: []const u8) !u64 {
         const w = try p.get(name);
