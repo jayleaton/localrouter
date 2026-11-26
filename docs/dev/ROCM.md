@@ -176,6 +176,8 @@ allocations past GTT fail even when MemAvailable has room. So:
 
 ## 5. Gates
 
+ComfyUI is a development-time reference for the baseline gate only, never a runtime dependency of any engine.
+
 **Here, with no GPU** (this dev box has none; heavy steps run in a Davit box):
 
 - `zig build` and `zig build test` with `-Dgpu=cuda` and `-Dgpu=hip`, both with empty images.
