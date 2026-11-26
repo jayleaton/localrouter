@@ -115,13 +115,13 @@ checks that both modules declare every name the engines use, so the HIP side can
 
 | Kernel (CUDA source) | H3-Image use | HIP form |
 | --- | --- | --- |
-| `minimax/ops.cu` (norm_mod, gate_add(+norm_mod), swiglu, rms, final_mod, patchify, euler, `h3_gemm_f32`, ...) | every DiT step, PDD heads, patch projection | One source for both vendors through `kernels/common/gpu.cuh` (bf16 type, intrinsics, shuffles). No tensor cores, written-out roundings. CUDA SASS must not move (`sass_check.sh`). |
+| `minimax/ops.cu` (norm_mod, gate_add(+norm_mod), swiglu, rms, final_mod, patchify, euler, `h3_gemm_f32`, ...) | every DiT step, PDD heads, patch projection | One source for both vendors: the CUDA source compiles for HIP unchanged, with `kernels/hip/compat/cuda_compat.h` force-included (bf16 type, CUDA's bf16 and e4m3 roundings written out, shuffles). No tensor cores, written-out roundings. CUDA SASS must not move (`sass_check.sh`). |
 | `minimax/kitchen/rms_rope.cu` | per-head RMSNorm + RoPE | Ported copy under `kernels/hip/minimax/kitchen/`. It is built with `--use_fast_math` on CUDA. The HIP copy writes the same math out explicitly, so its bits are its own. UPSTREAM.md entry: comfy-kitchen has no ROCm backend; offer the port upstream as a general HIP backend, or record why not. |
 | `minimax/kitchen` INT8 attention (`qk_int_sv_i8`, quant_qk, quant_v) | DiT attention | **Not ported for H3-Image.** At 1 MP the sequence is about 1.3 k tokens (1,024 image tokens: VAE /16, patch 2, plus text). Attention is about 2 TFLOP a forward against about 53 TFLOP of linears (*estimate*), so INT8 attention buys nothing here. H3-Image on HIP uses the bf16 attention below. Series 2 revisits it at about 37 k tokens. |
 | `qwen_image/attention.cu` (TensorFold's bf16 prefill attention, mma.sync m16n8k16, D 128) | token refiner; on HIP, also the DiT | New HIP kernel `kernels/hip/attention.hip`: bf16 WMMA for QKᵀ and PV with fp32 accumulation, fp32 online softmax, a fixed key order and no split-K. Ours, not CK or AOTriton, so its order is written down and the twin runs the same code. |
 | `qwen_image/gemm.cu` (deterministic bf16 GEMM, mma.sync, cp.async, ldmatrix) | `condition_proj`, refiner, and on HIP **every block linear** of a bf16 pack | New HIP kernel `kernels/hip/gemm_bf16.hip` with the same contract: bf16 in, fp32 accumulation over K tiles in ascending order, no split-K, so a row's bits depend on neither M, N nor the grid. It uses `__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32` directly. rocWMMA is used only as a cross-check in tests: a pinned header dependency for one fragment wrapper is not worth it, and the builtin keeps the order visible. hipBLASLt is ruled out: it is not ours, and its algorithm choice is not bit-stable. |
 | `minimax/gemm_f16.cu` (fp16 mma.sync) | image VAE decoder linears and attention | `kernels/hip/gemm_f16.hip`, the f16 twin of the bf16 GEMM above |
-| `minimax/vae_video.cu`, `vae_enc.cu` | image VAE decoder ops; encoder (edits) | single source via `gpu.cuh` |
+| `minimax/vae_video.cu`, `vae_enc.cu` | image VAE decoder ops; encoder (edits) | single source via `kernels/hip/compat` |
 | `minimax/te32.cu` (fp32 GEMM with NVFP4 AWQ weights dequantized on the fly) | 32B text encoder | single source. It is weight-only dequantization on CUDA cores, so FP4's missing hardware does not matter. Keep the same checkpoint (15.7 GB, smaller than `int8_convrot`'s 27 GB). |
 | `minimax/te_vision.cu`, `qwen_image/vision.cu` | edits: the reference image through the vision tower | single source; its GEMMs go through the bf16 GEMM above |
 | TensorFold NVFP4 `gemm_ck`/`gemm_ws`/`act`/`lane4` | H3 video's DiT linears on CUDA | **Not on gfx1151** (Blackwell block-scaled MMA). See precision below. |
@@ -215,7 +215,7 @@ Series 1, H3-Image. Each PR runs `zig build` and `zig build test` (Zig 0.17.0), 
 | 1.0 | this plan | — |
 | 1.1 | `gpu` seam: `-Dgpu`, `src/gpu/hip` runtime, `build/hip.zig`, engines import `gpu` | host tests; no kernel or nvcc flag changes |
 | 1.2 | GTT budget in `sched/memory.zig` | fixture tests |
-| 1.3 | `kernels/common/gpu.cuh` and the single-source kernels building for HIP (`-Dhip`, `-Dgfx`); the twin's ROCm extension loader; `isa_check.sh` | ISA check; G0 for these kernels |
+| 1.3 | `kernels/hip/compat` and the single-source kernels building for HIP (`-Dhip`, `-Dgfx`); the twin's ROCm extension loader; `isa_check.sh` | ISA check; G0 for these kernels |
 | 1.4 | HIP bf16 and f16 WMMA GEMMs and bf16 attention; bf16 `Linear` kind (also on CUDA); kitchen rms_rope HIP copy plus its UPSTREAM.md entry | G0 |
 | 1.5 | `docs/dev/H3-IMAGE.md` (ComfyUI findings); H3-Image twin (`stk_twin/h3i`), bf16 pack build, captures, structure gate | CPU structure; baseline vs ComfyUI |
 | 1.6 | engine: DiT image variant (no audio, PDD heads), image VAE decoder, PDD sampler, `minimax_h3_image` entry (`text_to_image`, its own licence) | G1-G3 |

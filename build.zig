@@ -16,15 +16,20 @@ pub fn build(b: *std.Build) void {
     const cuda = cudaRuntime(b, target, optimize);
     const choice = b.option(Gpu, "gpu", "The GPU engines' runtime on Linux: cuda (default) or hip (docs/dev/ROCM.md)") orelse .cuda;
     const nvfp4 = @import("build/cuda.zig").nvfp4(b, target, optimize); // -Dnvcc, -Dsm, `fatbins`, module nvfp4_kernels
+    const hip = @import("build/hip.zig").options(b); // -Dhip, -Dgfx, `hsaco`
     if (choice == .hip and nvfp4.nvcc != null) {
         b.default_step.dependOn(&b.addFail("-Dnvcc builds CUDA fatbins: a -Dgpu=hip build embeds none").step);
     }
+    if (choice == .cuda and hip.root != null) {
+        b.default_step.dependOn(&b.addFail("-Dhip builds HIP code objects: add -Dgpu=hip").step);
+    }
+    const hip_images: ?@import("build/hip.zig").Hip = if (choice == .hip) hip else null;
     // the runtime the engines import as `gpu`, and the CUDA compiler their kernels get (none for a HIP build)
     const gpu = if (choice == .hip) @import("build/hip.zig").runtime(b, target, optimize) else cuda;
     const nvcc = if (choice == .hip) null else nvfp4.nvcc;
     const tokenizer = b.createModule(.{ .root_source_file = b.dependency("tensorfold", .{}).path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
-    const qwen = @import("build/qwen.zig").engine(b, target, optimize, nvcc, nvfp4.sms, gpu, nvfp4.module, tokenizer, nvfp4.fatbins);
-    const h3 = @import("build/minimax.zig").engine(b, target, optimize, nvcc, nvfp4.sms, gpu, qwen, nvfp4.fatbins);
+    const qwen = @import("build/qwen.zig").engine(b, target, optimize, nvcc, nvfp4.sms, hip_images, gpu, nvfp4.module, tokenizer, nvfp4.fatbins);
+    const h3 = @import("build/minimax.zig").engine(b, target, optimize, nvcc, nvfp4.sms, hip_images, gpu, qwen, nvfp4.fatbins);
     // pinned vendor libraries (docs/ARCHITECTURE.md; no exception open): loaded at run time, so host-built and tested
     const vendor = b.createModule(.{ .root_source_file = b.path("src/engine/vendor/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
     const k6_build = @import("build/kandinsky6.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, tokenizer, vendor, nvfp4.fatbins);
