@@ -16,11 +16,12 @@ const torch_flags = [_][]const u8{
 };
 
 const sources = [_][]const u8{ "ops", "attention", "gemm", "te", "vae", "vision", "vae_enc" };
+/// The sources built for HIP (`-O3` as on CUDA); attention.cu and gemm.cu, on mma.sync, are ported in PR 1.4.
+const hip_sources = [_][]const u8{ "ops", "te", "vae", "vision", "vae_enc" };
 
 /// `nvcc` / `sms` as given to build/cuda.zig (-Dnvcc, -Dsm); `gpu` the runtime (CUDA or HIP), `nvfp4` the TensorFold kernel module.
-pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, gpu: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
+pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, hip: ?@import("hip.zig").Hip, gpu: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
     const opts = b.addOptions();
-    opts.addOption(bool, "with_kernels", nvcc != null);
     opts.addOption([]const u8, "set", "qwen_image"); // distinct contents: options files must not be shared by modules
     const kmod = b.createModule(.{ .root_source_file = b.path("kernels/cuda/qwen_image.zig"), .target = target, .optimize = optimize });
     kmod.addOptions("qwen_options", opts);
@@ -36,9 +37,15 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         run.addArg("-o");
         const out = run.addOutputFileArg(b.fmt("qwen_{s}.fatbin", .{name}));
         run.addFileArg(b.path(b.fmt("kernels/cuda/qwen_image/{s}.cu", .{name})));
-        kmod.addAnonymousImport(b.fmt("qwen_fatbin_{s}", .{name}), .{ .root_source_file = out });
+        kmod.addAnonymousImport(b.fmt("qwen_image_{s}", .{name}), .{ .root_source_file = out });
         fatbin_step.dependOn(&b.addInstallFile(out, b.fmt("fatbin/qwen_{s}.fatbin", .{name})).step);
     };
+    if (hip) |h| if (h.root != null) for (hip_sources) |name| {
+        const out = @import("hip.zig").codeObject(b, h, b.fmt("qwen_{s}", .{name}), b.fmt("kernels/cuda/qwen_image/{s}.cu", .{name}), &.{"-O3"});
+        kmod.addAnonymousImport(b.fmt("qwen_image_{s}", .{name}), .{ .root_source_file = out });
+    };
+    const built: []const []const u8 = if (nvcc != null) &sources else if (hip != null and hip.?.root != null) &hip_sources else &.{};
+    opts.addOption([]const []const u8, "images", built);
     return b.createModule(.{
         .root_source_file = b.path("src/engines/qwen_image/root.zig"),
         .target = target,

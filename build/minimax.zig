@@ -4,6 +4,7 @@
 //! The engine shares the image engine's pack reader, linears, bf16 GEMM, attention and replay (`qwen_image`).
 
 const std = @import("std");
+const Hip = @import("hip.zig").Hip;
 
 const torch_flags = [_][]const u8{
     "-D__CUDA_NO_HALF_OPERATORS__",
@@ -29,21 +30,24 @@ const kitchen_flags = [_][]const u8{
     "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
 };
 
-const Source = struct { name: []const u8, file: []const u8, extra: []const []const u8 };
+/// `extra`: nvcc's flags after torch's; `hip`: clang's for the HIP code object (null: not built for HIP yet, its image
+/// empty: comfy-kitchen's INT8 attention and the tensor-core GEMM are ported in PR 1.4, docs/dev/ROCM.md).
+const Source = struct { name: []const u8, file: []const u8, extra: []const []const u8, hip: ?[]const []const u8 };
 const sources = [_]Source{
-    .{ .name = "ops", .file = "kernels/cuda/minimax/ops.cu", .extra = &.{"-O3"} },
-    .{ .name = "kitchen", .file = "kernels/cuda/minimax/kitchen_launch.cu", .extra = &kitchen_flags },
-    .{ .name = "te32", .file = "kernels/cuda/minimax/te32.cu", .extra = &.{"-O3"} }, // no fast math (h3/te32.py)
-    .{ .name = "vae_audio", .file = "kernels/cuda/minimax/vae_audio.cu", .extra = &.{ "-O3", "--fmad=false" } }, // h3/vae_audio.py
-    .{ .name = "gemm_f16", .file = "kernels/cuda/minimax/gemm_f16.cu", .extra = &.{"-O3"} }, // h3/vae_video.py
-    .{ .name = "te_vision", .file = "kernels/cuda/minimax/te_vision.cu", .extra = &.{"-O3"} },
-    .{ .name = "vae_enc", .file = "kernels/cuda/minimax/vae_enc.cu", .extra = &.{"-O3"} },
-    .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"} },
+    .{ .name = "ops", .file = "kernels/cuda/minimax/ops.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
+    .{ .name = "kitchen", .file = "kernels/cuda/minimax/kitchen_launch.cu", .extra = &kitchen_flags, .hip = null },
+    .{ .name = "te32", .file = "kernels/cuda/minimax/te32.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} }, // no fast math (h3/te32.py)
+    .{ .name = "vae_audio", .file = "kernels/cuda/minimax/vae_audio.cu", .extra = &.{ "-O3", "--fmad=false" }, .hip = &.{ "-O3", "-ffp-contract=off" } }, // h3/vae_audio.py
+    .{ .name = "gemm_f16", .file = "kernels/cuda/minimax/gemm_f16.cu", .extra = &.{"-O3"}, .hip = null }, // h3/vae_video.py
+    .{ .name = "te_vision", .file = "kernels/cuda/minimax/te_vision.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
+    .{ .name = "vae_enc", .file = "kernels/cuda/minimax/vae_enc.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
+    .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"}, .hip = &.{"-O3"} },
 };
 
-pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, gpu: *std.Build.Module, qwen: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
+/// `nvcc` set: CUDA fatbins; `hip` with a ROCm directory: HIP code objects (build.zig never sets both).
+pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, hip: ?Hip, gpu: *std.Build.Module, qwen: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
+    var images: std.ArrayList([]const u8) = .empty;
     const opts = b.addOptions();
-    opts.addOption(bool, "with_kernels", nvcc != null);
     opts.addOption([]const u8, "set", "minimax_h3"); // distinct contents: options files must not be shared by modules
     const kmod = b.createModule(.{ .root_source_file = b.path("kernels/cuda/minimax.zig"), .target = target, .optimize = optimize });
     kmod.addOptions("minimax_options", opts);
@@ -59,9 +63,16 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         run.addArg("-o");
         const out = run.addOutputFileArg(b.fmt("minimax_{s}.fatbin", .{src.name}));
         run.addFileArg(b.path(src.file));
-        kmod.addAnonymousImport(b.fmt("minimax_fatbin_{s}", .{src.name}), .{ .root_source_file = out });
+        kmod.addAnonymousImport(b.fmt("minimax_image_{s}", .{src.name}), .{ .root_source_file = out });
+        images.append(b.allocator, src.name) catch @panic("OOM");
         fatbin_step.dependOn(&b.addInstallFile(out, b.fmt("fatbin/minimax_{s}.fatbin", .{src.name})).step);
     };
+    if (hip) |h| if (h.root != null) for (sources) |src| if (src.hip) |flags| {
+        const out = @import("hip.zig").codeObject(b, h, b.fmt("minimax_{s}", .{src.name}), src.file, flags);
+        kmod.addAnonymousImport(b.fmt("minimax_image_{s}", .{src.name}), .{ .root_source_file = out });
+        images.append(b.allocator, src.name) catch @panic("OOM");
+    };
+    opts.addOption([]const []const u8, "images", images.items);
     return b.createModule(.{
         .root_source_file = b.path("src/engines/minimax_h3/root.zig"),
         .target = target,

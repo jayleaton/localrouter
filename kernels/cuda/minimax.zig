@@ -1,9 +1,12 @@
 //! LocalRouter's MiniMax H3 kernels as fatbins (ops.cu; kitchen_launch.cu with comfy-kitchen's copied device code; te32.cu; the VAEs' vae_audio.cu, gemm_f16.cu and vae_video.cu),
-//! built by build/minimax.zig with the flags the video twin's extensions use. Without nvcc the images are empty.
+//! built by build/minimax.zig with the flags the video twin's extensions use, or as HIP code objects of the same sources
+//! (-Dgpu=hip -Dhip, build/hip.zig). Without a compiler, or for a source not built for HIP, an image is empty.
 
+const std = @import("std");
 const options = @import("minimax_options");
 
-pub const with_kernels: bool = options.with_kernels;
+/// Whether the build embedded any image (a CUDA fatbin each, or a HIP code object each).
+pub const with_kernels: bool = options.images.len > 0;
 
 fn Blob(comptime name: []const u8) type {
     return struct {
@@ -11,15 +14,23 @@ fn Blob(comptime name: []const u8) type {
     };
 }
 
-pub const ops: []const u8 = if (with_kernels) &Blob("minimax_fatbin_ops").bytes else &.{};
-pub const kitchen: []const u8 = if (with_kernels) &Blob("minimax_fatbin_kitchen").bytes else &.{};
-pub const te32: []const u8 = if (with_kernels) &Blob("minimax_fatbin_te32").bytes else &.{};
-pub const vae_audio: []const u8 = if (with_kernels) &Blob("minimax_fatbin_vae_audio").bytes else &.{};
-pub const gemm_f16: []const u8 = if (with_kernels) &Blob("minimax_fatbin_gemm_f16").bytes else &.{};
-pub const vae_video: []const u8 = if (with_kernels) &Blob("minimax_fatbin_vae_video").bytes else &.{};
+/// The embedded image of source `name`, empty where the build has none (no compiler, or not ported to this runtime).
+fn image(comptime name: []const u8) []const u8 {
+    inline for (options.images) |have| {
+        if (comptime std.mem.eql(u8, have, name)) return &Blob("minimax_image_" ++ name).bytes;
+    }
+    return &.{};
+}
+
+pub const ops: []const u8 = image("ops");
+pub const kitchen: []const u8 = image("kitchen");
+pub const te32: []const u8 = image("te32");
+pub const vae_audio: []const u8 = image("vae_audio");
+pub const gemm_f16: []const u8 = image("gemm_f16");
+pub const vae_video: []const u8 = image("vae_video");
 
 /// The 32B text encoder's RoPE frequencies as ComfyUI's CUDA run computes them (kernels/minimax/te32_inv_freq.json).
 pub const te32_inv_freq: []const u8 = @embedFile("minimax_te32_inv_freq");
 
-pub const vae_enc: []const u8 = if (with_kernels) &Blob("minimax_fatbin_vae_enc").bytes else &.{};
-pub const te_vision: []const u8 = if (with_kernels) &Blob("minimax_fatbin_te_vision").bytes else &.{};
+pub const vae_enc: []const u8 = image("vae_enc");
+pub const te_vision: []const u8 = image("te_vision");
