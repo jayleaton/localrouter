@@ -1,6 +1,7 @@
-//! LocalRouter: one `localrouter` binary (daemon, worker, client, checks) on TensorFold's pinned CUDA runtime.
-//! On macOS the CUDA engines (Qwen-Image, MiniMax H3, Kandinsky-6), their checks and the vendor loader are left out:
-//! the binary serves out-of-process servers and `cmd` workers there (docs/dev/MAC-PORT.md).
+//! LocalRouter: one `localrouter` binary (daemon, worker, client, checks). On Linux the GPU engines run on TensorFold's
+//! pinned CUDA runtime (`-Dgpu=cuda`, the default: Qwen-Image, MiniMax H3, Kandinsky-6) or on LocalRouter's HIP runtime
+//! (`-Dgpu=hip`: MiniMax H3, docs/dev/ROCM.md); the engines import either as `gpu`. On macOS the GPU engines, their checks
+//! and the vendor loader are left out: the binary serves out-of-process servers and `cmd` workers there (docs/dev/MAC-PORT.md).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -13,25 +14,36 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const cuda = cudaRuntime(b, target, optimize);
+    const choice = b.option(Gpu, "gpu", "The GPU engines' runtime on Linux: cuda (default) or hip (docs/dev/ROCM.md)") orelse .cuda;
     const nvfp4 = @import("build/cuda.zig").nvfp4(b, target, optimize); // -Dnvcc, -Dsm, `fatbins`, module nvfp4_kernels
+    if (choice == .hip and nvfp4.nvcc != null) {
+        b.default_step.dependOn(&b.addFail("-Dnvcc builds CUDA fatbins: a -Dgpu=hip build embeds none").step);
+    }
+    // the runtime the engines import as `gpu`, and the CUDA compiler their kernels get (none for a HIP build)
+    const gpu = if (choice == .hip) @import("build/hip.zig").runtime(b, target, optimize) else cuda;
+    const nvcc = if (choice == .hip) null else nvfp4.nvcc;
     const tokenizer = b.createModule(.{ .root_source_file = b.dependency("tensorfold", .{}).path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
-    const qwen = @import("build/qwen.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, nvfp4.module, tokenizer, nvfp4.fatbins);
-    const h3 = @import("build/minimax.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, nvfp4.fatbins);
+    const qwen = @import("build/qwen.zig").engine(b, target, optimize, nvcc, nvfp4.sms, gpu, nvfp4.module, tokenizer, nvfp4.fatbins);
+    const h3 = @import("build/minimax.zig").engine(b, target, optimize, nvcc, nvfp4.sms, gpu, qwen, nvfp4.fatbins);
     // pinned vendor libraries (docs/ARCHITECTURE.md; no exception open): loaded at run time, so host-built and tested
     const vendor = b.createModule(.{ .root_source_file = b.path("src/engine/vendor/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
     const k6_build = @import("build/kandinsky6.zig").engine(b, target, optimize, nvfp4.nvcc, nvfp4.sms, cuda, qwen, tokenizer, vendor, nvfp4.fatbins);
     const k6 = k6_build.module;
-    // CUDA engines build on Linux only; `build_config.cuda_engines` tells the source which table it gets.
-    const cuda_engines = target.result.os.tag == .linux;
+    // GPU engines build on Linux only; `build_config.gpu` tells the source which runtime, and so which table, it gets.
+    const backend: Backend = if (target.result.os.tag != .linux) .none else if (choice == .hip) .hip else .cuda;
     const build_config = b.addOptions();
-    build_config.addOption(bool, "cuda_engines", cuda_engines);
+    build_config.addOption(Backend, "gpu", backend);
 
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = if (cuda_engines) &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 }, .{ .name = "kandinsky6", .module = k6 } } else &.{},
+        .imports = switch (backend) {
+            .none => &.{},
+            .cuda => &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "gpu", .module = gpu }, .{ .name = "nvfp4_kernels", .module = nvfp4.module }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 }, .{ .name = "kandinsky6", .module = k6 } },
+            .hip => &.{ .{ .name = "gpu", .module = gpu }, .{ .name = "qwen_image", .module = qwen }, .{ .name = "minimax_h3", .module = h3 } },
+        },
     });
     root.addOptions("build_config", build_config);
     if (target.result.os.tag.isDarwin()) { // sched/memory.zig: the GPU's working-set ceiling
@@ -84,11 +96,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&selftest.step);
     const unit_step = b.step("test-unit", "Unit tests only");
     unit_step.dependOn(&unit.step);
-    if (cuda_engines) {
+    if (backend != .none) {
         test_step.dependOn(nvfp4.tests);
         unit_step.dependOn(nvfp4.tests);
         // the Kandinsky-6 sampler and DiT checkpoint loader (M2): host tests, not yet reachable from main.zig
-        for ([_]*std.Build.Module{ qwen, h3, k6, vendor, k6_build.sampler, k6_build.dit_weights }) |m| {
+        const cuda_only = [_]*std.Build.Module{ qwen, k6, vendor, k6_build.sampler, k6_build.dit_weights };
+        const modules: []const *std.Build.Module = if (backend == .hip) &.{ h3, gpu } else &(cuda_only ++ [_]*std.Build.Module{h3});
+        for (modules) |m| {
             const t = b.addRunArtifact(b.addTest(.{ .root_module = m }));
             test_step.dependOn(&t.step);
             if (m != h3) unit_step.dependOn(&t.step);
@@ -96,6 +110,11 @@ pub fn build(b: *std.Build) void {
     }
     b.step("test-integration", "Integration tests only").dependOn(&integration.step);
 }
+
+/// `-Dgpu`: the runtime the Linux GPU engines are built on.
+const Gpu = enum { cuda, hip };
+/// `build_config.gpu`: `none` where no GPU engine is built (macOS).
+const Backend = enum { none, cuda, hip };
 
 /// TensorFold's CUDA runtime (driver via dlopen, memory, streams, launch, graphs, cuBLASLt) from the pinned
 /// dependency, host side only: our engines embed their own fatbins, so TensorFold's are left out.

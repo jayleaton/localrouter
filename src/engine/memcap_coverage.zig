@@ -42,7 +42,9 @@ test "coverage: nothing in LocalRouter opens a driver or allocates GPU memory ex
     // build.zig) and the DiT weights module (its own test module; the engine does not import it yet). Its raw calls
     // go through the driver table its caller passes, so wiring it in takes a driver from memcap.open.
     const outside = [_][]const u8{ "engines/kandinsky6/video_vae/qual.zig", "engines/kandinsky6/dit_weights.zig" };
-    const n_src = try scanTree(io, gpa, "src", &([_][]const u8{ "engines/qwen_image/memcap.zig", "engine/memcap_coverage.zig" } ++ outside), &guarded, &hits);
+    // the HIP runtime is a runtime like TensorFold's: it owns the table memcap patches (its own test below)
+    const runtime = [_][]const u8{ "gpu/hip/driver.zig", "gpu/hip/memory.zig" };
+    const n_src = try scanTree(io, gpa, "src", &([_][]const u8{ "engines/qwen_image/memcap.zig", "engine/memcap_coverage.zig" } ++ outside ++ runtime), &guarded, &hits);
     const n_k = try scanTree(io, gpa, "kernels", &.{}, &guarded, &hits);
     if (hits.items.len > 0) std.debug.print("unguarded allocation paths:\n{s}", .{hits.items});
     try std.testing.expect(n_src > 50 and n_k > 0);
@@ -56,9 +58,9 @@ test "coverage: the pinned TensorFold CUDA package reaches allocation entry poin
     defer hits.deinit(gpa);
     // an extern declaration or a symbol lookup outside abi.zig's table would bypass the patched entries. arena.zig is
     // the one exception, by name: its VMM sub-allocator (cuMemCreate) serves DeviceBuffer.alloc only once installed as
-    // the `memory.setHook` allocator, so LocalRouter's sources must never reach it (`cuda.arena`, `cuda.pack`, setHook)
+    // the `memory.setHook` allocator, so LocalRouter's sources must never reach it (`cuda.arena`, `cuda.pack`, as `gpu` too, setHook)
     const vmm = [_][]const u8{"arena.zig"};
-    const reach = [_][]const u8{ "setHook(", "cuda.arena", "cuda.pack" };
+    const reach = [_][]const u8{ "setHook(", "cuda.arena", "cuda.pack", "gpu.arena", "gpu.pack" };
     const bypass = [_][]const u8{ "extern \"c\" fn cuMem", "extern fn cuMem", "lookup(\"cuMem", "cuGetProcAddress", "cudaMalloc", "cuMemCreate", "cuMemAllocManaged", "cuMemAllocAsync" };
     // the package build.zig.zon pins, by its hash: a bump scans the new package, never a stale one left in zig-pkg
     const zon = try std.Io.Dir.cwd().readFileAlloc(io, "build.zig.zon", gpa, .limited(1 << 16));
@@ -78,4 +80,17 @@ test "coverage: the pinned TensorFold CUDA package reaches allocation entry poin
     try std.testing.expect(files > 10);
     try std.testing.expectEqualStrings("", hits.items);
     try std.testing.expectEqualStrings("", own.items);
+}
+
+test "coverage: the HIP runtime reaches allocation entry points only through the driver table" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var hits: std.ArrayList(u8) = .empty;
+    defer hits.deinit(gpa);
+    // every HIP export is looked up by `abi.symbol` into `abi.Api` (driver.zig), the table memcap patches
+    const bypass = [_][]const u8{ "extern \"c\" fn hip", "extern fn hip", "lookup(\"hip", "hipMallocManaged", "hipMallocAsync", "hipExtMallocWithFlags" };
+    const files = try scanTree(io, gpa, "src/gpu/hip", &.{}, &bypass, &hits);
+    if (hits.items.len > 0) std.debug.print("allocation bypasses in the HIP runtime:\n{s}", .{hits.items});
+    try std.testing.expect(files >= 7);
+    try std.testing.expectEqualStrings("", hits.items);
 }

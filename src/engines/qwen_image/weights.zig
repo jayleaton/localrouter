@@ -4,7 +4,7 @@
 //!   side weights:  bf16 as stored; the text norm's zero-centred weight + 1 in f32 (as the twin), q / k norms f32
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const Pack = @import("pack.zig").Pack;
 const Kind = @import("pack.zig").Kind;
 const Tensor = @import("pack.zig").Tensor;
@@ -37,7 +37,7 @@ pub const Linear = struct {
 
     /// y[rows, n] = x[rows, k] . W^T: the rows quantized under the static input scale (NVFP4 or FP8, `qc` / `qs`
     /// scratch for the widest rows), then TensorFold's prompt GEMM at `tile` (the twin's call).
-    pub fn forward(l: Linear, nv: *Nvfp4, major: u32, minor: u32, tile: u32, in: u64, out: u64, rows: u32, qc: u64, qs: u64, s: cuda.Stream) !void {
+    pub fn forward(l: Linear, nv: *Nvfp4, major: u32, minor: u32, tile: u32, in: u64, out: u64, rows: u32, qc: u64, qs: u64, s: gpu.Stream) !void {
         const tb = plan.tb(tile, major, minor);
         const r = plan.rows(rows, l.k, tb);
         if (l.kind == .nvfp4) {
@@ -88,10 +88,10 @@ pub const Store = struct {
     tmp: std.ArrayList(u8) = .empty,
     bulk: []align(block) u8 = &.{},
     bulk2: []align(block) u8 = &.{}, // the streamed FP8 load's second slice
-    staged: ?cuda.DeviceBuffer = null,
-    stream: ?cuda.Stream = null, // where pack4 may still read `staged`
+    staged: ?gpu.DeviceBuffer = null,
+    stream: ?gpu.Stream = null, // where pack4 may still read `staged`
 
-    pub fn init(d: *const cuda.Driver, gpa: std.mem.Allocator) Store {
+    pub fn init(d: *const gpu.Driver, gpa: std.mem.Allocator) Store {
         return .{ .mem = .init(d, gpa), .gpa = gpa };
     }
 
@@ -220,7 +220,7 @@ pub const Store = struct {
             b.free();
             w.staged = null;
         }
-        w.staged = try cuda.DeviceBuffer.alloc(w.mem.d, n);
+        w.staged = try gpu.DeviceBuffer.alloc(w.mem.d, n);
         w.stream = up.s;
         return w.staged.?.at(0);
     }
@@ -336,7 +336,7 @@ pub const Weights = struct {
     }
 
     /// Loads every tensor the DiT reads through `up`; `nv` runs pack4 on its stream. Returns once all landed.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, p: *const Pack, nv: *Nvfp4, up: *Uploader) !Weights {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, p: *const Pack, nv: *Nvfp4, up: *Uploader) !Weights {
         var w: Weights = .{ .store = .init(d, gpa), .precision = std.meta.stringToEnum(Kind, p.precision) orelse .nvfp4 };
         errdefer w.deinit();
         const st = &w.store;

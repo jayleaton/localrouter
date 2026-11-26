@@ -1,4 +1,4 @@
-//! Per-process caps on native GPU memory, enforced in front of the driver. `open` (instead of `cuda.Driver.open`)
+//! Per-process caps on native GPU memory, enforced in front of the driver. `open` (instead of `gpu.Driver.open`)
 //! routes the driver table's allocation entry points through this file: cuMemAlloc_v2 (device / UMA), cuMemHostAlloc
 //! and cuMemHostRegister_v2 (pinned host), with their frees. Each allocation checks and reserves against the caps
 //! BEFORE the driver is called; over a cap it is refused (CUDA_ERROR_OUT_OF_MEMORY) without calling the driver, and
@@ -15,8 +15,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const cuda = @import("cuda");
-const abi = cuda.abi;
+const gpu = @import("gpu");
+const abi = gpu.abi;
 const testdir = @import("testdir.zig");
 
 pub const Caps = struct {
@@ -76,14 +76,14 @@ fn unlock() void {
 }
 
 /// The driver, with its allocation entry points behind the caps. Use this everywhere a driver is opened.
-pub fn open() cuda.Error!cuda.Driver {
-    var d = try cuda.Driver.open();
+pub fn open() gpu.Error!gpu.Driver {
+    var d = try gpu.Driver.open();
     install(&d);
     return d;
 }
 
 /// Routes `d`'s allocation entry points through the caps (idempotent). Reads the caps on first use.
-pub fn install(d: *cuda.Driver) void {
+pub fn install(d: *gpu.Driver) void {
     lock();
     if (!configured) configureFromEnv();
     if (real_alloc == null) {
@@ -114,7 +114,7 @@ pub fn install(d: *cuda.Driver) void {
 }
 
 /// Whether `d`'s allocation entry points go through the caps.
-pub fn installed(d: *const cuda.Driver) bool {
+pub fn installed(d: *const gpu.Driver) bool {
     return d.api.cuMemAlloc_v2 == &capAlloc and d.api.cuMemHostAlloc == &capHostAlloc and d.api.cuMemHostRegister_v2 == &capRegister;
 }
 
@@ -379,8 +379,8 @@ const Fake = struct {
         return abi.success;
     }
 
-    fn driver() cuda.Driver {
-        var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    fn driver() gpu.Driver {
+        var d: gpu.Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = &alloc;
         d.api.cuMemFree_v2 = &free;
         d.api.cuMemHostAlloc = &hostAlloc;
@@ -393,7 +393,7 @@ const Fake = struct {
     }
 };
 
-fn freshDriver(c: Caps) cuda.Driver {
+fn freshDriver(c: Caps) gpu.Driver {
     resetForTest();
     configure(c, null);
     Fake.calls = 0;
@@ -409,7 +409,7 @@ fn freshDriver(c: Caps) cuda.Driver {
 test "an allocation over the device cap is refused before the driver is called; under it, it is counted" {
     var d = freshDriver(.{ .device = 1000 });
     try std.testing.expect(installed(&d));
-    var a = try cuda.DeviceBuffer.alloc(&d, 600);
+    var a = try gpu.DeviceBuffer.alloc(&d, 600);
     try std.testing.expectEqual(@as(u32, 1), Fake.calls);
     var p: abi.DevicePtr = 0;
     try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 500)); // DeviceBuffer.alloc maps 2 to OutOfDeviceMemory
@@ -423,9 +423,9 @@ test "an allocation over the device cap is refused before the driver is called; 
 
 test "frees give the bytes back; the peak stays; a freed slot can be used again" {
     var d = freshDriver(.{ .device = 1000 });
-    var a = try cuda.DeviceBuffer.alloc(&d, 700);
+    var a = try gpu.DeviceBuffer.alloc(&d, 700);
     a.free();
-    var b = try cuda.DeviceBuffer.alloc(&d, 900);
+    var b = try gpu.DeviceBuffer.alloc(&d, 900);
     defer b.free();
     const s = snapshot();
     try std.testing.expectEqual(@as(u64, 900), s.device);
@@ -436,9 +436,9 @@ test "frees give the bytes back; the peak stays; a freed slot can be used again"
 
 test "pinned host bytes count on their own and inside the total; register counts as pinned host" {
     var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1050 });
-    var a = try cuda.DeviceBuffer.alloc(&d, 1000);
+    var a = try gpu.DeviceBuffer.alloc(&d, 1000);
     defer a.free();
-    var h = try cuda.HostBuffer.alloc(&d, 40);
+    var h = try gpu.HostBuffer.alloc(&d, 40);
     var hp: ?*anyopaque = null;
     try std.testing.expectEqual(out_of_memory, d.api.cuMemHostAlloc(&hp, 20, 0)); // total 1060 > 1050
     var dummy: [8]u8 = undefined;
@@ -476,7 +476,7 @@ test "install is idempotent; a second driver shares the same process caps" {
     install(&e);
     try std.testing.expect(installed(&e));
     try std.testing.expectEqual(@as(u64, 2), snapshot().drivers);
-    var a = try cuda.DeviceBuffer.alloc(&d, 600);
+    var a = try gpu.DeviceBuffer.alloc(&d, 600);
     defer a.free();
     var p: abi.DevicePtr = 0;
     try std.testing.expectEqual(out_of_memory, e.api.cuMemAlloc_v2(&p, 600));
@@ -484,7 +484,7 @@ test "install is idempotent; a second driver shares the same process caps" {
 
 test "no caps set: nothing is refused, everything is still counted" {
     var d = freshDriver(.{});
-    var a = try cuda.DeviceBuffer.alloc(&d, 1 << 40);
+    var a = try gpu.DeviceBuffer.alloc(&d, 1 << 40);
     defer a.free();
     try std.testing.expectEqual(@as(u64, 1 << 40), snapshot().device);
     try std.testing.expectEqual(@as(u64, 0), snapshot().refused);
@@ -509,7 +509,7 @@ test "the receipt: caps as read back, current, peak and counts; rewritten after 
     var d = freshDriver(.{ .device = 1000, .host = 100, .total = 1050 });
     configure(.{ .device = 1000, .host = 100, .total = 1050 }, path.ptr);
     defer configure(.{}, null);
-    var a = try cuda.DeviceBuffer.alloc(&d, 600);
+    var a = try gpu.DeviceBuffer.alloc(&d, 600);
     defer a.free();
     var p: abi.DevicePtr = 0;
     try std.testing.expectEqual(out_of_memory, d.api.cuMemAlloc_v2(&p, 500)); // writes the receipt
@@ -554,7 +554,7 @@ test "tracking fails, the give-back succeeds: the matching call returns it, the 
     try std.testing.expectEqual(@as(u64, 3), s.refused);
     try std.testing.expect(!s.failed_closed);
     fail_track_for_test = false;
-    var a = try cuda.DeviceBuffer.alloc(&d, 1000); // the cap is whole again
+    var a = try gpu.DeviceBuffer.alloc(&d, 1000); // the cap is whole again
     a.free();
     s = snapshot();
     try std.testing.expectEqual(@as(u64, 0), s.device);

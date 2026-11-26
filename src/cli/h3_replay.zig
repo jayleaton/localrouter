@@ -3,7 +3,7 @@
 //! captured inputs) and chained (from Zig's own outputs), and the step's velocities against the twin's. One JSON line.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const h3 = @import("minimax_h3");
 
@@ -40,13 +40,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer pack.close(io);
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &d, @intCast(maj), @intCast(min));
     defer nv.unload();
@@ -69,10 +69,10 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer dit.deinit();
 
     // device inputs: the text states and the step's latents, as captured
-    var bufs: [5]cuda.DeviceBuffer = undefined; // text, video, audio, video velocity, audio velocity
+    var bufs: [5]gpu.DeviceBuffer = undefined; // text, video, audio, video velocity, audio velocity
     const nvx: usize = 24 * @as(usize, t) * lh * lw * 2;
     const nax: usize = 32 * 2 * @as(usize, audio_t) * 2;
-    for (&bufs, [_]usize{ ctx_ref.bytes(), nvx, nax, nvx, nax }) |*b, len| b.* = try cuda.DeviceBuffer.alloc(&d, len);
+    for (&bufs, [_]usize{ ctx_ref.bytes(), nvx, nax, nvx, nax }) |*b, len| b.* = try gpu.DeviceBuffer.alloc(&d, len);
     defer for (&bufs) |*b| b.free();
     const inputs = cap.ops[cap.find("step.inputs", 0) orelse return error.NoInputs];
     for ([_]struct { []const u8, usize }{ .{ "context", 0 }, .{ "video", 1 }, .{ "audio", 2 } }) |e| {

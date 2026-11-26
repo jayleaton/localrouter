@@ -4,7 +4,7 @@
 //! Weights come from the text encoder's pack (`pack.py write_te`, all bf16) with its tokenizer.json.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const tokenizer = @import("tokenizer");
 const Pack = @import("pack.zig").Pack;
 const upload_mod = @import("upload.zig");
@@ -101,10 +101,10 @@ pub const Prompt = struct {
 /// The device weights and scratch for prompts of at most `max_rows` tokens.
 pub const TextEncoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const ops_launch.TeOps,
     ops: *const ops_launch.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     inv: [64]f32,
     mem: upload_mod.Slab,
@@ -126,7 +126,7 @@ pub const TextEncoder = struct {
     cos: u64 = 0,
     sin: u64 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, inv: [64]f32, max_rows: u32) !TextEncoder {
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: gpu.Stream, p: *const Pack, up: *upload_mod.Uploader, inv: [64]f32, max_rows: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .ops = ops, .s = s, .inv = inv, .max_rows = max_rows, .mem = .init(d, gpa) };
         errdefer t.deinit();
         t.embed_w = try t.tensor(up, p, "te.embed", &.{ 0, dim });

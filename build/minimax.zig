@@ -41,7 +41,7 @@ const sources = [_]Source{
     .{ .name = "vae_video", .file = "kernels/cuda/minimax/vae_video.cu", .extra = &.{"-O3"} },
 };
 
-pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, cuda: *std.Build.Module, qwen: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
+pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, gpu: *std.Build.Module, qwen: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
     const opts = b.addOptions();
     opts.addOption(bool, "with_kernels", nvcc != null);
     opts.addOption([]const u8, "set", "minimax_h3"); // distinct contents: options files must not be shared by modules
@@ -68,7 +68,7 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "cuda", .module = cuda },
+            .{ .name = "gpu", .module = gpu },
             .{ .name = "qwen_image", .module = qwen },
             .{ .name = "minimax_kernels", .module = kmod },
         },

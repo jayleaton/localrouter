@@ -3,7 +3,7 @@
 //! sequence (kernels/cuda/minimax/kitchen_launch.cu documents it: kernels, template arguments, grids, workspace).
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 
 const Ptr = u64;
 const block: u32 = 256;
@@ -15,9 +15,9 @@ fn blocks(n: u64) u32 {
 /// Kernel launches made through this file (the H3 ops and comfy-kitchen's): a counter for the step benchmark.
 pub var count: u64 = 0;
 
-fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: cuda.launch.Dim3, shared: u32, args: *cuda.launch.Args) !void {
+fn go(f: gpu.Function, s: gpu.Stream, grid: gpu.launch.Dim3, blk: gpu.launch.Dim3, shared: u32, args: *gpu.launch.Args) !void {
     _ = @atomicRmw(u64, &count, .Add, 1, .monotonic);
-    try cuda.launch.launch(f, .{ .grid = grid, .block = blk, .shared = shared }, s, args);
+    try gpu.launch.launch(f, .{ .grid = grid, .block = blk, .shared = shared }, s, args);
 }
 
 fn i64of(v: anytype) i64 {
@@ -25,32 +25,32 @@ fn i64of(v: anytype) i64 {
 }
 
 pub const Ops = struct {
-    module: cuda.Module,
-    norm_mod_fn: cuda.Function,
-    gate_add_fn: cuda.Function,
-    gate_add_norm_mod_fn: cuda.Function,
-    swiglu_fn: cuda.Function,
-    silu_mul_fn: cuda.Function,
-    rms_fn: cuda.Function,
-    final_mod_fn: cuda.Function,
-    scale_fn: cuda.Function,
-    uncarry_fn: cuda.Function,
-    patchify_fn: cuda.Function,
-    cond_fn: cuda.Function,
-    unpatchify_fn: cuda.Function,
-    pack_audio_fn: cuda.Function,
-    unpack_audio_fn: cuda.Function,
-    add_fn: cuda.Function,
-    gemm_fn: cuda.Function,
-    to_bf16_fn: cuda.Function,
-    heads_fn: cuda.Function,
-    denoise_fn: cuda.Function,
-    euler_fn: cuda.Function,
-    res2_fn: cuda.Function,
-    scale32_fn: cuda.Function,
+    module: gpu.Module,
+    norm_mod_fn: gpu.Function,
+    gate_add_fn: gpu.Function,
+    gate_add_norm_mod_fn: gpu.Function,
+    swiglu_fn: gpu.Function,
+    silu_mul_fn: gpu.Function,
+    rms_fn: gpu.Function,
+    final_mod_fn: gpu.Function,
+    scale_fn: gpu.Function,
+    uncarry_fn: gpu.Function,
+    patchify_fn: gpu.Function,
+    cond_fn: gpu.Function,
+    unpatchify_fn: gpu.Function,
+    pack_audio_fn: gpu.Function,
+    unpack_audio_fn: gpu.Function,
+    add_fn: gpu.Function,
+    gemm_fn: gpu.Function,
+    to_bf16_fn: gpu.Function,
+    heads_fn: gpu.Function,
+    denoise_fn: gpu.Function,
+    euler_fn: gpu.Function,
+    res2_fn: gpu.Function,
+    scale32_fn: gpu.Function,
 
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
-        var m = try cuda.Module.load(d, image);
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Ops {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         var o: Ops = undefined;
         o.module = m;
@@ -72,8 +72,8 @@ pub const Ops = struct {
     }
 
     /// y[S, D] = tfvideo's norm_mod of x under the rows' modulation (part 0: attention, 1: MLP); y may alias x.
-    pub fn normMod(o: *const Ops, s: cuda.Stream, x: Ptr, w: Ptr, mod: Ptr, idx: Ptr, y: Ptr, rows: u64, dim: u64, part: i32, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn normMod(o: *const Ops, s: gpu.Stream, x: Ptr, w: Ptr, mod: Ptr, idx: Ptr, y: Ptr, rows: u64, dim: u64, part: i32, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, w, mod, idx, y }) |p| a.add(p);
         a.add(i64of(dim));
         a.add(part);
@@ -82,8 +82,8 @@ pub const Ops = struct {
     }
 
     /// x += y * gate (part 0: chunk 2, 1: chunk 5), in place.
-    pub fn gateAdd(o: *const Ops, s: cuda.Stream, x: Ptr, y: Ptr, mod: Ptr, idx: Ptr, rows: u64, dim: u64, part: i32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn gateAdd(o: *const Ops, s: gpu.Stream, x: Ptr, y: Ptr, mod: Ptr, idx: Ptr, rows: u64, dim: u64, part: i32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, y, mod, idx }) |p| a.add(p);
         a.add(i64of(dim));
         a.add(part);
@@ -93,8 +93,8 @@ pub const Ops = struct {
     /// `gateAdd` (x = bf16(x + y * gate), the gate from `gmod` part `gpart`) then `normMod` of that x (`nmod` part `npart`, weight w) into
     /// `out`, in one launch: ops.cu's h3_gate_add_norm_mod, bit-identical to the two kernels in sequence (its comment gives the
     /// per-element argument). `gmod` / `nmod`: the modulation rows [R, 6, D] of the gate's block and of the norm's block.
-    pub fn gateAddNormMod(o: *const Ops, s: cuda.Stream, x: Ptr, y: Ptr, gmod: Ptr, nmod: Ptr, idx: Ptr, w: Ptr, out: Ptr, rows: u64, dim: u64, gpart: i32, npart: i32, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn gateAddNormMod(o: *const Ops, s: gpu.Stream, x: Ptr, y: Ptr, gmod: Ptr, nmod: Ptr, idx: Ptr, w: Ptr, out: Ptr, rows: u64, dim: u64, gpart: i32, npart: i32, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, y, gmod, nmod, idx, w, out }) |p| a.add(p);
         a.add(i64of(dim));
         a.add(gpart);
@@ -104,8 +104,8 @@ pub const Ops = struct {
     }
 
     /// [M, 2F] -> [M, F]: tfvideo's swiglu (`silu_split` false) or ComfyUI's (true: SiLU rounded to bf16 first).
-    pub fn swiglu(o: *const Ops, s: cuda.Stream, gu: Ptr, out: Ptr, m: u64, f: u64, comfy: bool) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn swiglu(o: *const Ops, s: gpu.Stream, gu: Ptr, out: Ptr, m: u64, f: u64, comfy: bool) !void {
+        var a: gpu.launch.Args = .{};
         a.add(gu);
         a.add(out);
         a.add(i64of(f));
@@ -113,8 +113,8 @@ pub const Ops = struct {
     }
 
     /// RMSNorm over rows of `dim` with a bf16 weight; y may alias x.
-    pub fn rmsNorm(o: *const Ops, s: cuda.Stream, x: Ptr, w: Ptr, y: Ptr, rows: u64, dim: u64, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn rmsNorm(o: *const Ops, s: gpu.Stream, x: Ptr, w: Ptr, y: Ptr, rows: u64, dim: u64, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, w, y }) |p| a.add(p);
         a.add(i64of(dim));
         a.add(eps);
@@ -122,16 +122,16 @@ pub const Ops = struct {
     }
 
     /// The final layer's fp32 modulation of `rows` rows (scale / shift: the segment's fp32 modulation row).
-    pub fn finalMod(o: *const Ops, s: cuda.Stream, x: Ptr, w: Ptr, scale_row: Ptr, shift: Ptr, out: Ptr, rows: u64, dim: u64, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn finalMod(o: *const Ops, s: gpu.Stream, x: Ptr, w: Ptr, scale_row: Ptr, shift: Ptr, out: Ptr, rows: u64, dim: u64, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, w, scale_row, shift, out }) |p| a.add(p);
         a.add(i64of(dim));
         a.add(eps);
         try go(o.final_mod_fn, s, .{ .x = @intCast(rows) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn scale(o: *const Ops, s: cuda.Stream, x: Ptr, c: f32, y: Ptr, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn scale(o: *const Ops, s: gpu.Stream, x: Ptr, c: f32, y: Ptr, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(c);
         a.add(y);
@@ -139,8 +139,8 @@ pub const Ops = struct {
         try go(o.scale_fn, s, .{ .x = blocks(n) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn uncarry(o: *const Ops, s: cuda.Stream, carried: Ptr, v: Ptr, c1: f32, c2: f32, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn uncarry(o: *const Ops, s: gpu.Stream, carried: Ptr, v: Ptr, c1: f32, c2: f32, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(carried);
         a.add(v);
         a.add(c1);
@@ -150,24 +150,24 @@ pub const Ops = struct {
     }
 
     /// video bf16 [C, T, H, W] -> rows fp32 [T*(H/2)*(W/2), 4C].
-    pub fn patchify(o: *const Ops, s: cuda.Stream, x: Ptr, rows: Ptr, c: u32, t: u32, h: u32, w: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn patchify(o: *const Ops, s: gpu.Stream, x: Ptr, rows: Ptr, c: u32, t: u32, h: u32, w: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(rows);
         inline for (.{ c, t, h, w }) |v| a.add(@as(i32, @intCast(v)));
         try go(o.patchify_fn, s, .{ .x = blocks(@as(u64, t) * (h / 2) * (w / 2) * c * 4) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn unpatchifyNeg(o: *const Ops, s: cuda.Stream, rows: Ptr, x: Ptr, c: u32, t: u32, h: u32, w: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn unpatchifyNeg(o: *const Ops, s: gpu.Stream, rows: Ptr, x: Ptr, c: u32, t: u32, h: u32, w: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(rows);
         a.add(x);
         inline for (.{ c, t, h, w }) |v| a.add(@as(i32, @intCast(v)));
         try go(o.unpatchify_fn, s, .{ .x = blocks(@as(u64, c) * t * h * w) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn conditionRows(o: *const Ops, s: cuda.Stream, z: Ptr, noise: Ptr, rows: Ptr, h: u32, w: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn conditionRows(o: *const Ops, s: gpu.Stream, z: Ptr, noise: Ptr, rows: Ptr, h: u32, w: u32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ z, noise, rows }) |p| a.add(p);
         a.add(@as(i32, @intCast(h)));
         a.add(@as(i32, @intCast(w)));
@@ -176,8 +176,8 @@ pub const Ops = struct {
         try go(o.cond_fn, s, .{ .x = blocks(24 * @as(u64, h) * w) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn packAudio(o: *const Ops, s: cuda.Stream, x: Ptr, rows: Ptr, c: u32, n: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn packAudio(o: *const Ops, s: gpu.Stream, x: Ptr, rows: Ptr, c: u32, n: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(rows);
         a.add(@as(i32, @intCast(c)));
@@ -185,8 +185,8 @@ pub const Ops = struct {
         try go(o.pack_audio_fn, s, .{ .x = blocks(2 * @as(u64, n) * c) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn unpackAudioNeg(o: *const Ops, s: cuda.Stream, rows: Ptr, x: Ptr, c: u32, n: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn unpackAudioNeg(o: *const Ops, s: gpu.Stream, rows: Ptr, x: Ptr, c: u32, n: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(rows);
         a.add(x);
         a.add(@as(i32, @intCast(c)));
@@ -194,23 +194,23 @@ pub const Ops = struct {
         try go(o.unpack_audio_fn, s, .{ .x = blocks(2 * @as(u64, n) * c) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn add(o: *const Ops, s: cuda.Stream, x: Ptr, z: Ptr, y: Ptr, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn add(o: *const Ops, s: gpu.Stream, x: Ptr, z: Ptr, y: Ptr, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, z, y }) |p| a.add(p);
         a.add(i64of(n));
         try go(o.add_fn, s, .{ .x = blocks(n) }, .{ .x = block }, 0, &a);
     }
 
     /// fp32 c[m, n] = a[m, k] . b[n, k]^T (+ bias, 0 for none), k in order.
-    pub fn gemmF32(o: *const Ops, s: cuda.Stream, a_: Ptr, b: Ptr, bias: Ptr, c: Ptr, m: u64, n: u64, k: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn gemmF32(o: *const Ops, s: gpu.Stream, a_: Ptr, b: Ptr, bias: Ptr, c: Ptr, m: u64, n: u64, k: u64) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ a_, b, bias, c }) |p| a.add(p);
         inline for (.{ m, n, k }) |v| a.add(i64of(v));
         try go(o.gemm_fn, s, .{ .x = @intCast((n + 63) / 64), .y = @intCast((m + 63) / 64) }, .{ .x = block }, 0, &a);
     }
 
-    pub fn toBf16(o: *const Ops, s: cuda.Stream, x: Ptr, y: Ptr, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn toBf16(o: *const Ops, s: gpu.Stream, x: Ptr, y: Ptr, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(y);
         a.add(i64of(n));
@@ -218,8 +218,8 @@ pub const Ops = struct {
     }
 
     /// den = x - float(out) * sigma over the packed fp32 state (out: the bf16 velocities packed alike).
-    pub fn denoise(o: *const Ops, s: cuda.Stream, x: Ptr, out: Ptr, sigma: f32, den: Ptr, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn denoise(o: *const Ops, s: gpu.Stream, x: Ptr, out: Ptr, sigma: f32, den: Ptr, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(out);
         a.add(sigma);
@@ -229,8 +229,8 @@ pub const Ops = struct {
     }
 
     /// x += ((x - den) / sigma) * dt.
-    pub fn euler32(o: *const Ops, s: cuda.Stream, x: Ptr, den: Ptr, sigma: f32, dt: f32, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn euler32(o: *const Ops, s: gpu.Stream, x: Ptr, den: Ptr, sigma: f32, dt: f32, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(den);
         a.add(sigma);
@@ -240,8 +240,8 @@ pub const Ops = struct {
     }
 
     /// x = e * x + h * (b1 * den + b2 * old).
-    pub fn res2(o: *const Ops, s: cuda.Stream, x: Ptr, den: Ptr, old: Ptr, e: f32, h: f32, b1: f32, b2: f32, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn res2(o: *const Ops, s: gpu.Stream, x: Ptr, den: Ptr, old: Ptr, e: f32, h: f32, b1: f32, b2: f32, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, den, old }) |p| a.add(p);
         inline for (.{ e, h, b1, b2 }) |v| a.add(v);
         a.add(i64of(n));
@@ -249,8 +249,8 @@ pub const Ops = struct {
     }
 
     /// x *= c (fp32, in place).
-    pub fn scale32(o: *const Ops, s: cuda.Stream, x: Ptr, c: f32, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn scale32(o: *const Ops, s: gpu.Stream, x: Ptr, c: f32, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(c);
         a.add(x);
@@ -259,8 +259,8 @@ pub const Ops = struct {
     }
 
     /// [H, S, D] -> [S, H * D].
-    pub fn headsToRows(o: *const Ops, s: cuda.Stream, x: Ptr, y: Ptr, h: u64, rows: u64, dim: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn headsToRows(o: *const Ops, s: gpu.Stream, x: Ptr, y: Ptr, h: u64, rows: u64, dim: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(y);
         inline for (.{ h, rows, dim }) |v| a.add(i64of(v));
@@ -270,17 +270,17 @@ pub const Ops = struct {
 
 /// comfy-kitchen's INT8 attention (D 128, no mask, H == HK, batch 1) and fused per-head RMSNorm + split-half RoPE.
 pub const Kitchen = struct {
-    module: cuda.Module,
-    anchor: cuda.Function,
-    qk_c64_rot4: cuda.Function,
-    qk_c64_rot128: cuda.Function,
-    qk_c128: cuda.Function,
-    v128: cuda.Function,
-    v512: cuda.Function,
-    attn_c64: cuda.Function,
-    attn_c64_fuse: cuda.Function,
-    attn_c128_fuse: cuda.Function,
-    rope: cuda.Function,
+    module: gpu.Module,
+    anchor: gpu.Function,
+    qk_c64_rot4: gpu.Function,
+    qk_c64_rot128: gpu.Function,
+    qk_c128: gpu.Function,
+    v128: gpu.Function,
+    v512: gpu.Function,
+    attn_c64: gpu.Function,
+    attn_c64_fuse: gpu.Function,
+    attn_c128_fuse: gpu.Function,
+    rope: gpu.Function,
 
     const sym_anchor = "_ZN16kitchen_quant_qk15detect_k_anchorI13__nv_bfloat16EEvPKT_Piiiilll";
     const sym_qk_c64_rot4 = "_ZN16kitchen_quant_qk14quant_qk_fusedI13__nv_bfloat16Li4ELi8ELi128ELi32ELi64ELi64ELi1ELi4ELb1EEEvPKT_PaPfS4_S5_S6_PKiiiiiiiiillllll";
@@ -293,8 +293,8 @@ pub const Kitchen = struct {
     const sym_attn_c128_fuse = "_Z24qk_int_sv_i8_attn_kernelILj128ELj128ELj16ELj128ELj128EL8DataType1EL16QuantGranularity3ELS1_3EfLb0E13__nv_bfloat16L11ComputeUnit1EL8MaskMode0ELb0ELb1ELb0ELb0ELb1EEvPaS5_S5_PT9_PfS8_S8_S8_S8_PKvllllijjjjjjjjjjjjjjjf";
     const sym_rope = "_ZN5comfy16kitchen_rms_rope11rope_kernelI13__nv_bfloat16S2_S2_Lb1ELb1ELb1ELb1ELb1EEEvPKT_S5_PKT0_PKT1_SB_PS3_SC_llliilllllllllllllllllllllllllllf";
 
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Kitchen {
-        var m = try cuda.Module.load(d, image);
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Kitchen {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         var k: Kitchen = undefined;
         k.module = m;
@@ -351,13 +351,13 @@ pub const Kitchen = struct {
 
     /// softmax(q k^T / sqrt(128)) v over S tokens: q, k, v views into one qkv buffer [S, 3 * heads * 128] (row stride
     /// 3 * heads * 128), out [heads, S, 128] bf16 contiguous; `ws` at least `Plan.of(heads, S).total` bytes.
-    pub fn attention(k: *const Kitchen, s: cuda.Stream, qkv: Ptr, out: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
+    pub fn attention(k: *const Kitchen, s: gpu.Stream, qkv: Ptr, out: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
         try k.attentionPrep(s, qkv, ws, heads, seq);
         try k.attentionKernel(s, out, ws, heads, seq, false);
     }
 
     /// The wheel's launches 1 to 3 (the K anchor, Q and K to INT8 with the rotation, V to INT8) into the workspace.
-    pub fn attentionPrep(k: *const Kitchen, s: cuda.Stream, qkv: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
+    pub fn attentionPrep(k: *const Kitchen, s: gpu.Stream, qkv: Ptr, ws: Ptr, heads: u32, seq: u32) !void {
         const d: u32 = 128;
         const p = Plan.of(heads, seq);
         const row: i64 = 3 * @as(i64, heads) * d; // the qkv buffer's row stride (elements)
@@ -368,7 +368,7 @@ pub const Kitchen = struct {
         const sh: i64 = d; // the head stride within a row
         const sn: i64 = row;
         { // 1. the representative key per head
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             a.add(kk);
             a.add(ws + p.anchor);
             a.add(@as(i32, @intCast(seq)));
@@ -380,7 +380,7 @@ pub const Kitchen = struct {
         const q_oblk: u32 = (seq + 127) / 128 * 4;
         const k_oblk: u32 = (seq + p.cta_k - 1) / p.cta_k;
         { // 2. Q and K to INT8 with the Hadamard rotation (H4 at S <= 256, else the signed H128)
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ q, ws + p.q8, ws + p.qs, kk, ws + p.k8, ws + p.ks, ws + p.anchor }) |x| a.add(x);
             inline for (.{ seq, seq, d, q_oblk, heads, heads, q_oblk * 8, k_oblk * 4 }) |x| a.add(@as(i32, @intCast(x)));
             inline for (.{ sb, sh, sn, sb, sh, sn }) |x| a.add(x);
@@ -388,7 +388,7 @@ pub const Kitchen = struct {
             try go(f, s, .{ .x = q_oblk + k_oblk, .y = heads, .z = 1 }, .{ .x = 128 }, 0, &a);
         }
         { // 3. V to INT8, per channel, padded to padded_k
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ v, ws + p.v8, ws + p.vs }) |x| a.add(x);
             inline for (.{ seq, p.padded_k, heads, d }) |x| a.add(@as(i32, @intCast(x)));
             inline for (.{ sb, sh, sn }) |x| a.add(x);
@@ -400,10 +400,10 @@ pub const Kitchen = struct {
     /// The wheel's launch 4, the attention kernel, from the workspace `attentionPrep` filled. `rows` false: out [heads, S,
     /// 128] as the wheel writes it; true: out as rows [S, heads * 128] (the kernel's output strides (seq, head) =
     /// (heads * 128, 128) instead of (128, S * 128): the same values at the addresses a [H, S, D] -> rows pass would give them).
-    pub fn attentionKernel(k: *const Kitchen, s: cuda.Stream, out: Ptr, ws: Ptr, heads: u32, seq: u32, rows: bool) !void {
+    pub fn attentionKernel(k: *const Kitchen, s: gpu.Stream, out: Ptr, ws: Ptr, heads: u32, seq: u32, rows: bool) !void {
         const d: u32 = 128;
         const p = Plan.of(heads, seq);
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ ws + p.q8, ws + p.k8, ws + p.v8, out, @as(u64, 0), ws + p.qs, ws + p.ks, ws + p.vs, @as(u64, 0), @as(u64, 0) }) |x| a.add(x);
         inline for (.{ @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 0) }) |x| a.add(x);
         a.add(@as(i32, -1));
@@ -420,13 +420,13 @@ pub const Kitchen = struct {
 
     /// In place on q, k (views into the qkv buffer [S, 3 * heads * 128]): per-head RMSNorm (bf16 weights) then
     /// split-half RoPE on the first `rot` dims from the bf16 table [S, rot/2, 2, 2].
-    pub fn rmsRope(k: *const Kitchen, s: cuda.Stream, qkv: Ptr, freqs: Ptr, qw: Ptr, kw: Ptr, heads: u32, seq: u32, rot: u32, eps: f32) !void {
+    pub fn rmsRope(k: *const Kitchen, s: gpu.Stream, qkv: Ptr, freqs: Ptr, qw: Ptr, kw: Ptr, heads: u32, seq: u32, rot: u32, eps: f32) !void {
         const d: i64 = 128;
         const row: i64 = 3 * @as(i64, heads) * d;
         const q = qkv;
         const kk = qkv + @as(u64, heads) * 128 * 2;
         const fs: i64 = @as(i64, rot) * 2; // a row of the table: rot/2 2x2 matrices
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ q, kk, freqs, qw, kw, q, kk }) |x| a.add(x);
         inline for (.{ @as(i64, 1), @as(i64, seq), @as(i64, heads) }) |x| a.add(x);
         a.add(@as(i32, 128));

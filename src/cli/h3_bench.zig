@@ -10,7 +10,7 @@
 //! so the encoder's memory is not counted. Run it with nothing else on the machine: MemAvailable is the whole system's.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const h3 = @import("minimax_h3");
 const qi = @import("qwen_image");
 const mp4 = @import("../media/mp4.zig");
@@ -128,7 +128,7 @@ const Sampler = struct {
 fn gpuUsedMib() ?u64 {
     var d = qi.memcap.open() catch return null;
     defer d.close();
-    var c = cuda.Context.init(&d, 0) catch return null;
+    var c = gpu.Context.init(&d, 0) catch return null;
     defer c.deinit();
     const m = c.memInfo() catch return null;
     return (m.total - m.free) >> 20;

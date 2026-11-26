@@ -7,7 +7,7 @@
 //! recording selection are the twin's (tools/twin/VVAE-PORT.md, "Recorder names"), so a twin capture replays.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const tile_mod = @import("vae_video_tile.zig");
 const Pack = qi.pack.Pack;
@@ -208,9 +208,9 @@ const Carry = struct { canvas: u64, frames: u32, b0: u32, nb: u32 };
 
 pub const Decoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     tile: Tile,
     /// Probe calls under the twin's names (null: none).
     probe: ?Probe = null,
@@ -222,7 +222,7 @@ pub const Decoder = struct {
 
     /// `path`: minimax_h3_video_vae_fp16.safetensors (the int8 file is refused). Loads the decoder, post_quant_conv and the
     /// latent statistics (4.85 GB of fp16).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, path: []const u8, up: *Uploader) !Decoder {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const Ops, s: gpu.Stream, path: []const u8, up: *Uploader) !Decoder {
         var pack = try openCheckpoint(gpa, io, path);
         defer pack.close(io);
         return .{ .gpa = gpa, .d = d, .k = k, .s = s, .tile = try Tile.init(gpa, d, k, s, &pack, up) };

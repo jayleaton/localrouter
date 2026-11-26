@@ -1,7 +1,7 @@
 //! One-frame video encoder, op-for-op with the twin. Canvas RGB fp32 -> normalized fp32 [24,1,H/16,W/16].
 //! Tiles retain raw moments for both neighbors; decoder GEMM and spatial placement are shared unchanged.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const decoder = @import("vae_video.zig");
 const tile_mod = @import("vae_video_tile.zig");
@@ -16,15 +16,15 @@ fn tensor(role: []const u8, ptr: u64, bytes: u64) Io {
 }
 pub const Encoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
     shared: *const decoder.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     store: Store,
     w: weights.Weights,
     probe: ?Probe = null,
     select: ?[]const [2]i32 = null,
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, shared: *const decoder.Ops, s: cuda.Stream, path: []const u8, up: *Uploader) !Encoder {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const Ops, shared: *const decoder.Ops, s: gpu.Stream, path: []const u8, up: *Uploader) !Encoder {
         var store = Store.init(d, gpa);
         errdefer store.deinit();
         const w = try weights.load(gpa, io, path, &store, up);

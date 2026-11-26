@@ -2,7 +2,7 @@
 //! decoder op replayed alone (from the captured inputs) and chained (from Zig's own outputs), the pixels compared.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 
 pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -23,13 +23,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var ops = try qi.ops_launch.Ops.load(&d, qi.kernels.ops, qi.kernels.attention);
     defer ops.unload();
@@ -42,7 +42,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     var vae = try qi.vae.Vae.init(gpa, io, &d, &vk, &tk, &ops, s, &pack, &up, args[0], h, w, @as(u64, h) * w);
     try s.synchronize();
     defer vae.deinit();
-    var lat = try cuda.DeviceBuffer.alloc(&d, lat_ref.bytes());
+    var lat = try gpu.DeviceBuffer.alloc(&d, lat_ref.bytes());
     defer lat.free();
     {
         const host = try a.alloc(u8, lat_ref.bytes());
@@ -50,7 +50,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
         try lat.upload(0, host);
     }
     const npx: usize = 256 * @as(usize, h) * w * vae.out_channels;
-    var px = try cuda.DeviceBuffer.alloc(&d, npx);
+    var px = try gpu.DeviceBuffer.alloc(&d, npx);
     defer px.free();
 
     var out: std.Io.Writer.Allocating = .init(a);

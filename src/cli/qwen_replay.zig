@@ -2,7 +2,7 @@
 //! the Zig forward alone (each op from the captured inputs) and chained (from its own outputs), prints a JSON summary.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 
 pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -21,13 +21,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false); // blocking: ordered with the synchronous uploads
+    var s = try gpu.Stream.init(&d, false); // blocking: ordered with the synchronous uploads
     defer s.deinit();
 
     var nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &d, @intCast(maj), @intCast(min));
@@ -49,8 +49,8 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const om = try qi.smath.omegas(qi.kernels.rope_omega);
     var dit = try qi.dit.Dit.init(gpa, &d, .{ .ops = &ops, .nv = &nv, .tri = &tri, .major = @intCast(maj), .minor = @intCast(min) }, &w, s, om, n, req.ctx_rows);
     defer dit.deinit();
-    var bufs: [4]cuda.DeviceBuffer = undefined;
-    for (&bufs, [_]usize{ @as(usize, req.ctx_rows) * 4096 * 2, 64 * @as(usize, n) * 2, 64 * @as(usize, n) * 2, 64 * @as(usize, n) * 2 }) |*b, len| b.* = try cuda.DeviceBuffer.alloc(&d, len);
+    var bufs: [4]gpu.DeviceBuffer = undefined;
+    for (&bufs, [_]usize{ @as(usize, req.ctx_rows) * 4096 * 2, 64 * @as(usize, n) * 2, 64 * @as(usize, n) * 2, 64 * @as(usize, n) * 2 }) |*b, len| b.* = try gpu.DeviceBuffer.alloc(&d, len);
     defer for (&bufs) |*b| b.free();
     { // the text context the twin's encoder produced
         const ref = cap.ops[cap.find("text_encoder", 0).?].out("context").?;
@@ -77,7 +77,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 }
 
 /// The three Triton kernels from the capture's own cubins (the first launch of each).
-pub fn loadTriton(a: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, device: cuda.abi.Device, cap: *const qi.capture.Capture) !qi.triton_k.Triton {
+pub fn loadTriton(a: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, device: gpu.abi.Device, cap: *const qi.capture.Capture) !qi.triton_k.Triton {
     const specs = try qi.triton_k.specsFromCapture(a, io, cap.dir);
     return qi.triton_k.Triton.load(d, device, specs[0] orelse return error.NoAdalnCubin, specs[1] orelse return error.NoRopeCubin, specs[2]);
 }

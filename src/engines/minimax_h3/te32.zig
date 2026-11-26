@@ -4,7 +4,7 @@
 //! the fp32 GEMM; bf16 norms and AWQ scales widened to fp32), RoPE tables from the portable fdlibm math.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const Pack = qi.pack.Pack;
 const Store = qi.weights.Store;
@@ -30,17 +30,17 @@ fn blocks(n: u64) u32 {
 }
 
 pub const Ops = struct {
-    module: cuda.Module,
-    embed_fn: cuda.Function,
-    add_fn: cuda.Function,
-    silu_mul_fn: cuda.Function,
-    rms_fn: cuda.Function,
-    rope_fn: cuda.Function,
-    attn_fn: cuda.Function,
-    linear_fn: cuda.Function,
+    module: gpu.Module,
+    embed_fn: gpu.Function,
+    add_fn: gpu.Function,
+    silu_mul_fn: gpu.Function,
+    rms_fn: gpu.Function,
+    rope_fn: gpu.Function,
+    attn_fn: gpu.Function,
+    linear_fn: gpu.Function,
 
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
-        var m = try cuda.Module.load(d, image);
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Ops {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         return .{
             .module = m,
@@ -58,8 +58,8 @@ pub const Ops = struct {
         o.module.unload();
     }
 
-    fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: u32, shared: u32, args: *cuda.launch.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = blk }, .shared = shared }, s, args);
+    fn go(f: gpu.Function, s: gpu.Stream, grid: gpu.launch.Dim3, blk: u32, shared: u32, args: *gpu.launch.Args) !void {
+        try gpu.launch.launch(f, .{ .grid = grid, .block = .{ .x = blk }, .shared = shared }, s, args);
     }
 };
 
@@ -79,9 +79,9 @@ const lin_names = [7][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_a
 
 pub const TextEncoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     store: Store,
     embed: u64 = 0, // int8 [vocab, 5120]
@@ -126,7 +126,7 @@ pub const TextEncoder = struct {
         };
     }
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_l: u32) !TextEncoder {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const Ops, s: gpu.Stream, p: *const Pack, up: *Uploader, max_l: u32) !TextEncoder {
         var t: TextEncoder = .{ .gpa = gpa, .d = d, .k = k, .s = s, .store = .init(d, gpa), .max_l = max_l };
         errdefer t.store.deinit();
         var host: std.ArrayList(u8) = .empty;
@@ -196,7 +196,7 @@ pub const TextEncoder = struct {
 
     fn lin(t: *TextEncoder, name: []const u8, l: Lin, in: u64, out: u64, m: u64) !void {
         try t.pre(name, &.{.{ .role = "x", .ptr = in, .bytes = m * l.k * 4 }});
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ in, l.pqs, l.codes, l.bscale }) |x| a.add(x);
         a.add(l.tscale);
         a.add(@as(u64, 0)); // no bias
@@ -208,7 +208,7 @@ pub const TextEncoder = struct {
 
     fn norm(t: *TextEncoder, name: []const u8, in: u64, w: u64, out: u64, rows: u64, d: u64) !void {
         try t.pre(name, &.{.{ .role = "x", .ptr = in, .bytes = rows * d * 4 }});
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ in, w, out }) |x| a.add(x);
         a.add(@as(i64, @intCast(d)));
         a.add(eps);
@@ -218,7 +218,7 @@ pub const TextEncoder = struct {
 
     fn add(t: *TextEncoder, name: []const u8, a_: u64, b: u64, out: u64, n: u64) !void {
         try t.pre(name, &.{ .{ .role = "a", .ptr = a_, .bytes = n * 4 }, .{ .role = "b", .ptr = b, .bytes = n * 4 } });
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ a_, b, out }) |x| a.add(x);
         a.add(@as(i64, @intCast(n)));
         try Ops.go(t.k.add_fn, t.s, .{ .x = blocks(n) }, block, 0, &a);
@@ -226,7 +226,7 @@ pub const TextEncoder = struct {
     }
 
     fn rope(t: *TextEncoder, x: u64, rows: u32, nh: u32, mode: i32) !void {
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, t.cos, t.sin }) |p| a.add(p);
         a.add(@as(i64, nh));
         a.add(mode);
@@ -276,7 +276,7 @@ pub const TextEncoder = struct {
         }
         try t.pre("te.embed", &.{.{ .role = "ids", .ptr = t.ids, .bytes = Lu * 4 }});
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ t.embed, t.embed_scale, t.ids, t.h }) |x| a.add(x);
             a.add(@as(i64, dim));
             a.add(@as(i32, 1)); // round through bf16 (ComfyUI's dequantize_embedding to the compute dtype)
@@ -312,7 +312,7 @@ pub const TextEncoder = struct {
             const an = nm(&nb, i, "attention");
             try t.pre(an, &.{ .{ .role = "q", .ptr = t.q, .bytes = qn * 4 }, .{ .role = "k", .ptr = t.kk, .bytes = kn * 4 }, .{ .role = "v", .ptr = t.v, .bytes = kn * 4 } });
             {
-                var a: cuda.launch.Args = .{};
+                var a: gpu.launch.Args = .{};
                 inline for (.{ t.q, t.kk, t.v, t.at }) |x| a.add(x);
                 inline for (.{ L, heads, kv_heads }) |x| a.add(@as(i32, @intCast(x)));
                 a.add(@as(f32, @floatCast(1.0 / @sqrt(@as(f64, head_dim)))));
@@ -329,7 +329,7 @@ pub const TextEncoder = struct {
             const sn = nm(&nb, i, "silu_mul");
             try t.pre(sn, &.{ .{ .role = "g", .ptr = t.g, .bytes = Lu * mlp * 4 }, .{ .role = "u", .ptr = t.u, .bytes = Lu * mlp * 4 } });
             {
-                var a: cuda.launch.Args = .{};
+                var a: gpu.launch.Args = .{};
                 inline for (.{ t.g, t.u, t.gu }) |x| a.add(x);
                 a.add(@as(i64, @intCast(Lu * mlp)));
                 try Ops.go(t.k.silu_mul_fn, t.s, .{ .x = blocks(Lu * mlp) }, block, 0, &a);

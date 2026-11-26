@@ -3,16 +3,16 @@
 //! The cubins come from a capture (`cubins/<sha>`) or, for the shipping engine, from the AOT set built per SM.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 
 pub const Spec = struct { cubin: []const u8, name: [:0]const u8, num_warps: u32, shared: u32 };
 
 pub const Triton = struct {
-    adaln: cuda.triton.Kernel,
-    rope: cuda.triton.Kernel,
-    swiglu: ?cuda.triton.Kernel,
+    adaln: gpu.triton.Kernel,
+    rope: gpu.triton.Kernel,
+    swiglu: ?gpu.triton.Kernel,
 
-    pub fn load(d: *const cuda.Driver, device: cuda.abi.Device, adaln: Spec, rope: Spec, swiglu: ?Spec) !Triton {
+    pub fn load(d: *const gpu.Driver, device: gpu.abi.Device, adaln: Spec, rope: Spec, swiglu: ?Spec) !Triton {
         return .{
             .adaln = try kernel(d, device, adaln),
             .rope = try kernel(d, device, rope),
@@ -20,8 +20,8 @@ pub const Triton = struct {
         };
     }
 
-    fn kernel(d: *const cuda.Driver, device: cuda.abi.Device, s: Spec) !cuda.triton.Kernel {
-        return cuda.triton.Kernel.load(d, device, s.cubin, .{ .name = s.name, .num_warps = s.num_warps, .shared = s.shared }, s.name);
+    fn kernel(d: *const gpu.Driver, device: gpu.abi.Device, s: Spec) !gpu.triton.Kernel {
+        return gpu.triton.Kernel.load(d, device, s.cubin, .{ .name = s.name, .num_warps = s.num_warps, .shared = s.shared }, s.name);
     }
 
     pub fn unload(t: *Triton) void {
@@ -31,8 +31,8 @@ pub const Triton = struct {
     }
 
     /// out[B * rows, D] = LayerNorm(x) * (1 + s[b]) (fp32 inside, bf16 out); s is fp32 [B, D]. Grid B * rows.
-    pub fn adalnRun(t: *const Triton, st: cuda.Stream, x: u64, s: u64, out: u64, b: u32, rows: u32, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn adalnRun(t: *const Triton, st: gpu.Stream, x: u64, s: u64, out: u64, b: u32, rows: u32, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(s);
         a.add(out);
@@ -44,8 +44,8 @@ pub const Triton = struct {
     /// RMSNorm + RoPE of one part (0 q, 1 k) of qkv [B, N, 3, 32, 128] into dst (row strides in elements).
     pub const Rope = struct { src: u64, w: u64, cos: u64, sin: u64, dst: u64, src_b_stride: u32, src_row_stride: u32, src_off: u32, dst_b_stride: u32, dst_row_stride: u32, n: u32, b: u32 };
 
-    pub fn ropeRun(t: *const Triton, st: cuda.Stream, r: Rope, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn ropeRun(t: *const Triton, st: gpu.Stream, r: Rope, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ r.src, r.w, r.cos, r.sin, r.dst }) |p| a.add(p);
         inline for (.{ r.src_b_stride, r.src_row_stride, r.src_off, r.dst_b_stride, r.dst_row_stride, r.n }) |v| a.add(@as(i32, @intCast(v)));
         a.add(eps);
@@ -53,8 +53,8 @@ pub const Triton = struct {
     }
 
     /// [M, 2F] = [gate | up] -> silu(gate) * up [M, F] (F = 12288, BLOCK 2048). Grid (M, F / 2048).
-    pub fn swigluRun(t: *const Triton, st: cuda.Stream, gu: u64, out: u64, m: u32, f: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn swigluRun(t: *const Triton, st: gpu.Stream, gu: u64, out: u64, m: u32, f: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(gu);
         a.add(out);
         try t.swiglu.?.launchOn(.{ .x = m, .y = (f + 2047) / 2048 }, st, &a, .{}, &.{});

@@ -14,6 +14,9 @@ GPU-free test engine and host checks. A hardware build uses:
 zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121,120
 ```
 
+`-Dgpu=hip` builds the GPU engines on LocalRouter's HIP runtime instead of CUDA's ([ROCm](docs/dev/ROCM.md)); CI
+builds it and runs its unit tests (`zig build test-unit -Dgpu=hip`).
+
 Keep changes focused, describe the resulting behavior and include the checks you ran. Never commit credentials,
 machine identifiers, model weights, generated outputs or local configuration.
 

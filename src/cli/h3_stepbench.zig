@@ -11,7 +11,7 @@
 //! One JSON line; exit 1 if any configuration's velocities differ from `ref`'s or the graphs turned themselves off.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const h3 = @import("minimax_h3");
 
@@ -107,13 +107,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer pack.close(io);
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &d, @intCast(maj), @intCast(min));
     defer nv.unload();
@@ -134,10 +134,10 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer dit.deinit();
 
     // device inputs: text, video, audio latents, and the two velocities
-    var bufs: [5]cuda.DeviceBuffer = undefined;
+    var bufs: [5]gpu.DeviceBuffer = undefined;
     const nvx: usize = 24 * @as(usize, t) * lh * lw * 2;
     const nax: usize = 32 * 2 * @as(usize, audio_t) * 2;
-    for (&bufs, [_]usize{ ctx_ref.bytes(), nvx, nax, nvx, nax }) |*b, len| b.* = try cuda.DeviceBuffer.alloc(&d, len);
+    for (&bufs, [_]usize{ ctx_ref.bytes(), nvx, nax, nvx, nax }) |*b, len| b.* = try gpu.DeviceBuffer.alloc(&d, len);
     defer for (&bufs) |*b| b.free();
     const inputs = cap.ops[cap.find("step.inputs", 0) orelse return error.NoInputs];
     const synthetic = frames != cap_frames;
@@ -153,9 +153,9 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const vel_v = try bufs[3].at(0);
     const vel_a = try bufs[4].at(0);
 
-    var e0 = try cuda.Event.init(&d, true);
+    var e0 = try gpu.Event.init(&d, true);
     defer e0.deinit();
-    var e1 = try cuda.Event.init(&d, true);
+    var e1 = try gpu.Event.init(&d, true);
     defer e1.deinit();
     const zeros = try a.alloc(u8, @max(nvx, nax));
     @memset(zeros, 0);

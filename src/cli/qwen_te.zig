@@ -3,7 +3,7 @@
 //! (from Zig's own outputs), the context rows against the twin's, and the encode time. One JSON summary line.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 
 pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -34,13 +34,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var ops = try qi.ops_launch.Ops.load(&d, qi.kernels.ops, qi.kernels.attention);
     defer ops.unload();
