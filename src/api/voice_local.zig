@@ -144,7 +144,7 @@ pub fn modelSkill(app: *App, a: std.mem.Allocator) error{OutOfMemory}![]const u8
         const c = slot.tool.config();
         m.* = .{ .kind = c.kind, .id = c.id, .bytes = app.scheduler.defaultNeeds(i).total(), .you = if (you) |y| y == i else false };
     }
-    const budget = if (app.cfg.budget_bytes > 0) app.cfg.budget_bytes else (memory.total() orelse 0) -| app.cfg.reserve_bytes;
+    const budget = if (app.cfg.budget_bytes > 0) app.cfg.budget_bytes else (memory.capacity() orelse 0) -| app.cfg.reserve_bytes;
     return skill.render(a, budget, members);
 }
 

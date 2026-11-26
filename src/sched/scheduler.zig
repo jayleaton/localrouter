@@ -338,10 +338,11 @@ pub const Scheduler = struct {
         return out[0..n];
     }
 
-    /// Under `gate`: what the scheduler may book at most: `budget_bytes`, else the machine's memory less the reserve.
+    /// Under `gate`: what the scheduler may book at most: `budget_bytes`, else the machine's capacity (memory, within an
+    /// AMD APU's GTT) less the reserve.
     fn ceiling(s: *const Scheduler) u64 {
         if (s.cfg.budget_bytes > 0) return s.cfg.budget_bytes;
-        return (memory.total() orelse 0) -| s.cfg.reserve_bytes;
+        return (memory.capacity() orelse 0) -| s.cfg.reserve_bytes;
     }
 
     /// Under `gate`: what tool `i` takes kept loaded: its measured bytes (its estimate when not loaded) and a job's
