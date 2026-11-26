@@ -16,7 +16,7 @@
 //! request pays the checkpoint's reload.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const launch = @import("launch.zig");
 const layout = @import("layout.zig");
@@ -228,9 +228,9 @@ pub const Pipeline = struct {
     limits: Limits,
     max: Shapes, // the buffers' (`ceiling`)
     max_tokens: u32,
-    d: cuda.Driver,
-    ctx: cuda.Context,
-    s: cuda.Stream,
+    d: gpu.Driver,
+    ctx: gpu.Context,
+    s: gpu.Stream,
     major: u32,
     minor: u32,
     nv: qi.nvfp4_exec.Nvfp4,
@@ -251,7 +251,7 @@ pub const Pipeline = struct {
     vid: vae_video.Decoder,
     /// Device buffers: the state x, the two denoised buffers, bf16 model input, bf16 velocities, the bf16 text, the fp16
     /// video latents, the uint8 frames.
-    bufs: [8]cuda.DeviceBuffer,
+    bufs: [8]gpu.DeviceBuffer,
     /// The light ops of a run are reported here when set (the replay's `Probe`): `text_encoder`, `noise`, `step.{i}`,
     /// `latents`, `waveform`, under the twin's names and roles.
     probe: ?Probe = null,
@@ -290,7 +290,7 @@ pub const Pipeline = struct {
         };
         p.d = try qi.memcap.open();
         errdefer p.d.close();
-        p.ctx = try cuda.Context.init(&p.d, 0);
+        p.ctx = try gpu.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();
         var maj: c_int = 0;
         var min: c_int = 0;
@@ -298,7 +298,7 @@ pub const Pipeline = struct {
         try p.d.check(p.d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, p.ctx.device), "cc");
         p.major = @intCast(maj);
         p.minor = @intCast(min);
-        p.s = try cuda.Stream.init(&p.d, false); // blocking: ordered with the synchronous uploads
+        p.s = try gpu.Stream.init(&p.d, false); // blocking: ordered with the synchronous uploads
         errdefer p.s.deinit();
         p.load.context = clock.lap();
         p.nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &p.d, p.major, p.minor);
@@ -355,7 +355,7 @@ pub const Pipeline = struct {
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, sizes) |*b, len| {
-            b.* = try cuda.DeviceBuffer.alloc(&p.d, @intCast(len));
+            b.* = try gpu.DeviceBuffer.alloc(&p.d, @intCast(len));
             made += 1;
         }
         try p.s.synchronize();
@@ -450,7 +450,7 @@ pub const Pipeline = struct {
             const tags = try gpa.alloc(i64, text_tags.len);
             defer gpa.free(tags);
             for (tags, text_tags) |*dst, tag| dst.* = tag;
-            var tb = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
+            var tb = try gpu.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(tags));
             defer tb.free();
             try p.pre("text_tags", &.{});
             try p.post("text_tags", &.{.{ .role = "tags", .ptr = try tb.at(0), .bytes = tags.len * 8 }});
@@ -535,19 +535,19 @@ pub const Pipeline = struct {
         const l: u32 = @intCast(ids.len);
         try p.loadTe();
         var hidden: u64 = undefined;
-        var first_latent: ?cuda.DeviceBuffer = null;
+        var first_latent: ?gpu.DeviceBuffer = null;
         defer if (first_latent) |*b| {
             p.s.synchronize() catch {};
             b.free();
         };
         if (rgb) |pixels| {
             if (pixels.len != 3 * @as(u64, width) * height) return error.BadImage;
-            var input = try cuda.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(pixels));
+            var input = try gpu.DeviceBuffer.fromHost(&p.d, std.mem.sliceAsBytes(pixels));
             defer {
                 p.s.synchronize() catch {};
                 input.free();
             }
-            first_latent = try cuda.DeviceBuffer.alloc(&p.d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
+            first_latent = try gpu.DeviceBuffer.alloc(&p.d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
             const zp = try first_latent.?.at(0);
             var eops = try vae_enc.Ops.load(&p.d, kernels.vae_enc);
             defer eops.unload();
@@ -629,7 +629,7 @@ fn conditioned(p: anytype, first: anytype, c: Condition, comptime run: anytype, 
 
 const Clock = struct {
     io: std.Io,
-    s: cuda.Stream,
+    s: gpu.Stream,
     t: std.Io.Timestamp = undefined,
 
     fn start(c: *Clock) !void {

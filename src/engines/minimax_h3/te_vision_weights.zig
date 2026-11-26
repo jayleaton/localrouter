@@ -1,6 +1,6 @@
 //! Vision tensors widened exactly to fp32; NVFP4 linears retain checkpoint storage.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 pub const Lin = struct { w: u64, b: u64 = 0, n: u32, k: u32, scale: u64 = 0, tscale: f32 = 0, pqs: u64 = 0, quant: bool = false };
 pub const Norm = struct { w: u64, b: u64, dim: u32 };
@@ -22,7 +22,7 @@ pub const Weights = struct {
     pub fn deinit(w: *Weights) void {
         w.store.deinit();
     }
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, p: *const qi.pack.Pack, up: *qi.upload.Uploader) !Weights {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, p: *const qi.pack.Pack, up: *qi.upload.Uploader) !Weights {
         var w: Weights = .{ .store = .init(d, gpa) };
         errdefer w.deinit();
         if (!p.tensors.contains("visual.patch_embed.proj.weight")) {

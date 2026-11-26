@@ -84,11 +84,18 @@ test {
     _ = @import("engine/engine.zig");
     _ = @import("engines/testpattern.zig");
     _ = @import("engine/orphan.zig");
-    if (@import("build_config").cuda_engines) {
-        _ = @import("engine/memcap_coverage.zig");
-        _ = @import("engines/qwen_image_tool.zig");
-        _ = @import("engines/kandinsky6_tool.zig");
-        _ = @import("engines/minimax_h3_tool.zig");
+    switch (@import("build_config").gpu) {
+        .none => {},
+        .cuda => {
+            _ = @import("engine/memcap_coverage.zig");
+            _ = @import("engines/qwen_image_tool.zig");
+            _ = @import("engines/kandinsky6_tool.zig");
+            _ = @import("engines/minimax_h3_tool.zig");
+        },
+        .hip => {
+            _ = @import("engine/memcap_coverage.zig");
+            _ = @import("engines/minimax_h3_tool.zig");
+        },
     }
     _ = @import("sched/speech_gate.zig");
     _ = @import("sched/yielder.zig");

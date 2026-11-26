@@ -11,7 +11,7 @@
 //! tests (`test_fuse.py`, `h3-replay`'s fast passes, `h3-step-bench`'s equality) compare the two byte for byte.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const launch = @import("launch.zig");
 const lay = @import("layout.zig");
@@ -43,7 +43,7 @@ const linear_names = [4][]const u8{ "qkv", "out", "fc1", "fc2" };
 
 /// A step's shape and buffers: what its launches' arguments depend on (the step graph's key, less the fuse flag).
 const Body = struct { video: u64, vel_v: u64, vel_a: u64, t: u32, h: u32, w: u32, a: u32, ly: lay.Layout, m: u32, row_v: u32, row_a: u32 };
-const StepGraph = struct { key: [14]u64, exec: ?cuda.graph.Exec }; // exec null: seen once (run eagerly), captured on the next use
+const StepGraph = struct { key: [14]u64, exec: ?gpu.graph.Exec }; // exec null: seen once (run eagerly), captured on the next use
 const max_graphs = 4;
 
 pub const Kernels = struct {
@@ -94,7 +94,7 @@ pub const Weights = struct {
         w.store.deinit();
     }
 
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, p: *const Pack, nv: *qi.nvfp4_exec.Nvfp4, up: *Uploader) !Weights {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, p: *const Pack, nv: *qi.nvfp4_exec.Nvfp4, up: *Uploader) !Weights {
         var w: Weights = .{ .store = .init(d, gpa) };
         errdefer w.deinit();
         const st = &w.store;
@@ -142,12 +142,12 @@ pub fn sumBuffers(sizes: anytype) u64 {
 
 pub const Dit = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: Kernels,
     w: *const Weights,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
-    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    bufs: std.ArrayList(gpu.DeviceBuffer) = .empty,
     max_s: u32,
     max_a: u32, // audio latent frames
     max_l: u32,
@@ -156,7 +156,7 @@ pub const Dit = struct {
     ctx_rows: u32 = 0,
     cond_rows: u64 = 0,
     cond_emb: u64 = 0,
-    cond_bufs: [2]?cuda.DeviceBuffer = .{ null, null },
+    cond_bufs: [2]?gpu.DeviceBuffer = .{ null, null },
     cond_hw: ?[2]u32 = null,
     text_tags: []u8 = &.{},
     // per step
@@ -200,7 +200,7 @@ pub const Dit = struct {
     idx_key: ?[9]u32 = null,
     extra_launches: u64 = 0, // the NVFP4 and row-copy launches (the H3 kernels count in `launch.count`)
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const Weights, s: cuda.Stream, max_s: u32, max_l: u32, max_a: u32) !Dit {
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: Kernels, w: *const Weights, s: gpu.Stream, max_s: u32, max_l: u32, max_a: u32) !Dit {
         var x: Dit = .{ .gpa = gpa, .d = d, .k = k, .w = w, .s = s, .max_s = max_s, .max_l = max_l, .max_a = max_a };
         errdefer x.deinit();
         if (std.c.getenv("STK_H3_REF")) |v| {
@@ -312,7 +312,7 @@ pub const Dit = struct {
     }
 
     fn alloc(x: *Dit, n: u64) !u64 {
-        var b = try cuda.DeviceBuffer.alloc(x.d, @intCast(@max(n, 256)));
+        var b = try gpu.DeviceBuffer.alloc(x.d, @intCast(@max(n, 256)));
         errdefer b.free();
         try x.bufs.append(x.gpa, b);
         return b.at(0);
@@ -446,16 +446,16 @@ pub const Dit = struct {
         x.releaseCondition(); // the previous request's, before this one's is allocated
         const owned = try x.gpa.dupe(u8, tags);
         errdefer x.gpa.free(owned);
-        var cb = try cuda.DeviceBuffer.alloc(x.d, @intCast(n * 4));
+        var cb = try gpu.DeviceBuffer.alloc(x.d, @intCast(n * 4));
         errdefer {
             x.s.synchronize() catch {};
             cb.free();
         }
-        var eb = try cuda.DeviceBuffer.alloc(x.d, @intCast(rows * dim * 4));
+        var eb = try gpu.DeviceBuffer.alloc(x.d, @intCast(rows * dim * 4));
         errdefer eb.free();
         const cr = try cb.at(0);
         const ce = try eb.at(0);
-        var noise = try cuda.DeviceBuffer.alloc(x.d, @intCast(n * 4));
+        var noise = try gpu.DeviceBuffer.alloc(x.d, @intCast(n * 4));
         defer {
             x.s.synchronize() catch {};
             noise.free();
@@ -554,13 +554,13 @@ pub const Dit = struct {
             try x.step_graphs.append(x.gpa, .{ .key = gk, .exec = null });
             return x.stepBody(bd);
         }
-        cuda.graph.beginCapture(x.s, .thread_local) catch |err| return x.graphFallback(err, bd);
+        gpu.graph.beginCapture(x.s, .thread_local) catch |err| return x.graphFallback(err, bd);
         var failed: ?anyerror = null;
         x.stepBody(bd) catch |err| {
             failed = err;
         };
-        var g = cuda.graph.endCapture(x.s) catch |err| {
-            cuda.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later copy
+        var g = gpu.graph.endCapture(x.s) catch |err| {
+            gpu.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later copy
             return x.graphFallback(failed orelse err, bd);
         };
         defer g.deinit();

@@ -4,7 +4,7 @@
 //! not depend on the band), everything else vae.cu and ops.cu's silu. Weights from the VAE's pack (`pack.py write_vae`).
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const Pack = @import("pack.zig").Pack;
 const upload_mod = @import("upload.zig");
 const ops_launch = @import("ops_launch.zig");
@@ -22,19 +22,19 @@ fn blocks(n: u64) u32 {
 }
 
 pub const VaeOps = struct {
-    module: cuda.Module,
-    im2col: cuda.Function,
-    transpose: cuda.Function,
-    rms: cuda.Function,
-    add: cuda.Function,
-    up2: cuda.Function,
-    dup: cuda.Function,
-    softmax: cuda.Function,
-    affine: cuda.Function,
-    to_u8: cuda.Function,
+    module: gpu.Module,
+    im2col: gpu.Function,
+    transpose: gpu.Function,
+    rms: gpu.Function,
+    add: gpu.Function,
+    up2: gpu.Function,
+    dup: gpu.Function,
+    softmax: gpu.Function,
+    affine: gpu.Function,
+    to_u8: gpu.Function,
 
-    pub fn load(d: *const cuda.Driver, image: []const u8) !VaeOps {
-        var m = try cuda.Module.load(d, image);
+    pub fn load(d: *const gpu.Driver, image: []const u8) !VaeOps {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         return .{
             .module = m,
@@ -70,11 +70,11 @@ const Manifest = struct {
 pub const Vae = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const VaeOps,
     tk: *const ops_launch.TeOps,
     ops: *const ops_launch.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     mem: upload_mod.Slab,
     convs: std.StringHashMapUnmanaged(Conv) = .empty,
@@ -94,7 +94,7 @@ pub const Vae = struct {
     max_area: u64, // h * w at most: what the activations are sized for
 
     /// Weights from the pack `p` and scratch for latents up to max_h x max_w and max_area in all (the image is 16x that).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: cuda.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32, max_area: u64) !Vae {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const VaeOps, tk: *const ops_launch.TeOps, ops: *const ops_launch.Ops, s: gpu.Stream, p: *const Pack, up: *upload_mod.Uploader, dir: []const u8, max_h: u32, max_w: u32, max_area: u64) !Vae {
         var v: Vae = .{ .gpa = gpa, .arena = .init(gpa), .d = d, .k = k, .tk = tk, .ops = ops, .s = s, .max_h = max_h, .max_w = max_w, .max_area = @min(max_area, @as(u64, max_h) * max_w), .mem = .init(d, gpa) };
         errdefer v.deinit();
         const a = v.arena.allocator();
@@ -179,13 +179,13 @@ pub const Vae = struct {
         if (v.probe) |p| try p.after(p.ctx, name, outs);
     }
 
-    pub fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: cuda.launch.Dim3, args: *cuda.launch.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = grid, .block = blk, .shared = 0 }, s, args);
+    pub fn go(f: gpu.Function, s: gpu.Stream, grid: gpu.launch.Dim3, blk: gpu.launch.Dim3, args: *gpu.launch.Args) !void {
+        try gpu.launch.launch(f, .{ .grid = grid, .block = blk, .shared = 0 }, s, args);
     }
 
     /// y[c * ldy + off + r] = x[r * ldx + c] for r < rows, c < cols (stk_transpose_bf16).
     fn transposeRaw(v: *Vae, x: Ptr, rows: u64, cols: u64, ldx: u64, y: Ptr, ldy: u64) !void {
-        var args: cuda.launch.Args = .{};
+        var args: gpu.launch.Args = .{};
         args.add(x);
         args.add(y);
         inline for (.{ rows, cols, ldx, ldy }) |n| args.add(@as(i64, @intCast(n)));
@@ -212,7 +212,7 @@ pub const Vae = struct {
         while (y0 < ho) : (y0 += rows) {
             const r = @min(rows, ho - y0);
             const np = r * wo;
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             args.add(x);
             args.add(v.cols);
             inline for (.{ sh.c, sh.h, sh.w, c.kh, c.kw, c.stride, c.pad[0], c.pad[1], c.pad[2], c.pad[3], 1, kpad }) |n| args.add(@as(i32, @intCast(n)));
@@ -232,7 +232,7 @@ pub const Vae = struct {
         if (n.c != sh.c) return error.ShapeMismatch;
         const hw: u64 = @as(u64, sh.h) * sh.w;
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = bytesOf(sh) }});
-        var args: cuda.launch.Args = .{};
+        var args: gpu.launch.Args = .{};
         inline for (.{ x, n.gamma, y }) |p| args.add(p);
         args.add(@as(i32, @intCast(sh.c)));
         args.add(@as(i64, @intCast(hw)));
@@ -250,7 +250,7 @@ pub const Vae = struct {
     /// out = x + z (out may alias either); the twin's roles: inputs x, y; output y.
     pub fn add(v: *Vae, name: []const u8, x: Ptr, z: Ptr, out: Ptr, bytes: u64) !void {
         try v.pre(name, &.{ .{ .role = "x", .ptr = x, .bytes = bytes }, .{ .role = "y", .ptr = z, .bytes = bytes } });
-        var args: cuda.launch.Args = .{};
+        var args: gpu.launch.Args = .{};
         inline for (.{ x, z, out }) |p| args.add(p);
         args.add(@as(i64, @intCast(bytes / 2)));
         try go(v.k.add, v.s, .{ .x = blocks(bytes / 2) }, .{ .x = block }, &args);
@@ -331,7 +331,7 @@ pub const Vae = struct {
         const sm = try std.fmt.bufPrint(&nb, "{s}.softmax", .{name});
         try v.pre(sm, &.{.{ .role = "s", .ptr = xn, .bytes = L * L * 2 }});
         {
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             args.add(xn);
             args.add(vv);
             args.add(@as(i64, @intCast(L)));
@@ -371,7 +371,7 @@ pub const Vae = struct {
         const us: Shape = .{ .c = cs.c, .h = 2 * cs.h, .w = 2 * cs.w };
         try v.pre(up_name, &.{.{ .role = "x", .ptr = v.pool[cur], .bytes = bytesOf(cs) }});
         {
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             args.add(v.pool[cur]);
             args.add(v.pool[ui]);
             inline for (.{ cs.c, cs.h, cs.w }) |n| args.add(@as(i32, @intCast(n)));
@@ -385,7 +385,7 @@ pub const Vae = struct {
         const ds: Shape = .{ .c = du.cout, .h = sh.h * du.fs, .w = sh.w * du.fs };
         try v.pre(dn, &.{.{ .role = "x", .ptr = v.pool[xi], .bytes = bytesOf(sh) }});
         {
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             args.add(v.pool[xi]);
             args.add(v.pool[ui]);
             inline for (.{ du.cout, sh.h, sh.w, du.fs, du.factor, du.repeats, du.fti }) |n| args.add(@as(i32, @intCast(n)));
@@ -408,7 +408,7 @@ pub const Vae = struct {
         const hw: u64 = @as(u64, h) * w;
         try v.pre("vae.denorm", &.{ .{ .role = "x", .ptr = lat, .bytes = bytesOf(zs) }, .{ .role = "mean", .ptr = v.mean, .bytes = z_dim * 2 }, .{ .role = "std", .ptr = v.stdv, .bytes = z_dim * 2 } });
         {
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             inline for (.{ lat, v.mean, v.stdv, v.pool[zi] }) |p| args.add(p);
             args.add(@as(i64, @intCast(hw)));
             args.add(@as(i64, @intCast(z_dim * hw)));
@@ -446,7 +446,7 @@ pub const Vae = struct {
         // torch.clamp(out, -1, 1) is not an op of ours: to_u8's clamp to [0, 1] after x * 0.5 + 0.5 gives the same bytes
         try v.pre("vae.to_u8", &.{.{ .role = "x", .ptr = v.pool[oi], .bytes = bytesOf(os) }});
         {
-            var args: cuda.launch.Args = .{};
+            var args: gpu.launch.Args = .{};
             args.add(v.pool[oi]);
             args.add(out);
             inline for (.{ os.c, os.h, os.w }) |n| args.add(@as(i32, @intCast(n)));

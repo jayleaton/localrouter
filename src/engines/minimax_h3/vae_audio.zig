@@ -6,7 +6,7 @@
 //! (weight norm already folded); the encoder tensors are not loaded.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const Pack = qi.pack.Pack;
 const Store = qi.weights.Store;
@@ -33,22 +33,22 @@ fn i64of(v: anytype) i64 {
 }
 
 pub const Ops = struct {
-    module: cuda.Module,
-    latent_in_fn: cuda.Function,
-    im2col_fn: cuda.Function,
-    ct_im2col_fn: cuda.Function,
-    ct_store_fn: cuda.Function,
-    up2_fn: cuda.Function,
-    down2_fn: cuda.Function,
-    snake_fn: cuda.Function,
-    add_fn: cuda.Function,
-    avg3_fn: cuda.Function,
-    clamp_fn: cuda.Function,
-    std_fn: cuda.Function,
-    div_fn: cuda.Function,
+    module: gpu.Module,
+    latent_in_fn: gpu.Function,
+    im2col_fn: gpu.Function,
+    ct_im2col_fn: gpu.Function,
+    ct_store_fn: gpu.Function,
+    up2_fn: gpu.Function,
+    down2_fn: gpu.Function,
+    snake_fn: gpu.Function,
+    add_fn: gpu.Function,
+    avg3_fn: gpu.Function,
+    clamp_fn: gpu.Function,
+    std_fn: gpu.Function,
+    div_fn: gpu.Function,
 
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
-        var m = try cuda.Module.load(d, image);
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Ops {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         var o: Ops = undefined;
         o.module = m;
@@ -65,8 +65,8 @@ pub const Ops = struct {
         o.module.unload();
     }
 
-    fn go(f: cuda.Function, s: cuda.Stream, grid: u32, args: *cuda.launch.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = grid }, .block = .{ .x = block }, .shared = 0 }, s, args);
+    fn go(f: gpu.Function, s: gpu.Stream, grid: u32, args: *gpu.launch.Args) !void {
+        try gpu.launch.launch(f, .{ .grid = .{ .x = grid }, .block = .{ .x = block }, .shared = 0 }, s, args);
     }
 };
 
@@ -81,10 +81,10 @@ const Layer = struct { a1: Act, c1: Conv, a2: Act, c2: Conv };
 
 pub const Decoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
     g: *const launch.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     store: Store,
     max_a: u32,
@@ -129,7 +129,7 @@ pub const Decoder = struct {
         return total + @typeInfo(@FieldType(Decoder, "r")).array.len * widest(max_a) * 4;
     }
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, g: *const launch.Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_a: u32) !Decoder {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const Ops, g: *const launch.Ops, s: gpu.Stream, p: *const Pack, up: *Uploader, max_a: u32) !Decoder {
         var t: Decoder = .{ .gpa = gpa, .d = d, .k = k, .g = g, .s = s, .store = .init(d, gpa), .max_a = max_a };
         errdefer t.store.deinit();
         var host: std.ArrayList(u8) = .empty;
@@ -249,7 +249,7 @@ pub const Decoder = struct {
         try t.pre(name, &.{.{ .role = "x", .ptr = in, .bytes = B * T * c.cin * 4 }});
         var col = in; // K = 1: the activations are the GEMM's rows already
         if (c.k != 1) {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             a.add(in);
             a.add(t.col);
             inline for (.{ B, T, c.cin }) |v| a.add(i64of(v));
@@ -264,7 +264,7 @@ pub const Decoder = struct {
     fn convTranspose(t: *Decoder, name: []const u8, c: *const Up, in: u64, out: u64, B: u64, L: u64) !void {
         try t.pre(name, &.{.{ .role = "x", .ptr = in, .bytes = B * L * c.cin * 4 }});
         for (c.ph[0..c.u], 0..) |ph, r| {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             a.add(in);
             a.add(t.col);
             inline for (.{ B, L, c.cin }) |v| a.add(i64of(v));
@@ -272,7 +272,7 @@ pub const Decoder = struct {
             a.add(@as(i32, @intCast(ph.qoff)));
             try Ops.go(t.k.ct_im2col_fn, t.s, blocks(B * L * ph.j * c.cin), &a);
             try t.g.gemmF32(t.s, t.col, ph.w, c.bias, t.ph, B * L, c.cout, @as(u64, ph.j) * c.cin);
-            var s: cuda.launch.Args = .{};
+            var s: gpu.launch.Args = .{};
             s.add(t.ph);
             s.add(out);
             inline for (.{ B, L, c.cout }) |v| s.add(i64of(v));
@@ -286,15 +286,15 @@ pub const Decoder = struct {
     fn activation(t: *Decoder, name: []const u8, c: Act, in: u64, out: u64, B: u64, T: u64, C: u64) !void {
         try t.pre(name, &.{.{ .role = "x", .ptr = in, .bytes = B * T * C * 4 }});
         const n2 = B * 2 * T * C;
-        var u: cuda.launch.Args = .{};
+        var u: gpu.launch.Args = .{};
         inline for (.{ in, c.up, t.up2 }) |v| u.add(v);
         inline for (.{ T, C, n2 }) |v| u.add(i64of(v));
         try Ops.go(t.k.up2_fn, t.s, blocks(n2), &u);
-        var sn: cuda.launch.Args = .{};
+        var sn: gpu.launch.Args = .{};
         inline for (.{ t.up2, c.alpha, c.beta, t.up2 }) |v| sn.add(v);
         inline for (.{ C, n2 }) |v| sn.add(i64of(v));
         try Ops.go(t.k.snake_fn, t.s, blocks(n2), &sn);
-        var dn: cuda.launch.Args = .{};
+        var dn: gpu.launch.Args = .{};
         inline for (.{ t.up2, c.down, out }) |v| dn.add(v);
         inline for (.{ 2 * T, C, B * T * C }) |v| dn.add(i64of(v));
         try Ops.go(t.k.down2_fn, t.s, blocks(B * T * C), &dn);
@@ -312,7 +312,7 @@ pub const Decoder = struct {
         const zn: u64 = latent_ch * stereo * A;
         try t.pre("avae.latent_in", &.{.{ .role = "z", .ptr = latent, .bytes = zn * 4 }});
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ latent, t.mean, t.std_, t.b }) |v| a.add(v);
             inline for (.{ 1, latent_ch, stereo, A }) |v| a.add(i64of(v));
             try Ops.go(t.k.latent_in_fn, t.s, blocks(zn), &a);
@@ -341,7 +341,7 @@ pub const Decoder = struct {
             const an = try std.fmt.bufPrint(&nb, "avae.avg.{d}", .{i});
             try t.pre(an, &.{ .{ .role = "a", .ptr = t.r[0], .bytes = n * 4 }, .{ .role = "b", .ptr = t.r[1], .bytes = n * 4 }, .{ .role = "c", .ptr = t.r[2], .bytes = n * 4 } });
             {
-                var a: cuda.launch.Args = .{};
+                var a: gpu.launch.Args = .{};
                 inline for (.{ t.r[0], t.r[1], t.r[2], t.x }) |v| a.add(v);
                 a.add(i64of(n));
                 a.add(avg3_recip);
@@ -354,7 +354,7 @@ pub const Decoder = struct {
         const wn = B * T; // samples over both channels (conv_post has one output channel)
         try t.pre("avae.clamp", &.{.{ .role = "x", .ptr = t.b, .bytes = wn * 4 }});
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ t.b, t.a }) |v| a.add(v);
             a.add(i64of(wn));
             try Ops.go(t.k.clamp_fn, t.s, blocks(wn), &a);
@@ -363,7 +363,7 @@ pub const Decoder = struct {
         // vae_decode_audio's normalisation: one std over both channels (Bb = 1 row of 2 * A * 800 samples)
         try t.pre("avae.std_scale", &.{.{ .role = "x", .ptr = t.a, .bytes = wn * 4 }});
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ t.a, t.sc }) |v| a.add(v);
             a.add(i64of(wn));
             try Ops.go(t.k.std_fn, t.s, 1, &a);
@@ -371,7 +371,7 @@ pub const Decoder = struct {
         try t.post("avae.std_scale", &.{.{ .role = "sc", .ptr = t.sc, .bytes = 4 }});
         try t.pre("avae.div_scale", &.{ .{ .role = "x", .ptr = t.a, .bytes = wn * 4 }, .{ .role = "sc", .ptr = t.sc, .bytes = 4 } });
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ t.a, t.sc, t.wav }) |v| a.add(v);
             inline for (.{ wn, wn }) |v| a.add(i64of(v));
             try Ops.go(t.k.div_fn, t.s, blocks(wn), &a);
@@ -382,7 +382,7 @@ pub const Decoder = struct {
 
     fn add(t: *Decoder, name: []const u8, a_: u64, b_: u64, out: u64, n: u64) !void {
         try t.pre(name, &.{ .{ .role = "a", .ptr = a_, .bytes = n * 4 }, .{ .role = "b", .ptr = b_, .bytes = n * 4 } });
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ a_, b_, out }) |v| a.add(v);
         a.add(i64of(n));
         try Ops.go(t.k.add_fn, t.s, blocks(n), &a);

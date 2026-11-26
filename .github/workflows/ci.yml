@@ -39,6 +39,10 @@ jobs:
       - run: zig build
       - run: zig build test
         timeout-minutes: 20
+      - name: the HIP build (-Dgpu=hip, docs/dev/ROCM.md) and its unit tests (no GPU, no ROCm)
+        run: |
+          zig build -Dgpu=hip
+          zig build test-unit -Dgpu=hip
       - name: zig fmt on the Zig files this change touches (prints what it would change)
         if: always()
         run: |

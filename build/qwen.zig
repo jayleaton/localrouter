@@ -17,8 +17,8 @@ const torch_flags = [_][]const u8{
 
 const sources = [_][]const u8{ "ops", "attention", "gemm", "te", "vae", "vision", "vae_enc" };
 
-/// `nvcc` / `sms` as given to build/cuda.zig (-Dnvcc, -Dsm); `cuda` the runtime, `nvfp4` the TensorFold kernel module.
-pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, cuda: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
+/// `nvcc` / `sms` as given to build/cuda.zig (-Dnvcc, -Dsm); `gpu` the runtime (CUDA or HIP), `nvfp4` the TensorFold kernel module.
+pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, sms: []const u8, gpu: *std.Build.Module, nvfp4: *std.Build.Module, tokenizer: *std.Build.Module, fatbin_step: *std.Build.Step) *std.Build.Module {
     const opts = b.addOptions();
     opts.addOption(bool, "with_kernels", nvcc != null);
     opts.addOption([]const u8, "set", "qwen_image"); // distinct contents: options files must not be shared by modules
@@ -45,7 +45,7 @@ pub fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "cuda", .module = cuda },
+            .{ .name = "gpu", .module = gpu },
             .{ .name = "nvfp4_kernels", .module = nvfp4 },
             .{ .name = "qwen_kernels", .module = kmod },
             .{ .name = "tokenizer", .module = tokenizer }, // TensorFold's tokenizer.json implementation

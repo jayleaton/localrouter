@@ -1,6 +1,6 @@
 //! Qwen3-VL 32B vision tower, identical launch ABI and probe names to the twin.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const smath = qi.smath;
 const tw = @import("te_vision_weights.zig");
@@ -23,14 +23,14 @@ pub const Features = struct {
     }
 };
 pub const Ops = struct {
-    module: cuda.Module,
-    norm_fn: cuda.Function,
-    gelu_fn: cuda.Function,
-    rope_fn: cuda.Function,
-    position_fn: cuda.Function,
-    attn_fn: cuda.Function,
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
-        var m = try cuda.Module.load(d, image);
+    module: gpu.Module,
+    norm_fn: gpu.Function,
+    gelu_fn: gpu.Function,
+    rope_fn: gpu.Function,
+    position_fn: gpu.Function,
+    attn_fn: gpu.Function,
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Ops {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         return .{ .module = m, .norm_fn = try m.function("h3v_norm"), .gelu_fn = try m.function("h3v_gelu"), .rope_fn = try m.function("h3v_rope"), .position_fn = try m.function("h3v_position"), .attn_fn = try m.function("h3v_attention") };
     }
@@ -57,11 +57,11 @@ test "linspace47 follows torch's two-sided float32 linspace" {
 
 pub const VisionEncoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
     h3: *const launch.Ops,
     tk: *const te.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     w: tw.Weights,
     max_patches: u32,
     probe: ?dit.Probe = null,
@@ -81,7 +81,7 @@ pub const VisionEncoder = struct {
     ids: u64 = 0,
     weights: u64 = 0,
     out: [4]u64 = .{ 0, 0, 0, 0 },
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, h3: *const launch.Ops, tk: *const te.Ops, s: cuda.Stream, p: *const qi.pack.Pack, up: *qi.upload.Uploader, max_patches: u32) !VisionEncoder {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const gpu.Driver, k: *const Ops, h3: *const launch.Ops, tk: *const te.Ops, s: gpu.Stream, p: *const qi.pack.Pack, up: *qi.upload.Uploader, max_patches: u32) !VisionEncoder {
         var v: VisionEncoder = .{ .gpa = gpa, .d = d, .k = k, .h3 = h3, .tk = tk, .s = s, .w = try tw.Weights.load(gpa, io, d, p, up), .max_patches = max_patches };
         errdefer v.deinit();
         const sizes = scratch(max_patches);
@@ -113,15 +113,15 @@ pub const VisionEncoder = struct {
     fn post(v: *VisionEncoder, n: []const u8, outs: []const dit.Io) !void {
         if (v.probe) |p| try p.after(p.ctx, n, outs);
     }
-    fn go(v: *VisionEncoder, f: cuda.Function, grid: cuda.launch.Dim3, b: u32, shared: u32, args: *cuda.launch.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = b }, .shared = shared }, v.s, args);
+    fn go(v: *VisionEncoder, f: gpu.Function, grid: gpu.launch.Dim3, b: u32, shared: u32, args: *gpu.launch.Args) !void {
+        try gpu.launch.launch(f, .{ .grid = grid, .block = .{ .x = b }, .shared = shared }, v.s, args);
     }
     fn upload(v: *VisionEncoder, ptr: u64, bytes: []const u8) !void {
         try v.d.check(v.d.api.cuMemcpyHtoD_v2(ptr, bytes.ptr, bytes.len), "cuMemcpyHtoD");
     }
     fn linear(v: *VisionEncoder, name: []const u8, l: tw.Lin, x: u64, y: u64, m: u32) !void {
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = @as(u64, m) * l.k * 4 }});
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         if (l.quant) {
             inline for (.{ x, l.pqs, l.w, l.scale }) |p| a.add(p);
             a.add(l.tscale);
@@ -139,7 +139,7 @@ pub const VisionEncoder = struct {
     fn norm(v: *VisionEncoder, name: []const u8, n: tw.Norm, x: u64, y: u64, rows: u32) !void {
         const bytes = @as(u64, rows) * n.dim * 4;
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = bytes }});
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, n.w, n.b, y }) |p| a.add(p);
         a.add(@as(i32, @intCast(n.dim)));
         try v.go(v.k.norm_fn, .{ .x = rows }, 256, 0, &a);
@@ -147,7 +147,7 @@ pub const VisionEncoder = struct {
     }
     fn gelu(v: *VisionEncoder, name: []const u8, x: u64, y: u64, n: u64, approx: i32) !void {
         try v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = n * 4 }});
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(y);
         a.add(@as(i64, @intCast(n)));
@@ -157,7 +157,7 @@ pub const VisionEncoder = struct {
     }
     fn add(v: *VisionEncoder, name: []const u8, x: u64, b: u64, y: u64, n: u64) !void {
         try v.pre(name, &.{ .{ .role = "a", .ptr = x, .bytes = n * 4 }, .{ .role = "b", .ptr = b, .bytes = n * 4 } });
-        var a: cuda.launch.Args = .{};
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, b, y }) |p| a.add(p);
         a.add(@as(i64, @intCast(n)));
         try v.go(v.tk.add_fn, .{ .x = blocks(n) }, 256, 0, &a);
@@ -235,7 +235,7 @@ pub const VisionEncoder = struct {
         try v.linear("vision.patch", v.w.patch, v.pixels, v.h, n);
         try v.pre("vision.position", &.{ .{ .role = "ids", .ptr = v.ids, .bytes = @as(u64, n) * 16 }, .{ .role = "weights", .ptr = v.weights, .bytes = @as(u64, n) * 16 } });
         {
-            var a: cuda.launch.Args = .{};
+            var a: gpu.launch.Args = .{};
             inline for (.{ v.w.pos, v.ids, v.weights, v.z }) |p| a.add(p);
             a.add(@as(i32, @intCast(n)));
             a.add(@as(i32, D));
@@ -258,7 +258,7 @@ pub const VisionEncoder = struct {
             const rn = nm(&nb, i, "rope");
             try v.pre(rn, &.{ .{ .role = "q", .ptr = v.q, .bytes = bytes }, .{ .role = "k", .ptr = v.kk, .bytes = bytes }, .{ .role = "cos", .ptr = v.cs, .bytes = @as(u64, n) * 36 * 4 }, .{ .role = "sin", .ptr = v.sn, .bytes = @as(u64, n) * 36 * 4 } });
             for ([2]u64{ v.q, v.kk }) |ptr| {
-                var a: cuda.launch.Args = .{};
+                var a: gpu.launch.Args = .{};
                 a.add(ptr);
                 a.add(v.cs);
                 a.add(v.sn);
@@ -270,7 +270,7 @@ pub const VisionEncoder = struct {
             const an = nm(&nb, i, "attention");
             try v.pre(an, &.{ .{ .role = "q", .ptr = v.q, .bytes = bytes }, .{ .role = "k", .ptr = v.kk, .bytes = bytes }, .{ .role = "v", .ptr = v.v, .bytes = bytes } });
             {
-                var a: cuda.launch.Args = .{};
+                var a: gpu.launch.Args = .{};
                 inline for (.{ v.q, v.kk, v.v, v.attn }) |p| a.add(p);
                 a.add(@as(i32, @intCast(n)));
                 a.add(@as(i32, HEADS));

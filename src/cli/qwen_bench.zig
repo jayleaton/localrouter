@@ -2,7 +2,7 @@
 //! (GPU events), plus the weight load time. Prints JSON.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 
 pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -22,13 +22,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer pack.close(io);
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &d, @intCast(maj), @intCast(min));
     defer nv.unload();
@@ -52,25 +52,25 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const om = try qi.smath.omegas(qi.kernels.rope_omega);
     var dit = try qi.dit.Dit.init(gpa, &d, .{ .ops = &ops, .nv = &nv, .tri = &tri, .major = @intCast(maj), .minor = @intCast(min) }, &wts, s, om, n, p);
     defer dit.deinit();
-    var cb = try cuda.DeviceBuffer.alloc(&d, @as(usize, p) * 4096 * 2);
+    var cb = try gpu.DeviceBuffer.alloc(&d, @as(usize, p) * 4096 * 2);
     defer cb.free();
-    var lat = try cuda.DeviceBuffer.alloc(&d, 64 * @as(usize, n) * 2);
+    var lat = try gpu.DeviceBuffer.alloc(&d, 64 * @as(usize, n) * 2);
     defer lat.free();
-    var vel = try cuda.DeviceBuffer.alloc(&d, 64 * @as(usize, n) * 2);
+    var vel = try gpu.DeviceBuffer.alloc(&d, 64 * @as(usize, n) * 2);
     defer vel.free();
     try cb.fill8(0x3c, null); // a finite bf16 pattern (about 0.0117): the speed does not depend on the values
     try lat.fill8(0x3c, null);
     try dit.buildPrefix(try cb.at(0), p, 0.5);
-    var e0 = try cuda.Event.init(&d, true);
+    var e0 = try gpu.Event.init(&d, true);
     defer e0.deinit();
-    var e1 = try cuda.Event.init(&d, true);
+    var e1 = try gpu.Event.init(&d, true);
     defer e1.deinit();
     for (0..2) |_| try dit.step(try lat.at(0), 0.5, h, w, try vel.at(0));
     try e0.record(s);
     for (0..10) |_| try dit.step(try lat.at(0), 0.5, h, w, try vel.at(0));
     try e1.record(s);
     try e1.synchronize();
-    const ms = try cuda.Event.elapsedMs(e0, e1) / 10.0;
+    const ms = try gpu.Event.elapsedMs(e0, e1) / 10.0;
     var buf: [256]u8 = undefined;
     const line = try std.fmt.bufPrint(&buf, "{{\"qwen_bench\": {{\"gpu\": \"sm_{d}{d}\", \"precision\": \"{s}\", \"size\": \"{s}\", \"step_ms\": {d:.2}, \"load_ms\": {d}}}}}\n", .{ maj, min, pack.precision, size, ms, load_ms });
     try std.Io.File.stdout().writeStreamingAll(io, line);

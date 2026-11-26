@@ -3,7 +3,7 @@
 //! Batch 1. Latents are [64, H * W] (CHW); the step runs the target rows over [kept text prefix | target] keys.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const W = @import("weights.zig");
 const plan = @import("nvfp4_plan.zig");
 const Nvfp4 = @import("nvfp4_exec.zig").Nvfp4;
@@ -31,7 +31,7 @@ pub const Probe = struct {
     after: *const fn (ctx: *anyopaque, name: []const u8, outs: []const Io) anyerror!void,
 };
 
-const StepGraph = struct { key: [5]u64, exec: cuda.graph.Exec };
+const StepGraph = struct { key: [5]u64, exec: gpu.graph.Exec };
 const max_graphs = 8;
 
 pub const Kernels = struct { ops: *const Ops, nv: *Nvfp4, tri: *const Triton, major: u32, minor: u32 };
@@ -39,13 +39,13 @@ pub const Kernels = struct { ops: *const Ops, nv: *Nvfp4, tri: *const Triton, ma
 /// Device scratch for at most `max_rows` rows a pass (target or prefix) and `max_prefix` kept text rows.
 pub const Dit = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: Kernels,
     w: *const W.Weights,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     om: [64]f64,
-    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    bufs: std.ArrayList(gpu.DeviceBuffer) = .empty,
     max_rows: u32,
     max_prefix: u32,
     // side path
@@ -111,7 +111,7 @@ pub const Dit = struct {
     segments: std.ArrayList(Segment) = .empty,
     mod_sigma: ?f32 = null,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: Kernels, w: *const W.Weights, s: cuda.Stream, om: [64]f64, max_rows: u32, max_prefix: u32) !Dit {
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: Kernels, w: *const W.Weights, s: gpu.Stream, om: [64]f64, max_rows: u32, max_prefix: u32) !Dit {
         var x: Dit = .{ .gpa = gpa, .d = d, .k = k, .w = w, .s = s, .om = om, .max_rows = max_rows, .max_prefix = max_prefix };
         errdefer x.deinit();
         const r: u64 = @max(max_rows, max_prefix);
@@ -157,7 +157,7 @@ pub const Dit = struct {
     }
 
     fn alloc(x: *Dit, n: u64) !u64 {
-        var b = try cuda.DeviceBuffer.alloc(x.d, @intCast(@max(n, 256)));
+        var b = try gpu.DeviceBuffer.alloc(x.d, @intCast(@max(n, 256)));
         errdefer b.free();
         try x.bufs.append(x.gpa, b);
         return b.at(0);
@@ -466,14 +466,14 @@ pub const Dit = struct {
             var old = x.step_graphs.orderedRemove(0);
             old.exec.deinit();
         }
-        try cuda.graph.beginCapture(x.s, .thread_local);
+        try gpu.graph.beginCapture(x.s, .thread_local);
         const captured = blk: {
             x.modulationKernels() catch |err| break :blk err;
             x.stepKernels(lat, h, w, vel) catch |err| break :blk err;
             break :blk {};
         };
-        var g = cuda.graph.endCapture(x.s) catch |err| {
-            cuda.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later capture
+        var g = gpu.graph.endCapture(x.s) catch |err| {
+            gpu.copy_source.captureEnd(x.s); // TensorFold ends its capture scope only on success; left open, it refuses every later capture
             return err;
         };
         defer g.deinit();

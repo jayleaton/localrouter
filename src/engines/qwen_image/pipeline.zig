@@ -6,7 +6,7 @@
 //! its parts point at each other.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const kernels = @import("qwen_kernels");
 const Pack = @import("pack.zig").Pack;
 const ops_launch = @import("ops_launch.zig");
@@ -77,9 +77,9 @@ pub const Pipeline = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     arena: std.heap.ArenaAllocator,
-    d: cuda.Driver,
-    ctx: cuda.Context,
-    s: cuda.Stream,
+    d: gpu.Driver,
+    ctx: gpu.Context,
+    s: gpu.Stream,
     major: u32,
     minor: u32,
     nv: Nvfp4,
@@ -100,7 +100,7 @@ pub const Pipeline = struct {
     max_w: u32,
     max_area: u32, // h * w at most, in 16x16 patches: what the scratch is sized for
     ref_area: u32 = 0, // the largest reference image, in 16x16 patches (0 without the edit weights); sides up to edit_ref_side
-    bufs: [4]cuda.DeviceBuffer, // latents, the next latents, velocity, pixels
+    bufs: [4]gpu.DeviceBuffer, // latents, the next latents, velocity, pixels
     times: Times = .{},
     load: LoadTimes = .{},
     weights_bytes: u64 = 0,
@@ -153,7 +153,7 @@ pub const Pipeline = struct {
         };
         p.d = try memcap.open();
         errdefer p.d.close();
-        p.ctx = try cuda.Context.init(&p.d, 0);
+        p.ctx = try gpu.Context.init(&p.d, 0);
         errdefer p.ctx.deinit();
         var maj: c_int = 0;
         var min: c_int = 0;
@@ -161,7 +161,7 @@ pub const Pipeline = struct {
         try p.d.check(p.d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, p.ctx.device), "cc");
         p.major = @intCast(maj);
         p.minor = @intCast(min);
-        p.s = try cuda.Stream.init(&p.d, false); // blocking: ordered with the synchronous uploads
+        p.s = try gpu.Stream.init(&p.d, false); // blocking: ordered with the synchronous uploads
         errdefer p.s.deinit();
         p.load.context = clock.lap();
         p.nv = try Nvfp4.load(gpa, &p.d, p.major, p.minor);
@@ -216,7 +216,7 @@ pub const Pipeline = struct {
         var made: usize = 0;
         errdefer for (p.bufs[0..made]) |*b| b.free();
         for (&p.bufs, [_]usize{ 2 * n, 2 * n, 2 * n, 256 * n / 64 * 4 }) |*b, len| {
-            b.* = try cuda.DeviceBuffer.alloc(&p.d, len);
+            b.* = try gpu.DeviceBuffer.alloc(&p.d, len);
             made += 1;
         }
         try p.s.synchronize();
@@ -337,7 +337,7 @@ pub const Progress = struct {
 
 const Clock = struct {
     io: std.Io,
-    s: cuda.Stream,
+    s: gpu.Stream,
     t: std.Io.Timestamp = undefined,
 
     fn start(c: *Clock) !void {

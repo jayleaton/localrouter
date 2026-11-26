@@ -1,6 +1,6 @@
 //! Edit orchestration in capture order; weights and kernel modules live at stable addresses.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const pipeline = @import("pipeline.zig");
 const vision = @import("vision.zig");
 const vis_launch = @import("vision_launch.zig");

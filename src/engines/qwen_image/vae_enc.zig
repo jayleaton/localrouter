@@ -1,6 +1,6 @@
 //! Single-frame reference encoder; decoder arithmetic and scratch are shared, weights use Store/Uploader.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const vae = @import("vae.zig");
 const Pack = @import("pack.zig").Pack;
 const Store = @import("weights.zig").Store;
@@ -9,12 +9,12 @@ const Shape = vae.Vae.Shape;
 const block = 256;
 
 pub const Ops = struct {
-    module: cuda.Module,
-    avg: cuda.Function,
-    normalize: cuda.Function,
-    from_u8: cuda.Function,
-    pub fn load(d: *const cuda.Driver, image: []const u8) !Ops {
-        var m = try cuda.Module.load(d, image);
+    module: gpu.Module,
+    avg: gpu.Function,
+    normalize: gpu.Function,
+    from_u8: gpu.Function,
+    pub fn load(d: *const gpu.Driver, image: []const u8) !Ops {
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
         return .{ .module = m, .avg = try m.function("stk_avg_down"), .normalize = try m.function("stk_chan_normalize"), .from_u8 = try m.function("stk_from_u8_rgba") };
     }
@@ -106,7 +106,7 @@ pub const Encoder = struct {
         if (sh.c != d.cin or sh.h % d.fs != 0 or sh.w % d.fs != 0) return error.ShapeMismatch;
         const out: Shape = .{ .c = d.cout, .h = sh.h / d.fs, .w = sh.w / d.fs };
         try e.v.pre(name, &.{.{ .role = "x", .ptr = x, .bytes = vae.Vae.bytesOf(sh) }});
-        var args: cuda.launch.Args = .{};
+        var args: gpu.launch.Args = .{};
         args.add(x);
         args.add(y);
         inline for (.{ sh.c, sh.h, sh.w, d.cout, d.factor_t, d.fs }) |n| args.add(@as(i32, @intCast(n)));
@@ -171,7 +171,7 @@ pub const Encoder = struct {
         const ii = try v.take();
         const hw: u64 = @as(u64, h) * w;
         try v.pre("vae.from_u8", &.{.{ .role = "x", .ptr = rgba, .bytes = hw * 4 }});
-        var args: cuda.launch.Args = .{};
+        var args: gpu.launch.Args = .{};
         args.add(rgba);
         args.add(v.pool[ii]);
         args.add(@as(i32, @intCast(h)));

@@ -3,7 +3,7 @@
 //! output is compared byte for byte with the capture. `localrouter check qwen-replay PACK CAPTURE` runs both.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const Capture = @import("capture.zig").Capture;
 const Dit = @import("dit.zig").Dit;
 const Io = @import("dit.zig").Io;
@@ -16,8 +16,8 @@ pub const Stats = struct { equal: u32 = 0, differ: u32 = 0, skipped: u32 = 0, un
 pub const Replay = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    d: *const cuda.Driver,
-    s: cuda.Stream,
+    d: *const gpu.Driver,
+    s: gpu.Stream,
     cap: *const Capture,
     mode: Mode,
     next: usize = 0,

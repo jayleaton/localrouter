@@ -5,7 +5,7 @@
 //! caller measures the whole step with its own event pair and reports `total - sum(classes)` as the time between ops.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 
 /// The op classes. `quant` is the NVFP4 activation quantizer in front of every block linear (all four summed), `gemm_*`
 /// the prompt GEMM of that linear; `attn_prep` is the INT8 attention's K anchor, Q / K / V quantizers (comfy-kitchen's
@@ -19,18 +19,18 @@ pub const n_classes = names.len;
 
 pub const Profile = struct {
     gpa: std.mem.Allocator,
-    ev: []cuda.Event, // two per span: start, end
+    ev: []gpu.Event, // two per span: start, end
     cls: []Class,
     n: usize = 0,
 
     /// Room for `spans` spans a step (a block makes about 20; the sides some 20 more).
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, spans: usize) !Profile {
-        const ev = try gpa.alloc(cuda.Event, 2 * spans);
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, spans: usize) !Profile {
+        const ev = try gpa.alloc(gpu.Event, 2 * spans);
         errdefer gpa.free(ev);
         var made: usize = 0;
         errdefer for (ev[0..made]) |*e| e.deinit();
         for (ev) |*e| {
-            e.* = try cuda.Event.init(d, true);
+            e.* = try gpu.Event.init(d, true);
             made += 1;
         }
         return .{ .gpa = gpa, .ev = ev, .cls = try gpa.alloc(Class, spans) };
@@ -46,12 +46,12 @@ pub const Profile = struct {
         p.n = 0;
     }
 
-    pub fn begin(p: *Profile, s: cuda.Stream) !void {
+    pub fn begin(p: *Profile, s: gpu.Stream) !void {
         if (p.n >= p.cls.len) return error.ProfileFull;
         try p.ev[2 * p.n].record(s);
     }
 
-    pub fn end(p: *Profile, s: cuda.Stream, c: Class) !void {
+    pub fn end(p: *Profile, s: gpu.Stream, c: Class) !void {
         try p.ev[2 * p.n + 1].record(s);
         p.cls[p.n] = c;
         p.n += 1;

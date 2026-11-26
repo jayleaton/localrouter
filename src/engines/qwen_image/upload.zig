@@ -9,7 +9,7 @@
 //! Only the order and overlap of the traffic change: every byte lands where it did before.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const Pack = @import("pack.zig").Pack;
 const Tensor = @import("pack.zig").Tensor;
 const block = @import("pack.zig").block;
@@ -25,16 +25,16 @@ pub const Stats = struct {
 };
 
 pub const Uploader = struct {
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     io: std.Io,
-    s: cuda.Stream,
-    bufs: [ring]cuda.HostBuffer,
-    events: [ring]cuda.Event,
+    s: gpu.Stream,
+    bufs: [ring]gpu.HostBuffer,
+    events: [ring]gpu.Event,
     pending: [ring]bool = @splat(false),
     next: usize = 0,
     stats: Stats = .{},
 
-    pub fn init(d: *const cuda.Driver, io: std.Io, s: cuda.Stream) !Uploader {
+    pub fn init(d: *const gpu.Driver, io: std.Io, s: gpu.Stream) !Uploader {
         var u: Uploader = .{ .d = d, .io = io, .s = s, .bufs = undefined, .events = undefined };
         var made: usize = 0;
         errdefer for (0..made) |i| {
@@ -42,9 +42,9 @@ pub const Uploader = struct {
             u.events[i].deinit();
         };
         for (0..ring) |i| {
-            u.bufs[i] = try cuda.HostBuffer.alloc(d, chunk + 2 * block); // a direct read's block-aligned window
+            u.bufs[i] = try gpu.HostBuffer.alloc(d, chunk + 2 * block); // a direct read's block-aligned window
             errdefer u.bufs[i].free();
-            u.events[i] = try cuda.Event.init(d, false);
+            u.events[i] = try gpu.Event.init(d, false);
             made += 1;
         }
         return u;
@@ -127,16 +127,16 @@ pub const Uploader = struct {
 /// Device memory for a component's weights and buffers, sub-allocated from 1 GiB slabs (256-byte aligned, as
 /// cuMemAlloc); a request over 256 MiB gets its own allocation, so a slab wastes at most that at its end. Freed at once.
 pub const Slab = struct {
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     gpa: std.mem.Allocator,
-    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    bufs: std.ArrayList(gpu.DeviceBuffer) = .empty,
     cur: u64 = 0, // the open slab's next free address
     left: usize = 0,
     bytes: u64 = 0, // handed out
     const slab: usize = 1 << 30;
     const own_from: usize = 256 << 20;
 
-    pub fn init(d: *const cuda.Driver, gpa: std.mem.Allocator) Slab {
+    pub fn init(d: *const gpu.Driver, gpa: std.mem.Allocator) Slab {
         return .{ .d = d, .gpa = gpa };
     }
 
@@ -160,7 +160,7 @@ pub const Slab = struct {
     }
 
     fn own(s: *Slab, len: usize) !u64 {
-        var b = try cuda.DeviceBuffer.alloc(s.d, len);
+        var b = try gpu.DeviceBuffer.alloc(s.d, len);
         errdefer b.free();
         try s.bufs.append(s.gpa, b);
         return b.at(0);

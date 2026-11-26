@@ -1,7 +1,7 @@
 //! `localrouter check h3-i2v PACK TE VAE CAPTURE`: PNG decode, encoder, vision/text, refiner and one conditioned DiT
 //! step, alone and chained against capture_i2v. Source PNG hash, expanded ids/tags and velocities must also match.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const h3 = @import("minimax_h3");
 
@@ -54,13 +54,13 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     var d = try qi.memcap.open();
     defer d.close();
-    var ctx = try cuda.Context.init(&d, 0);
+    var ctx = try gpu.Context.init(&d, 0);
     defer ctx.deinit();
     var maj: c_int = 0;
     var min: c_int = 0;
     try d.check(d.api.cuDeviceGetAttribute(&maj, .compute_capability_major, ctx.device), "cc");
     try d.check(d.api.cuDeviceGetAttribute(&min, .compute_capability_minor, ctx.device), "cc");
-    var s = try cuda.Stream.init(&d, false);
+    var s = try gpu.Stream.init(&d, false);
     defer s.deinit();
     var nv = try qi.nvfp4_exec.Nvfp4.load(gpa, &d, @intCast(maj), @intCast(min));
     defer nv.unload();
@@ -97,21 +97,21 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     const ly = h3.layout.Layout.init(@intCast(tokens.ids.len), sh.latent_t, sh.lh, sh.lw, sh.audio_t).withFirstFrame();
     var dit = try h3.dit.Dit.init(gpa, &d, .{ .h3 = &hops, .kitchen = &kitchen, .te = &bf, .ops = &ops, .nv = &nv, .major = @intCast(maj), .minor = @intCast(min) }, &weights, s, ly.s, @intCast(tokens.ids.len), ly.a);
     defer dit.deinit();
-    var pixels = try cuda.DeviceBuffer.fromHost(&d, std.mem.sliceAsBytes(rgb));
+    var pixels = try gpu.DeviceBuffer.fromHost(&d, std.mem.sliceAsBytes(rgb));
     defer pixels.free();
-    var z = try cuda.DeviceBuffer.alloc(&d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
+    var z = try gpu.DeviceBuffer.alloc(&d, @intCast(24 * @as(u64, sh.lh) * sh.lw * 4));
     defer z.free();
-    var text = try cuda.DeviceBuffer.alloc(&d, tokens.ids.len * h3.te32.dim * 2);
+    var text = try gpu.DeviceBuffer.alloc(&d, tokens.ids.len * h3.te32.dim * 2);
     defer text.free();
     const tags = try a.alloc(i64, tokens.tags.len);
     for (tags, tokens.tags) |*dst, v| dst.* = v;
-    var tb = try cuda.DeviceBuffer.fromHost(&d, std.mem.sliceAsBytes(tags));
+    var tb = try gpu.DeviceBuffer.fromHost(&d, std.mem.sliceAsBytes(tags));
     defer tb.free();
-    var latent: [4]cuda.DeviceBuffer = undefined;
+    var latent: [4]gpu.DeviceBuffer = undefined;
     var made: usize = 0;
     defer for (latent[0..made]) |*b| b.free();
     for (&latent, [_]usize{ @intCast(sh.n_video * 2), @intCast(sh.n_audio * 2), @intCast(sh.n_video * 2), @intCast(sh.n_audio * 2) }) |*b, n| {
-        b.* = try cuda.DeviceBuffer.alloc(&d, n);
+        b.* = try gpu.DeviceBuffer.alloc(&d, n);
         made += 1;
     }
     const input = cap.ops[cap.find("step.inputs", 0) orelse return error.NoInputs];

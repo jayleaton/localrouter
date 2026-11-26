@@ -1,7 +1,7 @@
 //! Vision tower in twin REC order. Host plans interpolate the learned positions and freeze axial rotary phases;
 //! temporal slices attend independently, patch rows are processor merge-block order.
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const Pack = @import("pack.zig").Pack;
 const DType = @import("pack.zig").DType;
 const Store = @import("weights.zig").Store;
@@ -97,11 +97,11 @@ pub fn ropeTables(grid: []const Grid, inv: *const [18]f32, cos: []f32, sin: []f3
 
 pub const VisionEncoder = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const vis.Ops,
     te: *const launch.TeOps,
     ops: *const launch.Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     probe: ?Probe = null,
     store: Store,
     cfg: Config,
@@ -130,7 +130,7 @@ pub const VisionEncoder = struct {
     cos: u64 = 0,
     sin: u64 = 0,
     merged: u64 = 0,
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const vis.Ops, te: *const launch.TeOps, ops: *const launch.Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, cfg: Config, max_rows: u32) !VisionEncoder {
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: *const vis.Ops, te: *const launch.TeOps, ops: *const launch.Ops, s: gpu.Stream, p: *const Pack, up: *Uploader, cfg: Config, max_rows: u32) !VisionEncoder {
         if (cfg.depth == 0 or cfg.num_heads == 0 or cfg.hidden_size != cfg.num_heads * 72 or cfg.spatial_merge_size != 2 or max_rows == 0 or (!std.mem.eql(u8, cfg.hidden_act, "gelu_pytorch_tanh") and !std.mem.eql(u8, cfg.hidden_act, "gelu_new"))) return error.BadVisionConfig;
         var t: VisionEncoder = .{ .gpa = gpa, .d = d, .k = k, .te = te, .ops = ops, .s = s, .store = .init(d, gpa), .cfg = cfg, .max_rows = max_rows };
         errdefer t.deinit();

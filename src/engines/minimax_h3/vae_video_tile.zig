@@ -4,7 +4,7 @@
 //! 1797 tokens (1792 patches, 4 register tokens, 1 zero token), 36 blocks of 32 heads x 64, FFN 8192 gated.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const qi = @import("qwen_image");
 const dit = @import("dit.zig");
 const vo = @import("vae_video_ops.zig");
@@ -83,21 +83,21 @@ const phase_names = [n_phase][]const u8{ "gemm", "attn_gemm", "softmax", "norm",
 /// and no probe is attached (a probe's copies and compares would be billed to the ops). Every call is a no-op when off.
 pub const Prof = struct {
     on: bool = false,
-    evs: []cuda.Event = &.{},
+    evs: []gpu.Event = &.{},
     cls: []Phase = &.{},
     n: usize = 0,
     ms: [n_phase]f64 = @splat(0),
 
     const capacity = 8192; // a tile: 36 x (13 + 3 x 16 groups of 2 heads), at one head a group about 4,000
 
-    fn init(p: *Prof, gpa: std.mem.Allocator, d: *const cuda.Driver) !void {
-        p.evs = try gpa.alloc(cuda.Event, capacity);
+    fn init(p: *Prof, gpa: std.mem.Allocator, d: *const gpu.Driver) !void {
+        p.evs = try gpa.alloc(gpu.Event, capacity);
         errdefer gpa.free(p.evs);
         p.cls = try gpa.alloc(Phase, capacity);
         errdefer gpa.free(p.cls);
         var made: usize = 0;
         errdefer for (p.evs[0..made]) |*e| e.deinit();
-        while (made < capacity) : (made += 1) p.evs[made] = try cuda.Event.init(d, true);
+        while (made < capacity) : (made += 1) p.evs[made] = try gpu.Event.init(d, true);
     }
 
     fn deinit(p: *Prof, gpa: std.mem.Allocator) void {
@@ -107,13 +107,13 @@ pub const Prof = struct {
         p.* = .{};
     }
 
-    pub fn begin(p: *Prof, s: cuda.Stream) !void {
+    pub fn begin(p: *Prof, s: gpu.Stream) !void {
         if (!p.on) return;
         try p.evs[0].record(s);
         p.n = 1;
     }
 
-    pub fn mark(p: *Prof, s: cuda.Stream, ph: Phase) !void {
+    pub fn mark(p: *Prof, s: gpu.Stream, ph: Phase) !void {
         if (!p.on or p.n == 0 or p.n >= p.evs.len) return;
         try p.evs[p.n].record(s);
         p.cls[p.n] = ph;
@@ -126,7 +126,7 @@ pub const Prof = struct {
             return;
         }
         try p.evs[p.n - 1].synchronize();
-        for (1..p.n) |i| p.ms[@backingInt(p.cls[i])] += try cuda.Event.elapsedMs(p.evs[i - 1], p.evs[i]);
+        for (1..p.n) |i| p.ms[@backingInt(p.cls[i])] += try gpu.Event.elapsedMs(p.evs[i - 1], p.evs[i]);
         p.n = 0;
     }
 
@@ -228,9 +228,9 @@ pub const Lat = struct { ptr: u64, tz: u32, hz: u32, wz: u32 };
 
 pub const Tile = struct {
     gpa: std.mem.Allocator,
-    d: *const cuda.Driver,
+    d: *const gpu.Driver,
     k: *const Ops,
-    s: cuda.Stream,
+    s: gpu.Stream,
     rec: Rec = .{},
     prof: Prof = .{},
     store: Store,
@@ -250,7 +250,7 @@ pub const Tile = struct {
     act: u64 = 0,
     proj: u64 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const Ops, s: cuda.Stream, p: *const Pack, up: *Uploader) !Tile {
+    pub fn init(gpa: std.mem.Allocator, d: *const gpu.Driver, k: *const Ops, s: gpu.Stream, p: *const Pack, up: *Uploader) !Tile {
         var t: Tile = .{ .gpa = gpa, .d = d, .k = k, .s = s, .store = .init(d, gpa) };
         errdefer t.store.deinit();
         if (k.prof) try t.prof.init(gpa, d);

@@ -2,7 +2,7 @@
 //! argument roles bound to device pointers, shared memory opted into once per kernel.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 const plan = @import("nvfp4_plan.zig");
 const kernels = @import("nvfp4_kernels");
 
@@ -21,22 +21,22 @@ pub const Bind = struct {
     up_ws: u64 = 0,
 };
 
-const Entry = struct { symbol: []const u8, f: cuda.Function, smem_set: u32 };
+const Entry = struct { symbol: []const u8, f: gpu.Function, smem_set: u32 };
 
 pub const Nvfp4 = struct {
     gpa: std.mem.Allocator,
-    mods: [4]cuda.Module,
+    mods: [4]gpu.Module,
     cache: std.ArrayList(Entry) = .empty,
     major: u32,
     minor: u32,
 
-    pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, major: u32, minor: u32) !Nvfp4 {
-        var mods: [4]cuda.Module = undefined;
+    pub fn load(gpa: std.mem.Allocator, d: *const gpu.Driver, major: u32, minor: u32) !Nvfp4 {
+        var mods: [4]gpu.Module = undefined;
         const images = [_][]const u8{ kernels.act, kernels.gemm_ck, kernels.gemm_ws, kernels.lane4 };
         var n: usize = 0;
         errdefer for (mods[0..n]) |*m| m.unload();
         for (images, 0..) |img, i| {
-            mods[i] = try cuda.Module.load(d, img);
+            mods[i] = try gpu.Module.load(d, img);
             n += 1;
         }
         return .{ .gpa = gpa, .mods = mods, .major = major, .minor = minor };
@@ -48,7 +48,7 @@ pub const Nvfp4 = struct {
     }
 
     /// A kernel by symbol, its dynamic shared memory opted into up to `smem`; a short list (a dozen kernels).
-    fn function(e: *Nvfp4, l: *const plan.Launch) !cuda.Function {
+    fn function(e: *Nvfp4, l: *const plan.Launch) !gpu.Function {
         for (e.cache.items) |*c| if (std.mem.eql(u8, c.symbol, l.symbol)) {
             if (l.needsSmemOptIn() and c.smem_set < l.smem) {
                 try c.f.allowDynamicShared(l.smem);
@@ -62,8 +62,8 @@ pub const Nvfp4 = struct {
         return f;
     }
 
-    pub fn run(e: *Nvfp4, l: *const plan.Launch, b: Bind, s: cuda.Stream) !void {
-        var args: cuda.launch.Args = .{};
+    pub fn run(e: *Nvfp4, l: *const plan.Launch, b: Bind, s: gpu.Stream) !void {
+        var args: gpu.launch.Args = .{};
         for (l.slice()) |a| switch (a) {
             .x => args.add(b.x),
             .xs => args.add(b.xs),
@@ -83,6 +83,6 @@ pub const Nvfp4 = struct {
         const f = try e.function(l);
         const g = l.grid;
         const bl = l.block;
-        try cuda.launch.launch(f, .{ .grid = .{ .x = g.x, .y = g.y, .z = g.z }, .block = .{ .x = bl.x, .y = bl.y, .z = bl.z }, .shared = l.smem }, s, &args);
+        try gpu.launch.launch(f, .{ .grid = .{ .x = g.x, .y = g.y, .z = g.z }, .block = .{ .x = bl.x, .y = bl.y, .z = bl.z }, .shared = l.smem }, s, &args);
     }
 };

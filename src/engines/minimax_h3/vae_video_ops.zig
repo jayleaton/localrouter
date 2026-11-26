@@ -3,7 +3,7 @@
 //! `stk_twin/h3/vae_video.py` (`_LAUNCH`): the same kernels in the same order with the same arguments, so Zig is bit-exact.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const gpu = @import("gpu");
 
 const Ptr = u64;
 const block: u32 = 256;
@@ -69,37 +69,37 @@ fn envInt(name: [*:0]const u8, default: u32) u32 {
 }
 
 pub const Ops = struct {
-    gemm_module: cuda.Module,
-    module: cuda.Module,
-    gemm_fns: [gemm_kernels.len]cuda.Function,
+    gemm_module: gpu.Module,
+    module: gpu.Module,
+    gemm_fns: [gemm_kernels.len]gpu.Function,
     /// `STK_VVAE_REF=1`: every GEMM on the reference kernel and the attention in one piece (the old path, for comparisons).
     ref_only: bool,
     /// `STK_VVAE_HEADS=n`: heads an attention group runs (default 2; 0 or >= 32: all at once). See Tile.attention.
     heads: u32,
     /// `STK_VVAE_PROF=1`: CUDA events around every op; the decode's GPU milliseconds by class go to stderr.
     prof: bool,
-    denorm_fn: cuda.Function,
-    gather_fn: cuda.Function,
-    suffix_fn: cuda.Function,
-    rope_table_fn: cuda.Function,
-    rms_fn: cuda.Function,
-    ln_fn: cuda.Function,
-    rope_fn: cuda.Function,
-    vt_fn: cuda.Function,
-    softmax_fn: cuda.Function,
-    nan_fn: cuda.Function,
-    swiglu_fn: cuda.Function,
-    unshuffle_fn: cuda.Function,
-    place_fn: cuda.Function,
-    finalize_fn: cuda.Function,
+    denorm_fn: gpu.Function,
+    gather_fn: gpu.Function,
+    suffix_fn: gpu.Function,
+    rope_table_fn: gpu.Function,
+    rms_fn: gpu.Function,
+    ln_fn: gpu.Function,
+    rope_fn: gpu.Function,
+    vt_fn: gpu.Function,
+    softmax_fn: gpu.Function,
+    nan_fn: gpu.Function,
+    swiglu_fn: gpu.Function,
+    unshuffle_fn: gpu.Function,
+    place_fn: gpu.Function,
+    finalize_fn: gpu.Function,
 
     /// `gemm_image` is `h3.kernels.gemm_f16`, `image` is `h3.kernels.vae_video` (separate fatbins, both -O3).
-    pub fn load(d: *const cuda.Driver, gemm_image: []const u8, image: []const u8) !Ops {
-        var g = try cuda.Module.load(d, gemm_image);
+    pub fn load(d: *const gpu.Driver, gemm_image: []const u8, image: []const u8) !Ops {
+        var g = try gpu.Module.load(d, gemm_image);
         errdefer g.unload();
-        var m = try cuda.Module.load(d, image);
+        var m = try gpu.Module.load(d, image);
         errdefer m.unload();
-        var fns: [gemm_kernels.len]cuda.Function = undefined;
+        var fns: [gemm_kernels.len]gpu.Function = undefined;
         for (gemm_kernels, &fns) |k, *f| {
             f.* = try g.function(k.name);
             if (k.smem > 48 * 1024) try f.allowDynamicShared(k.smem); // 92,160 bytes of the wide tile: opt in
@@ -135,8 +135,8 @@ pub const Ops = struct {
         o.gemm_module.unload();
     }
 
-    fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, blk: u32, args: *cuda.launch.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = blk } }, s, args);
+    fn go(f: gpu.Function, s: gpu.Stream, grid: gpu.launch.Dim3, blk: u32, args: *gpu.launch.Args) !void {
+        try gpu.launch.launch(f, .{ .grid = grid, .block = .{ .x = blk } }, s, args);
     }
 
     /// The kernel for an m x n x k GEMM (an index of `gemm_kernels`, the twin's `gemm_pick`): K <= 64 (scores, the embeddings:
@@ -149,8 +149,8 @@ pub const Ops = struct {
     /// Reference: grid (ceil(n / 128), ceil(m / 128), batch) x 256. The others: grid (ceil(m / BM), ceil(n / BN), batch), the m
     /// tile fastest (the blocks resident together read one weight tile once). A and B advance by `a_off` / `b_off` half
     /// elements first.
-    pub fn gemm(o: *const Ops, s: cuda.Stream, g: Gemm) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn gemm(o: *const Ops, s: gpu.Stream, g: Gemm) !void {
+        var a: gpu.launch.Args = .{};
         a.add(g.a + 2 * g.a_off);
         a.add(g.b + 2 * g.b_off);
         a.add(g.bias);
@@ -163,11 +163,11 @@ pub const Ops = struct {
         a.add(i64of(g.sr));
         const v: usize = if (o.ref_only) 0 else pick(g.m, g.n, g.k);
         const k = gemm_kernels[v];
-        const grid: cuda.launch.Dim3 = if (v == 0)
+        const grid: gpu.launch.Dim3 = if (v == 0)
             .{ .x = blocks2(g.n, k.bn), .y = blocks2(g.m, k.bm), .z = g.batch }
         else
             .{ .x = blocks2(g.m, k.bm), .y = blocks2(g.n, k.bn), .z = g.batch };
-        try cuda.launch.launch(o.gemm_fns[v], .{ .grid = grid, .block = .{ .x = k.threads }, .shared = k.smem }, s, &a);
+        try gpu.launch.launch(o.gemm_fns[v], .{ .grid = grid, .block = .{ .x = k.threads }, .shared = k.smem }, s, &a);
     }
 
     fn blocks2(n: u64, by: u64) u32 {
@@ -175,8 +175,8 @@ pub const Ops = struct {
     }
 
     /// y = half(half(z * std_c) + mean_c) over [c, plane], plane = n / c.
-    pub fn denorm(o: *const Ops, s: cuda.Stream, z: Ptr, stdv: Ptr, mean: Ptr, y: Ptr, c: u64, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn denorm(o: *const Ops, s: gpu.Stream, z: Ptr, stdv: Ptr, mean: Ptr, y: Ptr, c: u64, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ z, stdv, mean, y }) |p| a.add(p);
         a.add(i64of(n / c));
         a.add(i64of(n));
@@ -184,8 +184,8 @@ pub const Ops = struct {
     }
 
     /// z [c, tz, hz, wz] -> rows [tn * h * w, c] of the crop (t0, y0, x0), frames clamped to tz - 1.
-    pub fn gather(o: *const Ops, s: cuda.Stream, z: Ptr, rows: Ptr, c: u32, tz: u32, hz: u32, wz: u32, t0: u32, tn: u32, y0: u32, h: u32, x0: u32, w: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn gather(o: *const Ops, s: gpu.Stream, z: Ptr, rows: Ptr, c: u32, tz: u32, hz: u32, wz: u32, t0: u32, tn: u32, y0: u32, h: u32, x0: u32, w: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(z);
         a.add(rows);
         inline for (.{ c, tz, hz, wz, t0, tn, y0, h, x0, w }) |x| a.add(i32of(x));
@@ -193,8 +193,8 @@ pub const Ops = struct {
     }
 
     /// Rows np .. np + 4 of h: the 4 register tokens and a zero token.
-    pub fn suffix(o: *const Ops, s: cuda.Stream, h: Ptr, reg: Ptr, np: u64, d: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn suffix(o: *const Ops, s: gpu.Stream, h: Ptr, reg: Ptr, np: u64, d: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(h);
         a.add(reg);
         a.add(i64of(np));
@@ -203,8 +203,8 @@ pub const Ops = struct {
     }
 
     /// The rotation table [S, 24, 4] for a tn x h x w tile and `nsuf` suffix tokens.
-    pub fn ropeTable(o: *const Ops, s: cuda.Stream, inv_freq: Ptr, table: Ptr, tn: u32, h: u32, w: u32, nsuf: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn ropeTable(o: *const Ops, s: gpu.Stream, inv_freq: Ptr, table: Ptr, tn: u32, h: u32, w: u32, nsuf: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(inv_freq);
         a.add(table);
         inline for (.{ tn, h, w, nsuf }) |x| a.add(i32of(x));
@@ -212,16 +212,16 @@ pub const Ops = struct {
         try go(o.rope_table_fn, s, .{ .x = blocks(total * 24) }, block, &a);
     }
 
-    pub fn rmsNorm(o: *const Ops, s: cuda.Stream, x: Ptr, w: Ptr, y: Ptr, rows: u64, d: u64, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn rmsNorm(o: *const Ops, s: gpu.Stream, x: Ptr, w: Ptr, y: Ptr, rows: u64, d: u64, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, w, y }) |p| a.add(p);
         a.add(i64of(d));
         a.add(eps);
         try go(o.rms_fn, s, .{ .x = @intCast(rows) }, block, &a);
     }
 
-    pub fn layerNorm(o: *const Ops, s: cuda.Stream, x: Ptr, w: Ptr, b: Ptr, y: Ptr, rows: u64, d: u64, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn layerNorm(o: *const Ops, s: gpu.Stream, x: Ptr, w: Ptr, b: Ptr, y: Ptr, rows: u64, d: u64, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         inline for (.{ x, w, b, y }) |p| a.add(p);
         a.add(i64of(d));
         a.add(eps);
@@ -229,8 +229,8 @@ pub const Ops = struct {
     }
 
     /// In place on the qkv rows [S, heads * 192]; grid ceil(S * heads / 4) x 128.
-    pub fn rmsRope(o: *const Ops, s: cuda.Stream, qkv: Ptr, table: Ptr, rows: u64, heads: u32, row_stride: u64, eps: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn rmsRope(o: *const Ops, s: gpu.Stream, qkv: Ptr, table: Ptr, rows: u64, heads: u32, row_stride: u64, eps: f32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(qkv);
         a.add(table);
         a.add(i64of(rows));
@@ -242,8 +242,8 @@ pub const Ops = struct {
     }
 
     /// V transposed per head to [heads, 64, sp], zero padded.
-    pub fn vt(o: *const Ops, s: cuda.Stream, qkv: Ptr, out: Ptr, rows: u64, sp: u64, heads: u32, row_stride: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn vt(o: *const Ops, s: gpu.Stream, qkv: Ptr, out: Ptr, rows: u64, sp: u64, heads: u32, row_stride: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(qkv);
         a.add(out);
         a.add(i64of(rows));
@@ -255,8 +255,8 @@ pub const Ops = struct {
     }
 
     /// Row softmax in place, `nrows` rows of `sp` (the first `rows` columns real).
-    pub fn softmax(o: *const Ops, s: cuda.Stream, sc: Ptr, nrows: u64, rows: u64, sp: u64, scale: f32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn softmax(o: *const Ops, s: gpu.Stream, sc: Ptr, nrows: u64, rows: u64, sp: u64, scale: f32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(sc);
         a.add(i64of(rows));
         a.add(i64of(sp));
@@ -264,16 +264,16 @@ pub const Ops = struct {
         try go(o.softmax_fn, s, .{ .x = @intCast(nrows) }, block, &a);
     }
 
-    pub fn nanToNum(o: *const Ops, s: cuda.Stream, x: Ptr, n: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn nanToNum(o: *const Ops, s: gpu.Stream, x: Ptr, n: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(x);
         a.add(i64of(n));
         try go(o.nan_fn, s, .{ .x = blocks(n) }, block, &a);
     }
 
     /// [m, 2f] = [gate | up] -> [m, f]; grid (ceil(f / 256), m).
-    pub fn swiglu(o: *const Ops, s: cuda.Stream, gu: Ptr, out: Ptr, m: u64, f: u64) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn swiglu(o: *const Ops, s: gpu.Stream, gu: Ptr, out: Ptr, m: u64, f: u64) !void {
+        var a: gpu.launch.Args = .{};
         a.add(gu);
         a.add(out);
         a.add(i64of(f));
@@ -281,8 +281,8 @@ pub const Ops = struct {
     }
 
     /// proj_out rows [>= tn * h * w, 3072] -> tile [3, 4 tn, 16 h, 16 w].
-    pub fn unshuffle(o: *const Ops, s: cuda.Stream, rows: Ptr, out: Ptr, tn: u32, h: u32, w: u32) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn unshuffle(o: *const Ops, s: gpu.Stream, rows: Ptr, out: Ptr, tn: u32, h: u32, w: u32) !void {
+        var a: gpu.launch.Args = .{};
         a.add(rows);
         a.add(out);
         inline for (.{ tn, h, w }) |x| a.add(i32of(x));
@@ -312,8 +312,8 @@ pub const Ops = struct {
         ow: u32,
     };
 
-    pub fn place(o: *const Ops, s: cuda.Stream, p: Place) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn place(o: *const Ops, s: gpu.Stream, p: Place) !void {
+        var a: gpu.launch.Args = .{};
         a.add(p.b);
         inline for (.{ p.frames, p.th, p.tw }) |x| a.add(i32of(x));
         a.add(p.ytail);
@@ -342,8 +342,8 @@ pub const Ops = struct {
         pos: u32,
     };
 
-    pub fn finalize(o: *const Ops, s: cuda.Stream, f: Finalize) !void {
-        var a: cuda.launch.Args = .{};
+    pub fn finalize(o: *const Ops, s: gpu.Stream, f: Finalize) !void {
+        var a: gpu.launch.Args = .{};
         a.add(f.a);
         inline for (.{ f.fa, f.a0 }) |x| a.add(i32of(x));
         a.add(f.b);
