@@ -65,7 +65,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     defer w.deinit();
     try s.synchronize();
     const load_ms = t0.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    var dit = try h3.dit.Dit.init(gpa, &d, .{ .h3 = &hops, .kitchen = &kitchen, .te = &te, .ops = &ops, .nv = &nv, .major = @intCast(maj), .minor = @intCast(min) }, &w, s, ly.s, l);
+    var dit = try h3.dit.Dit.init(gpa, &d, .{ .h3 = &hops, .kitchen = &kitchen, .te = &te, .ops = &ops, .nv = &nv, .major = @intCast(maj), .minor = @intCast(min) }, &w, s, ly.s, l, ly.a);
     defer dit.deinit();
 
     // device inputs: the text states and the step's latents, as captured

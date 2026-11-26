@@ -84,10 +84,25 @@ pub const VisionEncoder = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, h3: *const launch.Ops, tk: *const te.Ops, s: cuda.Stream, p: *const qi.pack.Pack, up: *qi.upload.Uploader, max_patches: u32) !VisionEncoder {
         var v: VisionEncoder = .{ .gpa = gpa, .d = d, .k = k, .h3 = h3, .tk = tk, .s = s, .w = try tw.Weights.load(gpa, io, d, p, up), .max_patches = max_patches };
         errdefer v.deinit();
-        const n: u64 = max_patches;
-        inline for (.{ .{ "pixels", n * 1536 * 4 }, .{ "h", n * D * 4 }, .{ "x", n * D * 4 }, .{ "z", n * D * 4 }, .{ "qkv", n * D * 3 * 4 }, .{ "q", n * D * 4 }, .{ "kk", n * D * 4 }, .{ "v", n * D * 4 }, .{ "attn", n * D * 4 }, .{ "fc", n * 4304 * 4 }, .{ "gel", n * 4304 * 4 }, .{ "cs", n * 36 * 4 }, .{ "sn", n * 36 * 4 }, .{ "ids", n * 4 * 4 }, .{ "weights", n * 4 * 4 } }) |e| @field(v, e[0]) = try v.w.store.alloc(@max(e[1], 256));
-        for (&v.out) |*ptr| ptr.* = try v.w.store.alloc(@max(n / 4 * 5120 * 4, 256));
+        const sizes = scratch(max_patches);
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(v, name) = try v.w.store.alloc(@max(@field(sizes, name), 256));
+        for (&v.out) |*ptr| ptr.* = try v.w.store.alloc(@max(outBytes(max_patches), 256));
         return v;
+    }
+    /// The bytes of each buffer `init` allocates for `max_patches` (besides the four outputs, `outBytes` each).
+    pub const Scratch = struct { pixels: u64, h: u64, x: u64, z: u64, qkv: u64, q: u64, kk: u64, v: u64, attn: u64, fc: u64, gel: u64, cs: u64, sn: u64, ids: u64, weights: u64 };
+    pub fn scratch(max_patches: u32) Scratch {
+        const n: u64 = max_patches;
+        return .{ .pixels = n * 1536 * 4, .h = n * D * 4, .x = n * D * 4, .z = n * D * 4, .qkv = n * D * 3 * 4, .q = n * D * 4, .kk = n * D * 4, .v = n * D * 4, .attn = n * D * 4, .fc = n * 4304 * 4, .gel = n * 4304 * 4, .cs = n * 36 * 4, .sn = n * 36 * 4, .ids = n * 4 * 4, .weights = n * 4 * 4 };
+    }
+    fn outBytes(max_patches: u32) u64 {
+        return @as(u64, max_patches) / 4 * 5120 * 4;
+    }
+    /// The device bytes the encoder takes for `max_patches`: its weights (at most `tw.max_bytes`) and its buffers.
+    pub fn deviceBytes(max_patches: u32) u64 {
+        var total: u64 = tw.max_bytes;
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| total += @max(@field(scratch(max_patches), name), 256);
+        return total + 4 * @max(outBytes(max_patches), 256);
     }
     pub fn deinit(v: *VisionEncoder) void {
         v.w.deinit();

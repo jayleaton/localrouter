@@ -152,7 +152,7 @@ curl -s -o out.mp4 $BASE/videos/$id/content   # once completed
 curl -s -X DELETE $BASE/videos/$id  # cancel
 ```
 
-Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (true by default). Poll every few seconds.
+Extensions: `seed`, `steps`, `guidance`, `fps`, `audio` (omit it for the model's own: an audio track when the model makes one; `/v1/models` lists `audio` and, for a `cmd` worker, its `video` limits). Poll every few seconds.
 
 Any job, of any kind, can be looked up by its id: `GET $BASE/jobs/{id}` returns `{id, kind, status, progress, phase,
 urls, error}`. `urls` lists the `/v1/files/...` outputs once `status` is `completed`. The voice loop's
@@ -164,12 +164,16 @@ fields as form fields) or a base64 string, data URL or URL in a JSON body (PNG, 
 size, so send one of that shape to keep all of it. Say what the image shows in the `prompt` too; a prompt about
 something else pulls the clip away from it.
 
-MiniMax H3 (`minimax-h3`) takes sizes up to its `max_width` x `max_height` and clips up to `max_seconds`, in multiples
-of 32 pixels (1280x720 is not one: send 1280x704, or `"size_snap": true` to have 1280x720 rounded to the nearest
-multiple inside those limits, which is 1280x704). A request past them is refused with those limits named (a multiple
-of 32, not the generic multiple of 16), before anything loads. A `cmd` image tool that sets `size_multiple` (H3-Image
-does, to 32) is refused the same way, before its worker loads. Without `size` a clip gets the operator's `default_size`. On a GB10 (the Jarvis box: up to 1280x704
-and 8 s, 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
+MiniMax H3 (`minimax-h3`) takes a frame of any shape up to its `max_pixels` (landscape or portrait), at most 1344 a
+side (the model's canvas, 768x1344), in multiples of 32 pixels (1280x720 is not one: send 1280x704, or `"size_snap": true`
+to have each side rounded to the nearest multiple of 32 within the long side, which gives 1280x704), for clips up to
+`max_seconds`; a frame larger than `max_pixels` (up to 768x1344's area) is taken for a shorter clip that fits the same
+buffers (the decode's scratch grows a little with the frame: on Jarvis at most 486 MiB against 445 MiB). A request past
+them is refused with the limits named (a multiple of 32, not the generic multiple of 16; for a large frame, the longest
+clip it takes), before anything loads; `size_snap` does not shrink a frame to fit the area. A `cmd` image tool that sets
+`size_multiple` (H3-Image does, to 32) is refused the same way, before its worker loads. Without `size` a clip gets the
+operator's `default_size`. On a GB10 (the Jarvis box: 901120 pixels and 8 s, so 1280x704 or
+704x1248 for 8 s and 768x1344 for up to 6 s; 768x448 by default) the engine takes 83 s for 864x480 at 5.17 s, 244 s for 1280x704 at 5.17 s and 397 s for
 1280x704 at 8 s; through the API, a 2.3 s clip at 768x448 takes 33 to 39 s with the load.
 
 Every MP4 is labelled as machine-generated in `moov/udta/meta/ilst`, whichever model made it (the coded video and

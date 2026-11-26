@@ -1,0 +1,31 @@
+[project]
+name = "localrouter-video-wan"
+version = "0.1.0"
+description = "Wan 2.2 TI2V-5B (text or image to video) worker for LocalRouter's cmd adapter: CUDA on x86_64 Linux and WSL2"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.8.0",  # cu128 wheels: Blackwell (sm_120) consumer GPUs included
+    "torchvision==0.23.0",
+    "diffusers==0.43.0",  # WanPipeline, WanImageToVideoPipeline (expand_timesteps), layerwise casting
+    "transformers==5.23.0",  # UMT5 text encoder
+    "accelerate==1.16.0",  # model CPU offload
+    "huggingface-hub==2.4.0",
+    "safetensors==0.8.0",
+    "sentencepiece==0.2.3",
+    "ftfy==6.3.1",  # Wan's prompt cleaning
+    "numpy==2.5.4",
+    "pillow==13.0.0",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

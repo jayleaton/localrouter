@@ -55,6 +55,8 @@ Text to video is in `tools/twin/VIDEO-PORT.md` and `docs/dev/M7.md`; this file i
   node's lanczos (declared substitution: no `nearest-exact` pre-scale; better quality, the same canvas rule). Everything below is defined on
   the canvas-sized RGB image.
 - Official canvas: 768 short edge, capped at 768 x 1344 pixels, multiples of 32 (`adapt_canvas`, `nodes_minimax_h3.py:53-64`; the node does not call it).
+  The tool takes either orientation within its `max_pixels` and the 1344 long side (`max_side`), so 9:16 portrait (704x1248, 768x1344) is a
+  request's `size` (Jarvis: 704x1248 for 8 s, 768x1344 for up to 6 s).
 - LocalRouter's vision encoder accepts canvases with both sides divisible by 32 and area from 3,136 through 12,845,056 pixels; it rejects canvases outside that range and does not apply a secondary resize.
 
 **The video VAE encoder** (`comfy/ldm/minimax/vae.py`). It is **not** a ViT: the encoder is a 3-D causal CNN, `EncoderFCN3D` (`vae.py:176-225`),

@@ -198,8 +198,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
 
     const t0 = std.Io.Clock.awake.now(io);
     const p = try pl.Pipeline.create(gpa, io, .{ .pack = o.pack, .te = o.te, .vae_audio = o.vae_audio, .vae_video = o.vae_video }, .{
-        .width = o.width,
-        .height = o.height,
+        .pixels = o.width * o.height,
         .frames = o.frames,
         .tokens = tokens_limit,
     }, .{ .unload_te = o.unload_te });
