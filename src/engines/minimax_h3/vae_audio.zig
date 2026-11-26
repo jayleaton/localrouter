@@ -109,6 +109,26 @@ pub const Decoder = struct {
     sc: u64 = 0,
     wav: u64 = 0,
 
+    /// The widest activation for `max_a` latent frames: [2, 800 A, 8] (every stage from ups.1 on).
+    fn widest(max_a: u32) u64 {
+        return stereo * hop * @as(u64, max_a) * 8;
+    }
+
+    /// The bytes of each named buffer `init` allocates for `max_a` latent frames (besides the `r` ring, `widest` each).
+    pub const Scratch = struct { x: u64, u: u64, a: u64, b: u64, up2: u64, col: u64, ph: u64, sc: u64, wav: u64 };
+
+    pub fn scratch(max_a: u32) Scratch {
+        const n = widest(max_a);
+        return .{ .x = n * 4, .u = n * 4, .a = n * 4, .b = n * 4, .up2 = n * 8, .col = 140800 * @as(u64, max_a) * 4, .ph = n * 4, .sc = 256, .wav = stereo * hop * @as(u64, max_a) * 4 };
+    }
+
+    /// The device bytes `init` allocates besides the weights.
+    pub fn scratchBytes(max_a: u32) u64 {
+        var total: u64 = 0;
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| total += @field(scratch(max_a), name);
+        return total + @typeInfo(@FieldType(Decoder, "r")).array.len * widest(max_a) * 4;
+    }
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, k: *const Ops, g: *const launch.Ops, s: cuda.Stream, p: *const Pack, up: *Uploader, max_a: u32) !Decoder {
         var t: Decoder = .{ .gpa = gpa, .d = d, .k = k, .g = g, .s = s, .store = .init(d, gpa), .max_a = max_a };
         errdefer t.store.deinit();
@@ -131,14 +151,9 @@ pub const Decoder = struct {
         t.post_act = try t.act(up, p, "decoder.activation_post");
         t.conv_post = try t.conv(io, p, up, &host, "decoder.conv_post", 1, false);
 
-        const A: u64 = max_a;
-        const act_n = stereo * hop * A * 8; // the widest activation: [2, 800 A, 8] (every stage from ups.1 on)
-        inline for (.{
-            .{ "x", act_n * 4 },              .{ "u", act_n * 4 },        .{ "a", act_n * 4 },  .{ "b", act_n * 4 },
-            .{ "up2", act_n * 8 },            .{ "col", 140800 * A * 4 }, .{ "ph", act_n * 4 }, .{ "sc", 256 },
-            .{ "wav", stereo * hop * A * 4 },
-        }) |e| @field(t, e[0]) = try t.store.alloc(e[1]);
-        for (&t.r) |*r| r.* = try t.store.alloc(act_n * 4);
+        const sizes = scratch(max_a);
+        inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(t, name) = try t.store.alloc(@field(sizes, name));
+        for (&t.r) |*r| r.* = try t.store.alloc(widest(max_a) * 4);
         try t.store.done(up); // the weights have landed
         return t;
     }

@@ -30,6 +30,12 @@ pub const Encoder = struct {
         const w = try weights.load(gpa, io, path, &store, up);
         return .{ .gpa = gpa, .d = d, .k = k, .shared = shared, .s = s, .store = store, .w = w };
     }
+    /// Maximum activation is level zero: 256*256*128; im2col has nine taps per channel.
+    const act_bytes = 256 * 256 * 128 * 2;
+    /// The device bytes an encoder takes for one `H` x `W` frame: its weights and `encode`'s scratch.
+    pub fn deviceBytes(H: u32, W: u32) u64 {
+        return weights.max_bytes + act_bytes * 9 + @typeInfo(@FieldType(Run, "buf")).array.len * act_bytes + 48 * @as(u64, H / 16) * (W / 16) * 2 + 2 * @as(u64, decoder.tileCount(W)) * 48 * 16 * 16 * 2;
+    }
     pub fn deinit(v: *Encoder) void {
         v.store.deinit();
     }
@@ -52,8 +58,6 @@ pub const Encoder = struct {
         defer sx.deinit(v.gpa);
         var scratch = Store.init(v.d, v.gpa);
         defer scratch.deinit();
-        // Maximum activation is level zero: 256*256*128; im2col has nine taps per channel.
-        const act_bytes = 256 * 256 * 128 * 2;
         var run: Run = .{ .v = v, .rec = .{ .probe = v.probe }, .buf = undefined, .col = try scratch.alloc(act_bytes * 9), .rgb = rgb, .H = H, .W = W };
         for (&run.buf) |*p| p.* = try scratch.alloc(act_bytes);
         const canvas = try scratch.alloc(48 * @as(u64, H / 16) * (W / 16) * 2);

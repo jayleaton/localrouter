@@ -1,0 +1,55 @@
+{
+ "host": "127.0.0.1",
+ "port": 8190,
+ "data_dir": "/home/localrouter/localrouter-desktop/data",
+ "reserve_bytes": 2147483648,
+ "pairing": {
+  "required": true
+ },
+ "defaults": {
+  "text_to_video": "wan2.2-ti2v-5b",
+  "image_to_video": "wan2.2-ti2v-5b"
+ },
+ "tools": [
+  {
+   "id": "wan2.2-ti2v-5b",
+   "kind": "video",
+   "name": "Wan 2.2 TI2V-5B (text or image to video, 24 fps, no audio; Diffusers, CUDA)",
+   "capabilities": [
+    "text_to_video",
+    "image_to_video"
+   ],
+   "cmd": [
+    "/home/localrouter/wan-venv/bin/python",
+    "-I",
+    "/home/localrouter/src/localrouter/tools/video/wan/worker.py"
+   ],
+   "weights": "/home/localrouter/models/Wan2.2-TI2V-5B-Diffusers",
+   "resident_bytes": 23622320128,
+   "working_bytes": 5368709120,
+   "idle_ttl_s": 900,
+   "load_timeout_s": 600,
+   "generate_timeout_s": 3600,
+   "license": {
+    "name": "Apache-2.0",
+    "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    "commercial": true
+   },
+   "options": {
+    "max_pixels": 901120,
+    "max_side": 1280,
+    "size_multiple": 32,
+    "default_size": "1280x704",
+    "max_seconds": 5,
+    "fps": [
+     24
+    ],
+    "audio": false,
+    "steps": 50,
+    "guidance": 5.0,
+    "transformer_storage": "fp8",
+    "offload": "model"
+   }
+  }
+ ]
+}

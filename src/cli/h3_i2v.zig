@@ -95,7 +95,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !u8 {
     var weights = try h3.dit.Weights.load(gpa, io, &d, &pack, &nv, &up);
     defer weights.deinit();
     const ly = h3.layout.Layout.init(@intCast(tokens.ids.len), sh.latent_t, sh.lh, sh.lw, sh.audio_t).withFirstFrame();
-    var dit = try h3.dit.Dit.init(gpa, &d, .{ .h3 = &hops, .kitchen = &kitchen, .te = &bf, .ops = &ops, .nv = &nv, .major = @intCast(maj), .minor = @intCast(min) }, &weights, s, ly.s, @intCast(tokens.ids.len));
+    var dit = try h3.dit.Dit.init(gpa, &d, .{ .h3 = &hops, .kitchen = &kitchen, .te = &bf, .ops = &ops, .nv = &nv, .major = @intCast(maj), .minor = @intCast(min) }, &weights, s, ly.s, @intCast(tokens.ids.len), ly.a);
     defer dit.deinit();
     var pixels = try cuda.DeviceBuffer.fromHost(&d, std.mem.sliceAsBytes(rgb));
     defer pixels.free();
