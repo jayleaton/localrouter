@@ -1,0 +1,9 @@
+{"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "f5d175de2cf7f720d45d6064019a81fcf056e986",
+ "files": {
+  "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf": [2786568256, "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"],
+  "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf": [10946618, "acc44040f74d0e55fb89c3967056cce5dbda1bcc52e909c3ba6fc72b5e9c0858"],
+  "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf": [49720539552, "45792ae869072d8229384c51c7c73dd959e191505252b41dd71852d9746f5ce4"],
+  "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf": [32803030176, "8c76e79d444b16a663d9c8db54e585ed3b1da13eebd2619c37b0c355da803c82"],
+  "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf": [28800138432, "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"],
+  "mmproj-BF16.gguf": [907542944, "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"]
+ }}
