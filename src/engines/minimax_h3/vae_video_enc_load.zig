@@ -16,6 +16,27 @@ pub const Weights = struct {
     mean: u64,
     stdv: u64,
 };
+/// The weights' device bytes at most, as `load` lays them out: fp16 kernels with K padded to eight, fp32 biases and norms.
+pub const max_bytes: u64 = blk: {
+    const conv = struct {
+        fn of(ci: u64, co: u64, k: u64) u64 {
+            return co * ((ci * k * k + 7) / 8 * 8) * 2 + co * 4;
+        }
+    }.of;
+    const mult = [_]u64{ 1, 2, 2, 4, 4, 8 };
+    var total: u64 = conv(3, 128, 3) + 48 * 4;
+    var ci: u64 = 128;
+    for (mult, 0..) |m, lev| {
+        const co = 128 * m;
+        for (0..2) |_| {
+            total += 2 * ci * 4 + 2 * co * 4 + conv(ci, co, 3) + conv(co, co, 3) + (if (ci != co) conv(ci, co, 1) else 0);
+            ci = co;
+        }
+        if (lev < 4) total += conv(co, co, 3);
+    }
+    break :blk total + 2 * ci * 4 + conv(ci, 48, 3) + conv(48, 48, 1);
+};
+
 const Loader = struct {
     gpa: std.mem.Allocator,
     io: std.Io,

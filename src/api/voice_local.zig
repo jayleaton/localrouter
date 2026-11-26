@@ -527,7 +527,7 @@ fn startJob(ptr: *anyopaque, a: std.mem.Allocator, spec: backend.JobSpec, why: *
             for (refs, files) |*d, f| d.* = f.name;
             r = .{ .image = .{ .prompt = spec.prompt, .width = wh[0], .height = wh[1], .seed = seed, .references = refs } };
         },
-        .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = if (spec.seconds > 0) spec.seconds else 5, .seed = seed, .first_frame = if (files.len > 0) files[0].name else null } },
+        .video => r = .{ .video = .{ .prompt = spec.prompt, .seconds = spec.seconds, .seed = seed, .first_frame = if (files.len > 0) files[0].name else null } },
         .asset3d => {
             if (files.len == 0) return failed(why, "a 3D model is made from a picture: there is none");
             var msg: []const u8 = "";

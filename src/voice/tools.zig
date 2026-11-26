@@ -164,7 +164,7 @@ fn answer(s: *Session, a: std.mem.Allocator, c: Call, output: []const u8) void {
 /// with `why` set when they are not usable. edit_image edits `image` (a URL) or else the last picture; generate_video
 /// with from_last_image starts from the last picture.
 fn jobSpec(a: std.mem.Allocator, name: []const u8, arguments: []const u8, last: []const u8, why: *backend.Why) ?backend.JobSpec {
-    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: u32 = 0, image: []const u8 = "", from_last_image: bool = false, input_mode: []const u8 = "" };
+    const Args = struct { prompt: []const u8 = "", size: []const u8 = "", seconds: ?u32 = null, image: []const u8 = "", from_last_image: bool = false, input_mode: []const u8 = "" };
     const args = std.json.parseFromSliceLeaky(Args, a, arguments, .{ .ignore_unknown_fields = true }) catch {
         why.set("the tool call's arguments are not valid JSON: {s}", .{arguments[0..@min(arguments.len, 200)]});
         return null;
@@ -181,8 +181,12 @@ fn jobSpec(a: std.mem.Allocator, name: []const u8, arguments: []const u8, last: 
         why.set("the tool call has no prompt", .{});
         return null;
     }
+    if (args.seconds == 0) {
+        why.set("seconds must be at least 1; leave it out for the model's own", .{});
+        return null;
+    }
     const edit = std.mem.eql(u8, name, "edit_image");
-    var spec: backend.JobSpec = .{ .kind = kind, .prompt = args.prompt, .size = args.size, .seconds = args.seconds };
+    var spec: backend.JobSpec = .{ .kind = kind, .prompt = args.prompt, .size = args.size, .seconds = args.seconds orelse 0 };
     if (edit and args.image.len > 0) {
         spec.input_url = args.image;
     } else if (edit or (spec.kind == .video and args.from_last_image)) {
@@ -216,6 +220,8 @@ test "a tool call's arguments: a prompt is needed, JSON only; an edit takes the 
     try std.testing.expectEqual(backend.JobKind.video, v.kind);
     try std.testing.expectEqualStrings("/jobs/img_1/0.png", v.input_file);
     try std.testing.expectEqualStrings("", jobSpec(a, "generate_video", "{\"prompt\": \"waves\"}", "/jobs/img_1/0.png", &why).?.input_file);
+    try std.testing.expect(jobSpec(a, "generate_video", "{\"prompt\": \"waves\", \"seconds\": 0}", "", &why) == null);
+    try std.testing.expectEqualStrings("seconds must be at least 1; leave it out for the model's own", why.message);
     // generate_3d: no prompt; the last picture, or the URL named, or a refusal saying there is none
     const m = jobSpec(a, "generate_3d", "{\"input_mode\": \"real\"}", "/jobs/img_1/0.png", &why).?;
     try std.testing.expectEqual(backend.JobKind.asset3d, m.kind);
