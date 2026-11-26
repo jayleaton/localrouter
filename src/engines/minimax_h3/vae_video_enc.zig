@@ -51,6 +51,17 @@ pub const Encoder = struct {
     /// Device addresses: RGB contiguous fp32 [H,W,3] in [0,1], output fp32 [24,1,H/16,W/16].
     /// All work uses s; scratch release synchronizes that stream before returning.
     pub fn encode(v: *Encoder, rgb: u64, H: u32, W: u32, out: u64) !void {
+        return v.encodeWith(rgb, H, W, out, false);
+    }
+
+    /// As `encode`, but `out` gets the raw blended moments fp16 [48, H/16, W/16] (24 means, then 24 log-variances)
+    /// instead of the normalized mean: H3-Image samples the posterior from them on the host (`edit.posterior`).
+    pub fn encodeMoments(v: *Encoder, rgb: u64, H: u32, W: u32, out: u64) !void {
+        return v.encodeWith(rgb, H, W, out, true);
+    }
+
+    fn encodeWith(v: *Encoder, rgb: u64, H: u32, W: u32, out: u64, moments_only: bool) !void {
+        if (!moments_only and (v.w.mean == 0 or v.w.stdv == 0)) return error.NoLatentStatistics;
         if (H < 32 or W < 32 or H % 16 != 0 or W % 16 != 0) return error.BadImageCanvas;
         var sy = try decoder.splitTiles(v.gpa, H);
         defer sy.deinit(v.gpa);
@@ -120,6 +131,11 @@ pub const Encoder = struct {
         run.rec.setPrefix("venc", .{});
         run.rec.on = v.selected(-1, -1);
         const P = (H / 16) * (W / 16);
+        if (moments_only) {
+            try v.d.check(v.d.api.cuMemcpyDtoDAsync_v2(out, canvas, 48 * @as(u64, P) * 2, v.s.handle), "cuMemcpyDtoDAsync");
+            try v.s.synchronize();
+            return;
+        }
         try run.rec.pre("latent", &.{ tensor("moments", canvas, 48 * @as(u64, P) * 2), tensor("mean", v.w.mean, 48), tensor("std", v.w.stdv, 48) });
         try v.k.latent(v.s, canvas, v.w.mean, v.w.stdv, out, P);
         try run.rec.post("latent", &.{tensor("y", out, 24 * @as(u64, P) * 4)});

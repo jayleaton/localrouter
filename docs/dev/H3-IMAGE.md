@@ -135,7 +135,7 @@ latent frame, no audio, no NestedTensor.
   composite (`comfy_extras/nodes_mask.py:12-46, 100-104`) is `out = m * decoded + (1 - m) * dest`, in fp32, where `m` is the mask
   bilinear-resized (`F.interpolate`, align_corners False) to the decoded size, and `dest` is `ImageScale(lanczos, crop center)` of the scaled
   input to its own size (node 15). A same-size lanczos still goes through `np.clip(255 x).astype(uint8)` (truncation) and back, so `dest` is the
-  input quantized to 8 bits. The PNG write rounds the result.
+  input quantized to 8 bits. SaveImage truncates the result (`np.clip(255 x, 0, 255).astype(uint8)`, `nodes.py`), it does not round.
 - Several references are supported (`image_2` .. `image_100`; #157 caps at 5); `<Picture n>` in the prompt names them. Whole-scene edits run the
   same graph without the composite (`-edit-unmasked.json`), at #157's 30 steps on the PDD table (4).
 
@@ -156,14 +156,13 @@ latent frame, no audio, no NestedTensor.
 | --- | --- | --- |
 | 1.5 | `dit.py`: the H3 twin's DiT with `audio=False`, `[text | refs | target]`, the PDD bank. `vae_image.py`: the 24-block decoder and its 256-px tiling. `sampler.py`: the PDD table, `simple` schedule, euler, head pick. `build.py`: the bf16 pack (linears as `weights.zig` `.bf16`: `{key}.weight`). Captures and the CPU structure gate at 256², 2 blocks against ComfyUI's module code | none |
 | 1.6 | `generate.py --image` (text to image) | `dit.zig` image variant (no audio segment, one or two timestep rows, PDD head mix in fp32), `vae_image.zig` (the tile ViT parameterized by depth 24, width 1024, 16 heads, 2-D RoPE over half the head, 768 out), `sampler.zig` PDD schedule; the `minimax_h3_image` entry, `text_to_image`, licence "MiniMax H3 Image Community License" (hosted services to third parties need MiniMax's authorization) |
-| 1.7 | `--edit`: references through `te_vision` and the VAE encoder (posterior, seed 42), cond noise, the composite | `image_edit`: `te_vision.zig` and `vae_video_enc.zig` reused, reference blocks in `layout.zig`, the posterior draw, the masked composite and the 8-bit lanczos in `image.zig` |
+| 1.7 | `edit.py`: the host path in numpy (LoadImage, `area`, the 8-bit lanczos, `_resize_to`, the center crop, the mask's bilinear, the composite, SaveImage's uint8, the posterior, the MRoPE positions); `test_edit.py` against ComfyUI's functions and PIL on CPU; `edit_image.json` the engine's fixture | `image.zig` (the host path, bit for bit against the fixture), `edit.zig` (the sizes and the posterior), `layout.zig` `ImageLayout` (reference blocks), `te32.zig` `forwardImages` (several pictures, ComfyUI's MRoPE positions), `tokenizer.zig` `editIds`, `dit.zig` `imageRefs`, `vae_video_enc.zig` `encodeMoments`, `vae_image.zig` `decodeTo` (fp32 pixels), `pipeline_image.zig` `edit`; `image_edit` in `minimax_h3_image_tool.zig` |
 
 Reused unchanged: the 32B text encoder (`te32.zig`, layer 50), the vision tower and MRoPE (`te_vision.zig`), the refiner, `DiTBlock`, the
 split-half RoPE, the VAE encoder. New: the PDD sampler and head mix, the image decoder's parameterization (the video decoder is 36 blocks of
 2048, 32 heads, 3-D RoPE over 0.75 of the head), the posterior sample, reference blocks (I2V has cond rows), and the composite.
 
-Declared substitutions, as in M7 and H3-I2V: LocalRouter's portable generator for the three draws; no `ImageScaleToTotalPixels` (`area`)
-pre-scale, the request's size instead; the decoder's tiles decoded one at a time, in ComfyUI's tile plan and blend (section 2; no batching
+Declared substitutions, as in M7 and H3-I2V: LocalRouter's portable generator for the three draws; the decoder's tiles decoded one at a time, in ComfyUI's tile plan and blend (section 2; no batching
 by free memory); the bf16 attention of ROCM.md in place of the `comfy_kitchen_int8` that `comfy_attention.config` selects.
 
 Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a step (G-baseline), decoded image LPIPS / DINO against
@@ -198,6 +197,31 @@ and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` po
   its records): the per-head RMS + RoPE over 32 of 64 dims (`vv_rms_rope` rotates 48), with its 2-axis table computed on the host
   like the DiT's, and the 768-column unshuffle (`vv_unshuffle` is fixed at 3072). PR 1.6's `vae_image` kernels replace them.
 
+**Decided in PR 1.7 (edits).** The host path is ComfyUI's graph, bit for bit against its code on CPU (`stk_twin.h3i.test_edit`: torch
+2.15 CPU, Pillow 13; the engine's `image.zig` against the twin's `edit_image.json`):
+- The graph is #157's: node 11 `ImageScaleToTotalPixels(area)` of image 1 (1.0 MP masked, 2.0 MP whole scene, steps 32); the target is the
+  request's size, else node 11's. Images 2 .. 5 are used as loaded. Each image's Qwen copy (`_size_short_edge` 1024, 1024) and VAE copy
+  (1024, 2048) are `_resize_to`: the identity at the same size, else the 8-bit lanczos.
+- `area` (adaptive average pooling, channels last) sums each window in kernel order in fp32, then divides by `kh` and by `kw`.
+- The mask's bilinear resize is ATen's generic CPU kernel (taken for outputs with H + W > 128; smaller targets are refused): weights in
+  fp32 from `scale (i + 0.5) - 0.5` (two roundings, clamped at 0), `l1 = src - floor`, `l0 = 1 - l1`; each lerp `fma(t0, l0, t1 l1)`, along W
+  then along H; the same size is the identity.
+- The posterior: `addcmul` on CPU is fused, so `z = fma(exp(0.5 clamp(logvar, -30, 20)), noise, mean)`, the exp within 1 ulp of torch's
+  (the portable `smath.exp`), then `(z - m) / s` with the fp16 `latents_mean` / `latents_std` of `vae_image.zig` (the image VAE file has
+  none). The encoder (`encodeMoments`) gives the fp16 moments; the posterior and the normalization run on the host.
+- The background is image 1's node-11 copy through `ImageScale(lanczos, crop center)` at the target: the input quantized to 8 bits at the
+  same size. The composite is `m * decoded + (1 - m) * dest` with each product rounded; SaveImage truncates.
+- Tokens: per image `"Picture k: "` (text, tag 1), `<|vision_start|>`, the rows, `<|vision_end|>` (tag 0), then the prompt; MRoPE positions
+  are ComfyUI's `qwen2vl_mrope_position_ids` (after a picture the text resumes at its start plus `max(1, gh, gw) / 2`).
+- LocalRouter's limits (`pipeline_image.Limits`, *estimates* until a gfx1151 run): 5 pictures (#157's cap); `edit_pixels` 2176 x 1024 for
+  the target and each VAE copy (every 2-MP node-11 size fits; a VAE copy past it, such as a reference longer than about 2:1, is refused);
+  `vision_rows` 5 x 1024 (five square pictures; four 4:3 ones). At five pictures the DiT holds about 20 k rows and the encoder 6.7 k
+  tokens. Those buffers are not resident: an edit allocates its own DiT and encoder scratch and sampler buffers for its sequence and frees
+  them before it returns, so they are booked as the request's working bytes, scaled by the pictures it sends (ROCM.md section 4, the
+  split `reference_working_bytes` makes), and the resident set is text to image's with edits on or off. The vision tower and the encoder
+  load per request, as I2V's do. A mask must be image 1's size and have a transparent pixel (ComfyUI would return the background unchanged).
+- Steps: 6 masked, 30 whole scene (#157's workflows), unless the request sets them.
+
 ## 3. Open questions
 
 - **Which attention ComfyUI ran on gfx1151.** The selector names `comfy_kitchen_int8` (section 1). On gfx1151 kitchen has no ROCm backend,
@@ -206,10 +230,9 @@ and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` po
   either way.
 - The adaLN linear's compute dtype (stored fp16, model bf16): read `comfy.ops` cast rules for `adaln_dtype` / `**curve` (`model.py:546-550`)
   before the twin fixes it.
-- `ImageScale(lanczos)` to the same size: confirm on a real run that node 15's 8-bit round trip is applied (`common_upscale` with
-  `crop="center"` at equal size reaches `lanczos`, `utils.py:1140-1164`). If so, LocalRouter's composite background is the input
-  truncated to 8 bits, i.e. the PNG's own values.
+- `ImageScale(lanczos)` to the same size: ComfyUI's code applies node 15's 8-bit round trip (`test_edit` runs `ImageScale.upscale` at
+  equal size on CPU), so the background is the input truncated to 8 bits; a real run should still confirm it.
+- The image VAE's encoder weights are read under the video encoder's names (`encoder.*`, `quant_conv`, as the header lists them); no
+  weights were loaded, so the shapes are checked at the first load (G4).
 - Size policy for LocalRouter: the node defaults to 2048 x 2048 ("tuned for 2048x2048 pixels of area"), while #157 ran 1024 x 1024 for
   speed. Pick the tool's default and `max_pixels` against the measured time and GTT (PR 1.8).
-- Text length with references: about 1,024 vision tokens per 1024² reference, plus the prompt, so `max_l` and the TE's limit must cover
-  5 references (#157's cap) or the engine must refuse past a stated count.

@@ -346,6 +346,7 @@ pub const Ops = struct {
         sm: [6]f32,
         out_u8: Ptr,
         pos: u32,
+        out_f32: Ptr = 0, // the fp32 pixels as well (H3-Image's masked composite); 0: none
     };
 
     pub fn finalize(o: *const Ops, s: gpu.Stream, f: Finalize) !void {
@@ -356,7 +357,7 @@ pub const Ops = struct {
         inline for (.{ f.fb, f.b0, f.ext, f.copy, f.h, f.w }) |x| a.add(i32of(x));
         for (f.sm) |v| a.add(v);
         a.add(f.out_u8);
-        a.add(@as(u64, 0)); // no fp32 output
+        a.add(f.out_f32);
         a.add(i32of(f.pos));
         try go(o.finalize_fn, s, .{ .x = blocks(@as(u64, f.copy) * f.h * f.w * 3) }, block, &a);
     }

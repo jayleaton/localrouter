@@ -172,8 +172,8 @@ pub const Layout = struct {
 /// H3-Image's timestep and modulation rows for [text | target] (`MiniMaxH3ImageModel._forward`, ComfyUI e9afbccc): the
 /// text and the target are both at `t` (float64, 1 - sigma), so `unique_t` is that one value, which the time embedding
 /// takes as the fp32 tensor `torch.tensor(unique_t, float32)` holds it (`unique[0]`); each token's row is 0 * 3 + tag:
-/// text 1 (or the encoder's tags), target 0. Reference images (`max(t, 0.999)`) are PR 1.7's. A layout with audio or a
-/// condition segment is not an image one.
+/// text 1 (or the encoder's tags), target 0. With reference images (`max(t, 0.999)`) it is `ImageLayout.modRows`, which
+/// gives these rows when there are none. A layout with audio or a condition segment is not an image one.
 pub fn imageModRows(x: Layout, t: f64, tags: []const u8, unique: *[1]f32, idx: []i32) !void {
     if (x.a != 0 or x.cond != 0 or x.t != 1) return error.NotAnImageLayout;
     std.debug.assert(idx.len == x.s);
@@ -184,6 +184,163 @@ pub fn imageModRows(x: Layout, t: f64, tags: []const u8, unique: *[1]f32, idx: [
         for (tags, idx[0..x.l]) |tag, *v| v.* = tag;
     }
     @memset(idx[x.l..x.s], 0);
+}
+
+/// The reference pictures an image layout holds (H3-Image edits: #157's cap of 5).
+pub const max_refs = 5;
+
+/// H3-Image's PackedLayout with reference images (`h3i/dit.py` ImageLayout; ComfyUI e9afbccc model.py): [text L |
+/// reference 0 .. n-1 | target], fp64 positions: text at (i, 0, 0), reference j at time L + j on its own area-normalized
+/// grid, the target at time L + n on its own. Modulation: text and target at t, references at max(t, 0.999) with tag 0.
+pub const ImageLayout = struct {
+    l: u32,
+    h: u32,
+    w: u32,
+    refs: [max_refs][2]u32 = undefined, // each reference's latent h, w (even)
+    n_refs: u32 = 0,
+    s: u32,
+
+    pub fn init(l: u32, h: u32, w: u32, refs: []const [2]u32) !ImageLayout {
+        if (refs.len > max_refs) return error.TooManyReferences;
+        if (h == 0 or w == 0 or h % 2 != 0 or w % 2 != 0) return error.BadImageShape;
+        var x: ImageLayout = .{ .l = l, .h = h, .w = w, .n_refs = @intCast(refs.len), .s = l + (h / 2) * (w / 2) };
+        for (refs, 0..) |r, j| {
+            if (r[0] == 0 or r[1] == 0 or r[0] % 2 != 0 or r[1] % 2 != 0) return error.BadReferenceShape;
+            x.refs[j] = r;
+            x.s += (r[0] / 2) * (r[1] / 2);
+        }
+        return x;
+    }
+
+    /// The rows of reference j, [start, stop).
+    pub fn refRows(x: ImageLayout, j: u32) [2]u32 {
+        var r = x.l;
+        for (x.refs[0..j]) |rf| r += (rf[0] / 2) * (rf[1] / 2);
+        return .{ r, r + (x.refs[j][0] / 2) * (x.refs[j][1] / 2) };
+    }
+
+    /// All the references' rows, [L, start of the target).
+    pub fn refSpan(x: ImageLayout) [2]u32 {
+        return .{ x.l, x.s - (x.h / 2) * (x.w / 2) };
+    }
+
+    pub fn targetRows(x: ImageLayout) [2]u32 {
+        return .{ x.s - (x.h / 2) * (x.w / 2), x.s };
+    }
+
+    /// A key that tells layouts apart (the RoPE table and the row map are cached by it).
+    pub fn key(x: ImageLayout) [3 + 2 * max_refs]u32 {
+        var k: [3 + 2 * max_refs]u32 = @splat(0);
+        k[0] = x.l;
+        k[1] = x.h;
+        k[2] = x.w;
+        for (x.refs[0..x.n_refs], 0..) |r, j| {
+            k[3 + 2 * j] = r[0];
+            k[4 + 2 * j] = r[1];
+        }
+        return k;
+    }
+
+    fn grid(out: [][3]f64, time: f64, h: u32, w: u32) void {
+        const ar = @sqrt(@as(f64, @floatFromInt(h * w)));
+        var r: usize = 0;
+        for (0..h / 2) |hh| for (0..w / 2) |ww| {
+            out[r] = .{ time, Layout.axis(h, ar, @intCast(hh)), Layout.axis(w, ar, @intCast(ww)) };
+            r += 1;
+        };
+    }
+
+    pub fn positions(x: ImageLayout, out: [][3]f64) void {
+        std.debug.assert(out.len == x.s);
+        for (0..x.l) |i| out[i] = .{ @floatFromInt(i), 0, 0 };
+        for (x.refs[0..x.n_refs], 0..) |r, j| {
+            const rr = x.refRows(@intCast(j));
+            grid(out[rr[0]..rr[1]], @floatFromInt(x.l + j), r[0], r[1]);
+        }
+        const t = x.targetRows();
+        grid(out[t[0]..t[1]], @floatFromInt(x.l + x.n_refs), x.h, x.w);
+    }
+
+    /// The unique timesteps ascending (t, and max(t, 0.999) with references; float64 as ComfyUI sorts them, then fp32
+    /// as the time embedding's tensor holds them), each token's row t_row * 3 + tag (text 1 or the encoder's tags,
+    /// references and target 0); returns how many unique values and the target's row (the final layer's).
+    pub fn modRows(x: ImageLayout, t: f64, tags: []const u8, unique: *[2]f32, idx: []i32) !struct { m: u32, row_t: u32 } {
+        std.debug.assert(idx.len == x.s);
+        const t_ref = @max(t, 0.999);
+        var u: [2]f64 = .{ t, t_ref };
+        var m: u32 = 1;
+        if (x.n_refs > 0 and t_ref != t) {
+            m = 2;
+            if (u[1] < u[0]) std.mem.swap(f64, &u[0], &u[1]);
+        }
+        for (0..m) |i| unique[i] = @floatCast(u[i]);
+        const row_t: u32 = if (m == 2 and u[1] == t) 1 else 0;
+        const row_r: u32 = if (m == 2 and u[1] == t_ref) 1 else 0;
+        if (tags.len != 0 and tags.len != x.l) return error.BadTextTags;
+        for (idx[0..x.l], 0..) |*v, i| v.* = @intCast(row_t * 3 + (if (tags.len != 0) tags[i] else 1));
+        const rs = x.refSpan();
+        @memset(idx[rs[0]..rs[1]], @intCast(row_r * 3));
+        @memset(idx[rs[1]..x.s], @intCast(row_t * 3));
+        return .{ .m = m, .row_t = row_t };
+    }
+};
+
+/// The RoPE rotation table of `pos` (as `Layout.ropeTable`) into `out` [pos.len, 48, 2, 2] bf16 bits.
+pub fn ropeRows(pos: []const [3]f64, inv: *const [16]f32, out: []u16) void {
+    std.debug.assert(out.len == pos.len * 48 * 4);
+    for (pos, 0..) |p, r| {
+        for (0..3) |ax| for (0..16) |j| {
+            const ang: f32 = @as(f32, @floatCast(p[ax])) * inv[j];
+            const sc = smath.sincos(@as(f64, ang));
+            const c: f32 = @floatCast(sc.cos);
+            const s: f32 = @floatCast(sc.sin);
+            const o = (r * 48 + ax * 16 + j) * 4;
+            out[o] = bf16Bits(c);
+            out[o + 1] = bf16Bits(-s);
+            out[o + 2] = bf16Bits(s);
+            out[o + 3] = bf16Bits(c);
+        };
+    }
+}
+
+test "an image layout with references: [text | refs | target], times L + j and L + n, refs at max(t, 0.999)" {
+    const x = try ImageLayout.init(3, 4, 6, &.{ .{ 2, 2 }, .{ 4, 4 } });
+    try std.testing.expectEqual(@as(u32, 3 + 1 + 4 + 6), x.s);
+    try std.testing.expectEqual([2]u32{ 4, 8 }, x.refRows(1));
+    try std.testing.expectEqual([2]u32{ 8, 14 }, x.targetRows());
+    var pos: [14][3]f64 = undefined;
+    x.positions(&pos);
+    try std.testing.expectEqual(@as(f64, 3), pos[3][0]);
+    for (pos[4..8]) |p| try std.testing.expectEqual(@as(f64, 4), p[0]);
+    for (pos[8..]) |p| try std.testing.expectEqual(@as(f64, 5), p[0]);
+    // the target's grid is the no-reference layout's
+    const plain = Layout.init(3, 1, 4, 6, 0);
+    var pp: [9][3]f64 = undefined;
+    plain.positions(&pp);
+    for (pos[8..], pp[3..]) |a, b| {
+        try std.testing.expectEqual(a[1], b[1]);
+        try std.testing.expectEqual(a[2], b[2]);
+    }
+    var idx: [14]i32 = undefined;
+    var unique: [2]f32 = undefined;
+    const r = try x.modRows(0.25, &.{ 1, 0, 1 }, &unique, &idx);
+    try std.testing.expectEqual(@as(u32, 2), r.m);
+    try std.testing.expectEqual(@as(u32, 0), r.row_t);
+    try std.testing.expectEqual([2]f32{ 0.25, 0.999 }, unique);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 0, 1, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0 }, &idx);
+    const late = try x.modRows(1.0, &.{}, &unique, &idx); // t >= 0.999: one value
+    try std.testing.expectEqual(@as(u32, 1), late.m);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 1, 1, 0, 0 }, idx[0..5]);
+    // no references: the 1.6 rows
+    const none = try ImageLayout.init(3, 4, 6, &.{});
+    var idx2: [9]i32 = undefined;
+    var old: [9]i32 = undefined;
+    var one: [1]f32 = undefined;
+    _ = try none.modRows(0.25, &.{ 1, 0, 1 }, &unique, &idx2);
+    try imageModRows(plain, 0.25, &.{ 1, 0, 1 }, &one, &old);
+    try std.testing.expectEqualSlices(i32, &old, &idx2);
+    const six: [6][2]u32 = @splat(.{ 2, 2 });
+    try std.testing.expectError(error.TooManyReferences, ImageLayout.init(3, 4, 6, &six));
 }
 
 /// The curve form's t_emb [m, k] f32: torch.lerp(table[i0], table[i0 + 1], w) with pos = clamp(t, 0, 1) * (grid - 1).

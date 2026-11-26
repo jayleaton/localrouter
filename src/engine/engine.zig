@@ -1072,7 +1072,7 @@ test "MiniMax H3-Image is its own engine, with its own licence, wherever the GPU
         try std.testing.expect(@import("build_config").gpu == .none);
         return;
     };
-    try std.testing.expectEqualSlices(Capability, &.{.text_to_image}, e.capabilities);
+    try std.testing.expectEqualSlices(Capability, &.{ .text_to_image, .image_edit }, e.capabilities);
     try std.testing.expectEqualStrings("MiniMax H3 Image Community License", e.license.?.name);
     try std.testing.expect(!std.mem.eql(u8, e.license.?.name, find("minimax_h3").?.license.?.name));
 }
