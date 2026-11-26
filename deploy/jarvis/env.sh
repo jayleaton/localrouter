@@ -11,6 +11,10 @@ UNIT=${UNIT:-localrouter-jarvis}
 CHAT_ROOT=${CHAT_ROOT:-$J/qualify-chat/root}
 CHAT_MARKER=${CHAT_MARKER:-$J/qualify-chat/qwen38-27b-qualification.json}
 DRAMA_ROOT=${DRAMA_ROOT:-$J/qualify-drama3/root}
+# Inkling 2 Mini (tools/chat/inkling2-mini): fetch.sh's root, the checkpoint and drafter it mounts, and the marker.
+INKLING_ROOT=${INKLING_ROOT:-$J/inkling2-mini}
+INKLING_MODELS=${INKLING_MODELS:-$INKLING_ROOT/models}
+INKLING_MARKER=${INKLING_MARKER:-$INKLING_ROOT/inkling2-mini-qualification.json}
 # Drama 3's weights: nvfp4 (plotarmordev/drama-3-NVFP4-Pruned, lossy, approved by JJ 2026-10-24) or full
 # (fishaudio/drama-3). Each has its own marker and booking (its measured peak plus 256 MiB); the full model's install
 # stays beside the quant's, so DRAMA_VARIANT=full and install.sh is the whole rollback.

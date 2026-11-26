@@ -36,10 +36,11 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's directory off sys.path
-from qualify_lib import (FIELDS, PROMPTS, STOP_GRACE_S, Fail, chat, free_port, get_json, load_tool,  # noqa: E402
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # and tools/chat, for qualify_lib
+from qualify_lib import (FIELDS, STOP_GRACE_S, Fail, chat, expectation, free_port, get_json, load_tool,  # noqa: E402
                          on_term, options, read_json, run_prompts, server_argv, server_env, stop_process, tail,
                          wait_health, write_json)
-from qualify import expectation, stream_reasoning_tail  # noqa: E402
+from qualify import PROMPTS, stream_reasoning_tail  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
@@ -186,7 +187,7 @@ def follow_up(port, model, out_dir, timeout, salt):
 
 def features(port, model, out_dir, timeout):
     runs = {}
-    run_prompts(port, model, ("whole1", "whole2", "stream"), timeout, out_dir, runs)
+    run_prompts(port, model, PROMPTS, ("whole1", "whole2", "stream"), timeout, out_dir, runs)
     baseline = read_json(BASELINE) if os.path.exists(BASELINE) else {}
     baseline = baseline.get("prompts") if baseline.get("tensorfold") == TENSORFOLD else None
     checks = []

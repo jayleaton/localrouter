@@ -258,6 +258,12 @@ gone, or silent past `generate_timeout_s`, kills the worker, so the next request
 server with SIGTERM (SIGKILL after `stop_timeout_s`, default 8); if the daemon dies, the worker stops the server first.
 `resident_bytes` and `working_bytes` are the model's measured figures: a server reports none.
 
+A server that ships as a container image runs through a launcher as `options.server[0]`: `tools/docker/serve.sh NAME
+[docker options] -- IMAGE CMD...` (NVIDIA GPUs; the image pinned by id or digest) or `tools/gufo/serve.sh` (Podman,
+AMD). Each runs the container in the foreground, stops it on SIGTERM, and a watcher outside the worker's process group
+removes it if the worker is killed, so no container outlives its worker holding memory (Inkling 2 Mini on the Spark:
+[CHAT.md](dev/CHAT.md#inkling-2-mini-on-the-spark)).
+
 ### The host's GPU lock
 
 A machine whose GPU is shared with jobs outside LocalRouter names their lock file in `gpu_lock`; those jobs take it

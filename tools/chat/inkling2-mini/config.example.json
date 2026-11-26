@@ -1,0 +1,42 @@
+{
+  "gpu_lock": "/var/lock/gpu.lock",
+  "tools": [
+    {
+      "id": "Inkling-2-Mini",
+      "kind": "chat",
+      "name": "Inkling 2 Mini (TensorFold sm_121 in Docker, NVFP4/MXFP8 + DFlash2 drafter, vision, 2 x 128k)",
+      "engine": "openai_server",
+      "weights": "/opt/localrouter/inkling/models/Inkling-2-Mini",
+      "resident_bytes": 51539607552,
+      "working_bytes": 0,
+      "keep_loaded": false,
+      "priority": 50,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 1800,
+      "generate_timeout_s": 900,
+      "qualification": "/opt/localrouter/inkling/inkling2-mini-qualification.json",
+      "license": {"name": "Apache-2.0", "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini",
+                  "use": "the checkpoint (thinkingmachines/Inkling-2-Mini) and the incoai DFlash2 drafter",
+                  "commercial": true},
+      "options": {
+        "server": ["/opt/localrouter/src/tools/docker/serve.sh", "{id}",
+                   "--network", "host", "--ipc", "host", "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
+                   "-e", "TENSORFOLD_MEMORY_RESERVE_GIB=9", "-e", "TENSORFOLD_NO_UPDATE_CHECK=1", "-e", "TF_DRAIN_S=5",
+                   "-e", "TF_INKLING2_ATTN_FP8=1", "-e", "TF_INKLING2_PREFILL_TC=1",
+                   "-v", "{weights}:/models/ink:ro",
+                   "-v", "/opt/localrouter/inkling/models/Inkling-2-Mini-DFlash2:/models/draft:ro",
+                   "-v", "/opt/localrouter/inkling/kernel-cache/20315469ad8c:/cache",
+                   "-v", "/opt/localrouter/inkling/sessions:/sessions",
+                   "--", "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                   "tensorfold-native", "serve", "/models/ink", "--name", "{id}", "--host", "127.0.0.1", "--port", "{port}",
+                   "--context", "131072", "--parallel", "2", "--max-tokens", "32768",
+                   "--temperature", "1.0", "--top-p", "1.0", "--top-k", "0", "--thinking",
+                   "--drafter", "/models/draft", "--vision", "--kv-cache", "fp8",
+                   "--prompt-cache-gib", "8", "--prompt-cache-disk", "/sessions"],
+        "env": {"DOCKER_STOP_TIMEOUT": "20"},
+        "health": "/health",
+        "stop_timeout_s": 30
+      }
+    }
+  ]
+}

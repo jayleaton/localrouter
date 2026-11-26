@@ -5,6 +5,7 @@ The whole of LocalRouter on one GB10 as a systemd user service, from a checkout:
 | | |
 | --- | --- |
 | Chat | `qwen3.8-27b`: TensorFold 1.1.1, Qwen3.8-27B MLX 4-bit + DFlash2 (qualified), priority 100, kept warm |
+| Chat, on demand | `Inkling-2-Mini`: TensorFold's sm_121 engine with the recipe's patches, in its Docker image (`tools/docker/serve.sh`, container `lr-Inkling-2-Mini` on loopback), NVFP4/MXFP8 + DFlash2, vision, 2 x 131,072 tokens; priority 50, loaded when a request names it, unloaded after 10 min idle ([docs/dev/CHAT.md](../../docs/dev/CHAT.md#inkling-2-mini-on-the-spark)) |
 | Speech to text | `whisper-large-v3-turbo`, priority 90, kept warm, 4 CPU threads (PR #19) |
 | Text to speech | `fishaudio/drama-3` on the NVFP4 pruned weights (`DRAMA_VARIANT=nvfp4`, lossy, approved by JJ 2026-10-24; [measured against the full model](../../docs/dev/DRAMA3.md#the-nvfp4-pruned-weights)): 20.78 GiB (qualified at 20.56; cloned voices' longer references add 224 MiB, measured), priority 95 (the last voice model to go), kept warm, `realtime` lane: the only speech model on the box (Kitten TTS stays in the repo but is not deployed: nothing lists or loads it) |
 | Image | `qwen-image-2.1-turbo`, **kept warm** (loaded at start, no idle unload), priority 10: a picture skips the cold load. Text to image and edits (`edit_refs` 2: one or two input images, optionally a mask) once the edit pack is installed (`tools/spark/prepare.sh` adds it beside the packs) |
@@ -63,7 +64,7 @@ deploy/jarvis/install.sh   # preflight, build into ~/jarvis/deploy/src/<commit>,
 deploy/jarvis/start.sh     # start and wait until chat, Drama 3, Whisper and the image model are warm and answer at warm speed
 deploy/jarvis/status.sh    # unit, build, each model's state and memory, URLs
 deploy/jarvis/pair.sh      # paired devices: add NAME (a code for the app), token NAME, list, revoke ID|NAME
-deploy/jarvis/stop.sh      # stop every model (and a Drama 3 server a killed worker left); --disable: off at boot too
+deploy/jarvis/stop.sh      # stop every model (and a Drama 3 server or a container a killed worker left); --disable: off at boot too
 journalctl --user -u localrouter-jarvis -f          # the daemon; models log to ~/jarvis/deploy/data/logs/
 tools/jarvis/smoke.sh [--quick]                       # every capability against the live service
 ```

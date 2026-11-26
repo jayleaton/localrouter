@@ -37,6 +37,11 @@ Not ours, and not listed above:
   `1a53b8ae`) and `pins-macos.json` (5 patches, `engine/nvfp4/macos/patches/` at `db6ba7da`) are drama-tensorfold's own:
   every patch's `From:` line and commit is plotarmordev's, and every pinned sha256 equals that commit's file, checked on
   2026-10-31. All 59 are in TensorFold v1.1.9, which the full model now pins with an empty series.
+- The engine `tools/chat/inkling2-mini/pins.json` pins: the recipe [jayleaton/inkling-2-mini-tensorfold](https://github.com/jayleaton/inkling-2-mini-tensorfold)
+  at `4ef6d1d5` builds TensorFold `dc2ca8a1` (Jürgen Schmied's Inkling 2 Mini CUDA head,
+  [ashhart/TensorFold#4441](https://github.com/ashhart/TensorFold/pull/4441)) with the recipe's `patches/0001`–`0019`
+  into its image; LocalRouter runs that image unchanged and pins it by the recipe's commit and the image's `tf.patches`
+  label.
 - `apps/mobile`'s react-native patch.
 
 ## Entries
