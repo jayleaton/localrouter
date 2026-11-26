@@ -20,8 +20,9 @@ reaches `MiniMaxH3ImageModel(pdd_sigmas, ...)` (`comfy/ldm/minimax/model.py:833-
   `rope.inv_freq` is F32 [16]. `video_patch_proj` is F32 [5376, 96] + bias, and `final_layer.video_out` is F32 [576, 5376] + bias. There
   are no `audio_*` tensors. Every block also has `attn.comfy_attention.config`, U8 [37], a JSON attention selector that `ComfyAttention`
   decodes (`comfy/ldm/modules/attention.py:89-106`: `comfy_kitchen_int8` or `comfy_kitchen_sol` when kitchen reports it available on the
-  device, any other method ignored with a warning; otherwise the default attention). Its 37 bytes are not in the header, so **which
-  method it names is unread** (section 3).
+  device, any other method ignored with a warning; otherwise the default attention). The bytes, read with HTTP range requests from the
+  published file (blocks 0, 1 and 49), are `[{"attention": "comfy_kitchen_int8"}]`: on CUDA ComfyUI runs kitchen's INT8 attention for this
+  checkpoint; on gfx1151, where kitchen reports no INT8 attention, the default one.
 - `latents_dim` = 576 / (4 x 6) = 24 (`model_detection.py:412`). The latent format is `MiniMaxH3Video`: 24 channels, /16 spatially, scale 1.0
   (`comfy/latent_formats.py:622-627`), so `process_latent_in/out` are the identity. `MiniMaxH3Image` is a `ModelType.FLOW` model with its
   own sampling object and no `shift` (`comfy/supported_models.py:1015-1024`, `comfy/model_base.py:2430-2433`).
@@ -140,8 +141,8 @@ latent frame, no audio, no NestedTensor.
 
 **7. What matters for the bit-exact work.**
 - Random draws: the initial noise (seed, `[1, 24, 1, h, w]`), one condition draw a reference (the same seed, the reference's row shape), and
-  **one fixed-seed (42) posterior draw a reference in the VAE encoder**. All three are CPU `torch.randn`. As in M7, the twin and engine replace them with LocalRouter's portable generator (declared substitution), the
-  encoder's with seed 42 kept.
+  **one fixed-seed (42) posterior draw a reference in the VAE encoder**. All three are CPU `torch.randn`. As in M7, the twin and engine
+  replace them with LocalRouter's portable generator (declared substitution), the encoder's with seed 42 kept.
 - Dtypes: the patch projection and the PDD heads (weights, bias, the dt mix) are fp32. The adaLN linears are stored fp16 and run at the
   compute dtype: ComfyUI casts them, but **the cast dtype was not traced**. The blocks are bf16. The VAE is fp16 throughout, with fp32
   normalization, posterior and finalize.
@@ -163,20 +164,20 @@ split-half RoPE, the VAE encoder. New: the PDD sampler and head mix, the image d
 
 Declared substitutions, as in M7 and H3-I2V: LocalRouter's portable generator for the three draws; no `ImageScaleToTotalPixels` (`area`)
 pre-scale, the request's size instead; the decoder's tiles decoded one at a time (no batching by free memory); the bf16 attention of ROCM.md
-in place of whatever `comfy_attention.config` selects.
+in place of the `comfy_kitchen_int8` that `comfy_attention.config` selects.
 
-Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a step (G-baseline), decoded image LPIPS / DINO against #157's
-outputs at the same seeds. Engine vs twin bit for bit (check names proposed, as in ROCM.md section 5): G1 `h3i-replay` / `h3-te` /
-`h3i-vae`, G2 one step, G3 `h3i-e2e`, G4 `h3i-edit-e2e` (masked and whole scene, after the composite). Host tests (no GPU): the PDD schedule and head picks at 6 and 30 steps against the
-arithmetic above, `PackedLayout` positions and segments against ComfyUI's function on CPU (as `test_vision_position`), the composite and the
-8-bit lanczos against the twin's numpy path.
+Gates (GPU, later; ROCM.md section 5): twin vs ComfyUI bf16 on gfx1151, cosine a step (G-baseline), decoded image LPIPS / DINO against
+#157's outputs at the same seeds. Engine vs twin bit for bit (check names proposed, as in ROCM.md section 5): G1 `h3i-replay` / `h3-te` /
+`h3i-vae`, G2 one step, G3 `h3i-e2e`, G4 `h3i-edit-e2e` (masked and whole scene, after the composite). Host tests (no GPU): the PDD schedule
+and head picks at 6 and 30 steps against the arithmetic above, `PackedLayout` positions and segments against ComfyUI's function on CPU (as
+`test_vision_position`), the composite and the 8-bit lanczos against the twin's numpy path.
 
 ## 3. Open questions
 
-- **The attention selector.** `blocks.*.attn.comfy_attention.config` (37 bytes) is in the bf16 file, but its value was not read (no
-  weights here). If it names `comfy_kitchen_int8`, ComfyUI on CUDA runs INT8 attention for this checkpoint. On gfx1151 kitchen has no ROCm
-  backend, so its availability check fails, `self.function` stays unset and the default attention runs (`attention.py:99-106`). Either way the twin's bf16 attention is a declared
-  substitution, but the baseline must say which one ComfyUI ran. Read the 37 bytes with a ranged read on the gfx1151 box.
+- **Which attention ComfyUI ran on gfx1151.** The selector names `comfy_kitchen_int8` (section 1). On gfx1151 kitchen has no ROCm backend,
+  so its availability check should fail, leave `self.function` unset and run the default attention (`attention.py:99-106`): which default
+  (`optimized_attention` on ROCm: PyTorch SDPA or another) the baseline run must log. The twin's bf16 attention is a declared substitution
+  either way.
 - **Tiling as reference.** Both encoder and decoder tile at 256 px, so ComfyUI's image depends on its tile plan. The twin should copy
   `split_tiles` exactly (it is pure integer arithmetic); whether the engine also tiles (ViT attention per 261-token tile) or decodes whole is
   a choice. Tiling is cheaper and matches the reference, so the default is to tile.
