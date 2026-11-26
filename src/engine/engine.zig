@@ -311,8 +311,8 @@ pub fn asset3dWorking(cfg: *const ToolConfig, v: request.Asset3d) ?u64 {
     return if (best_count != null) best else null;
 }
 
-/// The GPU engines are built on Linux only (build.zig), all of them on CUDA and MiniMax H3 on HIP; elsewhere a tool
-/// naming one finds no engine (`find`).
+/// The GPU engines are built on Linux only (build.zig), all of them on CUDA and MiniMax H3 and H3-Image on HIP; elsewhere
+/// a tool naming one finds no engine (`find`).
 pub const entries = [_]Entry{
     @import("../engines/testpattern.zig").entry,
 } ++ (switch (@import("build_config").gpu) {
@@ -321,9 +321,13 @@ pub const entries = [_]Entry{
         @import("../engines/qwen_image_tool.zig").entry,
         @import("../engines/qwen_image_tool.zig").turbo_entry,
         @import("../engines/minimax_h3_tool.zig").entry,
+        @import("../engines/minimax_h3_image_tool.zig").entry,
         @import("../engines/kandinsky6_tool.zig").entry,
     },
-    .hip => [_]Entry{@import("../engines/minimax_h3_tool.zig").entry},
+    .hip => [_]Entry{
+        @import("../engines/minimax_h3_tool.zig").entry,
+        @import("../engines/minimax_h3_image_tool.zig").entry,
+    },
 }) ++ [_]Entry{
     @import("../engines/openai_server.zig").entry,
 };
@@ -1063,11 +1067,22 @@ test "a tool's licence is its config's, else its engine's, else none" {
     try std.testing.expect(license(c.tool("cmd").?) == null);
 }
 
-test "without GPU engines (macOS) the table has none of them, and a HIP build has MiniMax H3 alone" {
+test "MiniMax H3-Image is its own engine, with its own licence, wherever the GPU engines are built" {
+    const e = find("minimax_h3_image") orelse {
+        try std.testing.expect(@import("build_config").gpu == .none);
+        return;
+    };
+    try std.testing.expectEqualSlices(Capability, &.{.text_to_image}, e.capabilities);
+    try std.testing.expectEqualStrings("MiniMax H3 Image Community License", e.license.?.name);
+    try std.testing.expect(!std.mem.eql(u8, e.license.?.name, find("minimax_h3").?.license.?.name));
+}
+
+test "without GPU engines (macOS) the table has none of them, and a HIP build has MiniMax H3 and H3-Image alone" {
     const hip = @import("build_config").gpu == .hip;
     if (@import("build_config").gpu == .cuda) return error.SkipZigTest;
     for ([_][]const u8{ "qwen_image", "qwen_image_turbo", "kandinsky6" }) |name| try std.testing.expect(find(name) == null);
     try std.testing.expectEqual(hip, find("minimax_h3") != null);
+    try std.testing.expectEqual(hip, find("minimax_h3_image") != null);
     try std.testing.expect(find("testpattern") != null and find("openai_server") != null);
 }
 
