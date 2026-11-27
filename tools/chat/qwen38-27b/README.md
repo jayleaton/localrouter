@@ -16,7 +16,7 @@ GPU-qualified on this host") until `qualify.sh` passes on the machine and writes
 | `config.example.json` | the daemon config fragment (`gpu_lock`, `defaults.chat_completion`, the tool). `options.memory` says where `resident_bytes` (24 GiB, measured on DGX-01) comes from |
 | `prompts.json` | the fixed prompt set P1 to P8: factual, reasoning on, reasoning off, a required tool call, a tool result, a JSON schema, stop + `max_tokens` 64, a ~2k-token multi-turn prompt. Temperature 0, seed 7 |
 | `qualify.sh ROOT LOCALROUTER_BIN OUT MARKER` | the GB10 run: pins, direct, daemon, compare, then the marker. Exit codes in `OUT/status.json`, memory peak and timings in `OUT/report.json` |
-| `qualify.py`, `qualify_lib.py` | the steps (standard library only, `python3 -I`) |
+| `qualify.py`, `../qualify_lib.py` | the steps (standard library only, `python3 -I`); the lib is shared with the other chat tools |
 
 ## Order
 

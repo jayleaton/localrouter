@@ -6,7 +6,7 @@ checksum, and stop and ask the user wherever a step says so.
 
 The end state is one systemd user service, `localrouter-jarvis`, on `http://127.0.0.1:8190`. It serves:
 
-- chat: Qwen3.8 27B;
+- chat: Qwen3.8 27B (and Inkling 2 Mini on demand, when you opt in to it);
 - speech: Fish Audio Drama 3;
 - transcription: Whisper large-v3-turbo;
 - images: Qwen-Image 2.1 Turbo;
@@ -213,6 +213,26 @@ step's `done` test.
 - **Verify.** `jq .qualified $J/qualify-chat/qwen38-27b-qualification.json` is `true`.
 - **Skip it.** Leave `chat` out. The voice loop then has nothing to answer with.
 
+### inkling: `Inkling-2-Mini`
+
+- **What it is.** Inkling 2 Mini (a looped mixture of experts: NVFP4 experts, MXFP8 layers 20-23) with DSpark, the
+  checkpoint's own drafter, and its vision tower, 2 streams of 131,072 tokens. TensorFold's native CUDA engine, upstream
+  main with the patches of the recipe [jayleaton/inkling-2-mini-recipe](https://github.com/jayleaton/inkling-2-mini-recipe),
+  built on the box by the TensorFold recipe kit release the recipe carries. Public: no credentials.
+  Licence Apache-2.0. Loaded on demand (a request that names it), beside `qwen3.8-27b`, which stays the default.
+- **Size.** About 20 GB to download, 27 GB on disk with the engine's build. 36 GiB in memory (34.38 GiB peak
+  measured by the live qualification, [CHAT.md](docs/dev/CHAT.md#memory-1)).
+- **Steps.** `tools/chat/inkling2-mini/fetch.sh $J/inkling2-mini --engine cuda --models $J/inkling2-mini/models` (the
+  recipe at its pinned commit with its kit release, the checkpoint, `recipe prepare`, and the recipe's serve argv), then
+  `setup.sh`, then `qualify.sh`. Every file is checked against `tools/chat/inkling2-mini/pins.json`, and the config's
+  server argv against the recipe's. qualify writes `$J/inkling2-mini/inkling2-mini-qualification.json`; without it the
+  service refuses the model.
+- **Verify.** `jq .qualified $J/inkling2-mini/inkling2-mini-qualification.json` is `true`.
+- **Optional.** Not installed by default: name it in `--models`, as `--models chat,inkling,tts,stt,image,video,asset3d`
+  (or `--models inkling` on a box that has the rest), and deploy it with
+  `TOOLS="$(jq -r '[.tools[].id] | join(" ")' ~/jarvis/deploy/config.json) Inkling-2-Mini" deploy/jarvis/install.sh`
+  when installing by hand. Without it `qwen3.8-27b` stays the box's only chat model.
+
 ### tts: `fishaudio/drama-3`
 
 - **What it is.** Fish Audio Drama 3 on its TensorFold native engine, with the NVFP4 pruned weights
@@ -276,11 +296,12 @@ step's `done` test.
 
 ## Choosing models
 
-`--models chat,tts,stt,image,video` is the default. A shorter list installs and serves only those models, and the
-service's config lists only them.
+`--models chat,tts,stt,image,video,asset3d` is the default: every model but the optional ones (`"optional": true` in
+the profile: `inkling`), which install only when `--models` names them. A shorter list installs and serves only those
+models, and the service's config lists only them.
 
 - The voice loop needs `chat,tts,stt`.
-- `image` and `video` are independent of it and of each other.
+- `inkling`, `image` and `video` are independent of it and of each other.
 
 ## Options
 
@@ -314,7 +335,7 @@ bootstrap.sh reuses its model files in a new prefix:
   and the step downloads as usual.
 - **Deleting one install.** Removing one install never affects the other: each keeps its links.
 
-What it reuses, per model: the chat checkpoint and archive, the Drama 3 checkpoint, the Whisper checkpoint and VAD,
+What it reuses, per model: the chat checkpoint and archive, the Inkling 2 Mini checkpoint, the Drama 3 checkpoint, the Whisper checkpoint and VAD,
 and the finished image and video packs (checked against `tools/twin/packs/built/`). The image and video download steps
 then have nothing left to fetch.
 
@@ -372,10 +393,12 @@ asks to remove everything. `sudo tailscale serve --https=10443 off` removes the 
 | `bin/`, `opt/`, `dl/` | zig, uv and ffmpeg (pinned by sha256) and their downloads |
 | `deploy/` | the service: `src/<commit>` (the build), `current`, `config.json`, `data/` (outputs and model logs) |
 | `qualify-chat/`, `qualify-drama3/` | the chat and Drama 3 installs, their qualification runs and markers |
+| `inkling2-mini/` | Inkling 2 Mini: the kit and recipe checkouts, the built engine (`engine/`), `models/`, conversation states (`sessions/`), its qualification runs and marker |
 | `venvs/whisper`, `models/whisper`, `models/vad` | Whisper |
 | `lr/` | the image and video checkpoints (`models/`), packs (`weights/`) and their build environment |
 | `install/logs/`, `install/state/` | bootstrap's logs, and what it has finished |
 
 The deeper detail per model is in [deploy/jarvis/README.md](deploy/jarvis/README.md),
-[tools/chat/qwen38-27b/README.md](tools/chat/qwen38-27b/README.md), [docs/dev/DRAMA3.md](docs/dev/DRAMA3.md) and
+[tools/chat/qwen38-27b/README.md](tools/chat/qwen38-27b/README.md), [docs/dev/CHAT.md](docs/dev/CHAT.md#inkling-2-mini-on-the-spark),
+[docs/dev/DRAMA3.md](docs/dev/DRAMA3.md) and
 [tools/speech/whisper/README.md](tools/speech/whisper/README.md).

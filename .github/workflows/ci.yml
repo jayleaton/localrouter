@@ -21,7 +21,7 @@ jobs:
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - name: the installer's scripts and manifests parse, and its plan runs (INSTALL.md)
         run: |
-          for f in tools/install/*.sh deploy/jarvis/*.sh deploy/mac/*.sh deploy/strix-halo/*.sh tools/gufo/*.sh tools/chat/*/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
+          for f in tools/install/*.sh deploy/jarvis/*.sh deploy/mac/*.sh deploy/strix-halo/*.sh tools/gufo/*.sh tools/chat/*.sh tools/chat/*/*.sh tools/spark/install.sh tools/spark/prepare.sh; do bash -n "$f"; done
           for f in deploy/profiles/*.json tools/twin/packs/sources/*.json tools/twin/packs/built/*.json; do jq empty "$f"; done
           for p in deploy/profiles/*.json; do tools/install/bootstrap.sh --profile "$(basename "$p" .json)" --prefix "$RUNNER_TEMP/jarvis" --dry-run; done
           # the Mac service's config: default install renders non-optional models; all-models render covers optional ones too

@@ -1,0 +1,33 @@
+{
+  "gpu_lock": "/var/lock/gpu.lock",
+  "tools": [
+    {
+      "id": "Inkling-2-Mini",
+      "kind": "chat",
+      "name": "Inkling 2 Mini (TensorFold native CUDA from the kit recipe, NVFP4/MXFP8 + DSpark drafter, vision, 2 x 128k)",
+      "engine": "openai_server",
+      "weights": "/opt/localrouter/inkling/models/Inkling-2-Mini",
+      "resident_bytes": 38654705664,
+      "working_bytes": 0,
+      "keep_loaded": false,
+      "priority": 50,
+      "idle_ttl_s": 600,
+      "load_timeout_s": 900,
+      "generate_timeout_s": 900,
+      "qualification": "/opt/localrouter/inkling/inkling2-mini-qualification.json",
+      "license": {"name": "Apache-2.0", "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini",
+                  "use": "the checkpoint (thinkingmachines/Inkling-2-Mini) and its own MTP drafter (mtp.safetensors)",
+                  "commercial": true},
+      "options": {
+        "server": ["/opt/localrouter/inkling/engine/zig-out/native/bin/tensorfold-native", "serve", "{weights}",
+                   "--name", "{id}", "--host", "127.0.0.1", "--port", "{port}",
+                   "--context", "131072", "--parallel", "2", "--no-update-check", "--max-tokens", "32768",
+                   "--thinking", "--temperature", "1.0", "--top-p", "1.0", "--top-k", "0",
+                   "--prompt-cache-disk", "/opt/localrouter/inkling/sessions", "--drafter", "{weights}", "--vision"],
+        "env": {"HF_HUB_OFFLINE": "1", "TENSORFOLD_NO_UPDATE_CHECK": "1", "TF_DRAIN_S": "5", "TF_INKLING2_COMPUTE_LANE": "1"},
+        "memory": "resident_bytes 36 GiB is the live qualification's peak on one DGX Spark (report.json memory.peak_drop_bytes 36,915,630,080 B, 34.38 GiB, with DSpark and vision at 2x131072) plus 1.6 GiB margin",
+        "health": "/health"
+      }
+    }
+  ]
+}

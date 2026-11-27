@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """check_args.py against the recipe's renders (no GPU, no network, no kit): the argv `recipe serve PROFILE ... --dry-run`
 prints at the pinned recipe, recorded below, must accept the Mac service's rendered Inkling-2-Mini entry
-(deploy/mac/install.sh RENDER_ONLY=1, which needs jq), and every change but the daemon's own must be refused.
+(deploy/mac/install.sh RENDER_ONLY=1, which needs jq), the Spark's config.example.json and deploy/jarvis/config.json.in
+entry, and every change but the daemon's own must be refused.
     python3 -I tools/chat/inkling2-mini/test_check_args.py"""
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,12 +28,14 @@ FLAGS = {
               "--temperature", "1.0", "--top-p", "1.0", "--top-k", "0", "--prompt-cache-disk", ".recipe/sessions",
               "--drafter", "{model}", "--vision"],
 }
+# and the environment the launch sets (the profile's product switches)
+ENV = {"mac": {}, "spark": {"TF_INKLING2_COMPUTE_LANE": "1"}}
 
 
 def launch(profile, binary, model):
     flags = [model if f == "{model}" else f for f in FLAGS[profile]]
     return {"rank": 0, "argv": [binary, "serve", model, "--name", "Inkling-2-Mini", *flags, "--port", "8888"],
-            "env": {}}
+            "env": dict(ENV[profile])}
 
 
 def tool(binary, model, flags, env=None):
@@ -79,6 +83,25 @@ class CheckArgs(unittest.TestCase):
     def test_the_launchs_env_must_be_set(self):
         self.assertTrue(self.problems(FLAGS["mac"], want_env={"TF_X": "1"}))
         self.assertEqual(self.problems(FLAGS["mac"], env={"TF_X": "1"}, want_env={"TF_X": "1"}), [])
+
+    def spark(self, cfg, root, models):
+        serve = launch("spark", f"{root}/engine/zig-out/native/bin/tensorfold-native", f"{models}/Inkling-2-Mini")
+        t = next(t for t in cfg["tools"] if t["id"] == "Inkling-2-Mini")
+        return check_args.check(t, serve)[0]
+
+    def test_the_spark_example_serves_the_recipes_spark_argv(self):
+        with open(os.path.join(HERE, "config.example.json")) as f:
+            text = f.read()  # as setup.sh fills it in
+        text = text.replace("/opt/localrouter/inkling/models", "/j/ink/models").replace("/opt/localrouter/inkling", "/j/ink")
+        self.assertEqual(self.spark(json.loads(text), "/j/ink", "/j/ink/models"), [])
+
+    def test_the_jarvis_service_serves_the_recipes_spark_argv(self):
+        with open(os.path.join(REPO, "deploy", "jarvis", "config.json.in")) as f:
+            text = f.read()  # as deploy/jarvis/install.sh renders it, every other placeholder a stand-in
+        text = text.replace("@INKLING_ROOT@", "/j/ink").replace("@INKLING_MODELS@", "/j/ink/models")
+        text = text.replace("@DRAMA_PORT@", "0").replace("@DRAMA_RESIDENT@", "0")
+        text = re.sub(r"@[A-Z_]+@", "/x", text)
+        self.assertEqual(self.spark(json.loads(text), "/j/ink", "/j/ink/models"), [])
 
     @unittest.skipUnless(shutil.which("jq"), "needs jq")
     def test_the_mac_service_serves_the_recipes_mac_argv(self):
