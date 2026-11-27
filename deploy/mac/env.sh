@@ -12,9 +12,13 @@ DOMAIN=gui/$(id -u)
 LOG=$DEPLOY/logs/daemon.log                   # the daemon's stdout and stderr; each model's own log: $DEPLOY/data/logs/
 # The models' installs, where the profile's steps put them (deploy/profiles/mac-apple-silicon.json, env).
 CHAT_ROOT=${CHAT_ROOT:-$J/chat}
-INKLING_BIN=${INKLING_BIN:-$HOME/.cache/tensorfold-inkling2-mac/tensorfold/zig-out/native/bin/tensorfold-native}
+# Inkling 2 Mini (tools/chat/inkling2-mini/fetch.sh --engine metal): the kit-built engine and the recipe's serve argv
+# (serve-mac.json) under INKLING_ROOT, the checkpoint, and the drafter as the Hugging Face repo id the recipe passes
+# (its snapshot is in HF_HUB).
+INKLING_ROOT=${INKLING_ROOT:-$J/inkling2-mini}
+INKLING_BIN=${INKLING_BIN:-$INKLING_ROOT/engine/zig-out/native/bin/tensorfold-native}
 INKLING_MODEL=${INKLING_MODEL:-$HOME/models/hf/Inkling-2-Mini}
-INKLING_DRAFTER=${INKLING_DRAFTER:-$HOME/models/hf/Inkling-2-Mini-DFlash2}
+INKLING_DRAFTER=${INKLING_DRAFTER:-incoai/Inkling-2-Mini-DFlash2}
 DRAMA_ROOT=${DRAMA_ROOT:-$J/qualify-drama3/root}
 DRAMA_MARKER=${DRAMA_MARKER:-$J/qualify-drama3/drama3-macos-qualification.json}
 DRAMA_PORT=${DRAMA_PORT:-$((PORT + 10603))}   # the Drama 3 server, on 127.0.0.1

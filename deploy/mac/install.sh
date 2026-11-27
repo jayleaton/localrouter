@@ -75,7 +75,13 @@ if [ "${CHECK_MODELS:-1}" = 1 ]; then
   # have WHAT PATH...: every PATH is there, else the step that makes it
   have() { local what=$1 f; shift; for f in "$@"; do [ -e "$f" ] || die "$what: no $f (run bootstrap.sh --profile mac-apple-silicon for it)"; done; echo "  $what: installed"; }
   if wanted qwen3.8-27b; then have qwen3.8-27b "$CHAT_BIN" "$HF_HUB/models--TensorFold--Qwen3.8-27B-MLX-4bit"; fi
-  if wanted Inkling-2-Mini; then have Inkling-2-Mini "$INKLING_BIN" "$INKLING_MODEL" "$INKLING_DRAFTER"; fi
+  if wanted Inkling-2-Mini; then # tools/chat/inkling2-mini: the drafter is a snapshot in HF_HUB; the argv is the recipe's
+    inkling_rev=$(jq -r .drafter.revision "$repo/tools/chat/inkling2-mini/pins.json")
+    have Inkling-2-Mini "$INKLING_BIN" "$INKLING_MODEL" "$HF_HUB/models--${INKLING_DRAFTER//\//--}/snapshots/$inkling_rev" \
+      "$INKLING_ROOT/serve-mac.json"
+    config "$pairing" | python3 -I "$repo/tools/chat/inkling2-mini/check_args.py" - "$INKLING_ROOT/serve-mac.json" ||
+      die "Inkling-2-Mini: config.json.in or env.sh serves another argv than the recipe (above): rerun the inkling step, or align them"
+  fi
   if wanted fishaudio/drama-3; then
     have fishaudio/drama-3 "$DRAMA_ROOT" "$DRAMA_MARKER"
     want=$(sha256 "$repo/tools/speech/drama3/pins-macos.json" | cut -c1-64)
