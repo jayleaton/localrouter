@@ -266,7 +266,7 @@
     "name": "Apache-2.0 (checkpoint, drafter, TensorFold and the recipe)",
     "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini"
    },
-   "pins": "tools/chat/inkling2-mini/pins.json (the recipe https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe/tree/a2a5eae, private, and the kit it names; the checkpoint and drafter files)",
+   "pins": "tools/chat/inkling2-mini/pins.json (the recipe's public tree https://github.com/jayleaton/inkling-2-mini-recipe at 15eb435 and the kit release it carries; the checkpoint and drafter files)",
    "download_bytes": 21600000000,
    "disk_bytes": 27000000000,
    "memory_bytes": 23622320128,
@@ -276,10 +276,10 @@
      "id": "prepare",
      "download_bytes": 21600000000,
      "disk_bytes": 27000000000,
-     "title": "the recipe and its kit at their pinned commits (private: git needs credentials for them), the checkpoint into ~/models/hf and the DFlash2 drafter into the Hugging Face cache (21.2 GB, every file against pins.json), the Metal engine built by recipe prepare, and the recipe's mac serve argv (fetch.sh --engine metal)",
+     "title": "the recipe's public tree at its pinned commit (it carries the kit release), the checkpoint into ~/models/hf and the DFlash2 drafter into the Hugging Face cache (21.2 GB, every file against pins.json), the Metal engine built by recipe prepare, and the recipe's mac serve argv (fetch.sh --engine metal)",
      "run": "bash $REPO/tools/chat/inkling2-mini/fetch.sh $INKLING_ROOT --engine metal --models $HOME/models/hf && $STEPS stamp inkling-prepare $REPO/tools/chat/inkling2-mini/pins.json $REPO/tools/chat/inkling2-mini/fetch.sh",
      "done": "$STEPS stamped inkling-prepare $REPO/tools/chat/inkling2-mini/pins.json $REPO/tools/chat/inkling2-mini/fetch.sh && [ -x $INKLING_ROOT/engine/zig-out/native/bin/tensorfold-native ] && [ -f $INKLING_ROOT/serve-mac.json ]",
-     "fix": "git clone failed: the recipe and kit are private: set up git credentials for github.com (or INKLING_RECIPE_REPO and INKLING_KIT_REPO). Network: run again (partial files resume). 'differs from the pins': delete the named files and run again. A build error: the log's recipe prepare lines (zig 0.17.0, Xcode's Metal Toolchain); report it with the log"
+     "fix": "git clone or a download failed: the network; run again (partial files resume). 'differs from the pins': delete the named files and run again. A build error: the log's recipe prepare lines (zig 0.17.0, Xcode's Metal Toolchain); report it with the log"
     }
    ]
   },

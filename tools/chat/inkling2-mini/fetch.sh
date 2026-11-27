@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetches and builds everything the Inkling-2-Mini tool runs, each part against pins.json:
 #   tools/chat/inkling2-mini/fetch.sh ROOT --engine metal|cuda [--models DIR] [--hf DIR]
-# 1. the TensorFold recipe kit in ROOT/kit and the recipe in ROOT/recipe, each at its pinned commit and clean; the
-#    recipe's [kit] rev must be the pinned kit commit (the kit refuses to run otherwise). Both repositories are
-#    private: git needs credentials for them (a credential helper or SSH). INKLING_RECIPE_REPO and INKLING_KIT_REPO
-#    override their URLs (a mirror, or git@github.com:... for SSH); the commits stay pinned;
+# 1. the recipe's public tree in ROOT/recipe at its pinned commit and clean (a public repository: no credentials).
+#    It carries the recipe kit's release in kit/: its sha256 and the recipe's [kit] rev must be the pinned ones, and
+#    kit/recipe checks the release against kit/SHA256SUMS before every run. A host without GitHub points git's
+#    url.<mirror>.insteadOf at mirrors of the recipe and TensorFold; the commits stay pinned;
 # 2. the checkpoint into DIR/Inkling-2-Mini (DIR default ROOT/models), then every file by size and sha256
 #    (tools/install/hf_pinned.py verify). A DIR that already holds it is only verified;
 # 3. metal only: the DFlash2 drafter into the Hugging Face cache layout under DIR (--hf; default the shared cache,
@@ -19,14 +19,12 @@
 # Idempotent and resumable: a checkout at its commit, a verified checkpoint (ROOT/PART.verified records the manifest
 # it passed; a rerun checks sizes only) and a fetched engine tree are kept; partial downloads (.part) resume; the kit
 # rebuilds incrementally. HF_TOKEN, if set, is sent to huggingface.co only (curl reads it from stdin, never argv).
-# Needs git, jq, curl, python3 3.11 or newer, zig 0.17.0. Nothing downloaded runs but the recipe, the kit and the
-# engine they build.
+# Needs git, jq, curl, python3 3.11 or newer, zig 0.17.0. Nothing downloaded runs but the recipe, the kit release
+# it carries and the engine they build.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 pins=$here/pins.json
-usage="usage: fetch.sh ROOT --engine metal|cuda [--models DIR] [--hf DIR]
-  the recipe and kit repositories are private: git needs credentials for them; INKLING_RECIPE_REPO and
-  INKLING_KIT_REPO override their URLs"
+usage="usage: fetch.sh ROOT --engine metal|cuda [--models DIR] [--hf DIR]"
 root=${1:?$usage}
 shift
 engine='' models='' hf=''
@@ -63,32 +61,28 @@ fi
 size_of() { stat -L -c %s "$1" 2> /dev/null || stat -L -f %z "$1"; }
 sha256() { if command -v sha256sum > /dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
-# 1. the kit and the recipe
-# checkout NAME URL COMMIT DIR VAR: DIR is a clean clone at COMMIT (VAR overrides URL)
-checkout() {
-  local name=$1 url=$2 commit=$3 dir=$4 var=$5
-  if [ ! -d "$dir/.git" ]; then
-    [ ! -e "$dir" ] || die "$dir exists but is not a git checkout: move it away first"
-    git clone -q "$url" "$dir" || die "git clone $url failed: the $name is private; set up git credentials for it, or $var"
-  fi
-  if ! git -C "$dir" cat-file -e "$commit^{commit}" 2> /dev/null; then
-    git -C "$dir" fetch -q "$url" "$commit" || die "git fetch $url $commit failed: git credentials, or $var"
-  fi
-  [ -z "$(git -C "$dir" status --porcelain --untracked-files=no 2> /dev/null)" ] ||
-    die "$dir has local changes: move it away and run again"
-  git -C "$dir" -c advice.detachedHead=false checkout -q --detach "$commit"
-  [ "$(git -C "$dir" rev-parse HEAD)" = "$commit" ] || die "$dir is not at $commit"
-  echo "fetch.sh: $name $url at ${commit:0:12}"
-}
-kit=$root/kit recipe=$root/recipe
-kit_commit=$(pin .kit.commit) recipe_commit=$(pin .recipe.commit)
-checkout kit "${INKLING_KIT_REPO:-$(pin .kit.repo)}" "$kit_commit" "$kit" INKLING_KIT_REPO
-# the kit refuses a checkout with any change, untracked files included
-[ -z "$(git -C "$kit" status --porcelain)" ] || die "$kit has untracked or changed files: move it away and run again"
-checkout recipe "${INKLING_RECIPE_REPO:-$(pin .recipe.repo)}" "$recipe_commit" "$recipe" INKLING_RECIPE_REPO
+# 1. the recipe, with the kit release it carries
+recipe=$root/recipe kit=$root/recipe/kit/recipe
+url=$(pin .recipe.repo) recipe_commit=$(pin .recipe.commit)
+if [ ! -d "$recipe/.git" ]; then
+  [ ! -e "$recipe" ] || die "$recipe exists but is not a git checkout: move it away first"
+  git clone -q "$url" "$recipe" || die "git clone $url failed (the network)"
+fi
+if ! git -C "$recipe" cat-file -e "$recipe_commit^{commit}" 2> /dev/null; then
+  git -C "$recipe" fetch -q "$url" "$recipe_commit" || die "git fetch $url $recipe_commit failed"
+fi
+[ -z "$(git -C "$recipe" status --porcelain --untracked-files=no 2> /dev/null)" ] ||
+  die "$recipe has local changes: move it away and run again"
+git -C "$recipe" -c advice.detachedHead=false checkout -q --detach "$recipe_commit"
+[ "$(git -C "$recipe" rev-parse HEAD)" = "$recipe_commit" ] || die "$recipe is not at $recipe_commit"
+echo "fetch.sh: recipe $url at ${recipe_commit:0:12}"
+kit_commit=$(pin .kit.commit) kit_sha256=$(pin .kit.sha256)
 want=$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["kit"]["rev"])' "$recipe/recipe.toml") ||
   die "$recipe/recipe.toml has no [kit] rev"
 [ "$want" = "$kit_commit" ] || die "the recipe at ${recipe_commit:0:12} names kit $want, pins.json pins $kit_commit: update pins.json"
+[ -x "$kit" ] && [ "$(cut -d' ' -f1 "$recipe/kit/SHA256SUMS")" = "$kit_sha256" ] ||
+  die "$recipe/kit holds no kit release with sha256 $kit_sha256: is $url the published recipe?"
+echo "fetch.sh: kit release ${kit_commit:0:12} (sha256 ${kit_sha256:0:12}) in $recipe/kit"
 
 # 2 and 3. the weights
 hfp=(python3 -I "$here/../../install/hf_pinned.py")
@@ -148,7 +142,7 @@ if [ "$engine" = metal ]; then
 fi
 
 # 4. the engine
-(cd "$recipe" && "$kit/bin/recipe" prepare --engine "$engine" "$root/engine") ||
+(cd "$recipe" && "$kit" prepare --engine "$engine" "$root/engine") ||
   die "recipe prepare --engine $engine failed (above): a missing toolchain, the network, or a build error"
 bin=$root/engine/$(pin ".engines.$engine.binary")
 [ -x "$bin" ] || die "recipe prepare left no $bin"
@@ -156,7 +150,7 @@ bin=$root/engine/$(pin ".engines.$engine.binary")
   die "recipe prepare left no $(pin ".engines.$engine.grammar_lib"): tool_choice required/named and response_format need it"
 
 # 5. the argv the recipe serves
-(cd "$recipe" && "$kit/bin/recipe" serve "$profile" "$root/engine" "$ck" --dry-run) > "$root/serve-$profile.json.tmp" ||
+(cd "$recipe" && "$kit" serve "$profile" "$root/engine" "$ck" --dry-run) > "$root/serve-$profile.json.tmp" ||
   die "recipe serve $profile --dry-run failed (above)"
 jq -e --arg bin "$bin" --arg ck "$ck" 'length == 1 and .[0].argv[0] == $bin and .[0].argv[1:3] == ["serve", $ck]' \
   "$root/serve-$profile.json.tmp" > /dev/null || die "recipe serve $profile --dry-run printed another launch: $root/serve-$profile.json.tmp"

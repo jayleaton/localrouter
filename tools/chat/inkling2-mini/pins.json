@@ -1,14 +1,13 @@
 {
- "note": "Inkling 2 Mini on a Mac (Metal) and a DGX Spark (CUDA), both from one recipe: the recipe and the TensorFold recipe kit it names in [kit] rev, each by commit (the recipe pins TensorFold, its patch series and the patched tree; the kit refuses to run unless it is at that rev), and every checkpoint and drafter file by size and sha256 (tools/install/hf_pinned.py manifests). Both repositories are private: cloning them needs git credentials for github.com/jayleaton.",
+ "note": "Inkling 2 Mini on a Mac (Metal) and a DGX Spark (CUDA), both from one recipe: its public tree by commit (the recipe pins TensorFold, its patch series and the patched tree), the TensorFold recipe kit release that tree carries in kit/ by the [kit] rev it names and its sha256 (kit/recipe checks it before every run), and every checkpoint and drafter file by size and sha256 (tools/install/hf_pinned.py manifests). Nothing needs credentials.",
  "recipe": {
-  "repo": "https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe.git",
-  "commit": "a2a5eaea0dd4752d7ef157063dab9dbc11602765",
-  "private": true
+  "repo": "https://github.com/jayleaton/inkling-2-mini-recipe.git",
+  "commit": "15eb4357d960e76b89b568627b1df6bbf896f9fe"
  },
  "kit": {
-  "repo": "https://github.com/jayleaton/tensorfold-recipe-kit.git",
   "commit": "539b913993818185569f4a84936b36ec85b3ee26",
-  "private": true
+  "release": "kit/tensorfold-recipe-kit-539b91399381.tar.gz",
+  "sha256": "445e4553a8bd2dcfc64ca6e7e37a10ba1abf5221d3a59c0de8b0e46a78c75dea"
  },
  "engines": {
   "metal": {
