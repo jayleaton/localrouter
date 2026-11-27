@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs LocalRouter as the Jarvis box on this GB10 host (DGX-01), from the checkout this script is in:
 #   deploy/jarvis/install.sh            then deploy/jarvis/start.sh
-# 1. Preflight: aarch64 and a GB10; zig 0.17, nvcc, jq, curl, python3; the qualified installs (chat and Drama 3)
+# 1. Preflight: aarch64 and a GB10; zig 0.17, nvcc, jq, curl, python3; the qualified installs (the chat models and Drama 3)
 #    and their markers, each "qualified": true and made from the same pins as this tree (else: re-qualify with
 #    that model's qualify.sh first); Whisper, the VAD, the image and video packs.
 # 2. The tree goes to $DEPLOY/src/<commit> (git archive of HEAD from a clean checkout, or a copy of an archive that
@@ -13,7 +13,7 @@
 #    left as they are). The daemon itself listens on 127.0.0.1 only and nothing binds 0.0.0.0: the tailnet (its ACLs)
 #    is who may connect, and with pairing.required only paired devices, each within its scopes, use it (pair.sh).
 # Settings: deploy/jarvis/env.sh (JARVIS, DEPLOY, PORT, HTTPS_PORT, UNIT, CHAT_ROOT, CHAT_MARKER, DRAMA_ROOT, DRAMA_MARKER,
-# DRAMA_PORT).
+# DRAMA_PORT, INKLING_ROOT, INKLING_MODELS, INKLING_MARKER).
 # Also SKIP_BUILD=1 (reuse a built $DEPLOY/src/<commit>), BUILD_ONLY=1 (preflight of the tools and step 2 only: the
 # binary that the models' qualify.sh runs), TOOLS (the tool ids to serve, space separated; default: every tool in
 # config.json.in), NVCC, SM (121), PAIRING_REQUIRED (1: every route but /health and pairing needs a paired device with
@@ -57,7 +57,10 @@ if [ -n "$TOPOLOGY" ]; then # one node of several: its tools checked, every node
   [ "$listen" = 127.0.0.1 ] || [[ " $(awk '{print $4}' <<< "$addrs" | cut -d/ -f1 | tr '\n' ' ') " == *" $listen "* ]] ||
     die "no interface of this machine has $listen (node $NODE's address; HOST overrides it)"
 fi
-TOOLS=${TOOLS:-$all}
+# the default leaves out the profile's optional models (deploy/profiles/jarvis-gb10.json, "optional": Inkling-2-Mini):
+# TOOLS names them to serve them
+optin=" $(jq -r '[.models[] | select(.optional == true) | .id] | join(" ")' "$repo/deploy/profiles/jarvis-gb10.json") "
+TOOLS=${TOOLS:-$(for t in $all; do [[ "$optin" == *" $t "* ]] || printf '%s ' "$t"; done)}
 for t in $TOOLS; do [[ " $all " == *" $t "* ]] || die "TOOLS has '$t'; config.json.in has: $all"; done
 keep=$TOOLS; [ "$topo" = null ] || keep=$(topo_all "$TOPOLOGY")   # the tools the config lists
 wanted() { [[ " $TOOLS " == *" $1 "* ]]; }
@@ -87,6 +90,14 @@ if [ "${BUILD_ONLY:-0}" != 1 ]; then
   if wanted qwen3.8-27b; then
     marker "$CHAT_MARKER" "$repo/tools/chat/qwen38-27b/pins.json" "qwen3.8-27b"
     [ -x "$CHAT_ROOT/tensorfold-1.1.1/bin/tensorfold-native" ] && [ -d "$CHAT_ROOT/hf" ] || die "no chat install at $CHAT_ROOT"
+  fi
+  if wanted Inkling-2-Mini; then # tools/chat/inkling2-mini: the kit-built engine the marker qualified, the recipe's argv
+    marker "$INKLING_MARKER" "$repo/tools/chat/inkling2-mini/pins.json" "Inkling-2-Mini"
+    inkling_bin=$INKLING_ROOT/engine/$(jq -r .engines.cuda.binary "$repo/tools/chat/inkling2-mini/pins.json")
+    [ -x "$inkling_bin" ] && [ -d "$INKLING_MODELS/Inkling-2-Mini" ] && [ -f "$INKLING_ROOT/serve-spark.json" ] ||
+      die "Inkling-2-Mini: no engine, checkpoint or serve-spark.json under $INKLING_ROOT (tools/chat/inkling2-mini/fetch.sh)"
+    [ "$(jq -r .engine_sha256 "$INKLING_MARKER")" = "$(sha256sum "$inkling_bin" | cut -d' ' -f1)" ] ||
+      die "Inkling-2-Mini: $INKLING_MARKER qualified another build than $inkling_bin: re-qualify first"
   fi
   if wanted fishaudio/drama-3; then
     marker "$DRAMA_MARKER" "$repo/tools/speech/drama3/pins.json" "fishaudio/drama-3" "$DRAMA_VARIANT"
@@ -142,7 +153,8 @@ render() {
   sed -e "s|@J@|$J|g" -e "s|@SRC@|$DEPLOY/current|g" -e "s|@DEPLOY@|$DEPLOY|g" -e "s|@PORT@|$PORT|g" \
       -e "s|@CHAT_ROOT@|$CHAT_ROOT|g" -e "s|@CHAT_MARKER@|$CHAT_MARKER|g" -e "s|@DRAMA_ROOT@|$DRAMA_ROOT|g" \
       -e "s|@DRAMA_MARKER@|$DRAMA_MARKER|g" -e "s|@DRAMA_PORT@|$DRAMA_PORT|g" -e "s|@DRAMA_VARIANT@|$DRAMA_VARIANT|g" \
-      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" -e "s|@HOST@|$listen|g" "$1"
+      -e "s|@DRAMA_RESIDENT@|$DRAMA_RESIDENT|g" -e "s|@WHISPER@|${whisper:-unused}|g" -e "s|@HOST@|$listen|g" \
+      -e "s|@INKLING_ROOT@|$INKLING_ROOT|g" -e "s|@INKLING_MODELS@|$INKLING_MODELS|g" -e "s|@INKLING_MARKER@|$INKLING_MARKER|g" "$1"
 }
 # pairing (pair.sh) carries over from the deployed config; PAIRING_REQUIRED=1 turns it on, 0 off
 pairing=$(jq -c '.pairing // {}' "$DEPLOY/config.json" 2> /dev/null || echo '{}')
@@ -156,6 +168,10 @@ render "$here/config.json.in" | jq --arg t " $keep " --argjson pairing "$pairing
   | if $topo == null then . else .machine = $node | .host = $host | .topology = $topo end' > "$DEPLOY/config.json.new"
 jq -e '(.tools | length > 0) and (tostring | test("@[A-Z_]+@") | not)' "$DEPLOY/config.json.new" > /dev/null ||
   die "the rendered config is not valid (no tools, or a @…@ left)"
+if wanted Inkling-2-Mini; then # its server argv is the one the recipe's spark profile renders (check_args.py)
+  python3 -I "$repo/tools/chat/inkling2-mini/check_args.py" "$DEPLOY/config.json.new" "$INKLING_ROOT/serve-spark.json" ||
+    die "Inkling-2-Mini: config.json.in serves another argv than the recipe (above): rerun its fetch and setup, or align them"
+fi
 # with pairing required, these scripts' own token (read only: models and residency, env.sh), made once
 if jq -e '.pairing.required == true' "$DEPLOY/config.json.new" > /dev/null && [ ! -s "$TOKEN_FILE" ]; then
   (umask 077 && "$src/zig-out/bin/localrouter" pair token jarvis-operator --scopes read --data "$DEPLOY/data" > "$TOKEN_FILE.tmp") &&

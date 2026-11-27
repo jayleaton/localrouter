@@ -1,4 +1,4 @@
-# Chat: Qwen3.8 27B on TensorFold
+# Chat: Qwen3.8 27B and Inkling 2 Mini on TensorFold
 
 LocalRouter is one "Jarvis box" on a single GB10: a chat model that is always warm and does most of the work, with
 image and video generation and speech to text and text to speech beside it. The chat model is
@@ -321,6 +321,97 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
   instead of 1–2 s at 30k). The default stays 4 GiB / 26.75 GiB; measure the 1 GiB footprint and cached-turn latency
   with `bench_macos.py serve` before booking it.
 
+## Inkling 2 Mini on the Spark
+
+`Inkling-2-Mini` is a second chat tool on the GB10, optional (`bootstrap.sh --models ...,inkling`; a default install
+leaves it out) and loaded on demand beside `qwen3.8-27b`, which stays the default:
+[thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) (a looped mixture of
+experts: 26.4B parameters, 3.4B active; NVFP4 experts, MXFP8 layers 20–23) with DSpark, the checkpoint's own MTP head
+(`mtp.safetensors`) as its drafter, and its vision tower. The engine is TensorFold's native CUDA build of upstream main
+[`eff4e5b`](https://github.com/ashhart/TensorFold/tree/eff4e5b7545477750df78916a0fc07eb4a69bf1e) with the recipe's
+`patches/cuda` 0001–0026, built on the box by the TensorFold recipe kit from the recipe
+[jayleaton/inkling-2-mini-tensorfold-recipe](https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe) (both
+private: fetching them needs git credentials). The Mac runs the same tool id from the same recipe's `mac` profile on
+TensorFold's Metal build (`deploy/mac`, [MAC-PORT.md](MAC-PORT.md)).
+
+**Status: not yet qualified on this engine.** Every machine runs `tools/chat/inkling2-mini/qualify.sh` itself: the tool
+is refused (503, not GPU-qualified) on a host until its own marker says qualified. The recipe's own receipts on one DGX
+Spark (`receipts/` at the pinned commit): `recipe gate spark` with DSpark and images passes conformance 5/5, token hashes
+12/12, nondeterminism, canary 3/3 and tool chains 2/2; `recipe bench spark-plain spark` measures DSpark at +39.2% (code)
+and +32.7% (chat) decode at one stream, +45.3% and +24.7% at two, with equal tokens; a 30-minute `recipe soak spark` ran
+129 requests with none failed.
+
+### How it runs
+
+The same `openai_server` engine as `qwen3.8-27b`: `options.server` is the kit-built `tensorfold-native serve` itself,
+in the worker's process group, on `127.0.0.1` and the free port the worker picked. Its flags are the ones `recipe serve
+spark ENGINE MODEL --dry-run` prints at the pinned recipe (`fetch.sh` saves them as `ROOT/serve-spark.json`), with only
+what the daemon owns changed: `--name {id}`, `--port {port}`, an added `--host 127.0.0.1`, and `--prompt-cache-disk` as
+an absolute path. `check_args.py` holds the config to that file in `setup.sh`, in qualify's pins step and in
+`deploy/jarvis/install.sh`, so the config cannot drift from the recipe.
+
+| Server flag | Why |
+| --- | --- |
+| `--context 131072 --parallel 2` | the recipe's spark profile: two windows of 131,072 tokens. LocalRouter sends one request at a time |
+| `--drafter {weights}` | DSpark (`patches/cuda` 0010–0016): the checkpoint's `mtp.safetensors` drafts, batched across streams; the target verifies every draft, so replies are unchanged |
+| `--vision` | the vision tower (0017–0026): `image_url` parts (data URLs); a picture over `--vision-image-tokens` (default 4096) is refused where Metal resizes it |
+| `--prompt-cache-disk ROOT/sessions` | kept conversation states on the NVMe (0001): a later turn, or a reload, resumes from disk. The recipe's is `.recipe/sessions` under the directory `recipe serve` runs from |
+| `--thinking`, `--temperature 1.0 --top-p 1.0 --top-k 0`, `--max-tokens 32768` | the checkpoint's generation config, as the recipe serves it |
+| `--no-update-check` | as the recipe passes it; `TENSORFOLD_NO_UPDATE_CHECK=1` in the env as well, as the other chat tools set it |
+
+Unload is SIGTERM to the server (TensorFold drains for `TF_DRAIN_S`, 5 s), SIGKILL after `stop_timeout_s` (default 8).
+
+### What it serves
+
+Everything `qwen3.8-27b` serves (the route, the fields passed through, the errors), and images: a user message's
+`image_url` content parts go to the server unchanged. Reasoning is on; `chat_template_kwargs.reasoning_effort` (`none`,
+`low`, `medium`, `high`) sets its effort per request, and the model card says the lowest still reasons a little. The
+thinking arrives as `reasoning_content`.
+
+### Memory
+
+`resident_bytes` is **36 GiB** (38,654,705,664), `working_bytes` 0: a placeholder from the recipe's serve peak on one
+DGX Spark with DSpark and vision (`/health` `memory.peak` 33,092,463,776 B, 30.8 GiB: weights, drafter, vision tower,
+both 131,072-token windows, CUDA context) plus margin. The live qualification re-measures it (`report.json`
+`memory.peak_drop_bytes`, the largest fall in `MemAvailable`), and the booking is set from that run. The recipe's spark
+profile does not bound the RAM prompt cache (`--prompt-cache-gib`); qualify's short prompts leave it nearly empty, so
+the measured peak does not include what long conversations add to it.
+
+### Setup and qualification
+
+```sh
+tools/chat/inkling2-mini/fetch.sh ~/jarvis/inkling2-mini --engine cuda   # kit, recipe, 20 GB of weights, recipe prepare
+tools/chat/inkling2-mini/setup.sh ~/jarvis/inkling2-mini                 # checks, prints the tool config
+tools/chat/inkling2-mini/qualify.sh ~/jarvis/inkling2-mini /path/to/localrouter OUT \
+  ~/jarvis/inkling2-mini/inkling2-mini-qualification.json
+```
+
+`fetch.sh` needs zig 0.17.0 and nvcc (`NVCC`, default `/usr/local/cuda/bin/nvcc`); the kit clones xgrammar from
+GitHub for libtfgrammar unless `XGRAMMAR=DIR` names a checkout. `--models` may name a directory that already holds
+`Inkling-2-Mini`: fetch.sh then only verifies it. `INKLING_RECIPE_REPO` and `INKLING_KIT_REPO` override the private
+repositories' URLs (a mirror, or SSH); the commits stay pinned.
+
+The steps are `qwen3.8-27b`'s (`tools/chat/qualify.sh` and `qualify_lib.py` are shared): pins, direct, daemon, compare,
+marker. **Pins** checks the kit and recipe checkouts are at their commits and clean, the config runs the binary recipe
+prepare built in `ROOT/engine`, its server argv is the recipe's (`check_args.py` against `ROOT/serve-spark.json`), it
+drafts from `{weights}`, and every checkpoint file against `pins.json` by size and sha256. **Direct** and **daemon**
+send `tools/chat/inkling2-mini/prompts.json`: P1 to P7 as Qwen's (reasoning at low or no effort), P8 a 64x64 PNG data
+URL (the reply must name its colour), P9 the 2k-token conversation. The marker records the engine binary's sha256, and
+`deploy/jarvis/install.sh` refuses a marker whose engine is not the one `ROOT/engine` holds now.
+
+### Pins
+
+`tools/chat/inkling2-mini/pins.json`:
+
+| What | Pin |
+| --- | --- |
+| Recipe | jayleaton/inkling-2-mini-tensorfold-recipe `a2a5eaea` (private): TensorFold `eff4e5b7` + `patches/cuda` 0001–0026, patched tree `f10722db` |
+| Kit | jayleaton/tensorfold-recipe-kit `539b9139` (private), the recipe's `[kit] rev` |
+| Checkpoint | thinkingmachines/Inkling-2-Mini @ `7a67ae2314b44ef05c87fd1d4d311c58aaeb18f6`: 13 files, 20,191,641,791 B; `model-00001-of-00001.safetensors` sha256 `65e60f51…`, `mtp.safetensors` `7c3b6513…` |
+
+The engine binary is built on the box, so it is not pinned by hash: the recipe pins the patched tree, and each box's
+marker names the binary it qualified.
+
 ## Licences
 
 | Part | Licence |
@@ -328,5 +419,9 @@ Prompt sizes are the server's `prompt_tokens`. Decode tok/s is (tokens - 1) / (w
 | TensorFold 1.1.1 (binary, fetched) | Apache 2.0 |
 | Qwen3.8-27B-MLX-4bit (TensorFold; base Qwen/Qwen3.8-27B) | Apache 2.0 |
 | Qwen3.8-27B-DFlash2 (z-lab) | Apache 2.0 |
+| Inkling-2-Mini (thinkingmachines) | Apache 2.0 |
+| Inkling-2-Mini-DFlash2 (incoai; the Mac's drafter) | Apache 2.0 |
+| inkling-2-mini-tensorfold-recipe and tensorfold-recipe-kit (built on the box; the patches modify TensorFold, which keeps its own licences) | Apache 2.0 |
 
-LocalRouter does not distribute the binary or the weights: `fetch.sh` downloads them from their publishers.
+LocalRouter does not distribute the binaries or the weights: each `fetch.sh` downloads them from their publishers, and
+Inkling's engine is built on the box from the recipe.
