@@ -370,12 +370,12 @@ thinking arrives as `reasoning_content`.
 ### Memory
 
 `resident_bytes` is **36 GiB** (38,654,705,664), `working_bytes` 0, set from the live qualification on one DGX Spark
-(recipe a2a5eae, DSpark and vision, both 131,072-token windows): the largest fall in `MemAvailable` was
-36,915,630,080 B (34.38 GiB) in the direct step and 35,999,997,952 B (33.53 GiB) through the daemon; the server's
-`/health` `memory.peak` was 33,988,050,592 B. The booking keeps 1.6 GiB above the measured peak (`report.json`
-`memory.peak_drop_bytes`). The recipe's spark profile does not bound the RAM prompt cache
-(`--prompt-cache-gib`); qualify's short prompts leave it nearly empty, so the measured peak does not include what long
-conversations add to it.
+(the recipe before the compute lane, DSpark and vision, both 131,072-token windows): the largest fall in `MemAvailable`
+was 36,915,630,080 B (34.38 GiB) in the direct step and 35,999,997,952 B (33.53 GiB) through the daemon; the server's
+`/health` `memory.peak` was 33,988,050,592 B. A clean install from the public recipe at `15eb435`, with the compute lane
+on, peaked at 35,854,168,064 B (33.39 GiB). The booking keeps 1.6 GiB above the higher of the two (`report.json`
+`memory.peak_drop_bytes`). The recipe's spark profile does not bound the RAM prompt cache (`--prompt-cache-gib`);
+qualify's short prompts leave it nearly empty, so the measured peak does not include what long conversations add to it.
 
 ### Setup and qualification
 
