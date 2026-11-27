@@ -5,7 +5,7 @@ Standard library only.
     python3 -I qualify.py ROLE --root ROOT --config CONFIG --out OUT [--tool ID] [--bin LOCALROUTER] [--marker PATH]
 
 preflight  the config's tool, the marker path and the host are fit to run (no server from the engine binary running).
-pins       the kit and recipe checkouts at their pinned commits and clean, the config's binary the one recipe prepare
+pins       the recipe checkout at its pinned commit and clean, carrying the pinned kit release, the config's binary the one recipe prepare
            built in ROOT/engine, the config's server argv the recipe's (check_args.py against ROOT/serve-spark.json),
            and every checkpoint file the server loads (its model and its DSpark drafter, the same directory) by size
            and sha256. OUT/pins.json.
@@ -75,14 +75,20 @@ def pins_role(args):
     pins = read_json(PINS)
     res = {"pass": False, "problems": [], "parts": {}}
     problem = res["problems"].append
-    for name in ("kit", "recipe"):
-        d = os.path.join(args.root, name)
-        head = git(d, "rev-parse", "HEAD")
-        dirty = git(d, "status", "--porcelain") if name == "kit" else git(d, "status", "--porcelain",
-                                                                             "--untracked-files=no")
-        res[name] = {"dir": d, "head": head, "clean": not dirty}
-        if head != pins[name]["commit"] or dirty:
-            problem(f"{d} is at {head or 'nothing'}{' with changes' if dirty else ''}, pinned {pins[name]['commit']}")
+    d = os.path.join(args.root, "recipe")
+    head = git(d, "rev-parse", "HEAD")
+    dirty = git(d, "status", "--porcelain", "--untracked-files=no")
+    res["recipe"] = {"dir": d, "head": head, "clean": not dirty}
+    if head != pins["recipe"]["commit"] or dirty:
+        problem(f"{d} is at {head or 'nothing'}{' with changes' if dirty else ''}, pinned {pins['recipe']['commit']}")
+    try:
+        with open(os.path.join(d, "kit", "SHA256SUMS")) as f:
+            release = f.read().split()[0]
+    except (OSError, IndexError):
+        release = ""
+    res["kit"] = {"commit": pins["kit"]["commit"], "sha256": release}
+    if release != pins["kit"]["sha256"]:
+        problem(f"{d}/kit holds the kit release {release or 'nothing'}, pinned {pins['kit']['sha256']}")
     argv = server_argv(tool, 0)
     binary = binary_of(args)
     res["engine"] = {"binary": argv[0], "built": binary}
@@ -124,7 +130,8 @@ def pins_role(args):
 
 def record(comp, pins_r, gpu):
     return {"model": MODEL, "host": os.uname().nodename, "gpu": gpu, "pins_sha256": sha256_file(PINS),
-            "recipe_commit": pins_r["recipe"]["head"], "kit_commit": pins_r["kit"]["head"],
+            "recipe_commit": pins_r["recipe"]["head"], "kit_commit": pins_r["kit"]["commit"],
+            "kit_sha256": pins_r["kit"]["sha256"],
             "engine_sha256": pins_r["engine"].get("sha256"), "engine_version": pins_r["engine"].get("version"),
             "serve_json_sha256": pins_r["argv"]["serve_json_sha256"], "checks": comp["checks"],
             "exceptions": comp.get("exceptions", [])}

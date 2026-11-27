@@ -329,9 +329,8 @@ leaves it out) and loaded on demand beside `qwen3.8-27b`, which stays the defaul
 experts: 26.4B parameters, 3.4B active; NVFP4 experts, MXFP8 layers 20–23) with DSpark, the checkpoint's own MTP head
 (`mtp.safetensors`) as its drafter, and its vision tower. The engine is TensorFold's native CUDA build of upstream main
 [`eff4e5b`](https://github.com/ashhart/TensorFold/tree/eff4e5b7545477750df78916a0fc07eb4a69bf1e) with the recipe's
-`patches/cuda` 0001–0026, built on the box by the TensorFold recipe kit from the recipe
-[jayleaton/inkling-2-mini-tensorfold-recipe](https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe) (both
-private: fetching them needs git credentials). The Mac runs the same tool id from the same recipe's `mac` profile on
+`patches/cuda` 0001–0026, built on the box by the TensorFold recipe kit release that the recipe's public tree
+[jayleaton/inkling-2-mini-recipe](https://github.com/jayleaton/inkling-2-mini-recipe) carries (no credentials). The Mac runs the same tool id from the same recipe's `mac` profile on
 TensorFold's Metal build (`deploy/mac`, [MAC-PORT.md](MAC-PORT.md)).
 
 **Status: not yet qualified on this engine.** Every machine runs `tools/chat/inkling2-mini/qualify.sh` itself: the tool
@@ -389,11 +388,11 @@ tools/chat/inkling2-mini/qualify.sh ~/jarvis/inkling2-mini /path/to/localrouter 
 
 `fetch.sh` needs zig 0.17.0 and nvcc (`NVCC`, default `/usr/local/cuda/bin/nvcc`); the kit clones xgrammar from
 GitHub for libtfgrammar unless `XGRAMMAR=DIR` names a checkout. `--models` may name a directory that already holds
-`Inkling-2-Mini`: fetch.sh then only verifies it. `INKLING_RECIPE_REPO` and `INKLING_KIT_REPO` override the private
-repositories' URLs (a mirror, or SSH); the commits stay pinned.
+`Inkling-2-Mini`: fetch.sh then only verifies it. A host without GitHub points git's `url.<mirror>.insteadOf` at
+mirrors of the recipe and TensorFold; the commits stay pinned.
 
 The steps are `qwen3.8-27b`'s (`tools/chat/qualify.sh` and `qualify_lib.py` are shared): pins, direct, daemon, compare,
-marker. **Pins** checks the kit and recipe checkouts are at their commits and clean, the config runs the binary recipe
+marker. **Pins** checks the recipe checkout is at its commit and clean and carries the pinned kit release, the config runs the binary recipe
 prepare built in `ROOT/engine`, its server argv is the recipe's (`check_args.py` against `ROOT/serve-spark.json`), it
 drafts from `{weights}`, and every checkpoint file against `pins.json` by size and sha256. **Direct** and **daemon**
 send `tools/chat/inkling2-mini/prompts.json`: P1 to P7 as Qwen's (reasoning at low or no effort), P8 a 64x64 PNG data
@@ -406,8 +405,8 @@ URL (the reply must name its colour), P9 the 2k-token conversation. The marker r
 
 | What | Pin |
 | --- | --- |
-| Recipe | jayleaton/inkling-2-mini-tensorfold-recipe `a2a5eaea` (private): TensorFold `eff4e5b7` + `patches/cuda` 0001–0026, patched tree `f10722db` |
-| Kit | jayleaton/tensorfold-recipe-kit `539b9139` (private), the recipe's `[kit] rev` |
+| Recipe | jayleaton/inkling-2-mini-recipe `15eb435` (public): TensorFold `eff4e5b7` + `patches/cuda` 0001–0026, patched tree `f10722db`; the compute lane on (`TF_INKLING2_COMPUTE_LANE`) |
+| Kit | the release the recipe carries in `kit/`: `539b9139`, the recipe's `[kit] rev`, sha256 `445e4553…` |
 | Checkpoint | thinkingmachines/Inkling-2-Mini @ `7a67ae2314b44ef05c87fd1d4d311c58aaeb18f6`: 13 files, 20,191,641,791 B; `model-00001-of-00001.safetensors` sha256 `65e60f51…`, `mtp.safetensors` `7c3b6513…` |
 
 The engine binary is built on the box, so it is not pinned by hash: the recipe pins the patched tree, and each box's
@@ -422,7 +421,7 @@ marker names the binary it qualified.
 | Qwen3.8-27B-DFlash2 (z-lab) | Apache 2.0 |
 | Inkling-2-Mini (thinkingmachines) | Apache 2.0 |
 | Inkling-2-Mini-DFlash2 (incoai; the Mac's drafter) | Apache 2.0 |
-| inkling-2-mini-tensorfold-recipe and tensorfold-recipe-kit (built on the box; the patches modify TensorFold, which keeps its own licences) | Apache 2.0 |
+| inkling-2-mini-recipe and the recipe kit release it carries (built on the box; the patches modify TensorFold, which keeps its own licences) | Apache 2.0 |
 
 LocalRouter does not distribute the binaries or the weights: each `fetch.sh` downloads them from their publishers, and
 Inkling's engine is built on the box from the recipe.

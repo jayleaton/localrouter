@@ -24,7 +24,7 @@
                    "--context", "131072", "--parallel", "2", "--no-update-check", "--max-tokens", "32768",
                    "--thinking", "--temperature", "1.0", "--top-p", "1.0", "--top-k", "0",
                    "--prompt-cache-disk", "/opt/localrouter/inkling/sessions", "--drafter", "{weights}", "--vision"],
-        "env": {"HF_HUB_OFFLINE": "1", "TENSORFOLD_NO_UPDATE_CHECK": "1", "TF_DRAIN_S": "5"},
+        "env": {"HF_HUB_OFFLINE": "1", "TENSORFOLD_NO_UPDATE_CHECK": "1", "TF_DRAIN_S": "5", "TF_INKLING2_COMPUTE_LANE": "1"},
         "memory": "resident_bytes 36 GiB is the live qualification's peak on one DGX Spark (report.json memory.peak_drop_bytes 36,915,630,080 B, 34.38 GiB, with DSpark and vision at 2x131072) plus 1.6 GiB margin",
         "health": "/health"
       }

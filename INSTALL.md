@@ -217,13 +217,13 @@ step's `done` test.
 
 - **What it is.** Inkling 2 Mini (a looped mixture of experts: NVFP4 experts, MXFP8 layers 20-23) with DSpark, the
   checkpoint's own drafter, and its vision tower, 2 streams of 131,072 tokens. TensorFold's native CUDA engine, upstream
-  main with the patches of the recipe [jayleaton/inkling-2-mini-tensorfold-recipe](https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe),
-  built on the box by the TensorFold recipe kit. Both repositories are private: the step needs git credentials for them.
+  main with the patches of the recipe [jayleaton/inkling-2-mini-recipe](https://github.com/jayleaton/inkling-2-mini-recipe),
+  built on the box by the TensorFold recipe kit release the recipe carries. Public: no credentials.
   Licence Apache-2.0. Loaded on demand (a request that names it), beside `qwen3.8-27b`, which stays the default.
 - **Size.** About 20 GB to download, 27 GB on disk with the engine's build. 36 GiB in memory (34.38 GiB peak
   measured by the live qualification, [CHAT.md](docs/dev/CHAT.md#memory-1)).
 - **Steps.** `tools/chat/inkling2-mini/fetch.sh $J/inkling2-mini --engine cuda --models $J/inkling2-mini/models` (the
-  kit and recipe at their pinned commits, the checkpoint, `recipe prepare`, and the recipe's serve argv), then
+  recipe at its pinned commit with its kit release, the checkpoint, `recipe prepare`, and the recipe's serve argv), then
   `setup.sh`, then `qualify.sh`. Every file is checked against `tools/chat/inkling2-mini/pins.json`, and the config's
   server argv against the recipe's. qualify writes `$J/inkling2-mini/inkling2-mini-qualification.json`; without it the
   service refuses the model.

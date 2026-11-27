@@ -28,12 +28,14 @@ FLAGS = {
               "--temperature", "1.0", "--top-p", "1.0", "--top-k", "0", "--prompt-cache-disk", ".recipe/sessions",
               "--drafter", "{model}", "--vision"],
 }
+# and the environment the launch sets (the profile's product switches)
+ENV = {"mac": {}, "spark": {"TF_INKLING2_COMPUTE_LANE": "1"}}
 
 
 def launch(profile, binary, model):
     flags = [model if f == "{model}" else f for f in FLAGS[profile]]
     return {"rank": 0, "argv": [binary, "serve", model, "--name", "Inkling-2-Mini", *flags, "--port", "8888"],
-            "env": {}}
+            "env": dict(ENV[profile])}
 
 
 def tool(binary, model, flags, env=None):
