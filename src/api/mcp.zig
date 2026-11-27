@@ -1009,7 +1009,7 @@ const tool_list = [_]Tool{
     .{ .name = "chat", .title = "Chat", .description = "A chat completion from the local chat model (OpenAI Chat Completions semantics). Returns the reply's text (or its tool calls as JSON when it called a tool instead), then the whole completion as JSON (message, reasoning_content when the model thought, finish_reason, usage). The chat model stays loaded, so replies start at once.", .inputSchema = .{ .text =
     \\{"type":"object","properties":{
     \\"prompt":{"type":"string","description":"The user's message (appended after messages)."},
-    \\"messages":{"type":"array","items":{"type":"object"},"description":"OpenAI chat messages (role system, user, assistant or tool; content; tool_calls; tool_call_id), for a multi-turn conversation."},
+    \\"messages":{"type":"array","items":{"type":"object"},"description":"OpenAI chat messages (role system, user, assistant or tool; content; tool_calls; tool_call_id), for a multi-turn conversation. For a chat model that takes images, a user message's content may be a list of parts: {\"type\":\"text\",\"text\":...} and {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,...\" or \"https://...\"}}; a model that takes none refuses it."},
     \\"system":{"type":"string","description":"A system message, put first."},
     \\"model":{"type":"string","description":"A chat model id from list_models; default: the one whose default_for lists chat_completion."},
     \\"reasoning":{"type":"boolean","description":"false: answer without thinking (faster); true: think first. Omit for the model's default."},

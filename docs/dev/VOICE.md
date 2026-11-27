@@ -297,7 +297,7 @@ binary, and it works in desktop Chrome and Safari and in phone browsers. Chat an
 - On a wide screen a sidebar lists the conversations, with new, rename and delete (delete can be undone). On a phone
   the sidebar slides in as a drawer.
 - The main pane holds the conversation, an empty state with suggestions, and a composer:
-  - attachments, shown disabled for now;
+  - attach a picture (the file picker, or paste or drop one on the box), sent with the next typed message;
   - the reasoning toggle;
   - a large mic button and the send button, which becomes stop while a reply streams.
 - On a phone the page is as tall as the visual viewport, so the composer stays above the keyboard. It respects

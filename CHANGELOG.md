@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `/voice` and the companion's chat: the attach button takes pictures, from the file picker or pasted or dropped onto
+  the message box. The page scales a picture to at most 1536 px on its longest side (a PNG stays PNG, others become
+  JPEG) and sends it with the next typed message, as `image_url` parts before the text; the message shows it. Pictures
+  stay in the page's memory: the conversation kept in the browser keeps only their count, so after a reload later turns
+  go without them. A chat model that takes no pictures refuses the request, the reply shows its error, and later turns
+  leave that message's pictures out. Voice mode sends no pictures. The MCP `chat` tool's `messages` describes the
+  `image_url` part.
 - MiniMax H3: portrait. The limit is a frame's area (`max_pixels`) and the long side (`max_side`, the model's 1344), not a
   width and a height, so one config takes landscape and 9:16 portrait with the same load-time buffers; a frame past
   `max_pixels` (up to the canvas's 768x1344 area) is taken for a clip short enough to fit them, and its refusal names
