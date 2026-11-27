@@ -17,6 +17,7 @@
   "STEPS": "bash $REPO/tools/install/steps.sh",
   "IMAGE_ROOT": "$J/image-mac",
   "CHAT_ROOT": "$J/chat",
+  "INKLING_ROOT": "$J/inkling2-mini",
   "DRAMA_ROOT": "$J/qualify-drama3/root",
   "DRAMA_MARKER": "$J/qualify-drama3/drama3-macos-qualification.json",
   "DRAMA_RESIDENT": "30870077440",
@@ -260,25 +261,25 @@
    "id": "Inkling-2-Mini",
    "optional": true,
    "warm": false,
-   "title": "Inkling 2 Mini chat: TensorFold native Metal server (NVFP4/MXFP8 + DFlash2 drafter, vision, 128k context, 2 streams)",
+   "title": "Inkling 2 Mini chat: TensorFold native Metal server built by the recipe kit (upstream main + the recipe's patches/metal; NVFP4/MXFP8 + DFlash2 drafter, vision, 128k context, 2 streams)",
    "licence": {
-    "name": "Apache-2.0 (checkpoint, drafter and TensorFold)",
+    "name": "Apache-2.0 (checkpoint, drafter, TensorFold and the recipe)",
     "url": "https://huggingface.co/thinkingmachines/Inkling-2-Mini"
    },
-   "pins": "https://github.com/jayleaton/inkling-2-mini-tensorfold/tree/5bc2d70",
-   "download_bytes": 17500000000,
-   "disk_bytes": 20000000000,
+   "pins": "tools/chat/inkling2-mini/pins.json (the recipe https://github.com/jayleaton/inkling-2-mini-tensorfold-recipe/tree/a2a5eae, private, and the kit it names; the checkpoint and drafter files)",
+   "download_bytes": 21600000000,
+   "disk_bytes": 27000000000,
    "memory_bytes": 23622320128,
    "skip": "leave inkling out of --models; qwen3.8-27b remains the default chat model",
    "steps": [
     {
      "id": "prepare",
-     "download_bytes": 17500000000,
-     "disk_bytes": 20000000000,
-     "title": "the Inkling 2 Mini Metal binary, checkpoint and DFlash2 drafter from jayleaton/inkling-2-mini-tensorfold@5bc2d70 (mac/scripts/prepare.sh)",
-     "run": "d=$J/inkling-2-mini-tensorfold && if [ ! -d \"$d/.git\" ]; then git clone https://github.com/jayleaton/inkling-2-mini-tensorfold.git \"$d\"; fi && git -C \"$d\" fetch origin 5bc2d70 && git -C \"$d\" checkout --detach 5bc2d70 && bash \"$d/mac/scripts/prepare.sh\"",
-     "done": "[ -x \"$HOME/.cache/tensorfold-inkling2-mac/tensorfold/zig-out/native/bin/tensorfold-native\" ] && [ -d \"$HOME/models/hf/Inkling-2-Mini\" ] && [ -d \"$HOME/models/hf/Inkling-2-Mini-DFlash2\" ]",
-     "fix": "network or Metal build: run mac/scripts/prepare.sh in $J/inkling-2-mini-tensorfold"
+     "download_bytes": 21600000000,
+     "disk_bytes": 27000000000,
+     "title": "the recipe and its kit at their pinned commits (private: git needs credentials for them), the checkpoint into ~/models/hf and the DFlash2 drafter into the Hugging Face cache (21.2 GB, every file against pins.json), the Metal engine built by recipe prepare, and the recipe's mac serve argv (fetch.sh --engine metal)",
+     "run": "bash $REPO/tools/chat/inkling2-mini/fetch.sh $INKLING_ROOT --engine metal --models $HOME/models/hf && $STEPS stamp inkling-prepare $REPO/tools/chat/inkling2-mini/pins.json $REPO/tools/chat/inkling2-mini/fetch.sh",
+     "done": "$STEPS stamped inkling-prepare $REPO/tools/chat/inkling2-mini/pins.json $REPO/tools/chat/inkling2-mini/fetch.sh && [ -x $INKLING_ROOT/engine/zig-out/native/bin/tensorfold-native ] && [ -f $INKLING_ROOT/serve-mac.json ]",
+     "fix": "git clone failed: the recipe and kit are private: set up git credentials for github.com (or INKLING_RECIPE_REPO and INKLING_KIT_REPO). Network: run again (partial files resume). 'differs from the pins': delete the named files and run again. A build error: the log's recipe prepare lines (zig 0.17.0, Xcode's Metal Toolchain); report it with the log"
     }
    ]
   },

@@ -37,6 +37,8 @@ jobs:
         run: python3 -I tools/speech/openai_audio/test_worker.py
       - name: the ComfyUI worker against a fake ComfyUI (no GPU)
         run: python3 -I tools/comfyui/test_worker.py
+      - name: the Inkling-2-Mini configs serve the argv the recipe renders (tools/chat/inkling2-mini/check_args.py; no kit)
+        run: python3 -I tools/chat/inkling2-mini/test_check_args.py
       - name: the Wan fetch script against a stand-in curl (no network)
         run: python3 -I tools/video/wan/test_fetch.py
       - name: every lock file pins every artifact by sha256 (tools/install/check_hashes.py), and the pinned downloads verify
