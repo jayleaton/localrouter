@@ -87,6 +87,12 @@ test "mcp tools: a strict schema each, models with state and memory, voices, ima
         try testing.expect(props.get("size").?.object.get("default") == null);
     };
 
+    // chat: messages says how to send a picture to a chat model that takes images.
+    for (list) |t| if (std.mem.eql(u8, t.object.get("name").?.string, "chat")) {
+        const messages = t.object.get("inputSchema").?.object.get("properties").?.object.get("messages").?.object;
+        try testing.expect(std.mem.indexOf(u8, messages.get("description").?.string, "{\"type\":\"image_url\",\"image_url\":{\"url\":") != null);
+    };
+
     // list_models: each model's state, resident bytes and lane, and the machine's memory.
     const models = (try mcpText(a, try mcpCall(&d, a, "list_models", "{}"))).object;
     try testing.expect(models.get("memory").?.object.get("mem_available_bytes").?.integer > 0);

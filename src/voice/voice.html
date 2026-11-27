@@ -120,6 +120,8 @@
   .foot .via:not(:empty) { margin-right: 6px; }
   .bubble { background: var(--amber); color: var(--amber-ink); border-radius: 18px 18px 6px 18px; padding: 9px 14px;
             white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pics { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .pics img { display: block; max-width: min(240px, 100%); max-height: 240px; border-radius: 14px; border: 1px solid var(--border); }
   .row.user.partial .bubble { background: var(--amber-soft); color: var(--muted); font-style: italic; }
   .foot { display: flex; align-items: center; gap: 2px; min-height: 30px; color: var(--dim); font-size: 12px; flex-wrap: wrap; }
   .foot .icon-btn { width: 32px; height: 32px; border-radius: 10px; }
@@ -192,6 +194,14 @@
   #text { display: block; width: 100%; resize: none; border: 0; background: none; outline: none; padding: 10px 12px 4px;
           min-height: 44px; max-height: 200px; line-height: 1.45; font-size: 16px; }
   .tools { display: flex; align-items: center; gap: 4px; }
+  #atts { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 8px 0; }
+  .att { position: relative; }
+  .att img { display: block; width: 64px; height: 64px; object-fit: cover; border-radius: 12px; border: 1px solid var(--border); }
+  .att button { position: absolute; top: -6px; right: -6px; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+                background: var(--raised); color: var(--text); border: 1px solid var(--border); }
+  .att button::before { content: ""; position: absolute; inset: -10px; }
+  .att button svg { width: 14px; height: 14px; }
+  .box.drop { border-color: var(--amber); background: var(--amber-soft); }
   .tools .grow { flex: 1; }
   .chip { min-height: 36px; padding: 0 12px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px;
           font-size: 13px; color: var(--muted); border: 1px solid transparent; }
@@ -486,10 +496,12 @@
       <div id="vbar" hidden><span class="dot" data-s="ready"></span><span id="vbarText">Voice on</span><span class="grow"></span>
         <button class="btn" id="vbarOpen">Open</button><button class="end" id="vbarEnd"><i></i>End</button></div>
       <div class="box">
+        <div id="atts" hidden></div>
         <label class="sr" for="text">Message</label>
         <textarea id="text" rows="1" placeholder="Message Jarvis" autocomplete="off" enterkeyhint="send"></textarea>
         <div class="tools">
-          <button class="icon-btn" id="attach" aria-disabled="true" aria-label="Attach files (not available yet)" title="Attachments are not available yet"><svg viewBox="0 0 24 24"><path d="m21 11-8.6 8.6a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg></button>
+          <input type="file" id="attachFile" accept="image/*" multiple hidden>
+          <button class="icon-btn" id="attach" aria-label="Attach a picture" title="Attach a picture"><svg viewBox="0 0 24 24"><path d="m21 11-8.6 8.6a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4L15.5 7"/></svg></button>
           <button class="chip" id="think" aria-pressed="false" title="Let the model reason before it answers"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/></svg>Reasoning</button>
           <span class="grow"></span>
           <button id="mic" aria-label="Start voice mode"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg></button>
@@ -693,6 +705,7 @@ const I = {
   chev: '<svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
   bulb: '<svg viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V17h6v-.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/></svg>',
   mic: '<svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>',
+  x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   micOff: '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M9 9v1a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.7-1.3M19 10a7 7 0 0 1-1.1 3.8M5 10a7 7 0 0 0 10.6 6M12 17v5"/></svg>',
 };
 // What each kind of generation is called, the tool that makes it and its download's name: the cards, the reel and the
@@ -1129,7 +1142,7 @@ function skeleton(m) {
   if (m.role === 'user') {
     el.className = 'row user';
     el.setAttribute('aria-label', `You, ${clock(m.at)}`);
-    col.append(Object.assign(document.createElement('div'), { className: 'bubble' }));
+    col.append(Object.assign(document.createElement('div'), { className: 'pics', hidden: true }), Object.assign(document.createElement('div'), { className: 'bubble' }));
     const foot = Object.assign(document.createElement('div'), { className: 'foot' });
     foot.append(Object.assign(document.createElement('span'), { className: 'via' }), timeEl(m.at), iconBtn('copy', I.copy, 'Copy message', m.id));
     col.append(foot);
@@ -1163,7 +1176,11 @@ function drawNow(m) {
   if (m.role === 'user') {
     el.classList.toggle('partial', !!m.partial);
     el.querySelector('.bubble').textContent = m.text || (m.partial ? 'Listening…' : '');
-    el.querySelector('.via').textContent = m.via === 'voice' ? '🎙 voice' : '';
+    const pics = el.querySelector('.pics'), imgs = m.images || [];
+    if (pics.childElementCount !== imgs.length) pics.replaceChildren(...imgs.map(src => Object.assign(document.createElement('img'), { src, alt: 'Attached picture' })));
+    pics.hidden = !imgs.length;
+    const lost = m.refused ? 'refused; later turns leave it out' : m.pictures && !imgs.length ? `${m.pictures === 1 ? 'picture' : `${m.pictures} pictures`} not kept after a reload` : '';
+    el.querySelector('.via').textContent = m.via === 'voice' ? '🎙 voice' : lost;
     return;
   }
   if (m.role === 'tool') { drawTool(m, el); return renderReel(); }
@@ -1919,7 +1936,7 @@ function apiMessages() {
   const msgs = [{ role: 'system', content: MM.enabled && S.tools ? `${base}\n\n${MM.text}` : base }];
   const list = cur.msgs.filter(m => !m.partial && !m.gone && (m.role === 'user' || m.role === 'assistant' || m.role === 'tool' || (m.role === 'sys' && m.callId)));
   for (const m of list) {
-    if (m.role === 'user' && m.text) msgs.push({ role: 'user', content: m.text });
+    if (m.role === 'user' && m.text) msgs.push({ role: 'user', content: m.images && m.images.length && !m.refused ? [...m.images.map(url => ({ type: 'image_url', image_url: { url } })), { type: 'text', text: m.text }] : m.text });
     else if (m.role === 'sys') { // a model tool's answer
       if (msgs.some(x => x.tool_calls && x.tool_calls.some(c => c.id === m.callId))) msgs.push({ role: 'tool', tool_call_id: m.callId, content: m.result || '' });
       else if (m.call && m.result != null) { // run on a call: its call, then its result
@@ -1993,7 +2010,14 @@ async function streamReply(am, signal) {
   dbg('chat.request', { messages: body.messages.length, think: S.think, tools: (body.tools || []).length });
   const t0 = performance.now();
   const r = await api('/v1/chat/completions', { json: body, signal });
-  if (!r.ok) { am.error = await errorText(r); dbg('chat.error', { status: r.status, error: am.error }); return []; }
+  if (!r.ok) {
+    am.error = await errorText(r);
+    dbg('chat.error', { status: r.status, error: am.error });
+    // A refused picture (a model that takes none) is left out of later turns, so the conversation can go on.
+    const u = r.status === 400 && [...cur.msgs].reverse().find(x => x.role === 'user');
+    if (u && u.images && u.images.length && !u.refused) { u.refused = true; draw(u); }
+    return [];
+  }
   const reader = r.body.getReader();
   const dec = new TextDecoder();
   let buf = '', first = 0, last = 0, pieces = 0, usage = null, finish = '', thinkStart = 0;
@@ -2307,9 +2331,63 @@ function sendText() {
     return;
   }
   if (busy) return;
-  addMsg({ role: 'user', text, via: 'text' });
+  const m = addMsg({ role: 'user', text, via: 'text' });
+  if (ATT.length) {
+    // In memory only (not enumerable, so the conversation kept in this browser leaves it out): a few pictures would
+    // fill localStorage. The message keeps how many it had.
+    Object.defineProperty(m, 'images', { value: ATT, writable: true });
+    m.pictures = ATT.length;
+    ATT = [];
+    renderAtts();
+    draw(m);
+  }
   saveConv();
   chatTurn();
+}
+
+// ---------------------------------------------------------------- pictures attached to a typed message
+
+// Each is a data URL, at most 1536 px on its longest side, sent before the text as an image_url part. A chat model
+// that takes no pictures refuses the request, and the reply shows its error. Voice mode sends no pictures.
+let ATT = [];
+const ATT_SIDE = 1536;
+async function readPicture(file) {
+  const url = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => no(r.error); r.readAsDataURL(file); });
+  const img = new Image();
+  await new Promise((ok, no) => { img.onload = ok; img.onerror = () => no(new Error('this browser cannot read it')); img.src = url; });
+  const w = img.naturalWidth, h = img.naturalHeight, scale = Math.min(1, ATT_SIDE / Math.max(w, h));
+  if (scale === 1 && /^data:image\/(jpeg|png);/.test(url)) return url;
+  const png = file.type === 'image/png';
+  const c = Object.assign(document.createElement('canvas'), { width: Math.round(w * scale), height: Math.round(h * scale) });
+  const g = c.getContext('2d');
+  if (!png) { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return png ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.9);
+}
+async function addPictures(files) {
+  if (V.ws) return;
+  for (const f of files) {
+    if (!/^image\//.test(f.type)) { toast(`${f.name || 'That file'} is not a picture`); continue; }
+    try { ATT.push(await readPicture(f)); } catch (e) { toast(`Couldn't read ${f.name || 'the picture'}: ${e.message}`); }
+  }
+  dbg('attach', { pictures: ATT.length });
+  renderAtts();
+}
+function renderAtts() {
+  $('atts').replaceChildren(...ATT.map((src, i) => {
+    const d = Object.assign(document.createElement('div'), { className: 'att' });
+    const rm = Object.assign(document.createElement('button'), { innerHTML: I.x, title: 'Remove the picture' });
+    rm.setAttribute('aria-label', 'Remove the picture');
+    rm.onclick = () => { ATT.splice(i, 1); renderAtts(); $('text').focus(); };
+    d.append(Object.assign(document.createElement('img'), { src, alt: 'Picture to send' }), rm);
+    return d;
+  }));
+  renderAttach();
+}
+function renderAttach() {
+  $('attach').setAttribute('aria-disabled', String(!!V.ws));
+  $('attach').title = V.ws ? 'Pictures go with typed chat, not voice mode' : 'Attach a picture';
+  $('atts').hidden = !!V.ws || !ATT.length;
 }
 
 // ---------------------------------------------------------------- voices: the list, previews, the picker
@@ -3799,6 +3877,7 @@ function renderVoice() {
   if ($('lightbox').open) renderLightboxVoice();
   window.jarvis.ui.voiceState = s;
   $('mic').dataset.on = V.ws ? '1' : '';
+  renderAttach();
   $('mic').setAttribute('aria-label', V.ws ? 'Open voice mode' : 'Start voice mode');
   $('vbar').hidden = !V.ws || V.open;
   $('vbarText').textContent = `Voice on · ${stateText(s)[0].toLowerCase()}`;
@@ -3987,7 +4066,23 @@ $('send').onclick = () => (busy ? busy.ctl.abort() : sendText());
 $('text').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendText(); } });
 $('text').addEventListener('input', onInput);
 $('think').onclick = () => { S.think = !S.think; saveSettings(); renderControls(); };
-$('attach').onclick = () => toast('Attachments are not available yet');
+$('attach').onclick = () => { if (!V.ws) $('attachFile').click(); };
+$('attachFile').onchange = e => { const files = [...e.target.files]; e.target.value = ''; addPictures(files); };
+$('text').addEventListener('paste', e => {
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter(f => /^image\//.test(f.type));
+  if (!files.length || V.ws) return;
+  if (!e.clipboardData.types.includes('text/plain')) e.preventDefault();
+  addPictures(files);
+});
+const dragsFiles = e => !V.ws && e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+document.querySelector('.box').addEventListener('dragover', e => { if (!dragsFiles(e)) return; e.preventDefault(); e.currentTarget.classList.add('drop'); });
+document.querySelector('.box').addEventListener('dragleave', e => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.classList.remove('drop'); });
+document.querySelector('.box').addEventListener('drop', e => {
+  e.currentTarget.classList.remove('drop');
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  addPictures([...e.dataTransfer.files]);
+});
 $('mic').onclick = () => { if (!V.ws) voiceStart(); showVoice(true); };
 $('vbarOpen').onclick = () => showVoice(true);
 $('vbarEnd').onclick = () => voiceStop();
